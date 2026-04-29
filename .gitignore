@@ -1,7 +1,7 @@
 .DS_Store
 /.git
-/doc
-/build
+docs/
+build/
 *.o
 *.obj
 *.exe
@@ -10,6 +10,7 @@
 *.tmp
 *.swp
 *.swo
+*.s
 test/
 .vscode/
 .idea/

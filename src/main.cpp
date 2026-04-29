@@ -1,7 +1,9 @@
 #include "../include/ast/ast.hpp"
 #include "../include/ast/astPrinter.hpp"
 #include "../include/ir/irGen.hpp"
+#include "../include/arm/arm.hpp"
 #include "../include/checker/checker.hpp"
+#include <fstream>
 #include <iostream>
 #include <ostream>
 #include <unistd.h>
@@ -16,8 +18,8 @@ int main(int argc, char **argv) {
 
   // TODO: advanced argument parser
   char *filename = nullptr;
-  int print_ir = true;
-  int print_asm = false;
+  int print_ir = false;
+  int print_asm = true;
 
   std::string output = "-";
 
@@ -69,7 +71,7 @@ int main(int argc, char **argv) {
   ErrorReporter errorReporter(std::cerr);
   Checker checker(errorReporter);
   checker.visit(*root);
-  std::cout << "Check Completed." << std::endl;
+  // std::cout << "Check Completed." << std::endl;
 
   // Generate IR from AST
   GenIR genIR;
@@ -100,22 +102,23 @@ int main(int argc, char **argv) {
 //      x->execute();
 //  }
 //
-    // Open output file
-    // std::ofstream fout;
-    // std::ostream *out;
-    // if (output == "-") {
-    // out = &std::cout;
-    // } else {
-    // fout.open(output);
-    // out = &fout;
-    // }
-//
-//  // Generate assembly file
-//  // TODO
-//  if (print_asm) {
-//    auto builder = new RiscvBuilder();
-//    const std::string RiscvCode = builder->buildRISCV(m.get());
-//    *out << RiscvCode << std::endl;
-//  }
+  std::ofstream fout;
+  std::ostream *out = &std::cout;
+  if (output != "-") {
+    fout.open(output);
+    if (!fout.is_open()) {
+      std::cerr << "failed to open output file: " << output << std::endl;
+      return -1;
+    }
+    out = &fout;
+  }
+
+  if (print_asm) {
+    ArmBuilder builder;
+    const std::string arm_code = builder.build(m.get());
+    *out << arm_code << std::endl;
+  } else if (print_ir) {
+    *out << m->print() << std::endl;
+  }
   return 0;
 }
