@@ -1,7 +1,7 @@
 .DS_Store
-/archive
 /.git
 /doc
+/build
 *.o
 *.obj
 *.exe
@@ -13,6 +13,3 @@
 test/
 .vscode/
 .idea/
-*.dSYM/
-*.pyc
-__pycache__/
