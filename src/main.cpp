@@ -1,7 +1,3 @@
-// #define DEBUG_LEXER
-// #define DEBUG_PARSER
-// #define DEBUG_IRGEN
-
 #include "../include/ast/ast.hpp"
 #include "../include/ast/astPrinter.hpp"
 #include "../include/ir/irGen.hpp"

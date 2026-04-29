@@ -10,9 +10,9 @@
 *.tmp
 *.swp
 *.swo
+test/
 .vscode/
 .idea/
-test/
 *.dSYM/
 *.pyc
 __pycache__/

@@ -33,37 +33,6 @@
   }
 %}
 
-%type <compUnit> CompUnit
-%type <declDef> DeclDef
-%type <decl> Decl
-%type <defList> DefList
-%type <def> Def
-%type <arrays> Arrays
-%type <initValList> InitValList
-%type <initVal> InitVal
-%type <funcDef> FuncDef
-%type <FuncFParamList> FuncFParamList
-%type <funcFParam> FuncFParam
-%type <block> Block
-%type <blockItemList> BlockItemList
-%type <blockItem> BlockItem
-%type <stmt> Stmt
-%type <returnStmt> ReturnStmt
-%type <selectStmt> SelectStmt
-%type <iterationStmt> IterationStmt
-%type <lVal> LVal
-%type <primaryExp> PrimaryExp
-%type <number> Number
-%type <unaryExp> UnaryExp
-%type <call> Call
-%type <funcCParamList> FuncCParamList
-%type <mulExp> MulExp
-%type <addExp> AddExp Exp
-%type <relExp> RelExp
-%type <eqExp> EqExp
-%type <lAndExp> LAndExp
-%type <lOrExp> Cond LOrExp
-
 %union {
   CompUnitAST* compUnit;
   DeclDefAST* declDef;
@@ -101,6 +70,37 @@
   int int_val;
   float float_val;
 }
+
+%type <compUnit> CompUnit
+%type <declDef> DeclDef
+%type <decl> Decl
+%type <defList> DefList
+%type <def> Def
+%type <arrays> Arrays
+%type <initValList> InitValList
+%type <initVal> InitVal
+%type <funcDef> FuncDef
+%type <FuncFParamList> FuncFParamList
+%type <funcFParam> FuncFParam
+%type <block> Block
+%type <blockItemList> BlockItemList
+%type <blockItem> BlockItem
+%type <stmt> Stmt
+%type <returnStmt> ReturnStmt
+%type <selectStmt> SelectStmt
+%type <iterationStmt> IterationStmt
+%type <lVal> LVal
+%type <primaryExp> PrimaryExp
+%type <number> Number
+%type <unaryExp> UnaryExp
+%type <call> Call
+%type <funcCParamList> FuncCParamList
+%type <mulExp> MulExp
+%type <addExp> AddExp Exp
+%type <relExp> RelExp
+%type <eqExp> EqExp
+%type <lAndExp> LAndExp
+%type <lOrExp> Cond LOrExp
 
 %type <ty> BType VoidType
 %type <op> UnaryOp
