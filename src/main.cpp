@@ -8,6 +8,7 @@
 #include <ostream>
 #include <unistd.h>
 
+#include "../build/parser.hpp"
 extern unique_ptr<CompUnitAST> root;
 extern int yyparse();
 extern FILE *yyin;
