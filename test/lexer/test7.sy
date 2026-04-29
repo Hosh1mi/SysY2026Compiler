@@ -1,0 +1,12 @@
+/* --- Bug #1: sign prefix ambiguity ---
+   Expected: a MINUS INT_LIT(3)
+   Actual (buggy): a INT_LIT(-3)   <-- MINUS is swallowed */
+int a;
+a = a - 3;
+a = a -3;
+
+/* --- Bug #2: tilde has no rule ---
+   Expected: TILDE
+   Actual (buggy): Lexical error */
+int b;
+b = ~b;

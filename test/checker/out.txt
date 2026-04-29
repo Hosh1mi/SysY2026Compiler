@@ -1,0 +1,21 @@
+==> 01_redefined_variable.sy
+Semantic error - line 2 : Redefined Variable "a"
+==> 02_undefined_variable.sy
+Semantic error - line 2 : Use Undefined Variable "x"
+==> 03_redefined_function.sy
+Semantic error - line 7 : Redefined Function "foo"
+==> 04_undefined_function.sy
+Semantic error - line 2 : Use Undefined Function "Call"
+==> 05_param_mismatch.sy
+Semantic error - line 2 : Array index not int
+Semantic error - line 6 : Use Undefined Function "Call"
+==> 06_return_type_mismatch.sy
+Semantic error - line 2 : Func return type not match
+==> 07_array_index_not_int.sy
+Semantic error - line 4 : Array index not int
+==> 08_break_continue_outside_loop.sy
+Semantic error - line 2 : Break not in loop
+Semantic error - line 3 : Continue not in loop
+==> 09_non_array_subscript.sy
+Semantic error - line 4 : Visit non-array variable in the form of subscript variables "a"
+Semantic error - line 4 : Array index not int

@@ -1,0 +1,10 @@
+int get_one(int a) {
+  return 1;
+}
+
+int main() {
+  int p;
+  p = -get_one(0) + ~1;
+  putint(p);
+  return 0;
+}

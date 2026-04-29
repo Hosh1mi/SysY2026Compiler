@@ -1,0 +1,17 @@
+.DS_Store
+/archive
+/.git
+/doc
+*.o
+*.obj
+*.exe
+*.out
+*.log
+*.tmp
+*.swp
+*.swo
+.vscode/
+.idea/
+*.dSYM/
+*.pyc
+__pycache__/

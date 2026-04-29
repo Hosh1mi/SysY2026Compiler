@@ -1,0 +1,7 @@
+int foo(int a, float b) {
+    return a;
+}
+
+int main() {
+    return foo(1);
+}
