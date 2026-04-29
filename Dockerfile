@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:22.04
 
 # Prevents `apt install` from asking questions
 ENV DEBIAN_FRONTEND=noninteractive
@@ -16,4 +16,4 @@ WORKDIR /workspace
 CMD ["/bin/bash"]
 
 # Commands:
-# docker build --platform linux/amd64 -t sysy-dev .; docker run -it --platform linux/amd64 -v $(pwd):/workspace sysy-dev
+# docker build --platform linux/arm64 -t sysy-dev .; docker run -it --platform linux/arm64 -v $(pwd):/workspace sysy-dev
