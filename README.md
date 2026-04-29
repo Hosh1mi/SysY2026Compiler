@@ -1,18 +1,25 @@
 # Compiler2026-NO_COMPILE_NO_LIFE
 
 ### 进度
+
 已初步完成：
 - 词法分析
 - 语法分析
 - AST构建
 - 静态语义检查
 - LLVM IR生成
+- IR -> ARM
 
 TODO:
-- IR -> ARM
 - IR opt
 
 ### 项目运行
+
+使用根目录下使用docker搭建环境：
+```bash
+docker build --platform linux/arm64 -t sysy-dev .; docker run -it --platform linux/arm64 -v $(pwd):/workspace sysy-dev
+# 项目代码会放在 /workspace 下
+```
 
 在根目录下构建：
 ```bash
