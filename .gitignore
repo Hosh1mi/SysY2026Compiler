@@ -1,7 +1,6 @@
 .DS_Store
 /.git
 docs/
-build/
 *.o
 *.obj
 *.exe
