@@ -14,7 +14,17 @@ TODO:
 
 ### 项目运行
 
-在`src/`下运行`make compiler`以编译，运行`make run`以测试。可修改`run`下的`.sy`文件以更改测试目标。通过修改`compiler`下的`-D`参数启用不同调试宏。
+在根目录下构建：
+```bash
+mkdir build && cd build && cmake .. && make -j4
+```
+
+在`build/`下运行:
+```bash
+./compiler <.sy path> > out.s
+gcc out.s -o out
+# TODO: Link libsysy.a
+```
 
 ### `git commit`规范
 
