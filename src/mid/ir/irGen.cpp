@@ -1,4 +1,5 @@
-#include "../../include/ir/irGen.hpp"
+#include "../../../include/mid/ir/irGen.hpp"
+#include<iostream>
 
 #define CONST_INT(num) new ConstantInt(module->int32_ty_, num)
 #define CONST_FLOAT(num) new ConstantFloat(module->float32_ty_, num)

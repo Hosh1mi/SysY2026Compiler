@@ -1,6 +1,6 @@
 #pragma once
 #include "ir.hpp"
-#include "../ast/ast.hpp"
+#include "../../frontend/ast/ast.hpp"
 #include <map>
 
 class Scope {

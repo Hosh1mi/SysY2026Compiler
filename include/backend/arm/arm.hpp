@@ -1,5 +1,5 @@
 #pragma once
-#include "../ir/ir.hpp"
+#include "../../mid/ir/ir.hpp"
 #include <sstream>
 #include <unordered_map>
 

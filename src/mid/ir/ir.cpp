@@ -1,5 +1,7 @@
-#include "../../include/ir/ir.hpp"
+#include "../../../include/mid/ir/ir.hpp"
 #include <cstdint>
+#include <iostream>
+#include <sstream>
 
 std::map<Instruction::OpID, std::string> instr_id2string_ = {
         {Instruction::Ret,"ret"},{Instruction::Br,"br"},{Instruction::FNeg,"fneg"},

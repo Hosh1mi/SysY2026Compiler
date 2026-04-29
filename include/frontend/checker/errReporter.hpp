@@ -1,6 +1,3 @@
-#ifndef CARROTCOMPILER_ERRORREPORTER_H
-#define CARROTCOMPILER_ERRORREPORTER_H
-
 #include <iostream>
 
 enum class ErrorType {
@@ -40,5 +37,3 @@ public:
 private:
   std::ostream &err;
 };
-
-#endif // CARROTCOMPILER_ERRORREPORTER_H

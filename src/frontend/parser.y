@@ -2,7 +2,7 @@
 %locations
 
 %code requires {
-  #include "../include/ast/ast.hpp"
+  #include "../include/frontend/ast/ast.hpp"
   #include <memory>
   #include <string>
 }
@@ -14,7 +14,7 @@
   #include <memory>
   #include <string>
   #include <utility>
-  #include "../include/ast/ast.hpp"
+  #include "../include/frontend/ast/ast.hpp"
   using std::string;
   using std::unique_ptr;
 

@@ -12,14 +12,14 @@ find_package(FLEX REQUIRED)
 
 bison_target(
   Parser
-  ${SRC_DIR}/parser.y
+  ${SRC_DIR}/frontend/parser.y
   ${GENERATED_DIR}/parser.cpp
   DEFINES_FILE ${GENERATED_DIR}/parser.hpp
 )
 
 flex_target(
   Lexer
-  ${SRC_DIR}/lexer.l
+  ${SRC_DIR}/frontend/lexer.l
   ${GENERATED_DIR}/lexer.cpp
 )
 
@@ -27,13 +27,13 @@ add_flex_bison_dependency(Lexer Parser)
 
 add_executable(compiler
   ${SRC_DIR}/main.cpp
-  ${SRC_DIR}/ast/ast.cpp
-  ${SRC_DIR}/ast/astPrinter.cpp
-  ${SRC_DIR}/ir/ir.cpp
-  ${SRC_DIR}/ir/irGen.cpp
-  ${SRC_DIR}/arm/arm.cpp
-  ${SRC_DIR}/checker/checker.cpp
-  ${SRC_DIR}/checker/errReporter.cpp
+  ${SRC_DIR}/frontend/ast/ast.cpp
+  ${SRC_DIR}/frontend/ast/astPrinter.cpp
+  ${SRC_DIR}/mid/ir/ir.cpp
+  ${SRC_DIR}/mid/ir/irGen.cpp
+  ${SRC_DIR}/backend/arm/arm.cpp
+  ${SRC_DIR}/frontend/checker/checker.cpp
+  ${SRC_DIR}/frontend/checker/errReporter.cpp
   ${BISON_Parser_OUTPUTS}
   ${FLEX_Lexer_OUTPUTS}
 )

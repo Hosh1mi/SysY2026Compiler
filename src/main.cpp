@@ -1,14 +1,15 @@
-#include "../include/ast/ast.hpp"
-#include "../include/ast/astPrinter.hpp"
-#include "../include/ir/irGen.hpp"
-#include "../include/arm/arm.hpp"
-#include "../include/checker/checker.hpp"
+#include "../include/frontend/ast/ast.hpp"
+#include "../include/frontend/ast/astPrinter.hpp"
+#include "../include/mid/ir/irGen.hpp"
+#include "../include/backend/arm/arm.hpp"
+#include "../include/frontend/checker/checker.hpp"
 #include <fstream>
 #include <iostream>
 #include <ostream>
 #include <unistd.h>
 
 #include "../build/parser.hpp"
+
 extern unique_ptr<CompUnitAST> root;
 extern int yyparse();
 extern FILE *yyin;
