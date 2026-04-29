@@ -9,14 +9,14 @@
 int yycolumn = 1;
 /* Update yycolumn whenever a token is matched */
 #define YY_USER_ACTION \
-  yylloc.first_line = yylloc.last_line = yylineno; \
-  yylloc.first_column = yycolumn; \
-  yylloc.last_column = yycolumn + yyleng - 1; \
-  yycolumn += yyleng;
+    yylloc.first_line = yylloc.last_line = yylineno; \
+    yylloc.first_column = yycolumn; \
+    yylloc.last_column = yycolumn + yyleng - 1; \
+    yycolumn += yyleng;
 
 #ifdef DEBUG_LEXER
 #define LEXER_DEBUG_TOKEN(name) \
-  std::fprintf(stderr, "[Lexer] %-12s : %s (line %d, col %d-%d)\n", name, yytext, yylloc.first_line, yylloc.first_column, yylloc.last_column)
+    std::fprintf(stderr, "[Lexer] %-12s : %s (line %d, col %d-%d)\n", name, yytext, yylloc.first_line, yylloc.first_column, yylloc.last_column)
 #else
 #define LEXER_DEBUG_TOKEN(name) do {} while (0)
 #endif

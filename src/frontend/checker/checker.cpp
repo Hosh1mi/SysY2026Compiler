@@ -23,11 +23,11 @@
  * @param {CompUnitAST&} ast - 单元类，也是语法树的根节点
  */
 void Checker::visit(CompUnitAST &ast) {
-  //创建新的表项
-  make_new_table();
-  for (auto &decl : ast.declDefList) {
-    decl->accept(*this);
-  }
+	//创建新的表项
+	make_new_table();
+	for (auto &decl : ast.declDefList) {
+		decl->accept(*this);
+	}
 }
 
 /**
@@ -37,12 +37,12 @@ void Checker::visit(CompUnitAST &ast) {
  * @param {DeclDefAST&} ast - 声明和函数定义类
  */
 void Checker::visit(DeclDefAST &ast) {
-  if (ast.Decl) {
-    ast.Decl->accept(*this);
-  }
-  if (ast.funcDef) {
-    ast.funcDef->accept(*this);
-  }
+	if (ast.Decl) {
+		ast.Decl->accept(*this);
+	}
+	if (ast.funcDef) {
+		ast.funcDef->accept(*this);
+	}
 }
 
 /**
@@ -53,13 +53,13 @@ void Checker::visit(DeclDefAST &ast) {
  * @param {DeclDefAST&} ast - 声明和函数定义类
  */
 void Checker::visit(DeclAST &ast) {
-  for (auto &def : ast.defList) {
-    def->accept(*this);
-  }
-  // 将定义的变量插入符号表
-  if (!InsertVar(ast)) {
-    exit(int(ErrorType::VarDuplicated));
-  }
+	for (auto &def : ast.defList) {
+		def->accept(*this);
+	}
+	// 将定义的变量插入符号表
+	if (!InsertVar(ast)) {
+		exit(int(ErrorType::VarDuplicated));
+	}
 }
 
 /**
@@ -70,9 +70,9 @@ void Checker::visit(DeclAST &ast) {
  * @param {DefAST&} ast - 定义AST节点
  */
 void Checker::visit(DefAST &ast) {
-  if (ast.initVal) {
-    ast.initVal->accept(*this);
-  }
+	if (ast.initVal) {
+		ast.initVal->accept(*this);
+	}
 }
 
 /**
@@ -84,13 +84,13 @@ void Checker::visit(DefAST &ast) {
  */
 
 void Checker::visit(InitValAST &ast) {
-  if (ast.exp) {
-    ast.exp->accept(*this);
-  } else {
-    for (auto &initVal : ast.initValList) {
-      initVal->accept(*this);
-    }
-  }
+	if (ast.exp) {
+		ast.exp->accept(*this);
+	} else {
+		for (auto &initVal : ast.initValList) {
+			initVal->accept(*this);
+		}
+	}
 }
 
 /**
@@ -102,11 +102,11 @@ void Checker::visit(InitValAST &ast) {
  */
 
 void Checker::visit(FuncFParamAST &ast) {
-  for (auto &exp : ast.arrays) {
-    if (exp) {
-      exp->accept(*this);
-    }
-  }
+	for (auto &exp : ast.arrays) {
+		if (exp) {
+			exp->accept(*this);
+		}
+	}
 }
 
 /**
@@ -118,17 +118,17 @@ void Checker::visit(FuncFParamAST &ast) {
  *  @param {ReturnStmtAST&} ast - 返回语句的AST节点
  **/
 void Checker::visit(ReturnStmtAST &ast) {
-  if (ast.exp) {
-    ast.exp->accept(*this);
-  } else {
-    this->current_type.type = TYPE::TYPE_VOID;
-  }
+	if (ast.exp) {
+		ast.exp->accept(*this);
+	} else {
+		this->current_type.type = TYPE::TYPE_VOID;
+	}
 
-  auto entry = find_func();
-  if (entry->type != this->current_type.type) {
-    err.error(ErrorType::FuncReturnTypeNotMatch, "return");
-    exit(int(ErrorType::FuncReturnTypeNotMatch));
-  }
+	auto entry = find_func();
+	if (entry->type != this->current_type.type) {
+		err.error(ErrorType::FuncReturnTypeNotMatch, "return");
+		exit(int(ErrorType::FuncReturnTypeNotMatch));
+	}
 }
 
 /**
@@ -140,13 +140,13 @@ void Checker::visit(ReturnStmtAST &ast) {
  *  @param {FuncDefAST&} ast - 函数定义AST节点
  **/
 void Checker::visit(FuncDefAST &ast) {
-  // 将函数插入符号表
-  if (!InsertFunc(ast)) {
-    err.error(ErrorType::FuncDuplicated, *ast.id);
-    exit(int(ErrorType::FuncDuplicated));
-  }
-  start_of_new_func = true;
-  ast.block->accept(*this);
+	// 将函数插入符号表
+	if (!InsertFunc(ast)) {
+		err.error(ErrorType::FuncDuplicated, *ast.id);
+		exit(int(ErrorType::FuncDuplicated));
+	}
+	start_of_new_func = true;
+	ast.block->accept(*this);
 }
 
 /**
@@ -157,20 +157,20 @@ void Checker::visit(FuncDefAST &ast) {
  * @param {BlockAST&} ast - 函数体块类
  */
 void Checker::visit(BlockAST &ast) {
-  //一个新的函数在插入时就已经建了新的符号表，这里不用重复建
-  if (start_of_new_func)
-    start_of_new_func = false;
-  //对非函数定义的语句块添加新的符号表
-  else
-    make_new_table();
+	//一个新的函数在插入时就已经建了新的符号表，这里不用重复建
+	if (start_of_new_func)
+		start_of_new_func = false;
+	//对非函数定义的语句块添加新的符号表
+	else
+		make_new_table();
 
-  for (auto &item : ast.blockItemList) {
-    item->is_inloop = ast.is_inloop;
-    item->accept(*this);
-  }
+	for (auto &item : ast.blockItemList) {
+		item->is_inloop = ast.is_inloop;
+		item->accept(*this);
+	}
 
-  //语句块作用域结束，删除之前添加的符号表
-  delete_table();
+	//语句块作用域结束，删除之前添加的符号表
+	delete_table();
 }
 
 /**
@@ -181,13 +181,13 @@ void Checker::visit(BlockAST &ast) {
  */
 void Checker::visit(BlockItemAST &ast) {
 
-  if (ast.stmt) {
-    ast.stmt->is_inloop = ast.is_inloop;
-    ast.stmt->accept(*this);
-  }
-  if (ast.decl) {
-    ast.decl->accept(*this);
-  }
+	if (ast.stmt) {
+		ast.stmt->is_inloop = ast.is_inloop;
+		ast.stmt->accept(*this);
+	}
+	if (ast.decl) {
+		ast.decl->accept(*this);
+	}
 }
 
 /**
@@ -199,40 +199,40 @@ void Checker::visit(BlockItemAST &ast) {
  */
 void Checker::visit(StmtAST &ast) {
 
-  if (ast.selectStmt) {
-    ast.selectStmt->is_inloop = ast.is_inloop;
-    ast.selectStmt->accept(*this);
-  }
-  if (ast.block) {
-    ast.block->is_inloop = ast.is_inloop;
-    ast.block->accept(*this);
-  }
-  if (ast.iterationStmt) {
-    ast.iterationStmt->is_inloop = ast.is_inloop;
-    ast.iterationStmt->accept(*this);
-  }
+	if (ast.selectStmt) {
+		ast.selectStmt->is_inloop = ast.is_inloop;
+		ast.selectStmt->accept(*this);
+	}
+	if (ast.block) {
+		ast.block->is_inloop = ast.is_inloop;
+		ast.block->accept(*this);
+	}
+	if (ast.iterationStmt) {
+		ast.iterationStmt->is_inloop = ast.is_inloop;
+		ast.iterationStmt->accept(*this);
+	}
 
-  if (ast.returnStmt) {
-    ast.returnStmt->accept(*this);
-  }  
-  if (ast.lVal) {
-    ast.lVal->accept(*this);
-  }
-  if (ast.exp) {
-    ast.exp->accept(*this);
-  }
+	if (ast.returnStmt) {
+		ast.returnStmt->accept(*this);
+	}  
+	if (ast.lVal) {
+		ast.lVal->accept(*this);
+	}
+	if (ast.exp) {
+		ast.exp->accept(*this);
+	}
 
-  if (ast.sType == STYPE::BRE) { // 当前节点为Break语句类型
-    if (!ast.is_inloop) {
-      err.error(ErrorType::BreakNotInLoop, "break");
-      exit(int(ErrorType::BreakNotInLoop));
-    }
-  } else if (ast.sType == STYPE::CONT) { // 当前节点为Continue语句类型
-    if (!ast.is_inloop) {
-      err.error(ErrorType::ContinueNotInLoop, "continue");
-      exit(int(ErrorType::ContinueNotInLoop));
-    }
-  }
+	if (ast.sType == STYPE::BRE) { // 当前节点为Break语句类型
+		if (!ast.is_inloop) {
+			err.error(ErrorType::BreakNotInLoop, "break");
+			exit(int(ErrorType::BreakNotInLoop));
+		}
+	} else if (ast.sType == STYPE::CONT) { // 当前节点为Continue语句类型
+		if (!ast.is_inloop) {
+			err.error(ErrorType::ContinueNotInLoop, "continue");
+			exit(int(ErrorType::ContinueNotInLoop));
+		}
+	}
 }
 
 /**
@@ -243,17 +243,17 @@ void Checker::visit(StmtAST &ast) {
  * @param {SelectStmtAST&} ast - 选择语句类
  */
 void Checker::visit(SelectStmtAST &ast) {
-  if (ast.elseStmt) {
-    ast.elseStmt->is_inloop = ast.is_inloop;
-    ast.elseStmt->accept(*this);
-  }
-  if (ast.ifStmt) {
-    ast.ifStmt->is_inloop = ast.is_inloop;
-    ast.ifStmt->accept(*this);
-  }
-  if (ast.cond) {
-    ast.cond->accept(*this);
-  }
+	if (ast.elseStmt) {
+		ast.elseStmt->is_inloop = ast.is_inloop;
+		ast.elseStmt->accept(*this);
+	}
+	if (ast.ifStmt) {
+		ast.ifStmt->is_inloop = ast.is_inloop;
+		ast.ifStmt->accept(*this);
+	}
+	if (ast.cond) {
+		ast.cond->accept(*this);
+	}
 }
 
 /**
@@ -263,13 +263,13 @@ void Checker::visit(SelectStmtAST &ast) {
  * @param {IterationStmtAST&} ast - 循环语句类
  */
 void Checker::visit(IterationStmtAST &ast) {
-  if (ast.cond) {
-    ast.cond->accept(*this);
-  }
-  if (ast.stmt) {
-    ast.stmt->is_inloop = true;
-    ast.stmt->accept(*this);
-  }
+	if (ast.cond) {
+		ast.cond->accept(*this);
+	}
+	if (ast.stmt) {
+		ast.stmt->is_inloop = true;
+		ast.stmt->accept(*this);
+	}
 }
 
 /**
@@ -279,12 +279,12 @@ void Checker::visit(IterationStmtAST &ast) {
  * @param {AddExpAST&} ast - 加法表达式类
  */
 void Checker::visit(AddExpAST &ast) {
-  if (ast.addExp) {
-    ast.addExp->accept(*this);
-  }
-  if (ast.mulExp) {
-    ast.mulExp->accept(*this);
-  }
+	if (ast.addExp) {
+		ast.addExp->accept(*this);
+	}
+	if (ast.mulExp) {
+		ast.mulExp->accept(*this);
+	}
 }
 
 /**
@@ -294,12 +294,12 @@ void Checker::visit(AddExpAST &ast) {
  * @param {MulExpAST&} ast - 乘法表达式类
  */
 void Checker::visit(MulExpAST &ast) {
-  if (ast.mulExp) {
-    ast.mulExp->accept(*this);
-  }
-  if (ast.unaryExp) {
-    ast.unaryExp->accept(*this);
-  }
+	if (ast.mulExp) {
+		ast.mulExp->accept(*this);
+	}
+	if (ast.unaryExp) {
+		ast.unaryExp->accept(*this);
+	}
 }
 
 /**
@@ -310,15 +310,15 @@ void Checker::visit(MulExpAST &ast) {
  * @param {UnaryExpAST&} ast - 一元表达式类
  */
 void Checker::visit(UnaryExpAST &ast) {
-  if (ast.primaryExp) {
-    ast.primaryExp->accept(*this);
-  }
-  if (ast.unaryExp) {
-    ast.unaryExp->accept(*this);
-  }
-  if (ast.call) {
-    ast.call->accept(*this);
-  }
+	if (ast.primaryExp) {
+		ast.primaryExp->accept(*this);
+	}
+	if (ast.unaryExp) {
+		ast.unaryExp->accept(*this);
+	}
+	if (ast.call) {
+		ast.call->accept(*this);
+	}
 }
 
 /**
@@ -328,15 +328,15 @@ void Checker::visit(UnaryExpAST &ast) {
  * @param {PrimaryExpAST&} ast - 基本表达式类
  */
 void Checker::visit(PrimaryExpAST &ast) {
-  if (ast.exp) {
-    ast.exp->accept(*this);
-  }
-  if (ast.lval) {
-    ast.lval->accept(*this);
-  }
-  if (ast.number) {
-    ast.number->accept(*this);
-  }
+	if (ast.exp) {
+		ast.exp->accept(*this);
+	}
+	if (ast.lval) {
+		ast.lval->accept(*this);
+	}
+	if (ast.number) {
+		ast.number->accept(*this);
+	}
 }
 
 /**
@@ -347,41 +347,41 @@ void Checker::visit(PrimaryExpAST &ast) {
  * @param {LValAST&} ast - 左值表达式类
  */
 void Checker::visit(LValAST &ast) {
-  for (auto &exp : ast.arrays) {
-    if (exp) {
-      exp->accept(*this);
-    }
-    // 左值数组下标不是整数
-    // 例如c[0.1] = 1;
-    if (!this->Expr_int) {
-      err.error(ErrorType::ArrayIndexNotInt, *ast.id);
-      exit(int(ErrorType::ArrayIndexNotInt));
-    }
-  }
+	for (auto &exp : ast.arrays) {
+		if (exp) {
+			exp->accept(*this);
+		}
+		// 左值数组下标不是整数
+		// 例如c[0.1] = 1;
+		if (!this->Expr_int) {
+			err.error(ErrorType::ArrayIndexNotInt, *ast.id);
+			exit(int(ErrorType::ArrayIndexNotInt));
+		}
+	}
 
-  auto str = ast.id.get();
-  //在符号表中查找对应变量
-  Entry *entry = Lookup(*str);
-  if (entry == nullptr) {
-    // 使用未定义变量
-    err.error(ErrorType::VarUnknown, *ast.id);
-    exit(int(ErrorType::VarUnknown));
-  }
+	auto str = ast.id.get();
+	//在符号表中查找对应变量
+	Entry *entry = Lookup(*str);
+	if (entry == nullptr) {
+		// 使用未定义变量
+		err.error(ErrorType::VarUnknown, *ast.id);
+		exit(int(ErrorType::VarUnknown));
+	}
 
-  // 对非数组变量采用下标变量的形式访问
-  // 例如 int c; c[10][10] = 10;
-  if (!entry->is_array && !ast.arrays.empty()) {
-    err.error(ErrorType::VisitVariableError, *ast.id);
-    exit(int(ErrorType::VisitVariableError));
-  }
+	// 对非数组变量采用下标变量的形式访问
+	// 例如 int c; c[10][10] = 10;
+	if (!entry->is_array && !ast.arrays.empty()) {
+		err.error(ErrorType::VisitVariableError, *ast.id);
+		exit(int(ErrorType::VisitVariableError));
+	}
 
-  this->current_type.type = entry->type;
-  this->Expr_int = (entry->type == TYPE::TYPE_INT);
+	this->current_type.type = entry->type;
+	this->Expr_int = (entry->type == TYPE::TYPE_INT);
 }
 
 void Checker::visit(NumberAST &ast) {
-  this->Expr_int = ast.isInt;
-  this->current_type.type = ast.isInt ? TYPE::TYPE_INT : TYPE::TYPE_FLOAT;
+	this->Expr_int = ast.isInt;
+	this->current_type.type = ast.isInt ? TYPE::TYPE_INT : TYPE::TYPE_FLOAT;
 }
 
 /**
@@ -391,43 +391,43 @@ void Checker::visit(NumberAST &ast) {
  * @param {CallAST&} ast - 函数调用类
  */
 void Checker::visit(CallAST &ast) {
-  //特殊函数不做处理
-  if (!ast.id->compare("getint") || !ast.id->compare("getfloat") ||
-      !ast.id->compare("getch") || !ast.id->compare("getarray") ||
-      !ast.id->compare("get_float_array") || !ast.id->compare("putint") ||
-      !ast.id->compare("putfloat") || !ast.id->compare("putch") ||
-      !ast.id->compare("putarray") || !ast.id->compare("put_float_array")) {
-    return;
-  }
+	//特殊函数不做处理
+	if (!ast.id->compare("getint") || !ast.id->compare("getfloat") ||
+			!ast.id->compare("getch") || !ast.id->compare("getarray") ||
+			!ast.id->compare("get_float_array") || !ast.id->compare("putint") ||
+			!ast.id->compare("putfloat") || !ast.id->compare("putch") ||
+			!ast.id->compare("putarray") || !ast.id->compare("put_float_array")) {
+		return;
+	}
 
-  // 在符号表中查找对应函数
-  Entry *entry = Lookup(*ast.id);
+	// 在符号表中查找对应函数
+	Entry *entry = Lookup(*ast.id);
  
-  if (entry == nullptr) {
-    err.error(ErrorType::FuncUnknown, *ast.id);
-    exit(int(ErrorType::FuncUnknown));
+	if (entry == nullptr) {
+		err.error(ErrorType::FuncUnknown, *ast.id);
+		exit(int(ErrorType::FuncUnknown));
  
-  } else {
-    //参数长度不匹配
-    if (entry->func_params.size() != ast.funcCParamList.size()) {
-      err.error(ErrorType::FuncParamsNotMatch, *ast.id);
-      exit(int(ErrorType::FuncParamsNotMatch));
-     } else {
-      //遍历实参与形参
-      int i = 0;
-      for (auto &exp : ast.funcCParamList) {
-        exp->accept(*this);
-        if (this->current_type.type != entry->func_params[i].type) {
-          err.error(ErrorType::FuncParamsNotMatch, *ast.id);
-          exit(int(ErrorType::FuncParamsNotMatch));
-        } else {
-          i++;
-        }
-      }
-    }
-    this->current_type.type = entry->type;
-    this->Expr_int = (entry->type == TYPE::TYPE_INT);
-  }
+	} else {
+		//参数长度不匹配
+		if (entry->func_params.size() != ast.funcCParamList.size()) {
+			err.error(ErrorType::FuncParamsNotMatch, *ast.id);
+			exit(int(ErrorType::FuncParamsNotMatch));
+		 } else {
+			//遍历实参与形参
+			int i = 0;
+			for (auto &exp : ast.funcCParamList) {
+				exp->accept(*this);
+				if (this->current_type.type != entry->func_params[i].type) {
+					err.error(ErrorType::FuncParamsNotMatch, *ast.id);
+					exit(int(ErrorType::FuncParamsNotMatch));
+				} else {
+					i++;
+				}
+			}
+		}
+		this->current_type.type = entry->type;
+		this->Expr_int = (entry->type == TYPE::TYPE_INT);
+	}
 }
 
 /**
@@ -437,14 +437,14 @@ void Checker::visit(CallAST &ast) {
  * @param {RelExpAST&} ast - 关系表达式类
  */
 void Checker::visit(RelExpAST &ast) {
-  if (ast.relExp) {
-    ast.relExp->accept(*this);
-  }
-  if (ast.addExp) {
-    ast.addExp->accept(*this);
-  }
-  this->Expr_int = false;
-  this->current_type.type = TYPE::TYPE_BOOL;
+	if (ast.relExp) {
+		ast.relExp->accept(*this);
+	}
+	if (ast.addExp) {
+		ast.addExp->accept(*this);
+	}
+	this->Expr_int = false;
+	this->current_type.type = TYPE::TYPE_BOOL;
 }
 
 /**
@@ -454,14 +454,14 @@ void Checker::visit(RelExpAST &ast) {
  * @param {EqExpAST&} ast - 等式表达式类
  */
 void Checker::visit(EqExpAST &ast) {
-  if (ast.eqExp) {
-    ast.eqExp->accept(*this);
-  }
-  if (ast.relExp) {
-    ast.relExp->accept(*this);
-  }
-  this->Expr_int = false;
-  this->current_type.type = TYPE::TYPE_BOOL;
+	if (ast.eqExp) {
+		ast.eqExp->accept(*this);
+	}
+	if (ast.relExp) {
+		ast.relExp->accept(*this);
+	}
+	this->Expr_int = false;
+	this->current_type.type = TYPE::TYPE_BOOL;
 }
 
 /**
@@ -471,12 +471,12 @@ void Checker::visit(EqExpAST &ast) {
  * @param {LAndExpAST&} ast - 逻辑与表达式类
  */
 void Checker::visit(LAndExpAST &ast) {
-  if (ast.lAndExp) {
-    ast.lAndExp->accept(*this);
-  }
-  if (ast.eqExp) {
-    ast.eqExp->accept(*this);
-  }
+	if (ast.lAndExp) {
+		ast.lAndExp->accept(*this);
+	}
+	if (ast.eqExp) {
+		ast.eqExp->accept(*this);
+	}
 }
 
 /**
@@ -486,10 +486,10 @@ void Checker::visit(LAndExpAST &ast) {
  * @param {LOrExpAST&} ast - 逻辑或表达式类
  */
 void Checker::visit(LOrExpAST &ast) {
-  if (ast.lOrExp) {
-    ast.lOrExp->accept(*this);
-  }
-  if (ast.lAndExp) {
-    ast.lAndExp->accept(*this);
-  }
+	if (ast.lOrExp) {
+		ast.lOrExp->accept(*this);
+	}
+	if (ast.lAndExp) {
+		ast.lAndExp->accept(*this);
+	}
 }

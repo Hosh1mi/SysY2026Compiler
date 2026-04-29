@@ -27,8 +27,8 @@ BasicBlock *trueBB = nullptr;           //通用true分支，即while和if为真
 BasicBlock *falseBB = nullptr;          //通用false分支，即while和if为假时所跳转的基本块
 BasicBlock * whileFalseBB;              //while语句false分支，用于break跳转
 int id = 1;                             //recent标号
-bool has_br = false;            //一个BB中是否已经出现了br
-bool is_single_exp = false;     //作为单独的exp语句出现，形如 "exp;"
+bool has_br = false;                    //一个BB中是否已经出现了br
+bool is_single_exp = false;             //作为单独的exp语句出现，形如 "exp;"
 
 
 //判断得到的赋值与声明类型是否一致，并做转换
