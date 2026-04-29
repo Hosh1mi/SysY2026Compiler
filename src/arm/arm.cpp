@@ -1,5 +1,6 @@
 #include "../../include/arm/arm.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <iomanip>
 
 static std::string opReg(const std::string& r) { return r; }

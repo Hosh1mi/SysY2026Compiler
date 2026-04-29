@@ -1,4 +1,5 @@
 #include "../../include/ir/ir.hpp"
+#include <cstdint>
 
 std::map<Instruction::OpID, std::string> instr_id2string_ = {
         {Instruction::Ret,"ret"},{Instruction::Br,"br"},{Instruction::FNeg,"fneg"},
@@ -96,7 +97,7 @@ std::string ConstantFloat::print()
     std::stringstream fp_ir_ss;
     std::string fp_ir;
     double val = this->value_;
-    fp_ir_ss << "0x"<< std::hex << *(uint64_t *)&val << std::endl;
+    fp_ir_ss << "0x" << std::hex << *reinterpret_cast<std::uint64_t *>(&val) << std::endl;
     fp_ir_ss >> fp_ir;
     return fp_ir;
 }
