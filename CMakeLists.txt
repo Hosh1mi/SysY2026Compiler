@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
+find_package(BISON REQUIRED)
+find_package(FLEX REQUIRED)
+
 bison_target(
   Parser
   ${SRC_DIR}/parser.y
