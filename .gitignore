@@ -10,6 +10,7 @@ docs/
 *.swp
 *.swo
 *.s
+out
 test/
 .vscode/
 .idea/
