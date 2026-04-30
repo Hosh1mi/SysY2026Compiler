@@ -1,11 +1,11 @@
-#include "../../../include/backend/arm/arm_builder.hpp"
+#include "../../include/backend/arm_builder.hpp"
 
-void ArmBuilder::analyzeFunction(FuncContext &ctx) {
+void ArmBuilder::analyzeFunction(ArmFuncContext &ctx) {
     assignStackSlots(ctx);
     collectPhiMoves(ctx);
 }
 
-void ArmBuilder::assignStackSlots(FuncContext &ctx) {
+void ArmBuilder::assignStackSlots(ArmFuncContext &ctx) {
     for (auto *arg : ctx.func->arguments_) allocateSlot(ctx, arg, typeSize(arg->type_), 8);
     for (auto *bb : ctx.func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
@@ -17,7 +17,7 @@ void ArmBuilder::assignStackSlots(FuncContext &ctx) {
     ctx.frame_size = alignUp(ctx.frame_size + 16 + call_area, 16);
 }
 
-void ArmBuilder::collectPhiMoves(FuncContext &ctx) {
+void ArmBuilder::collectPhiMoves(ArmFuncContext &ctx) {
     for (auto *bb : ctx.func->basic_blocks_) {
         for (auto *succ : bb->succ_bbs_) ctx.preds[succ].push_back(bb);
     }
@@ -28,7 +28,7 @@ void ArmBuilder::collectPhiMoves(FuncContext &ctx) {
             for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
                 auto *val = phi->get_operand(i);
                 auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
-                ctx.edge_moves[pred].push_back(PhiMove{phi, val});
+                ctx.edge_moves[pred].push_back(ArmFuncContext::PhiMove{phi, val});
             }
         }
     }
@@ -48,7 +48,7 @@ std::string ArmBuilder::emitFunction(Function *func) {
     return out.str();
 }
 
-void ArmBuilder::emitPrologue(FuncContext &ctx) {
+void ArmBuilder::emitPrologue(ArmFuncContext &ctx) {
     // 函数序言：保存帧指针和返回地址。
     ctx.prologue << "    stp x29, x30, [sp, #-16]!\n";
     ctx.prologue << "    mov x29, sp\n";
@@ -62,7 +62,8 @@ void ArmBuilder::emitPrologue(FuncContext &ctx) {
     }
 }
 
-void ArmBuilder::emitEpilogue(FuncContext &ctx) {
+void ArmBuilder::emitEpilogue(ArmFuncContext &ctx) {
+    // 返回标签必须带冒号，否则汇编器会把它当成伪指令名。
     ctx.text << ".Lreturn_" << ctx.func->name_ << ":\n";
     if (ctx.frame_size > 16) ctx.text << "    add sp, sp, #" << (ctx.frame_size - 16) << "\n";
     ctx.text << "    ldp x29, x30, [sp], #16\n";

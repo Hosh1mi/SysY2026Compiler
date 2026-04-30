@@ -1,19 +1,19 @@
-#include "../../../include/backend/arm/arm_builder.hpp"
+#include "../../include/backend/arm_builder.hpp"
 
-void ArmBuilder::emitFunctionBody(FuncContext &ctx) {
+void ArmBuilder::emitFunctionBody(ArmFuncContext &ctx) {
     for (auto *bb : ctx.func->basic_blocks_) emitBasicBlock(ctx, bb);
 }
 
-void ArmBuilder::emitBasicBlock(FuncContext &ctx, BasicBlock *bb) {
+void ArmBuilder::emitBasicBlock(ArmFuncContext &ctx, BasicBlock *bb) {
     ctx.current_bb = bb;
     ctx.text << escapeLabel(bb->name_) << ":\n";
     for (auto *inst : bb->instr_list_) emitInstruction(ctx, inst);
     for (auto *succ : bb->succ_bbs_) emitPhiCopiesForSuccessor(ctx, succ);
 }
 
-void ArmBuilder::emitParallelMoves(FuncContext &ctx, const std::vector<PhiMove> &moves) {
+void ArmBuilder::emitParallelMoves(ArmFuncContext &ctx, const std::vector<ArmFuncContext::PhiMove> &moves) {
     if (moves.empty()) return;
-    std::vector<PhiMove> pending = moves;
+    std::vector<ArmFuncContext::PhiMove> pending = moves;
     while (!pending.empty()) {
         bool progress = false;
         for (auto it = pending.begin(); it != pending.end(); ++it) {
@@ -40,10 +40,10 @@ void ArmBuilder::emitParallelMoves(FuncContext &ctx, const std::vector<PhiMove> 
     }
 }
 
-void ArmBuilder::emitPhiCopiesForSuccessor(FuncContext &ctx, BasicBlock *succ) {
+void ArmBuilder::emitPhiCopiesForSuccessor(ArmFuncContext &ctx, BasicBlock *succ) {
     auto it = ctx.edge_moves.find(ctx.current_bb);
     if (it == ctx.edge_moves.end()) return;
-    std::vector<PhiMove> moves;
+    std::vector<ArmFuncContext::PhiMove> moves;
     for (auto &m : it->second) {
         if (!m.dst || !m.src) continue;
         auto *phi = dynamic_cast<PhiInst *>(m.dst);

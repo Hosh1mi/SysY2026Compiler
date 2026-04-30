@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../mid/ir/ir.hpp"
+#include "../mid/ir/ir.hpp"
 #include <cstddef>
 #include <map>
 #include <sstream>
@@ -31,7 +31,3 @@ struct ArmFuncContext {
     int max_call_args = 0;
     BasicBlock *current_bb = nullptr;
 };
-
-using FuncContext = ArmFuncContext;
-using StackSlot = ArmFuncContext::StackSlot;
-using PhiMove = ArmFuncContext::PhiMove;

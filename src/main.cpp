@@ -1,7 +1,7 @@
 #include "../include/frontend/ast/ast.hpp"
 #include "../include/frontend/ast/astPrinter.hpp"
 #include "../include/mid/ir/irGen.hpp"
-#include "../include/backend/arm/backend.hpp"
+#include "../include/backend/arm_builder.hpp"
 #include "../include/frontend/checker/checker.hpp"
 #include "../build/parser.hpp"
 #include <fstream>

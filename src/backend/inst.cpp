@@ -1,4 +1,4 @@
-#include "../../../include/backend/arm/arm_builder.hpp"
+#include "../../include/backend/arm_builder.hpp"
 
 namespace {
 std::string reg32(int idx) { return "w" + std::to_string(idx); }
@@ -43,7 +43,7 @@ ArmBuilder::InstrKind ArmBuilder::classifyInstruction(Instruction *inst) const {
     }
 }
 
-void ArmBuilder::emitValueToReg(FuncContext &ctx, Value *v, const std::string &reg, bool asFloat) {
+void ArmBuilder::emitValueToReg(ArmFuncContext &ctx, Value *v, const std::string &reg, bool asFloat) {
     if (!v) return;
     if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
         if (isImm12(ci->value_)) ctx.text << "    mov " << reg << ", #" << ci->value_ << "\n";
@@ -69,16 +69,16 @@ void ArmBuilder::emitValueToReg(FuncContext &ctx, Value *v, const std::string &r
     ctx.text << "    ldr " << reg << ", [x29, #-" << (off + 4) << "]\n";
 }
 
-void ArmBuilder::emitStoreFromReg(FuncContext &ctx, Value *dst, const std::string &reg, bool asFloat) {
+void ArmBuilder::emitStoreFromReg(ArmFuncContext &ctx, Value *dst, const std::string &reg, bool asFloat) {
     auto it = ctx.slots.find(dst);
     if (it == ctx.slots.end()) return;
     auto off = it->second.offset;
     ctx.text << "    str " << reg << ", [x29, #-" << (off + 4) << "]\n";
 }
 
-void ArmBuilder::emitLoadValue(FuncContext &ctx, Value *v, const std::string &reg, bool asFloat) { emitValueToReg(ctx, v, reg, asFloat); }
+void ArmBuilder::emitLoadValue(ArmFuncContext &ctx, Value *v, const std::string &reg, bool asFloat) { emitValueToReg(ctx, v, reg, asFloat); }
 
-void ArmBuilder::emitAddrOf(FuncContext &ctx, Value *v, const std::string &reg) {
+void ArmBuilder::emitAddrOf(ArmFuncContext &ctx, Value *v, const std::string &reg) {
     if (auto *gv = dynamic_cast<GlobalVariable *>(v)) {
         ctx.text << "    adrp " << reg << ", " << globalName(gv) << "\n";
         ctx.text << "    add " << reg << ", " << reg << ", :lo12:" << globalName(gv) << "\n";
@@ -92,7 +92,7 @@ void ArmBuilder::emitAddrOf(FuncContext &ctx, Value *v, const std::string &reg) 
     ctx.text << "    mov " << reg << ", xzr\n";
 }
 
-void ArmBuilder::emitInstruction(FuncContext &ctx, Instruction *inst) {
+void ArmBuilder::emitInstruction(ArmFuncContext &ctx, Instruction *inst) {
     switch (classifyInstruction(inst)) {
         case InstrKind::Phi:
             return;
