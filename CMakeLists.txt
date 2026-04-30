@@ -31,7 +31,12 @@ add_executable(compiler
     ${SRC_DIR}/frontend/ast/astPrinter.cpp
     ${SRC_DIR}/mid/ir/ir.cpp
     ${SRC_DIR}/mid/ir/irGen.cpp
-    ${SRC_DIR}/backend/arm/arm.cpp
+    ${SRC_DIR}/backend/arm/backend.cpp
+    ${SRC_DIR}/backend/arm/backend_utils.cpp
+    ${SRC_DIR}/backend/arm/backend_driver.cpp
+    ${SRC_DIR}/backend/arm/backend_function.cpp
+    ${SRC_DIR}/backend/arm/backend_bb.cpp
+    ${SRC_DIR}/backend/arm/backend_inst.cpp
     ${SRC_DIR}/frontend/checker/checker.cpp
     ${SRC_DIR}/frontend/checker/errReporter.cpp
     ${BISON_Parser_OUTPUTS}
