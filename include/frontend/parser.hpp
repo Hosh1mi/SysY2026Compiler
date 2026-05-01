@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YY_WORKSPACE_BUILD_PARSER_HPP_INCLUDED
-# define YY_YY_WORKSPACE_BUILD_PARSER_HPP_INCLUDED
+#ifndef YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+# define YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -48,10 +48,9 @@ extern int yydebug;
 #line 4 "/workspace/src/frontend/parser.y"
 
     #include "../include/frontend/ast/ast.hpp"
-    #include <memory>
     #include <string>
 
-#line 55 "/workspace/build/parser.hpp"
+#line 54 "/workspace/include/frontend/parser.hpp"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -107,7 +106,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 36 "/workspace/src/frontend/parser.y"
+#line 34 "/workspace/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     DeclDefAST* declDef;
@@ -145,7 +144,7 @@ union YYSTYPE
     int int_val;
     float float_val;
 
-#line 149 "/workspace/build/parser.hpp"
+#line 148 "/workspace/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -174,4 +173,4 @@ extern YYLTYPE yylloc;
 int yyparse (void);
 
 
-#endif /* !YY_YY_WORKSPACE_BUILD_PARSER_HPP_INCLUDED  */
+#endif /* !YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */

@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 find_package(BISON REQUIRED)
@@ -13,14 +14,14 @@ find_package(FLEX REQUIRED)
 bison_target(
     Parser
     ${SRC_DIR}/frontend/parser.y
-    ${GENERATED_DIR}/parser.cpp
-    DEFINES_FILE ${GENERATED_DIR}/parser.hpp
+    ${SRC_DIR}/parser.cpp
+    DEFINES_FILE ${INCLUDE_DIR}/frontend/parser.hpp
 )
 
 flex_target(
     Lexer
     ${SRC_DIR}/frontend/lexer.l
-    ${GENERATED_DIR}/lexer.cpp
+    ${SRC_DIR}/lexer.cpp
 )
 
 add_flex_bison_dependency(Lexer Parser)
@@ -44,6 +45,7 @@ add_executable(compiler
 
 target_include_directories(compiler PRIVATE
     ${SRC_DIR}/include
+    ${INCLUDE_DIR}/frontend
     ${GENERATED_DIR}
     ${SRC_DIR}
 )

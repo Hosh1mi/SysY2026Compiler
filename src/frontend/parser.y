@@ -3,7 +3,6 @@
 
 %code requires {
     #include "../include/frontend/ast/ast.hpp"
-    #include <memory>
     #include <string>
 }
 
@@ -11,7 +10,6 @@
     #include <cstdio>
     #include <cstdlib>
     #include <iostream>
-    #include <memory>
     #include <string>
     #include <utility>
     #include "../include/frontend/ast/ast.hpp"
