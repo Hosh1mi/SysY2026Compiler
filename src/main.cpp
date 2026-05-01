@@ -3,7 +3,7 @@
 #include "../include/mid/ir/irGen.hpp"
 #include "../include/backend/arm_builder.hpp"
 #include "../include/frontend/checker/checker.hpp"
-#include "../include/frontend/parser.hpp"
+#include "../build/parser.hpp"
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
