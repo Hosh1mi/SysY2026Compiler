@@ -45,9 +45,9 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 4 "/workspace/src/frontend/parser.y"
+#line 5 "/workspace/src/frontend/parser.y"
 
-    #include "../include/frontend/ast/ast.hpp"
+    #include "../../include/frontend/ast/ast.hpp"
     #include <string>
 
 #line 54 "/workspace/include/frontend/parser.hpp"
@@ -106,7 +106,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 34 "/workspace/src/frontend/parser.y"
+#line 35 "/workspace/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     DeclDefAST* declDef;

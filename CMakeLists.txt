@@ -14,14 +14,14 @@ find_package(FLEX REQUIRED)
 bison_target(
     Parser
     ${SRC_DIR}/frontend/parser.y
-    ${SRC_DIR}/parser.cpp
+    ${SRC_DIR}/frontend/parser.cpp
     DEFINES_FILE ${INCLUDE_DIR}/frontend/parser.hpp
 )
 
 flex_target(
     Lexer
     ${SRC_DIR}/frontend/lexer.l
-    ${SRC_DIR}/lexer.cpp
+    ${SRC_DIR}/frontend/lexer.cpp
 )
 
 add_flex_bison_dependency(Lexer Parser)
@@ -44,10 +44,7 @@ add_executable(compiler
 )
 
 target_include_directories(compiler PRIVATE
-    ${SRC_DIR}/include
-    ${INCLUDE_DIR}/frontend
-    ${GENERATED_DIR}
-    ${SRC_DIR}
+    ${INCLUDE_DIR}
 )
 
 target_compile_definitions(compiler PRIVATE

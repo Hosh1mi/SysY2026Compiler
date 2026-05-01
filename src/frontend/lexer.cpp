@@ -1,6 +1,6 @@
-#line 2 "/workspace/src/lexer.cpp"
+#line 2 "/workspace/src/frontend/lexer.cpp"
 
-#line 4 "/workspace/src/lexer.cpp"
+#line 4 "/workspace/src/frontend/lexer.cpp"
 
 #define  YY_INT_ALIGNED short int
 
@@ -564,7 +564,7 @@ int yy_flex_debug = 0;
 char *yytext;
 #line 1 "/workspace/src/frontend/lexer.l"
 #line 5 "/workspace/src/frontend/lexer.l"
-#include "parser.hpp"
+#include "frontend/parser.hpp"
 #include <string>
 #include <cstdio>
 
@@ -582,8 +582,8 @@ int yycolumn = 1;
 #else
 #define LEXER_DEBUG_TOKEN(name) do {} while (0)
 #endif
-#line 586 "/workspace/src/lexer.cpp"
-#line 587 "/workspace/src/lexer.cpp"
+#line 586 "/workspace/src/frontend/lexer.cpp"
+#line 587 "/workspace/src/frontend/lexer.cpp"
 
 #define INITIAL 0
 
@@ -803,7 +803,7 @@ YY_DECL
 #line 39 "/workspace/src/frontend/lexer.l"
 
 
-#line 807 "/workspace/src/lexer.cpp"
+#line 807 "/workspace/src/frontend/lexer.cpp"
 
 	while ( /*CONSTCOND*/1 )		/* loops until end-of-file is reached */
 		{
@@ -1082,7 +1082,7 @@ YY_RULE_SETUP
 #line 90 "/workspace/src/frontend/lexer.l"
 ECHO;
 	YY_BREAK
-#line 1086 "/workspace/src/lexer.cpp"
+#line 1086 "/workspace/src/frontend/lexer.cpp"
 case YY_STATE_EOF(INITIAL):
 	yyterminate();
 

@@ -2,7 +2,7 @@
 %option yylineno
 
 %{
-#include "parser.hpp"
+#include "frontend/parser.hpp"
 #include <string>
 #include <cstdio>
 
