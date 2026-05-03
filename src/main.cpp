@@ -1,7 +1,6 @@
 #include "../include/frontend/ast/ast.hpp"
 #include "../include/frontend/ast/astPrinter.hpp"
 #include "../include/mid/ir/irGen.hpp"
-#include "../include/backend/arm_builder.hpp"
 #include "../include/frontend/checker/checker.hpp"
 #include "../include/frontend/parser.hpp"
 #include <fstream>
@@ -115,12 +114,8 @@ int main(int argc, char **argv) {
 	}
 
 	/* backend */
-	if (print_asm) {
-		ArmBuilder builder;
-		const std::string arm_code = builder.buildArm(m.get());
-		*out << arm_code << std::endl;
-	} else if (print_ir) {
-		*out << m->print() << std::endl;
-	}
+	// if (print_asm) {
+	// 	AsmBuilder builder;
+	// } 
 	return 0;
 }
