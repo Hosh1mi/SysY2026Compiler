@@ -3,6 +3,7 @@
 #include "../include/mid/ir/irGen.hpp"
 #include "../include/frontend/checker/checker.hpp"
 #include "../include/frontend/parser.hpp"
+#include "../include/backend/arm64/arm64_codegen.hpp"
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
@@ -114,8 +115,12 @@ int main(int argc, char **argv) {
 	}
 
 	/* backend */
-	// if (print_asm) {
-	// 	AsmBuilder builder;
-	// } 
+	if (print_asm) {
+		Arm64CodeGen codegen(m.get(), *out);
+		codegen.generate();
+	}
+	if (print_ir) {
+		*out << m->print();
+	}
 	return 0;
 }

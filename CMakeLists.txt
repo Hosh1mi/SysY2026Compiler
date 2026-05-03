@@ -34,6 +34,8 @@ add_executable(compiler
     ${SRC_DIR}/mid/ir/irGen.cpp
     ${SRC_DIR}/frontend/checker/checker.cpp
     ${SRC_DIR}/frontend/checker/errReporter.cpp
+    ${SRC_DIR}/backend/arm64/arm64_codegen.cpp
+    ${SRC_DIR}/backend/arm64/arm64_context.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
