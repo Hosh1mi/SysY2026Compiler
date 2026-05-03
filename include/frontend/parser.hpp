@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
-# define YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+#ifndef YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+# define YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -45,12 +45,12 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 5 "/workspace/src/frontend/parser.y"
+#line 5 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
 
     #include "../../include/frontend/ast/ast.hpp"
     #include <string>
 
-#line 54 "/workspace/include/frontend/parser.hpp"
+#line 54 "/home/valdez/pre-csc-compiler/include/frontend/parser.hpp"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -106,7 +106,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 35 "/workspace/src/frontend/parser.y"
+#line 35 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     DeclDefAST* declDef;
@@ -144,7 +144,7 @@ union YYSTYPE
     int int_val;
     float float_val;
 
-#line 148 "/workspace/include/frontend/parser.hpp"
+#line 148 "/home/valdez/pre-csc-compiler/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -173,4 +173,4 @@ extern YYLTYPE yylloc;
 int yyparse (void);
 
 
-#endif /* !YY_YY_WORKSPACE_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */
+#endif /* !YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */

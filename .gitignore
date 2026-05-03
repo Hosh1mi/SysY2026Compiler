@@ -16,3 +16,7 @@ out
 test/
 .vscode/
 .idea/
+CLAUDE.md
+*.pdf
+*.Identifier
+.claude/
