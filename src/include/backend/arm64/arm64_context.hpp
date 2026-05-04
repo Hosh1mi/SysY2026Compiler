@@ -28,6 +28,7 @@ private:
     std::string allocFloatReg();
     std::string allocAddrReg();
     void resetRegs();
+    void freeAddrReg(const std::string& reg);
 
     // load from slot/constant/global to scratch register
     std::string loadInt(Value *v);

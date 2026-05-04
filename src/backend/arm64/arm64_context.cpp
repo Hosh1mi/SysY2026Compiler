@@ -376,15 +376,28 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         while ((1 << shift) < elemSize) shift++;
                         os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled
                             << ", lsl #" << shift << "\n";
+                        freeAddrReg(scaled);
                     } else {
                         std::string elemReg = allocAddrReg();
                         std::string productReg = allocAddrReg();
-                        os_ << "\tmovz " << elemReg << ", #" << elemSize << "\n";
+                        uint32_t val = static_cast<uint32_t>(elemSize);
+                        os_ << "\tmovz " << elemReg << ", #" << (val & 0xFFFF) << "\n";
+                        // movz can only handle lower 16 bits
+                        // so movk, which handles upper 16 bits needs to be introduced
+                        // when val is larger than 0xffff
+                        if (val & 0xFFFF0000) {
+                            os_ << "\tmovk " << elemReg << ", #" << ((val >> 16) & 0xFFFF) 
+                                << ", lsl #16\n";
+                        }
                         os_ << "\tmul " << productReg << ", " << scaled << ", " << elemReg << "\n";
                         os_ << "\tadd " << newAddr << ", " << addr << ", " << productReg << "\n";
+                        freeAddrReg(scaled);
+                        freeAddrReg(elemReg);
+                        freeAddrReg(productReg);
                     }
                 } else {
                     os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled << "\n";
+                    freeAddrReg(scaled);
                 }
                 addr = newAddr;
             }
@@ -610,6 +623,13 @@ void Arm64FuncContext::resetRegs() {
     usedFloatRegs_.clear();
 }
 
+void Arm64FuncContext::freeAddrReg(const std::string& reg) {
+    if (reg.size() >= 2 && reg[0] == 'x') {
+        int num = std::stoi(reg.substr(1));
+        usedIntRegs_.erase(num);
+    }
+}
+
 std::string Arm64FuncContext::allocIntReg() {
     for (int r = 9; r <= 15; r++) {
         if (!usedIntRegs_.count(r)) {
@@ -637,7 +657,8 @@ std::string Arm64FuncContext::allocAddrReg() {
             return "x" + std::to_string(r);
         }
     }
-    return "x9";
+    // return "x9";
+    return "x16"; // highly improbable but use x16 as a temporary register when x9-x15 are all occupied
 }
 
 // ---- load from slot/constant/global to scratch register ----
