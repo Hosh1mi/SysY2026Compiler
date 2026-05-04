@@ -35,7 +35,7 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
         os_ << "\t.bss\n";
     }
 
-    os_ << "\t.globl " << gv->name_ << "\n";
+    os_ << "\t.global " << gv->name_ << "\n";
     os_ << "\t.p2align 2\n";
     os_ << gv->name_ << ":\n";
 

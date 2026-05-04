@@ -28,6 +28,39 @@ static bool isLabel(Type *ty)  { return ty->tid_ == Type::LabelTyID; }
 
 static int align16(int n) { return (n + 15) & ~15; }
 
+// emit str/ldr with potentially large negative offset
+static void emitStoreReg(std::ostream &os, const std::string &reg, int off) {
+    if (off >= -256 && off <= 255) {
+        os << "\tstr " << reg << ", [x29, #" << off << "]\n";
+    } else {
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub x16, x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub x16, x29, x16\n";
+        }
+        os << "\tstr " << reg << ", [x16]\n";
+    }
+}
+
+static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
+    if (off >= -256 && off <= 255) {
+        os << "\tldr " << reg << ", [x29, #" << off << "]\n";
+    } else {
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub x16, x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub x16, x29, x16\n";
+        }
+        os << "\tldr " << reg << ", [x16]\n";
+    }
+}
+
 // ---- Arm64FuncContext ----
 
 Arm64FuncContext::Arm64FuncContext(Function *f, Arm64CodeGen &parent, std::ostream &os)
@@ -68,32 +101,42 @@ void Arm64FuncContext::emitPrologue() {
     for (auto bb : func_->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
             if (inst->is_alloca()) {
-                getSlot(inst); // allocate space for the alloca region
+                getSlot(inst);
             } else if (inst->type_->tid_ != Type::VoidTyID &&
                        !dynamic_cast<Constant*>(inst) &&
                        !inst->is_store() && !inst->is_br() && !inst->is_ret()) {
-                getSlot(inst); // result value needs a slot
+                getSlot(inst);
             }
         }
     }
 
-    int totalFrame = align16(frameSize_ + 32); // +32 for FP/LR + red zone
-    int subSp = totalFrame - 16;              // 16 already covered by stp pre-index
+    int localSize = align16(frameSize_);
 
-    os_ << "\tstp x29, x30, [sp, #-" << totalFrame << "]!\n";
+    // stp supports only -512..504 range; use minimal stp + sub for large frames
+    os_ << "\tstp x29, x30, [sp, #-16]!\n";
     os_ << "\tmov x29, sp\n";
+    if (localSize > 0) {
+        if (localSize <= 4095) {
+            os_ << "\tsub sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x16, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x16, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tsub sp, sp, x16\n";
+        }
+    }
 
     // store arguments from registers to their slots
     int intArg = 0, floatArg = 0;
     for (auto arg : func_->arguments_) {
+        int off = getSlot(arg);
         if (isFloat(arg->type_)) {
             if (floatArg < 8) {
-                os_ << "\tstr s" << floatArg << ", [x29, #" << getSlot(arg) << "]\n";
+                emitStoreReg(os_, "s" + std::to_string(floatArg), off);
                 floatArg++;
             }
         } else {
             if (intArg < 8) {
-                os_ << "\tstr w" << intArg << ", [x29, #" << getSlot(arg) << "]\n";
+                emitStoreReg(os_, "w" + std::to_string(intArg), off);
                 intArg++;
             }
         }
@@ -104,13 +147,26 @@ void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
     os_ << ".L" << func_->name_ << "_epilogue:\n";
 
-    int totalFrame = align16(frameSize_ + 32);
-    os_ << "\tldp x29, x30, [sp], #" << totalFrame << "\n";
+    int localSize = align16(frameSize_);
+    if (localSize > 0) {
+        if (localSize <= 4095) {
+            os_ << "\tadd sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x16, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x16, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tadd sp, sp, x16\n";
+        }
+    }
+    os_ << "\tldp x29, x30, [sp], #16\n";
     os_ << "\tret\n";
 }
 
+static std::string bbLabel(Function *f, BasicBlock *bb) {
+    return f->name_ + "_" + bb->name_;
+}
+
 void Arm64FuncContext::emitBlock(BasicBlock *bb) {
-    os_ << bb->name_ << ":\n";
+    os_ << bbLabel(func_, bb) << ":\n";
     resetRegs();
 
     for (auto inst : bb->instr_list_) {
@@ -368,14 +424,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         if (inst->num_ops_ == 1) {
             auto target = static_cast<BasicBlock*>(inst->get_operand(0));
-            os_ << "\tb " << target->name_ << "\n";
+            os_ << "\tb " << bbLabel(func_, target) << "\n";
         } else {
             auto cond = inst->get_operand(0);
             auto trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
             auto falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
             std::string cr = loadInt(cond);
-            os_ << "\tcbnz " << cr << ", " << trueBB->name_ << "\n";
-            os_ << "\tb " << falseBB->name_ << "\n";
+            os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
+            os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
         }
         break;
     }
@@ -525,7 +581,7 @@ std::string Arm64FuncContext::loadInt(Value *v) {
     }
     std::string r = allocIntReg();
     int off = getSlot(v);
-    os_ << "\tldr " << r << ", [x29, #" << off << "]\n";
+    emitLoadReg(os_, r, off);
     return r;
 }
 
@@ -537,7 +593,7 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
     }
     std::string r = allocFloatReg();
     int off = getSlot(v);
-    os_ << "\tldr " << r << ", [x29, #" << off << "]\n";
+    emitLoadReg(os_, r, off);
     return r;
 }
 
@@ -561,7 +617,7 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
     }
     std::string r = allocAddrReg();
     int off = getSlot(v);
-    os_ << "\tldr " << r << ", [x29, #" << off << "]\n";
+    emitLoadReg(os_, r, off);
     return r;
 }
 
@@ -569,17 +625,17 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
 
 void Arm64FuncContext::storeInt(Value *v, const std::string &reg) {
     int off = getSlot(v);
-    os_ << "\tstr " << reg << ", [x29, #" << off << "]\n";
+    emitStoreReg(os_, reg, off);
 }
 
 void Arm64FuncContext::storeFloat(Value *v, const std::string &reg) {
     int off = getSlot(v);
-    os_ << "\tstr " << reg << ", [x29, #" << off << "]\n";
+    emitStoreReg(os_, reg, off);
 }
 
 void Arm64FuncContext::storeAddr(Value *v, const std::string &reg) {
     int off = getSlot(v);
-    os_ << "\tstr " << reg << ", [x29, #" << off << "]\n";
+    emitStoreReg(os_, reg, off);
 }
 
 // ---- constants ----
@@ -636,24 +692,24 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
         if (auto ci = dynamic_cast<ConstantInt*>(val)) {
             std::string r = allocIntReg();
             emitIntConst(ci->value_, r);
-            os_ << "\tstr " << r << ", [x29, #" << slot << "]\n";
+            emitStoreReg(os_, r, slot);
         } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
             std::string r = allocFloatReg();
             emitFloatConst(cf->value_, r);
-            os_ << "\tstr " << r << ", [x29, #" << slot << "]\n";
+            emitStoreReg(os_, r, slot);
         } else if (hasSlot(val)) {
             if (isFloat(val->type_)) {
                 std::string r = allocFloatReg();
-                os_ << "\tldr " << r << ", [x29, #" << getSlot(val) << "]\n";
-                os_ << "\tstr " << r << ", [x29, #" << slot << "]\n";
+                emitLoadReg(os_, r, getSlot(val));
+                emitStoreReg(os_, r, slot);
             } else if (isPtr(val->type_)) {
                 std::string r = allocAddrReg();
-                os_ << "\tldr " << r << ", [x29, #" << getSlot(val) << "]\n";
-                os_ << "\tstr " << r << ", [x29, #" << slot << "]\n";
+                emitLoadReg(os_, r, getSlot(val));
+                emitStoreReg(os_, r, slot);
             } else {
                 std::string r = allocIntReg();
-                os_ << "\tldr " << r << ", [x29, #" << getSlot(val) << "]\n";
-                os_ << "\tstr " << r << ", [x29, #" << slot << "]\n";
+                emitLoadReg(os_, r, getSlot(val));
+                emitStoreReg(os_, r, slot);
             }
         }
     }
