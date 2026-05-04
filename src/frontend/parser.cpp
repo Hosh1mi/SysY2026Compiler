@@ -74,7 +74,7 @@
     #include <iostream>
     #include <string>
     #include <utility>
-    #include "../../include/frontend/ast/ast.hpp"
+    #include "../include/frontend/ast/ast.hpp"
     using std::string;
     using std::unique_ptr;
 
@@ -115,7 +115,7 @@
 #  endif
 # endif
 
-#include "../../include/frontend/parser.hpp"
+#include "../include/frontend/parser.hpp"
 /* Symbol kind.  */
 enum yysymbol_kind_t
 {

@@ -1,4 +1,4 @@
-#include "../../../include/mid/ir/ir.hpp"
+#include "../../include/mid/ir/ir.hpp"
 #include <cstdint>
 #include <iostream>
 #include <sstream>

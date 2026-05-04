@@ -1,9 +1,9 @@
 %define parse.error verbose
-%define api.header.include {"../../include/frontend/parser.hpp"}
+%define api.header.include {"../include/frontend/parser.hpp"}
 %locations
 
 %code requires {
-    #include "../../include/frontend/ast/ast.hpp"
+    #include "ast/ast.hpp"
     #include <string>
 }
 
@@ -13,7 +13,7 @@
     #include <iostream>
     #include <string>
     #include <utility>
-    #include "../../include/frontend/ast/ast.hpp"
+    #include "../include/frontend/ast/ast.hpp"
     using std::string;
     using std::unique_ptr;
 

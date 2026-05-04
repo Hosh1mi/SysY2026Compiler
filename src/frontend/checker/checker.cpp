@@ -1,4 +1,4 @@
-#include "../../../include/frontend/checker/checker.hpp"
+#include "../../include/frontend/checker/checker.hpp"
 
 /* 静态语义分析
  1. Redefined Variable 变量重复定义/函数形参重复定义

@@ -1,9 +1,9 @@
-#include "../include/frontend/ast/ast.hpp"
-#include "../include/frontend/ast/astPrinter.hpp"
-#include "../include/mid/ir/irGen.hpp"
-#include "../include/frontend/checker/checker.hpp"
-#include "../include/frontend/parser.hpp"
-#include "../include/backend/arm64/arm64_codegen.hpp"
+#include "include/frontend/ast/ast.hpp"
+#include "include/frontend/ast/astPrinter.hpp"
+#include "include/mid/ir/irGen.hpp"
+#include "include/frontend/checker/checker.hpp"
+#include "include/frontend/parser.hpp"
+#include "include/backend/arm64/arm64_codegen.hpp"
 #include <fstream>
 #include <iostream>
 #include <unistd.h>

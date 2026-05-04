@@ -1,4 +1,4 @@
-#include "../../../include/frontend/ast/ast.hpp"
+#include "../../include/frontend/ast/ast.hpp"
 
 void CompUnitAST::accept(Visitor &visitor) { visitor.visit(*this); }
 void DeclDefAST::accept(Visitor &visitor) { visitor.visit(*this); }

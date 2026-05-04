@@ -12,7 +12,6 @@
 TODO:
 - IR -> ARM
 - IR opt
-- flex/bison: 评测机对生成文件的路径依赖问题
 
 ### 项目运行
 
@@ -34,6 +33,8 @@ gcc out.s ../lib/libsysy.a -o out
 ```
 
 ### `git commit`规范
+
+**为了diff可读性，commit前建议检查是否开启了ide的auto formatting**
 
 ```
 <类型>(<范围>): <主题>

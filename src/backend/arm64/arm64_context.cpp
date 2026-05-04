@@ -1,6 +1,6 @@
-#include "../../../include/backend/arm64/arm64_context.hpp"
-#include "../../../include/backend/arm64/arm64_codegen.hpp"
-#include "../../../include/mid/ir/ir.hpp"
+#include "../../include/backend/arm64/arm64_context.hpp"
+#include "../../include/backend/arm64/arm64_codegen.hpp"
+#include "../../include/mid/ir/ir.hpp"
 #include <cstdint>
 #include <cstring>
 #include <iostream>

@@ -564,7 +564,7 @@ int yy_flex_debug = 0;
 char *yytext;
 #line 1 "/workspace/src/frontend/lexer.l"
 #line 5 "/workspace/src/frontend/lexer.l"
-#include "../../include/frontend/parser.hpp"
+#include "../include/frontend/parser.hpp"
 #include <string>
 #include <cstdio>
 

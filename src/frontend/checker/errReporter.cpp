@@ -1,5 +1,5 @@
-#include "../../../include/frontend/checker/errReporter.hpp"
-#include "string"
+#include "../../include/frontend/checker/errReporter.hpp"
+#include <string>
 
 ErrorReporter::ErrorReporter(std::ostream &error_stream) : err(error_stream) {}
 

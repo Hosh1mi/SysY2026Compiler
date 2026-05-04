@@ -1,4 +1,4 @@
-#include "../../../include/frontend/ast/astPrinter.hpp"
+#include "../../include/frontend/ast/astPrinter.hpp"
 #include <stdexcept>
 
 // ref: https://stackoverflow.com/questions/2342162/stdstring-formatting-like-sprintf
