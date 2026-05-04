@@ -360,11 +360,20 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 std::string newAddr = allocAddrReg();
                 // sign-extend index to 64-bit for address calculation
                 os_ << "\tsxtw " << scaled << ", " << idxReg << "\n";
-                if (elemSize > 1) {
-                    int shift = 0;
-                    while ((1 << shift) < elemSize) shift++;
-                    os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled
-                        << ", lsl #" << shift << "\n";
+                if (elemSize > 1) { // check if elemSize is a power of two
+                    auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
+                    if (isPowerOfTwo(elemSize)) {
+                        int shift = 0;
+                        while ((1 << shift) < elemSize) shift++;
+                        os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled
+                            << ", lsl #" << shift << "\n";
+                    } else {
+                        std::string elemReg = allocAddrReg();
+                        std::string productReg = allocAddrReg();
+                        os_ << "\tmovz " << elemReg << ", #" << elemSize << "\n";
+                        os_ << "\tmul " << productReg << ", " << scaled << ", " << elemReg << "\n";
+                        os_ << "\tadd " << newAddr << ", " << addr << ", " << productReg << "\n";
+                    }
                 } else {
                     os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled << "\n";
                 }
