@@ -15,8 +15,8 @@ void Arm64CodeGen::generate() {
             emitExtern(f);
         }
     }
-    os_ << "\n";
 
+    os_ << "\n\t.text\n\n";
     for (auto f : m_->function_list_) {
         if (!f->is_declaration()) {
             emitFunction(f);

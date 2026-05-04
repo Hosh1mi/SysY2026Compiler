@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <sstream>
 
 // ---- helpers ----
 
@@ -209,6 +208,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             std::string r = allocFloatReg();
             os_ << "\tldr " << r << ", [" << addr << "]\n";
             storeFloat(inst, r);
+        } else if (isPtr(inst->type_)) {
+            std::string r = allocAddrReg();
+            os_ << "\tldr " << r << ", [" << addr << "]\n";
+            storeAddr(inst, r);
         } else {
             std::string r = allocIntReg();
             os_ << "\tldr " << r << ", [" << addr << "]\n";
@@ -326,7 +329,13 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
             // determine element size at this level
             int elemSize;
-            if (curTy->tid_ == Type::ArrayTyID) {
+            if (i == 1) {
+                // The first GEP index steps over whole objects pointed to by ptr.
+                // For the common pattern gep [N x T]* %arr, 0, i, ... this
+                // leading zero must not descend into the array; otherwise the
+                // next index is scaled by sizeof(T) instead of sizeof([M x T]).
+                elemSize = typeSize(curTy);
+            } else if (curTy->tid_ == Type::ArrayTyID) {
                 auto at = static_cast<ArrayType*>(curTy);
                 elemSize = typeSize(at->contained_);
                 curTy = at->contained_;
@@ -458,6 +467,40 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         unsigned numArgs = call->num_ops_ - 1;
         auto callee = static_cast<Function*>(call->get_operand(numArgs));
 
+        if (callee->name_ == "__aeabi_memclr4") {
+            // Inline the compiler-generated local array zero-initialization helper.
+            // This avoids requiring libgcc's ARM EABI helper at link time.
+            auto ptr = call->get_operand(0);
+            auto sizeVal = call->get_operand(1);
+            std::string addr = loadAddr(ptr);
+
+            if (auto sizeConst = dynamic_cast<ConstantInt*>(sizeVal)) {
+                int bytes = sizeConst->value_;
+                for (int off = 0; off < bytes; off += 4) {
+                    if (off == 0) {
+                        os_ << "\tstr wzr, [" << addr << "]\n";
+                    } else {
+                        os_ << "\tstr wzr, [" << addr << ", #" << off << "]\n";
+                    }
+                }
+            } else {
+                static int memclrLoopId = 0;
+                std::string sizeReg = loadInt(sizeVal);
+                std::string zeroReg = allocIntReg();
+                std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrLoopId++);
+                std::string done = loop + "_done";
+                os_ << "\tmov " << zeroReg << ", wzr\n";
+                os_ << loop << ":\n";
+                os_ << "\tcmp " << sizeReg << ", #0\n";
+                os_ << "\tble " << done << "\n";
+                os_ << "\tstr " << zeroReg << ", [" << addr << "], #4\n";
+                os_ << "\tsub " << sizeReg << ", " << sizeReg << ", #4\n";
+                os_ << "\tb " << loop << "\n";
+                os_ << done << ":\n";
+            }
+            break;
+        }
+
         // assign arguments to registers
         int intArg = 0, floatArg = 0;
         std::vector<std::pair<std::string, bool>> savedArgs; // reg, isFloat
@@ -470,6 +513,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     os_ << "\tfmov s" << floatArg << ", " << r << "\n";
                 }
                 floatArg++;
+            } else if (isPtr(arg->type_)) {
+                std::string r = loadAddr(arg);
+                if (intArg < 8) {
+                    os_ << "\tmov x" << intArg << ", " << r << "\n";
+                }
+                intArg++;
             } else {
                 std::string r = loadInt(arg);
                 if (intArg < 8) {
@@ -484,6 +533,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
                 storeFloat(inst, "s0");
+            } else if (isPtr(inst->type_)) {
+                storeAddr(inst, "x0");
             } else {
                 storeInt(inst, "w0");
             }
@@ -521,7 +572,7 @@ int Arm64FuncContext::getSlot(Value *v) {
     if (auto alloca = dynamic_cast<AllocaInst*>(v)) {
         size = typeSize(alloca->alloca_ty_);
     } else {
-        size = 8; // 8-byte slot for values
+        size = 8; // keep SSA/temp slots naturally aligned
     }
 
     frameSize_ += size;
@@ -612,7 +663,11 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
     if (dynamic_cast<AllocaInst*>(v)) {
         std::string r = allocAddrReg();
         int off = getSlot(v);
-        os_ << "\tadd " << r << ", x29, #" << off << "\n";
+        if (off < 0) {
+            os_ << "\tsub " << r << ", x29, #" << -off << "\n";
+        } else {
+            os_ << "\tadd " << r << ", x29, #" << off << "\n";
+        }
         return r;
     }
     std::string r = allocAddrReg();
