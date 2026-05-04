@@ -30,8 +30,7 @@ mkdir build && cd build && cmake .. && make -j4
 在`build/`下运行:
 ```bash
 ./compiler <.sy path> > out.s
-gcc out.s -o out
-# TODO: Link libsysy.a
+gcc out.s ../lib/libsysy.a -o out
 ```
 
 ### `git commit`规范
