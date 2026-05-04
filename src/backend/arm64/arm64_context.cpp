@@ -135,7 +135,13 @@ void Arm64FuncContext::emitPrologue() {
             }
         } else {
             if (intArg < 8) {
-                emitStoreReg(os_, "w" + std::to_string(intArg), off);
+                // pointer needs 64-bit register
+                // bool isPointer = (arg->type_->tid_ == Type::PointerTyID);
+                // or maybe array too, revert this if things got wrong
+                bool isPointer = (arg->type_->tid_ == Type::PointerTyID ||
+                                  arg->type_->tid_ == Type::ArrayTyID);
+                std::string reg = (isPointer ? "x" : "w") + std::to_string(intArg);
+                emitStoreReg(os_, reg, off);
                 intArg++;
             }
         }
@@ -192,6 +198,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string addr = loadAddr(ptr);
         if (isFloat(val->type_)) {
             std::string r = loadFloat(val);
+            os_ << "\tstr " << r << ", [" << addr << "]\n";
+        } else if (isPtr(val->type_)) {          
+            std::string r = loadAddr(val);       
             os_ << "\tstr " << r << ", [" << addr << "]\n";
         } else {
             std::string r = loadInt(val);

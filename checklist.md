@@ -57,4 +57,11 @@
 - task 54 : completed
 - task 55 : completed
 - task 56 : completed
-- task 57 : WA
+- task 57 : completed
+- task 58 : completed
+- task 59 : completed
+- task 60 : completed
+- task 61 : completed
+- task 62 : completed
+- task 63 : completed
+- task 64 : CE
