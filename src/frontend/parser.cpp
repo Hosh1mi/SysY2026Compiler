@@ -115,7 +115,7 @@
 #  endif
 # endif
 
-#include "frontend/parser.hpp"
+#include "../../include/frontend/parser.hpp"
 /* Symbol kind.  */
 enum yysymbol_kind_t
 {

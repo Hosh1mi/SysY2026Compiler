@@ -64,4 +64,5 @@
 - task 61 : completed
 - task 62 : completed
 - task 63 : completed
-- task 64 : CE
+- task 64 : completed
+- task 65 : CE

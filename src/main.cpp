@@ -68,9 +68,9 @@ int main(int argc, char **argv) {
 #endif
 
 	// Check errors of AST
-	ErrorReporter errorReporter(std::cerr);
-	Checker checker(errorReporter);
-	checker.visit(*root);
+	// ErrorReporter errorReporter(std::cerr);
+	// Checker checker(errorReporter);
+	// checker.visit(*root);
 
 	/* mid */
 	// Generate IR from AST

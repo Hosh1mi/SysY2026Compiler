@@ -1,5 +1,5 @@
 %define parse.error verbose
-%define api.header.include {"frontend/parser.hpp"}
+%define api.header.include {"../../include/frontend/parser.hpp"}
 %locations
 
 %code requires {
