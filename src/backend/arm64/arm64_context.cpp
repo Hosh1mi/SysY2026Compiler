@@ -34,13 +34,13 @@ static void emitStoreReg(std::ostream &os, const std::string &reg, int off) {
     } else {
         int pos = -off;
         if (pos <= 4095) {
-            os << "\tsub x16, x29, #" << pos << "\n";
+            os << "\tsub x17, x29, #" << pos << "\n";
         } else {
-            os << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
-            os << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
-            os << "\tsub x16, x29, x16\n";
+            os << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub x17, x29, x17\n";
         }
-        os << "\tstr " << reg << ", [x16]\n";
+        os << "\tstr " << reg << ", [x17]\n";
     }
 }
 
@@ -50,13 +50,13 @@ static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
     } else {
         int pos = -off;
         if (pos <= 4095) {
-            os << "\tsub x16, x29, #" << pos << "\n";
+            os << "\tsub x17, x29, #" << pos << "\n";
         } else {
-            os << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
-            os << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
-            os << "\tsub x16, x29, x16\n";
+            os << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub x17, x29, x17\n";
         }
-        os << "\tldr " << reg << ", [x16]\n";
+        os << "\tldr " << reg << ", [x17]\n";
     }
 }
 

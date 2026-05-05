@@ -33,11 +33,11 @@
 - task 30 : CE
 - task 30 : WA
 - task 31 : completed
-- task 32 : WA
+- task 32 : completed
 - task 33 : completed
 - task 34 : completed
 - task 35 : completed
 - task 36 : completed
 - task 37 : completed
 - task 38 : completed
-- task 39 : WA
+- task 39 : completed
