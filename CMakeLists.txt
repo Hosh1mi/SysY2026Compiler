@@ -36,6 +36,11 @@ add_executable(compiler
     ${SRC_DIR}/frontend/checker/errReporter.cpp
     ${SRC_DIR}/backend/arm64/arm64_codegen.cpp
     ${SRC_DIR}/backend/arm64/arm64_context.cpp
+    ${SRC_DIR}/mid/opt/deadCodeDelete.cpp
+    ${SRC_DIR}/mid/opt/constSpread.cpp
+    ${SRC_DIR}/mid/opt/instrCombine.cpp
+    ${SRC_DIR}/mid/opt/passManager.cpp
+    ${SRC_DIR}/mid/opt/arraySimplify.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
@@ -47,5 +52,5 @@ target_include_directories(compiler PRIVATE
 target_compile_definitions(compiler PRIVATE
     # DEBUG_LEXER
     # DEBUG_PARSER
-    # DEBUG_IRGEN
+    DEBUG_IRGEN
 )

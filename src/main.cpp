@@ -4,6 +4,11 @@
 #include "include/frontend/checker/checker.hpp"
 #include "include/frontend/parser.hpp"
 #include "include/backend/arm64/arm64_codegen.hpp"
+#include "include/mid/opt/passManager.hpp"
+#include "include/mid/opt/deadCodeDelete.hpp"
+#include "include/mid/opt/constSpread.hpp"
+#include "include/mid/opt/instrCombine.hpp"
+#include "include/mid/opt/arraySimplify.hpp"
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
@@ -102,6 +107,12 @@ int main(int argc, char **argv) {
 	// for (auto x : Opt)
 	// 	x->execute();
 	// }
+	PassManager pm;
+	// pm.addPass(std::make_unique<ConstSpread>());
+	// pm.addPass(std::make_unique<InstructionCombine>());
+	pm.addPass(std::make_unique<DimArrayArgSimplify>());
+	pm.addPass(std::make_unique<DeadCodeDelete>());
+	pm.run(m.get());
 
 	std::ofstream fout;
 	std::ostream *out = &std::cout;
