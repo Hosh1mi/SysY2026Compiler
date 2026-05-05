@@ -408,29 +408,24 @@ void GenIR::visit(BlockItemAST &ast) {
     }
 }
 
-//****************************************************************************
-//* 你需要完成这个visit()方法
-//****************************************************************************
 void GenIR::visit(StmtAST &ast) {
     switch (ast.sType) {
         case SEMI:
             break;
         case ASS: {
-            // ******************* 代码填写处
             is_single_exp = true;
             requireLVal = true;  
             ast.lVal->accept(*this);
             auto var = recentVal;
             ast.exp->accept(*this);
             auto expval = recentVal;
-            if (var->type_->tid_ == Type::FloatTyID && expval->type_->tid_ == Type::IntegerTyID) {
-                expval = builder->create_sitofp(expval,FLOAT_T);
-            }
-            else if (var->type_->tid_ == Type::IntegerTyID && expval->type_->tid_ == Type::FloatTyID) {
+            Type* varElemType = static_cast<PointerType*>(var->type_)->contained_;
+            if (varElemType == FLOAT_T && expval->type_ == INT32_T) {
+                expval = builder->create_sitofp(expval, FLOAT_T);
+            } else if (varElemType == INT32_T && expval->type_ == FLOAT_T) {
                 expval = builder->create_fptosi(expval, INT32_T);
             }
             builder->create_store(expval, var);
-            // ******************* 代码结束
             break;
         }
         case EXP:

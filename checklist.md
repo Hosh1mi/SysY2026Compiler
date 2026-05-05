@@ -95,4 +95,8 @@
 - task 92 : completed
 - task 93 : completed
 - task 94 : completed
-- task 95 : CE
+- task 95 : completed
+- task 96 : completed
+- task 97 : completed
+- task 98 : completed
+- task 99 : completed
