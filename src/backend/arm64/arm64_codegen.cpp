@@ -41,22 +41,23 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
 
     if (auto cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
         int size = 4; // default i32/float
-        auto ty = pointee;
+        Type *ty = pointee;
         if (ty->tid_ == Type::ArrayTyID) {
-            auto at = static_cast<ArrayType*>(ty);
-            auto elem = at->contained_;
-            while (elem->tid_ == Type::ArrayTyID) {
-                elem = static_cast<ArrayType*>(elem)->contained_;
+            // Total elements
+            int totalElements = 1;
+            Type *cur = ty;
+            while (auto arrTy = dynamic_cast<ArrayType*>(cur)) {
+                totalElements *= arrTy->num_elements_;
+                cur = arrTy->contained_;
             }
-            int elemSize = (elem->tid_ == Type::FloatTyID ||
-                           (elem->tid_ == Type::IntegerTyID && static_cast<IntegerType*>(elem)->num_bits_ == 32)) ? 4 : 4;
-            int total = at->num_elements_;
-            while (ty->tid_ == Type::ArrayTyID) {
-                auto arr = static_cast<ArrayType*>(ty);
-                total *= arr->num_elements_;
-                ty = arr->contained_;
+            // Element size
+            int elemSize = 4; 
+            if (cur->tid_ == Type::IntegerTyID) {
+                elemSize = static_cast<IntegerType*>(cur)->num_bits_ / 8;
+            } else if (cur->tid_ == Type::FloatTyID) {
+                elemSize = 4; // float set to 4 bytes
             }
-            size = total * elemSize;
+            size = totalElements * elemSize;
         }
         os_ << "\t.zero " << size << "\n";
     } else if (auto ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {

@@ -65,4 +65,13 @@
 - task 62 : completed
 - task 63 : completed
 - task 64 : completed
-- task 65 : WA
+- task 65 : completed
+- task 66 : completed
+- task 67 : completed
+- task 68 : completed
+- task 69 : completed
+- task 70 : completed
+- task 71 : completed
+- task 72 : completed
+- task 73 : completed
+- task 74 : CE
