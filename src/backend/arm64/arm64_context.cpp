@@ -321,28 +321,18 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::GetElementPtr: {
         auto gep = static_cast<GetElementPtrInst*>(inst);
         auto ptr = gep->get_operand(0);
-        std::string base = loadAddr(ptr);
+        std::string addr = loadAddr(ptr);          // addr 是基址寄存器
+    
         unsigned numIdx = gep->num_ops_ - 1;
-
-        if (numIdx == 0) {
-            storeAddr(inst, base);
-            break;
-        }
-
         auto srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
         Type *curTy = srcTy;
-        std::string addr = base;
-
+    
         for (unsigned i = 1; i < gep->num_ops_; i++) {
             auto idx = gep->get_operand(i);
-
-            // determine element size at this level
+    
+            // 确定当前层级的元素大小（字节）
             int elemSize;
             if (i == 1) {
-                // The first GEP index steps over whole objects pointed to by ptr.
-                // For the common pattern gep [N x T]* %arr, 0, i, ... this
-                // leading zero must not descend into the array; otherwise the
-                // next index is scaled by sizeof(T) instead of sizeof([M x T]).
                 elemSize = typeSize(curTy);
             } else if (curTy->tid_ == Type::ArrayTyID) {
                 auto at = static_cast<ArrayType*>(curTy);
@@ -355,51 +345,42 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             } else {
                 elemSize = typeSize(curTy);
             }
-
+    
             if (auto ci = dynamic_cast<ConstantInt*>(idx)) {
                 int offset = ci->value_ * elemSize;
                 if (offset != 0) {
-                    std::string newAddr = allocAddrReg();
-                    os_ << "\tadd " << newAddr << ", " << addr << ", #" << offset << "\n";
-                    addr = newAddr;
+                    os_ << "\tadd " << addr << ", " << addr << ", #" << offset << "\n";
                 }
             } else {
                 std::string idxReg = loadInt(idx);
                 std::string scaled = allocAddrReg();
-                std::string newAddr = allocAddrReg();
-                // sign-extend index to 64-bit for address calculation
+                // 符号扩展索引到64位
                 os_ << "\tsxtw " << scaled << ", " << idxReg << "\n";
-                if (elemSize > 1) { // check if elemSize is a power of two
+                freeIntReg(idxReg);
+    
+                if (elemSize > 1) {
                     auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
                     if (isPowerOfTwo(elemSize)) {
                         int shift = 0;
                         while ((1 << shift) < elemSize) shift++;
-                        os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled
-                            << ", lsl #" << shift << "\n";
+                        os_ << "\tadd " << addr << ", " << addr << ", " << scaled << ", lsl #" << shift << "\n";
                         freeAddrReg(scaled);
                     } else {
                         std::string elemReg = allocAddrReg();
-                        std::string productReg = allocAddrReg();
                         uint32_t val = static_cast<uint32_t>(elemSize);
                         os_ << "\tmovz " << elemReg << ", #" << (val & 0xFFFF) << "\n";
-                        // movz can only handle lower 16 bits
-                        // so movk, which handles upper 16 bits needs to be introduced
-                        // when val is larger than 0xffff
                         if (val & 0xFFFF0000) {
-                            os_ << "\tmovk " << elemReg << ", #" << ((val >> 16) & 0xFFFF) 
-                                << ", lsl #16\n";
+                            os_ << "\tmovk " << elemReg << ", #" << ((val >> 16) & 0xFFFF) << ", lsl #16\n";
                         }
-                        os_ << "\tmul " << productReg << ", " << scaled << ", " << elemReg << "\n";
-                        os_ << "\tadd " << newAddr << ", " << addr << ", " << productReg << "\n";
-                        freeAddrReg(scaled);
+                        os_ << "\tmul " << scaled << ", " << scaled << ", " << elemReg << "\n";
+                        os_ << "\tadd " << addr << ", " << addr << ", " << scaled << "\n";
                         freeAddrReg(elemReg);
-                        freeAddrReg(productReg);
+                        freeAddrReg(scaled);  // scaled 可以释放了，因为结果已累加到 addr
                     }
                 } else {
-                    os_ << "\tadd " << newAddr << ", " << addr << ", " << scaled << "\n";
+                    os_ << "\tadd " << addr << ", " << addr << ", " << scaled << "\n";
                     freeAddrReg(scaled);
                 }
-                addr = newAddr;
             }
         }
         storeAddr(inst, addr);
@@ -623,6 +604,13 @@ void Arm64FuncContext::resetRegs() {
     usedFloatRegs_.clear();
 }
 
+void Arm64FuncContext::freeIntReg(const std::string &reg) {
+    if (reg.size() >= 2 && reg[0] == 'w') {
+        int num = std::stoi(reg.substr(1));
+        usedIntRegs_.erase(num);
+    }
+}
+
 void Arm64FuncContext::freeAddrReg(const std::string& reg) {
     if (reg.size() >= 2 && reg[0] == 'x') {
         int num = std::stoi(reg.substr(1));
@@ -631,7 +619,7 @@ void Arm64FuncContext::freeAddrReg(const std::string& reg) {
 }
 
 std::string Arm64FuncContext::allocIntReg() {
-    for (int r = 9; r <= 15; r++) {
+    for (int r = 9; r <= 17; r++) {
         if (!usedIntRegs_.count(r)) {
             usedIntRegs_.insert(r);
             return "w" + std::to_string(r);
@@ -651,13 +639,14 @@ std::string Arm64FuncContext::allocFloatReg() {
 }
 
 std::string Arm64FuncContext::allocAddrReg() {
-    for (int r = 9; r <= 15; r++) {
+    for (int r = 9; r <= 17; r++) {
         if (!usedIntRegs_.count(r)) {
             usedIntRegs_.insert(r);
             return "x" + std::to_string(r);
         }
     }
     // return "x9";
+    usedIntRegs_.insert(16);
     return "x16"; // highly improbable but use x16 as a temporary register when x9-x15 are all occupied
 }
 
