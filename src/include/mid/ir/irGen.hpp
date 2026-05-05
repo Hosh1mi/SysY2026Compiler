@@ -132,30 +132,36 @@ public:
         output_type = new FunctionType(TyVoid, output_params);
         auto put_float_array = new Function(output_type, "putfarray", module.get());
 
-        output_params.clear();
+        std::vector<Type *>().swap(output_params);
+        // output_params.clear();
         output_params.push_back(TyInt32);
-        auto time_type = new FunctionType(TyVoid, output_params);
-        auto sysy_start_time = new Function(time_type, "_sysy_starttime", module.get());
-        auto sysy_stop_time = new Function(time_type, "_sysy_stoptime", module.get());
+        output_type = new FunctionType(TyVoid, output_params);
+        auto sysy_start_time = new Function(output_type, "_sysy_starttime", module.get());
 
-        output_params.clear();
+        std::vector<Type *>().swap(output_params);
+        output_params.push_back(TyInt32);
+        output_type = new FunctionType(TyVoid, output_params);
+        auto sysy_stop_time = new Function(output_type, "_sysy_stoptime", module.get());
+
+        std::vector<Type *>().swap(output_params);
         output_params.push_back(TyInt32Ptr);
         output_params.push_back(TyInt32Ptr);
         output_params.push_back(TyInt32);
         output_type = new FunctionType(TyVoid, output_params);
         auto memcpy = new Function(output_type, "__aeabi_memcpy4", module.get());
 
-        output_params.clear();
+        std::vector<Type *>().swap(output_params);
         output_params.push_back(TyInt32Ptr);
         output_params.push_back(TyInt32);
         output_type = new FunctionType(TyVoid, output_params);
         auto memclr = new Function(output_type, "__aeabi_memclr4", module.get());
 
+        std::vector<Type *>().swap(output_params);
         output_params.push_back(TyInt32);
         output_type = new FunctionType(TyVoid, output_params);
         auto memset = new Function(output_type, "__aeabi_memset4", module.get());
 
-        output_params.clear();
+        std::vector<Type *>().swap(output_params);
         output_type = new FunctionType(TyVoid, output_params);
         auto llvm_memset = new Function(output_type, "llvm.memset.p0.i32", module.get());
 

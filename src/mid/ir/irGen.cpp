@@ -862,7 +862,15 @@ void GenIR::visit(NumberAST &ast) {
 }
 
 void GenIR::visit(CallAST &ast) {
+    // 将 C 宏名映射到 SysY 运行时函数
+    if (*ast.id == "starttime") *ast.id = "_sysy_starttime";
+    else if (*ast.id == "stoptime") *ast.id = "_sysy_stoptime";
+
     auto fun = (Function *)scope.find(*ast.id);
+    if (!fun) {
+        std::cerr << "Error: undefined function '" << *ast.id << "'\n";
+        exit(1);
+    }
     //引用函数返回值
     if (fun->basic_blocks_.size() && !is_single_exp)
         fun->use_ret_cnt ++ ;
@@ -877,6 +885,11 @@ void GenIR::visit(CallAST &ast) {
             recentVal = builder->create_fptosi(recentVal, INT32_T);
         }
         args.push_back(recentVal);
+    }
+    // starttime/stoptime 在源码中无实参，但运行时函数需要一个行号参数
+    if (ast.funcCParamList.empty() &&
+        (*ast.id == "_sysy_starttime" || *ast.id == "_sysy_stoptime")) {
+        args.push_back(new ConstantInt(INT32_T, ast.lineno));
     }
     recentVal = builder->create_call(fun, args);
 }

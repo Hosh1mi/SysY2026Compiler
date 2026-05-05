@@ -505,11 +505,13 @@ Call:
     ID LP RP {
         $$ = make_node<CallAST>();
         $$->id = unique_ptr<string>($1);
+        $$->lineno = @1.first_line;
     }|
     ID LP FuncCParamList RP {
         $$ = make_node<CallAST>();
         $$->id = unique_ptr<string>($1);
         $$->funcCParamList.swap($3->list);
+        $$->lineno = @1.first_line;
     };
 
 // 单目运算符,这里可能与优先级相关，不删除该非终结符

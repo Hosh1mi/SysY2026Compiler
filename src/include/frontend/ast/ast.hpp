@@ -244,6 +244,7 @@ class CallAST : public BaseAST {
 public:
   unique_ptr<string> id;
   vector<unique_ptr<AddExpAST>> funcCParamList;
+  int lineno = 0;
   void accept(Visitor &visitor) override;
 };
 
