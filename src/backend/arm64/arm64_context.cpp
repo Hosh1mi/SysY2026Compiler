@@ -124,28 +124,50 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
-    // store arguments from registers to their slots
-    int intArg = 0, floatArg = 0;
-    for (auto arg : func_->arguments_) {
-        int off = getSlot(arg);
-        if (isFloat(arg->type_)) {
-            if (floatArg < 8) {
-                emitStoreReg(os_, "s" + std::to_string(floatArg), off);
-                floatArg++;
-            }
-        } else {
-            if (intArg < 8) {
-                // pointer needs 64-bit register
-                // bool isPointer = (arg->type_->tid_ == Type::PointerTyID);
-                // or maybe array too, revert this if things got wrong
-                bool isPointer = (arg->type_->tid_ == Type::PointerTyID ||
-                                  arg->type_->tid_ == Type::ArrayTyID);
-                std::string reg = (isPointer ? "x" : "w") + std::to_string(intArg);
-                emitStoreReg(os_, reg, off);
-                intArg++;
-            }
-        }
-    }
+   // ----- load arguments (including register arguments and stack arguments) -----
+   int intRegIdx = 0;     // x0-x7 / w0-w7
+   int floatRegIdx = 0;   // s0-s7
+   int stackOffset = 0;   // stack argument offset (relative to x29+16)
+
+   for (auto arg : func_->arguments_) {
+       int slot = getSlot(arg);
+       if (isFloat(arg->type_)) {
+           if (floatRegIdx < 8) {
+               // from float register
+               emitStoreReg(os_, "s" + std::to_string(floatRegIdx++), slot);
+           } else {
+               // from stack argument: the n-th stack argument is at [x29, #16 + stackOffset]
+               int off = 16 + stackOffset;
+               if (off <= 4095) {
+                   os_ << "\tldr s16, [x29, #" << off << "]\n";
+               } else {
+                   os_ << "\tmovz x16, #" << off << "\n";
+                   os_ << "\tldr s16, [x29, x16]\n";
+               }
+               emitStoreReg(os_, "s16", slot);
+               stackOffset += 8;
+           }
+       } else {
+           // int or ptr
+           if (intRegIdx < 8) {
+               bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
+                             arg->type_->tid_ == Type::ArrayTyID);
+               std::string reg = isPtr ? "x" : "w";
+               reg += std::to_string(intRegIdx++);
+               emitStoreReg(os_, reg, slot);
+           } else {
+               int off = 16 + stackOffset;
+               if (off <= 4095) {
+                   os_ << "\tldr x16, [x29, #" << off << "]\n";
+               } else {
+                   os_ << "\tmovz x16, #" << off << "\n";
+                   os_ << "\tldr x16, [x29, x16]\n";
+               }
+               emitStoreReg(os_, "x16", slot);
+               stackOffset += 8;
+           }
+       }
+   }
 }
 
 void Arm64FuncContext::emitEpilogue() {
@@ -349,7 +371,19 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (auto ci = dynamic_cast<ConstantInt*>(idx)) {
                 int offset = ci->value_ * elemSize;
                 if (offset != 0) {
-                    os_ << "\tadd " << addr << ", " << addr << ", #" << offset << "\n";
+                    if (offset > 0 && offset <= 4095) {
+                        os_<< "\tadd " << addr << ", " << addr << ", #" << offset << "\n";
+                    } else if (offset < 0 && -offset <= 4095) {
+                        os_ << "\tsub " << addr << ", " << addr << ", #" << -offset << "\n";
+                    } else {
+                        // 使用临时寄存器构造大常数
+                        os_ << "\tmovz x16, #" << (abs(offset) & 0xFFFF) << "\n";
+                        os_ << "\tmovk x16, #" << ((abs(offset) >> 16) & 0xFFFF) << ", lsl #16\n";
+                        if (offset > 0)
+                            os_ << "\tadd " << addr << ", " << addr << ", x16\n";
+                        else
+                            os_ << "\tsub " << addr << ", " << addr << ", x16\n";
+                    }
                 }
             } else {
                 std::string idxReg = loadInt(idx);
@@ -513,34 +547,80 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
 
-        // assign arguments to registers
+        // ----- 第一步：计算需要多少个栈参数 -----
         int intArg = 0, floatArg = 0;
-        std::vector<std::pair<std::string, bool>> savedArgs; // reg, isFloat
+        int stackArgsCount = 0;
+        for (unsigned i = 0; i < numArgs; i++) {
+            auto arg = call->get_operand(i);
+            if (isFloat(arg->type_)) {
+                if (floatArg++ >= 8) stackArgsCount++;
+            } else { // 整数或指针
+                if (intArg++ >= 8) stackArgsCount++;
+            }
+        }
+
+        // 栈参数占用的总字节数（每个8字节），并16字节对齐
+        int stackBytes = align16(stackArgsCount * 8);
+        if (stackBytes > 0) {
+            if (stackBytes <= 4095)
+                os_ << "\tsub sp, sp, #" << stackBytes << "\n";
+            else {
+                os_ << "\tmovz x16, #" << (stackBytes & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((stackBytes >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tsub sp, sp, x16\n";
+            }
+        }
+
+        // ----- 第二步：传递参数（寄存器 + 栈）-----
+        intArg = 0, floatArg = 0;
+        int stackIdx = 0; // 当前栈参数的索引（从0开始）
 
         for (unsigned i = 0; i < numArgs; i++) {
             auto arg = call->get_operand(i);
             if (isFloat(arg->type_)) {
                 std::string r = loadFloat(arg);
                 if (floatArg < 8) {
-                    os_ << "\tfmov s" << floatArg << ", " << r << "\n";
+                    os_ << "\tfmov s" << floatArg++ << ", " << r << "\n";
+                } else {
+                    // 存储到栈上：偏移 = stackIdx * 8
+                    os_ << "\tstr " << r << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    stackIdx++;
                 }
-                floatArg++;
             } else if (isPtr(arg->type_)) {
                 std::string r = loadAddr(arg);
                 if (intArg < 8) {
-                    os_ << "\tmov x" << intArg << ", " << r << "\n";
+                    os_ << "\tmov x" << intArg++ << ", " << r << "\n";
+                } else {
+                    os_ << "\tstr " << r << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    stackIdx++;
                 }
-                intArg++;
             } else {
                 std::string r = loadInt(arg);
                 if (intArg < 8) {
-                    os_ << "\tmov w" << intArg << ", " << r << "\n";
+                    os_ << "\tmov w" << intArg++ << ", " << r << "\n";
+                } else {
+                    // 整数参数也需要扩展到64位存储（寄存器宽度）
+                    std::string tmp = allocAddrReg();
+                    os_ << "\tsxtw " << tmp << ", " << r << "\n";
+                    os_ << "\tstr " << tmp << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    freeAddrReg(tmp);
+                    stackIdx++;
                 }
-                intArg++;
             }
         }
 
         os_ << "\tbl " << callee->name_ << "\n";
+
+        // 恢复栈指针
+        if (stackBytes > 0) {
+            if (stackBytes <= 4095)
+                os_ << "\tadd sp, sp, #" << stackBytes << "\n";
+            else {
+                os_ << "\tmovz x16, #" << (stackBytes & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((stackBytes >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tadd sp, sp, x16\n";
+            }
+        }
 
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
@@ -692,9 +772,22 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
         std::string r = allocAddrReg();
         int off = getSlot(v);
         if (off < 0) {
-            os_ << "\tsub " << r << ", x29, #" << -off << "\n";
+            int absOff = -off;
+            if (absOff <= 4095) {
+                os_ << "\tsub " << r << ", x29, #" << absOff << "\n";
+            } else {
+                os_ << "\tmovz x16, #" << (absOff & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tsub " << r << ", x29, x16\n";
+            }
         } else {
-            os_ << "\tadd " << r << ", x29, #" << off << "\n";
+            if (off <= 4095) {
+                os_ << "\tadd " << r << ", x29, #" << off << "\n";
+            } else {
+                os_ << "\tmovz x16, #" << (off & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((off >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tadd " << r << ", x29, x16\n";
+            }
         }
         return r;
     }
