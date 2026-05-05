@@ -87,7 +87,7 @@ void Arm64FuncContext::generate() {
 }
 
 void Arm64FuncContext::emitPrologue() {
-    os_ << "\t.globl " << func_->name_ << "\n";
+    os_ << "\t.global " << func_->name_ << "\n";
     os_ << "\t.p2align 2\n";
     os_ << func_->name_ << ":\n";
 
