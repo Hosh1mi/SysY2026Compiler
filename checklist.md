@@ -30,8 +30,7 @@
 - task 27 : completed
 - task 28 : completed
 - task 29 : completed
-- task 30 : CE
-- task 30 : WA
+- task 30 : completed
 - task 31 : completed
 - task 32 : completed
 - task 33 : completed

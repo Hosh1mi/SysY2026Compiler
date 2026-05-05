@@ -520,16 +520,22 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             auto sizeVal = call->get_operand(1);
             std::string addr = loadAddr(ptr);
 
+            bool useLoop = true;
             if (auto sizeConst = dynamic_cast<ConstantInt*>(sizeVal)) {
                 int bytes = sizeConst->value_;
-                for (int off = 0; off < bytes; off += 4) {
-                    if (off == 0) {
-                        os_ << "\tstr wzr, [" << addr << "]\n";
-                    } else {
-                        os_ << "\tstr wzr, [" << addr << ", #" << off << "]\n";
+                constexpr int MAX_UNROLL_BYTES = 256;   // 最多展开 256 字节（64条 str）
+                if (bytes <= MAX_UNROLL_BYTES) {
+                    for (int off = 0; off < bytes; off += 4) {
+                        if (off == 0)
+                            os_ << "\tstr wzr, [" << addr << "]\n";
+                        else
+                            os_ << "\tstr wzr, [" << addr << ", #" << off << "]\n";
                     }
+                    useLoop = false;
                 }
-            } else {
+                // 超过阈值则 fallthrough 到循环分支
+            }
+            if (useLoop) {
                 static int memclrLoopId = 0;
                 std::string sizeReg = loadInt(sizeVal);
                 std::string zeroReg = allocIntReg();
