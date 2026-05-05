@@ -32,7 +32,7 @@ int main(int argc, char **argv) {
 	while ((opt = getopt(argc, argv, "Sco:O::")) != -1) {
 		switch (opt) {
 		case 'S':
-			print_asm = false;
+			print_asm = true;
 			print_ir = false;
 			break;
 		case 'c':

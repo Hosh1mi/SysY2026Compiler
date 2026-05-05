@@ -52,5 +52,5 @@ target_include_directories(compiler PRIVATE
 target_compile_definitions(compiler PRIVATE
     # DEBUG_LEXER
     # DEBUG_PARSER
-    DEBUG_IRGEN
+    # DEBUG_IRGEN
 )
