@@ -18,59 +18,75 @@ extern int yyparse();
 extern FILE *yyin;
 
 int main(int argc, char **argv) {
-	if(argc == 1) cout << "No file input!" << endl;
-	assert(argc >= 2);
+	if (argc < 2) {
+        std::cerr << "No input file.\n";
+        return -1;
+    }
 
-	// TODO: advanced argument parser
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = true; // Temporarily set true
-	bool isO2 = false;
+	int print_asm = false; 
 	std::string output = "-";
-	int opt;
+	int optLevel = 0;
 
-	while ((opt = getopt(argc, argv, "Sco:O::")) != -1) {
-		switch (opt) {
-		case 'S':
-			print_asm = true;
-			print_ir = false;
-			break;
-		case 'c':
-			print_ir = true;
-			print_asm = false;
-			break;
-		case 'o':
-			output = optarg;
-			break;
-		case 'O':
-			isO2 = true;
-			break;
-		default:
-			break;
-		}
-	}
-	filename = argv[optind];
+	for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
 
-	yyin = fopen(filename, "r");
-	if (yyin == nullptr) {
-		std::cout << "yyin open" << filename << "failed" << std::endl;
-		return -1;
-	}
+        if (arg == "-S") {
+            print_asm = true;
+            print_ir = false;
+        } 
+        else if (arg == "-c") {
+            print_ir = true;
+            print_asm = false;
+        } 
+        else if (arg == "-o") {
+            if (i + 1 >= argc) {
+                std::cerr << "-o requires a filename\n";
+                return -1;
+            }
+            output = argv[++i];
+        } 
+        else if (arg.rfind("-O", 0) == 0) {
+            // 支持 -O1 / -O2 / -O 1
+            if (arg.size() > 2) {
+                optLevel = arg[2] - '0';
+            } else {
+                if (i + 1 < argc) {
+                    optLevel = std::stoi(argv[++i]);
+                } else {
+                    optLevel = 1; // 默认 -O == -O1
+                }
+            }
+        } 
+        else if (arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << "\n";
+            return -1;
+        } 
+        else {
+            filename = argv[i];
+        }
+    }
+
+	if (!filename) {
+        std::cerr << "No input file provided.\n";
+        return -1;
+    }
+
+    // Set default to asm for now
+    if (!print_ir && !print_asm) {
+        print_asm = true;
+    }
+
+    yyin = fopen(filename, "r");
+    if (!yyin) {
+        std::cerr << "Failed to open input file: " << filename << "\n";
+        return -1;
+    }
 
 	/* frontend */
 	// Lexer, Parser, and generate AST
 	yyparse();
-
-#ifdef DEBUG_PARSER
-	std::cerr << "========== Parser Result ==========" << std::endl;
-	if (root) {
-		Printer printer;
-		std::cerr << printer.visit(*root) << std::endl;
-	} else {
-		std::cerr << "Parser output: failed to construct AST root." << std::endl;
-	}
-	std::cerr << "===================================" << std::endl;
-#endif
 
 	// Check errors of AST
 	// ErrorReporter errorReporter(std::cerr);
@@ -83,35 +99,15 @@ int main(int argc, char **argv) {
 	root->accept(genIR);
 	std::unique_ptr<Module> m = genIR.getModule();
 
-#ifdef DEBUG_IRGEN
-	std::cerr << "========== IRGenerator Result ==========" << std::endl;
-	if (m) {
-		std::cerr << m->print() << std::endl;
-	} else {
-		std::cerr << "IR generation output: module is empty." << std::endl;
-	}
-	std::cerr << "========================================" << std::endl;
-#endif
-
-	// // Run IR optimization
-	// // TODO
-	// if (isO2) {
-	// std::vector<Optimization *> Opt;
-	// Opt.push_back(new DeadCodeDeletion(m.get()));
-	// Opt.push_back(new ConstSpread(m.get()));
-	// Opt.push_back(new CombineInstr(m.get()));
-	// Opt.push_back(new DomainTree(m.get()));
-	// Opt.push_back(new SimplifyJump(m.get()));
-	// Opt.push_back(new LoopInvariant(m.get()));
-	// Opt.push_back(new SimplifyJump(m.get()));
-	// for (auto x : Opt)
-	// 	x->execute();
-	// }
+	/* IR Pass */
 	PassManager pm;
-	// pm.addPass(std::make_unique<ConstSpread>());
-	// pm.addPass(std::make_unique<InstructionCombine>());
-	pm.addPass(std::make_unique<DimArrayArgSimplify>());
-	pm.addPass(std::make_unique<DeadCodeDelete>());
+	if(optLevel >= 1){
+		// pm.addPass(std::make_unique<ConstSpread>());
+		// pm.addPass(std::make_unique<InstructionCombine>());
+		pm.addPass(std::make_unique<DimArrayArgSimplify>());
+		pm.addPass(std::make_unique<DeadCodeDelete>());
+	}  
+	
 	pm.run(m.get());
 
 	std::ofstream fout;
@@ -129,9 +125,9 @@ int main(int argc, char **argv) {
 	if (print_asm) {
 		Arm64CodeGen codegen(m.get(), *out);
 		codegen.generate();
-	}
-	if (print_ir) {
+	}else if (print_ir) {
 		*out << m->print();
 	}
+
 	return 0;
 }

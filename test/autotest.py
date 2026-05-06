@@ -48,9 +48,9 @@ def main():
             results.append(f"{stem} : RE")
             continue
 
-        # 2. 链接：g++ out.s ../lib/libsysy.a -o out
+        # 2. 链接：g++ out.s ../lib/libsysy.a -o out -O1
         link = subprocess.run(
-            ["g++", "out.s", "../lib/libsysy.a", "-o", "out"],
+            ["g++", "out.s", "../lib/libsysy.a", "-o", "out", "-O1"],
             capture_output=True,
             text=True,
         )

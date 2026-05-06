@@ -48,9 +48,3 @@ add_executable(compiler
 target_include_directories(compiler PRIVATE
     ${INCLUDE_DIR}
 )
-
-target_compile_definitions(compiler PRIVATE
-    # DEBUG_LEXER
-    # DEBUG_PARSER
-    # DEBUG_IRGEN
-)
