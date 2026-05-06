@@ -2,6 +2,7 @@
 """
 性能测试脚本：对 performance/ 目录下的测试用例进行编译、运行和结果比对，
 并将结果写入同目录下的 result.txt。
+最后会附加一份总结，包含 AC / WA / TLE / RE 数量及总运行时间。
 """
 
 import os
@@ -23,6 +24,13 @@ def main():
     results = []
     sy_files = sorted(perf_dir.glob("*.sy"))
 
+    # 统计计数器
+    total_ac = 0
+    total_wa = 0
+    total_tle = 0
+    total_re = 0
+    total_time = 0.0  # 总运行时间（秒）
+
     for sy_file in sy_files:
         stem = sy_file.stem
         out_file = perf_dir / f"{stem}.out"
@@ -43,9 +51,11 @@ def main():
                 )
             if comp.returncode != 0:
                 results.append(f"{stem} : RE")
+                total_re += 1
                 continue
         except Exception:
             results.append(f"{stem} : RE")
+            total_re += 1
             continue
 
         # 2. 链接：g++ out.s ../lib/libsysy.a -o out -O1
@@ -56,16 +66,16 @@ def main():
         )
         if link.returncode != 0:
             results.append(f"{stem} : RE")
+            total_re += 1
             continue
 
         # 3. 运行，如有 .in 则提供标准输入
         stdin_content = None
         if in_file.exists():
             with open(in_file, "r", encoding="utf-8") as f:
-                stdin_content = f.read() 
+                stdin_content = f.read()
 
         try:
-            # 可选超时（如 30 秒），可根据需要调整
             exec_proc = subprocess.run(
                 ["./out"],
                 input=stdin_content,
@@ -74,15 +84,19 @@ def main():
                 timeout=30,
             )
         except subprocess.TimeoutExpired:
-            results.append(f"{stem} : RE")
+            results.append(f"{stem} : TLE")
+            total_tle += 1
+            total_time += 30.0  # 超时按 30 秒计算
             continue
         except Exception:
             results.append(f"{stem} : RE")
+            total_re += 1
             continue
 
         # 崩溃（信号终止）视为 RE
         if exec_proc.returncode < 0:
             results.append(f"{stem} : RE")
+            total_re += 1
             continue
 
         # 构建实际输出：标准输出的各行 + 最后一行是程序返回值（转为字符串）
@@ -91,15 +105,27 @@ def main():
         actual_combined = actual_stdout_lines + [actual_retcode]
 
         # 提取总时间 TOTAL: ...（来自标准错误输出）
-        total_time = None
+        total_time_str = None
         for line in exec_proc.stderr.splitlines():
             if line.startswith("TOTAL:"):
-                total_time = line[len("TOTAL:"):].strip()
-        time_str = f"Total time : {total_time}" if total_time else "Total time : N/A"
+                total_time_str = line[len("TOTAL:"):].strip()
+                break
+
+        # 将时间转换为浮点数，若不可用则按 0 处理
+        case_time = 0.0
+        if total_time_str:
+            try:
+                case_time = float(total_time_str)
+            except ValueError:
+                case_time = 0.0
+
+        time_str = f"Total time : {total_time_str}" if total_time_str else "Total time : N/A"
 
         # 4. 结果判定
         if actual_combined == expected_lines:
             results.append(f"{stem} : AC\n{time_str}")
+            total_ac += 1
+            total_time += case_time
         else:
             # 寻找第一个不匹配的位置
             mismatch_msg = ""
@@ -116,6 +142,21 @@ def main():
                         mismatch_msg = f"Line {i+1}: expected '{exp}', got '{act}'"
                     break
             results.append(f"{stem} : WA,\nFirst mismatch : {mismatch_msg}\n{time_str}")
+            total_wa += 1
+            total_time += case_time
+
+    # 构建总结信息
+    total_tests = total_ac + total_wa + total_tle + total_re
+    summary = [
+        "--- Summary ---",
+        f"Total tests: {total_tests}",
+        f"AC: {total_ac}",
+        f"WA: {total_wa}",
+        f"TLE: {total_tle}",
+        f"RE: {total_re}",
+        f"Total run time: {total_time:.6f} s",
+    ]
+    results.extend(summary)
 
     # 写入最终结果
     with open("result.txt", "w", encoding="utf-8") as f:

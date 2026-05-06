@@ -7,6 +7,7 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
 #include "include/mid/opt/arraySimplify.hpp"
+#include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
