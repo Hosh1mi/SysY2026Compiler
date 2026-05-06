@@ -7,6 +7,7 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
 #include "include/mid/opt/arraySimplify.hpp"
+#include "include/mid/opt/tailRecursionEliminate.hpp"
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
@@ -100,6 +101,7 @@ int main(int argc, char **argv) {
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
+		pm.addPass(std::make_unique<TailRecursionEliminate>());
 		pm.addPass(std::make_unique<DimArrayArgSimplify>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());
 	}  

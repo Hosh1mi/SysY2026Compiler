@@ -39,6 +39,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/deadCodeDelete.cpp
     ${SRC_DIR}/mid/opt/passManager.cpp
     ${SRC_DIR}/mid/opt/arraySimplify.cpp
+    ${SRC_DIR}/mid/opt/tailRecursionEliminate.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )

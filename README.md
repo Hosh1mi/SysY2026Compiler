@@ -16,6 +16,7 @@ IR Pass:
 - 简单的Pass 管理器
 - Dead Code Eliminate pass（局部死代码消除）
 - Array Simplify pass ~~（疑似没什么用）~~
+- Tail Recursion Eliminate Pass
 
 TODO:
 
