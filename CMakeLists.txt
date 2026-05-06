@@ -37,8 +37,6 @@ add_executable(compiler
     ${SRC_DIR}/backend/arm64/arm64_codegen.cpp
     ${SRC_DIR}/backend/arm64/arm64_context.cpp
     ${SRC_DIR}/mid/opt/deadCodeDelete.cpp
-    ${SRC_DIR}/mid/opt/constSpread.cpp
-    ${SRC_DIR}/mid/opt/instrCombine.cpp
     ${SRC_DIR}/mid/opt/passManager.cpp
     ${SRC_DIR}/mid/opt/arraySimplify.cpp
     ${BISON_Parser_OUTPUTS}

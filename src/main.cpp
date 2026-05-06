@@ -6,8 +6,6 @@
 #include "include/backend/arm64/arm64_codegen.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
-#include "include/mid/opt/constSpread.hpp"
-#include "include/mid/opt/instrCombine.hpp"
 #include "include/mid/opt/arraySimplify.hpp"
 #include <fstream>
 #include <iostream>
@@ -102,8 +100,6 @@ int main(int argc, char **argv) {
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
-		// pm.addPass(std::make_unique<ConstSpread>());
-		// pm.addPass(std::make_unique<InstructionCombine>());
 		pm.addPass(std::make_unique<DimArrayArgSimplify>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());
 	}  
