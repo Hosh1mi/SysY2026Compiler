@@ -13,6 +13,7 @@ void TailRecursionEliminate::execute(Module *module) {
 }
 
 bool TailRecursionEliminate::isTailRecursive(Function *func) {
+    bool found = false;
     for (auto bb : func->basic_blocks_) {
         auto term = bb->get_terminator();
         if (!term || !term->is_ret() || term->num_ops_ == 0) continue;
@@ -25,8 +26,9 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
         if (callee != func) return false;
 
         if (call->use_list_.size() != 1 || call->use_list_.front().val_ != term) return false;
+        found = true;
     }
-    return true;
+    return found;
 }
 
 void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *module) {

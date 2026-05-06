@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
 
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = false; 
+	int print_asm = true; 
 	std::string output = "-";
 	int optLevel = 0;
 
