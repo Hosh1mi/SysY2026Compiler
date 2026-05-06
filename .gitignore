@@ -13,7 +13,7 @@ build/
 *.swo
 *.s
 out
-test/
+test/performance/
 .vscode/
 .idea/
 CLAUDE.md
