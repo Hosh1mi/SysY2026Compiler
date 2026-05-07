@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <functional>
 #include <cstring>
-#include <cstdint>
 
 struct PairHash {
     template<typename T1, typename T2>
@@ -14,17 +13,17 @@ struct PairHash {
 };
 
 // 修改常量规范化映射的声明
-static std::unordered_map<std::pair<Type*, uint64_t>, Constant*, PairHash> canonical_constants;
+static std::unordered_map<std::pair<Type*, unsigned long long>, Constant*, PairHash> canonical_constants;
 
 static Value* get_canonical_constant(Value *v) {
     if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
-        uint64_t key = static_cast<uint64_t>(ci->value_);
+        unsigned long long key = static_cast<unsigned long long>(ci->value_);
         auto &entry = canonical_constants[{ci->type_, key}];
         if (!entry) entry = new ConstantInt(ci->type_, ci->value_);
         return entry;
     } else if (auto *cf = dynamic_cast<ConstantFloat*>(v)) {
-        // 将 float 按位转 uint64_t 作为键值
-        uint64_t key;
+        // 将 float 按位转 unsigned long long 作为键值
+        unsigned long long key;
         memcpy(&key, &cf->value_, sizeof(key));
         auto &entry = canonical_constants[{cf->type_, key}];
         if (!entry) entry = new ConstantFloat(cf->type_, cf->value_);
