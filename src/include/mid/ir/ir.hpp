@@ -381,7 +381,7 @@ public:
         use_pos_.resize(num_ops_);
     }
     Value* get_operand(unsigned i) const { return operands_[i]; }
-
+    virtual ~Instruction() = default;
 
     //***************************
     void set_operand(unsigned i, Value* v) {

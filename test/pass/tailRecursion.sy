@@ -1,30 +1,11 @@
-
-int add(int n, int acc) {
-    if (n == 0)
+int sum(int n, int acc) {
+    if (n <= 0)
         return acc;
     else
-        return add(n - 1, acc + 1);  
-}
-
-int fact(int n, int acc) {
-    if (n <= 1)
-        return acc;
-    else
-        return fact(n - 1, n * acc); 
-}
-
-int fib(int n, int a, int b) {
-    if (n == 0)
-        return a;
-    else if (n == 1)
-        return b;
-    else
-        return fib(n - 1, b, a + b); 
+        return sum(n - 1, acc + n);
 }
 
 int main() {
-    int a = add(100, 0);     
-    int f = fact(5, 1);      
-    int b = fib(10, 0, 1);   
-    return a + f + b;        
+    putint(sum(10, 0)); 
+    return 0;
 }
