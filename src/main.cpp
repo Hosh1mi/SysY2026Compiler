@@ -111,15 +111,15 @@ int main(int argc, char **argv) {
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
-        // pm.addPass(std::make_unique<DimArrayArgSimplify>());
+        pm.addPass(std::make_unique<DimArrayArgSimplify>());
         pm.addPass(std::make_unique<Mem2Reg>());
 		pm.addPass(std::make_unique<TailRecursionEliminate>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());
-        // pm.addPass(std::make_unique<LocalCopyPropagation>());
-        // pm.addPass(std::make_unique<ConstantFold>());
-        // pm.addPass(std::make_unique<AlgebraSimplify>());
-        // pm.addPass(std::make_unique<CSE>());
-        // pm.addPass(std::make_unique<DeadCodeDelete>());
+        pm.addPass(std::make_unique<LocalCopyPropagation>());
+        pm.addPass(std::make_unique<ConstantFold>());
+        pm.addPass(std::make_unique<AlgebraSimplify>());
+        pm.addPass(std::make_unique<CSE>());
+        pm.addPass(std::make_unique<DeadCodeDelete>());
         // pm.addPass(std::make_unique<InlineExpand>());
 	}  
     
