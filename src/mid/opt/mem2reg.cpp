@@ -3,6 +3,7 @@
 #include <cassert>
 #include <queue>
 #include <stack>
+#include <functional>
 
 void Mem2Reg::execute(Module *module) {
     curModule = module;
