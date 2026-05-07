@@ -2,14 +2,25 @@
 #include "../../include/backend/arm64/arm64_context.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <iostream>
+#include <vector>
+#include <thread>
+#include <sstream>
+#include <algorithm>
+#ifdef __linux__
+#include <pthread.h>
+#include <sched.h>
+#include <unistd.h>
+#endif
 
 void Arm64CodeGen::generate() {
     os_ << "\t.text\n\n";
 
+    // 1. 全局变量（单线程，顺序输出）
     for (auto gv : m_->global_list_) {
         emitGlobal(gv);
     }
 
+    // 2. 外部函数声明（单线程）
     for (auto f : m_->function_list_) {
         if (f->is_declaration()) {
             emitExtern(f);
@@ -17,10 +28,75 @@ void Arm64CodeGen::generate() {
     }
 
     os_ << "\n\t.text\n\n";
+
+    // 3. 收集需要生成代码的函数（非声明）
+    std::vector<Function*> funcs;
     for (auto f : m_->function_list_) {
         if (!f->is_declaration()) {
-            emitFunction(f);
+            funcs.push_back(f);
         }
+    }
+    if (funcs.empty()) return;
+
+    // 4. 提前为所有指令命名（避免多线程静态计数器竞争）
+    for (auto f : funcs) {
+        f->set_instr_name();
+    }
+
+    // 5. 计算可用线程数（排除隔离核心2、3）
+    unsigned numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 1;
+    // 4核CPU，扣除核心2、3后最多可用2个线程
+    if (numThreads <= 2) numThreads = 1;
+    else numThreads = numThreads - 2;  // 对于4核=2线程
+
+    // 6. 将函数均匀分配给各线程（轮转分配）
+    std::vector<std::vector<Function*>> partitions(numThreads);
+    for (size_t i = 0; i < funcs.size(); ++i) {
+        partitions[i % numThreads].push_back(funcs[i]);
+    }
+
+    // 7. 存储每个函数生成结果的字符串（按原始顺序）
+    std::vector<std::string> results(funcs.size());
+    std::vector<std::thread> threads;
+
+    for (unsigned t = 0; t < numThreads; ++t) {
+        threads.emplace_back([this, &partitions, &results, &funcs, t, numThreads]() {
+            // 设置CPU亲和性：只允许编译器线程运行在非隔离核心（核心0,1）
+#ifdef __linux__
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            int numCores = sysconf(_SC_NPROCESSORS_ONLN);
+            for (int i = 0; i < numCores; ++i) {
+                if (i != 2 && i != 3) {   // 排除隔离核心
+                    CPU_SET(i, &cpuset);
+                }
+            }
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+#endif
+
+            // 为该线程分配的每个函数生成汇编
+            for (auto f : partitions[t]) {
+                std::ostringstream local_os;
+                Arm64FuncContext ctx(f, local_os);
+                ctx.generate();
+
+                // 找到该函数在原始funcs中的位置，存入results对应索引
+                auto it = std::find(funcs.begin(), funcs.end(), f);
+                size_t idx = it - funcs.begin();
+                results[idx] = local_os.str();
+            }
+        });
+    }
+
+    // 8. 等待所有线程完成
+    for (auto &th : threads) {
+        th.join();
+    }
+
+    // 9. 按原始函数顺序输出结果
+    for (const auto &str : results) {
+        os_ << str;
     }
 }
 
@@ -96,6 +172,6 @@ void Arm64CodeGen::emitExtern(Function *f) {
 }
 
 void Arm64CodeGen::emitFunction(Function *f) {
-    Arm64FuncContext ctx(f, *this, os_);
+    Arm64FuncContext ctx(f, os_);
     ctx.generate();
 }

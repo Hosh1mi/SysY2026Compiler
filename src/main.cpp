@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CSE>());
         pm.addPass(std::make_unique<ConstantFold>());
 	}  
-	
+    
 	pm.run(m.get());
 
 	std::ofstream fout;

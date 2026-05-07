@@ -10,7 +10,7 @@ class Arm64CodeGen;
 
 class Arm64FuncContext {
 public:
-    Arm64FuncContext(Function *f, Arm64CodeGen &parent, std::ostream &os);
+    Arm64FuncContext(Function *f, std::ostream &os);
     void generate();
 
 private:
@@ -56,7 +56,6 @@ private:
     const char *fcmpCond(FCmpInst::FCmpOp op);
 
     Function *func_;
-    Arm64CodeGen &parent_;
     std::ostream &os_;
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)

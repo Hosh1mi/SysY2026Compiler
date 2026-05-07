@@ -1,5 +1,4 @@
 #include "../../include/backend/arm64/arm64_context.hpp"
-#include "../../include/backend/arm64/arm64_codegen.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <cstdint>
 #include <cstring>
@@ -62,8 +61,8 @@ static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
 
 // ---- Arm64FuncContext ----
 
-Arm64FuncContext::Arm64FuncContext(Function *f, Arm64CodeGen &parent, std::ostream &os)
-    : func_(f), parent_(parent), os_(os) {}
+Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os)
+    : func_(f), os_(os) {}
 
 void Arm64FuncContext::generate() {
     func_->set_instr_name();
