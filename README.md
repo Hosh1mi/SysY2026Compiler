@@ -2,28 +2,101 @@
 
 ### 进度
 
-已初步完成：
-
-正确性：
-- 词法分析
-- 语法分析
-- AST构建
-- 静态语义检查
-- LLVM IR生成
-- IR -> ARM
-
-IR Pass:
-- 简单的Pass 管理器
-- Dead Code Eliminate pass（局部死代码消除）
-- Array Simplify pass ~~（疑似没什么用）~~
-- Tail Recursion Eliminate Pass
-
 TODO:
 
-IR Pass:
-- Constant Fold
-- Loop Invariant
-- IR 分层 : HIR, MIR, LIR
+IR pass: (块内疑似并非顺序排列)
+
+#### A
+- [ ] Scalar replacement of array references → 数组引用的标量替换
+- [ ] Data-cache optimizations → 数据缓存优化
+
+#### B
+- [X] Scalar replacement of aggregates (*mem2reg*) → 聚合体的标量替换
+- [ ] Procedure integration → 过程集成（过程内联）
+- [X] Tail-call optimization, including tail-recursion elimination → 尾调用优化（包括尾递归消除）
+- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
+- [X] Interprocedural constant propagation → 过程间常量传播
+- [ ] Procedure specialization and cloning → 过程特化与克隆
+- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
+
+#### C1
+- [ ] Global value numbering → 全局值编号
+- [ ] Local and global copy propagation → 局部与全局拷贝传播
+- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
+- [ ] Dead-code elimination → 死代码消除
+
+#### C2
+- [ ] Local and global common-subexpression elimination → 局部与全局公共子表达式消除
+- [ ] Loop-invariant code motion → 循环不变代码外提
+
+#### C3
+- [ ] Partial-redundancy elimination → 部分冗余消除
+
+#### C4
+- [ ] Dead-code elimination → 死代码消除
+- [ ] Code hoisting → 代码上提
+- [ ] Induction-variable strength reduction → 归纳变量强度削弱
+- [ ] Linear-function test replacement → 线性函数测试替换
+- [ ] Induction-variable removal → 归纳变量删除
+- [ ] Unnecessary bounds-checking elimination → 不必要的边界检查消除
+- [ ] Control-flow optimizations → 控制流优化
+
+#### D
+- [ ] In-line expansion → 内联展开
+- [ ] Leaf-routine optimization → 叶例程优化
+- [ ] Shrink wrapping → 收缩包装
+- [ ] Machine idioms → 机器习语
+- [ ] Tail merging → 尾合并
+- [ ] Branch optimizations and conditional moves → 分支优化与条件传送
+- [ ] Dead-code elimination → 死代码消除
+- [ ] Software pipelining, with loop unrolling, variable expansion, register renaming, and hierarchical reduction → 软件流水（含循环展开、变量扩展、寄存器重命名和层次化归约）
+- [ ] Basic-block and branch scheduling 1 → 基本块与分支调度 1
+- [ ] Register allocation by graph coloring → 图着色寄存器分配
+- [ ] Basic-block and branch scheduling 2 → 基本块与分支调度 2
+- [ ] Intraprocedural I-cache optimization → 过程内指令缓存优化
+- [ ] Instruction prefetching → 指令预取
+- [ ] Data prefetching → 数据预取
+- [ ] Branch prediction → 分支预测
+
+#### E
+- [ ] Interprocedural register allocation → 过程间寄存器分配
+- [ ] Aggregation of global references → 全局引用的聚合
+- [ ] Interprocedural I-cache optimization → 过程间指令缓存优化
+
+#### 附加（来自图末尾）
+- [X] Constant folding → 常量折叠
+- [ ] Algebraic simplifications → 代数简化
+- [ ] Reassociation → 重组
+    
+```mermaid
+flowchart TD
+    A["Scalar replacement of array references<br>Data-cache optimizations"]
+    B["Procedure integration<br>Tail-call optimization, including tail-recursion elimination<br>Scalar replacement of aggregates<br>Sparse conditional constant propagation<br>Interprocedural constant propagation<br>Procedure specialization and cloning"]
+    C1["Global value numbering<br>Local and global copy propagation<br>Sparse conditional constant propagation<br>Dead-code elimination"]
+    C2["Local and global common-subexpression elimination<br>Loop-invariant code motion"]
+    C3["Partial-redundancy elimination"]
+    C4["Dead-code elimination<br>Code hoisting<br>Induction-variable strength reduction<br>Linear-function test replacement<br>Induction-variable removal<br>Unnecessary bounds-checking elimination<br>Control-flow optimizations"]
+    D["In-line expansion<br>Leaf-routine optimization<br>Shrink wrapping<br>Machine idioms<br>Tail merging<br>Branch optimizations and conditional moves<br>Dead-code elimination<br>Software pipelining, with loop unrolling, variable expansion, register renaming, and hierarchical reduction<br>Basic-block and branch scheduling 1<br>Register allocation by graph coloring<br>Basic-block and branch scheduling 2<br>Intraprocedural I-cache optimization<br>Instruction prefetching<br>Data prefetching<br>Branch prediction"]
+    E["Interprocedural register allocation<br>Aggregation of global references<br>Interprocedural I-cache optimization"]
+    F["Constant folding"]
+    G["algebraic simplifications including reassociation"]
+
+    A --> B
+    B --> C1
+    C1 --> C2
+    C1 --> C3
+    C2 --> C4
+    C3 --> C4
+    C4 --> D
+    D --> C4
+    D --> E
+    B --> G
+    C4 --> G
+    D --> G
+    C1 --> F
+    C2 --> F
+    C3 --> F
+```
 
 Backend:
 - 寄存器分配：图着色算法
@@ -32,8 +105,6 @@ Backend:
 Misc:
 - `autotest.py`测试改为使用clang
 - `autotest.py`打印错误信息
-- `main.cpp`里合理处理参数
-
 
 ### 项目结构
 
