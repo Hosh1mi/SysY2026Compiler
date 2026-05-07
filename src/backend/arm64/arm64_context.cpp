@@ -287,6 +287,32 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 
+    // ---- Integer Shift ----
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr: {
+        auto v1 = inst->get_operand(0);
+        auto v2 = inst->get_operand(1);
+        std::string r1 = loadInt(v1);
+        std::string rd = allocIntReg();
+
+        const char *opcode;
+        if (inst->op_id_ == Instruction::Shl)      opcode = "lsl";
+        else if (inst->op_id_ == Instruction::LShr) opcode = "lsr";
+        else                                        opcode = "asr";
+
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+            // 立即数移位：lsl wd, w1, #shift
+            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+        } else {
+            // 寄存器移位：lsl wd, w1, w2
+            std::string r2 = loadInt(v2);
+            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+        }
+        storeInt(inst, rd);
+        break;
+    }
+
     // ---- Float Binary ----
     case Instruction::FAdd:
     case Instruction::FSub:
