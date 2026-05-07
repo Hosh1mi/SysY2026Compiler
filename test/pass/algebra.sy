@@ -1,0 +1,7 @@
+int main() {
+    int x = 5;
+    int a = x * 2;      // x << 1
+    int b = x * 8;      // x << 3
+    int c = x * 16;     // x << 4
+    return a + b + c;   // 10 + 40 + 80 = 130
+}

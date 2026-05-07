@@ -26,7 +26,7 @@ IR pass: (块内疑似并非顺序排列)
 - [ ] Dead-code elimination → 死代码消除
 
 #### C2
-- [ ] Local and global common-subexpression elimination → 局部与全局公共子表达式消除
+- [X] Local and global common-subexpression elimination → 局部与全局公共子表达式消除
 - [ ] Loop-invariant code motion → 循环不变代码外提
 
 #### C3
@@ -65,7 +65,7 @@ IR pass: (块内疑似并非顺序排列)
 
 #### 附加（来自图末尾）
 - [X] Constant folding → 常量折叠
-- [ ] Algebraic simplifications → 代数简化
+- [X] Algebraic simplifications → 代数简化
 - [ ] Reassociation → 重组
     
 ```mermaid
