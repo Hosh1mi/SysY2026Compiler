@@ -21,7 +21,7 @@ IR pass: (块内疑似并非顺序排列)
 
 #### C1
 - [ ] Global value numbering → 全局值编号
-- [ ] Local and global copy propagation → 局部与全局拷贝传播
+- [X] Local and global copy propagation → 局部与全局拷贝传播
 - [ ] Sparse conditional constant propagation → 稀疏条件常量传播
 - [ ] Dead-code elimination → 死代码消除
 

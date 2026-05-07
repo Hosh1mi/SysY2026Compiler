@@ -44,6 +44,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/constFold.cpp
     ${SRC_DIR}/mid/opt/constSubexprEliminate.cpp
     ${SRC_DIR}/mid/opt/algebraSimplify.cpp
+    ${SRC_DIR}/mid/opt/localCopyPropagation.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )

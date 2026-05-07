@@ -13,6 +13,7 @@
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/constSubexprEliminate.hpp"
 #include "include/mid/opt/algebraSimplify.hpp"
+#include "include/mid/opt/localCopyPropagation.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -113,6 +114,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<Mem2Reg>());
 		pm.addPass(std::make_unique<TailRecursionEliminate>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());
+        pm.addPass(std::make_unique<LocalCopyPropagation>());
         pm.addPass(std::make_unique<ConstantFold>());
         pm.addPass(std::make_unique<AlgebraSimplify>());
         pm.addPass(std::make_unique<CSE>());
