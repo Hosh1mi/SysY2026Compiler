@@ -1,16 +1,20 @@
 #include "include/frontend/ast/ast.hpp"
 #include "include/frontend/ast/astPrinter.hpp"
-#include "include/mid/ir/irGen.hpp"
+
 #include "include/frontend/checker/checker.hpp"
 #include "include/frontend/parser.hpp"
-#include "include/backend/arm64/arm64_codegen.hpp"
+
+#include "include/mid/ir/irGen.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
 #include "include/mid/opt/arraySimplify.hpp"
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
-#include "include/mid/opt/localCopyPropagation.hpp"
+#include "include/mid/opt/constSubexprEliminate.hpp"
+
+#include "include/backend/arm64/arm64_codegen.hpp"
+
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
@@ -104,11 +108,12 @@ int main(int argc, char **argv) {
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
-        pm.addPass(std::make_unique<DimArrayArgSimplify>());
+        // pm.addPass(std::make_unique<DimArrayArgSimplify>());
         pm.addPass(std::make_unique<Mem2Reg>());
-		pm.addPass(std::make_unique<TailRecursionEliminate>());
-		pm.addPass(std::make_unique<LocalCopyPropagation>());
-		pm.addPass(std::make_unique<DeadCodeDelete>());
+		// pm.addPass(std::make_unique<TailRecursionEliminate>());
+		// pm.addPass(std::make_unique<DeadCodeDelete>());
+        pm.addPass(std::make_unique<CSE>());
+        // pm.addPass(std::make_unique<ConstantFold>());
 	}  
 	
 	pm.run(m.get());

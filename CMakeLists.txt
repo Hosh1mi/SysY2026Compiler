@@ -42,6 +42,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/mem2reg.cpp
     ${SRC_DIR}/mid/opt/tailRecursionEliminate.cpp
     ${SRC_DIR}/mid/opt/constFold.cpp
+    ${SRC_DIR}/mid/opt/constSubexprEliminate.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )

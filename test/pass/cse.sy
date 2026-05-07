@@ -1,0 +1,22 @@
+int arr[10];
+
+int main() {
+    int a = 5, b = 10;
+    int x = a + b;
+    int y = a * b;
+
+    int z = (a + b) * (a + b) + (a * b);  
+
+    if (x > 0) {
+        int tmp = a + b;    
+        z = z + tmp;
+    } else {
+        z = z + (a + b);    
+    }
+
+    arr[2] = x + y;
+    arr[3] = x + y;         
+    int s = arr[2] + arr[3]; 
+
+    return z + s;
+}

@@ -135,7 +135,7 @@ public:
 class Constant : public Value {
 public:
     Constant(Type* ty, const std::string& name = "") : Value(ty, name) {}
-    ~Constant() = default;
+    virtual ~Constant() = default;
 };
 
 // i32 -23
