@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <functional>
 #include <cstring>
+#include <cstdint>
 
 struct PairHash {
     template<typename T1, typename T2>
