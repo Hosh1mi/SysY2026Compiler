@@ -1,6 +1,5 @@
 #include "../../include/mid/opt/tailRecursionEliminate.hpp"
 
-#include <algorithm>
 #include <vector>
 
 void TailRecursionEliminate::execute(Module *module) {
@@ -13,61 +12,59 @@ void TailRecursionEliminate::execute(Module *module) {
 }
 
 bool TailRecursionEliminate::isTailRecursive(Function *func) {
+    bool hasTailRecCall = false;
     for (auto bb : func->basic_blocks_) {
-        auto term = bb->get_terminator();
-        if (!term || !term->is_ret() || term->num_ops_ == 0) continue;
+        for (auto instr : bb->instr_list_) {
+            auto call = dynamic_cast<CallInst *>(instr);
+            if (!call) continue;
+            auto callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+            if (callee != func) continue;          // 不是自调用，跳过
 
-        auto ret_val = term->get_operand(0);
-        auto call = dynamic_cast<CallInst *>(ret_val);
-        if (!call) continue;
+            // 自调用必须满足：使用者只有 1 个，且是当前块的 ret 指令
+            if (call->use_list_.size() != 1) return false;
+            auto use = call->use_list_.front();
+            auto term = bb->get_terminator();
+            if (!term || !term->is_ret() || term != use.val_) return false;
 
-        auto callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-        if (callee != func) return false;
-
-        if (call->use_list_.size() != 1 || call->use_list_.front().val_ != term) return false;
+            hasTailRecCall = true;
+        }
     }
-    return true;
+    return hasTailRecCall;   // 至少存在一个合法的尾递归调用
 }
 
 void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *module) {
-    if (func->basic_blocks_.empty() || func->arguments_.empty()) return;
-
+    // 1. 创建 preheader/header，插入到函数块列表首部
     auto entry_bb = func->basic_blocks_.front();
-    auto *builder = new IRStmtBuilder(entry_bb, module);
-
     auto *preheader_bb = new BasicBlock(module, "label_tailrec_preheader", func);
     auto *header_bb = new BasicBlock(module, "label_tailrec_header", func);
 
-    func->basic_blocks_.erase(std::remove(func->basic_blocks_.begin(), func->basic_blocks_.end(), preheader_bb), func->basic_blocks_.end());
-    func->basic_blocks_.erase(std::remove(func->basic_blocks_.begin(), func->basic_blocks_.end(), header_bb), func->basic_blocks_.end());
-    func->basic_blocks_.insert(func->basic_blocks_.begin(), header_bb);
-    func->basic_blocks_.insert(func->basic_blocks_.begin(), preheader_bb);
+    // 将这两个块移到最前面 (推荐使用 std::list 的 remove 成员函数)
+    auto &bbs = func->basic_blocks_;
+    bbs.erase(std::remove(bbs.begin(), bbs.end(), preheader_bb), bbs.end());
+    bbs.erase(std::remove(bbs.begin(), bbs.end(), header_bb), bbs.end());
+    bbs.insert(bbs.begin(), header_bb);
+    bbs.insert(bbs.begin(), preheader_bb);
 
+    auto *builder = new IRStmtBuilder(entry_bb, module);  // 任意块初始化
+
+    // 2. 为每个参数创建 phi，先替换 use 再添加操作数
     std::vector<PhiInst *> arg_phis;
-    arg_phis.reserve(func->arguments_.size());
     for (auto arg : func->arguments_) {
         auto phi = PhiInst::create_phi(arg->type_, header_bb);
         phi->name_ = arg->name_;
-        phi->add_phi_pair_operand(arg, preheader_bb);
+        arg->replace_all_use_with(phi);               // 先替换所有使用
+        phi->add_phi_pair_operand(arg, preheader_bb); // 再添加初始值
+        // 移除 header_bb->add_instruction(phi); 防止双重插入造成链表死循环或非法 IR
         arg_phis.push_back(phi);
     }
 
-    if (auto term = entry_bb->get_terminator()) {
-        if (term->is_br()) {
-            entry_bb->remove_instr(term);
-            delete static_cast<BranchInst *>(term);
-        }
-    }
+    // 3. 构建循环骨架
     builder->set_insert_point(preheader_bb);
     builder->create_br(header_bb);
-
     builder->set_insert_point(header_bb);
     builder->create_br(entry_bb);
 
-    for (size_t i = 0; i < func->arguments_.size(); ++i) {
-        func->arguments_[i]->replace_all_use_with(arg_phis[i]);
-    }
-
+    // 4. 改写所有尾调用点（ret <call func(...)>）
     for (auto bb : func->basic_blocks_) {
         auto term = bb->get_terminator();
         if (!term || !term->is_ret() || term->num_ops_ == 0) continue;
@@ -75,7 +72,6 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         auto ret_val = term->get_operand(0);
         auto call = dynamic_cast<CallInst *>(ret_val);
         if (!call) continue;
-
         auto callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
         if (callee != func) continue;
 
@@ -83,10 +79,14 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
             arg_phis[i]->add_phi_pair_operand(call->get_operand(i), bb);
         }
 
-        bb->remove_instr(call);
         bb->remove_instr(term);
-        delete static_cast<CallInst *>(call);
-        delete static_cast<ReturnInst *>(term);
+        delete static_cast<ReturnInst*>(term);
+        
+        if (call->parent_) {
+            call->parent_->remove_instr(call);
+        }
+        delete call;
+        
         builder->set_insert_point(bb);
         builder->create_br(header_bb);
     }
