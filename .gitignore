@@ -20,3 +20,4 @@ CLAUDE.md
 *.pdf
 *.Identifier
 .claude/
+test/result.txt
