@@ -119,7 +119,8 @@ std::string Type::print(){
 
 //-----------------------------------------------Value-----------------------------------------------
 void Value::replace_all_use_with(Value *new_val) {
-    for (auto use : use_list_) {
+    auto use_list_copy = use_list_;  
+    for (auto use : use_list_copy) {
         auto val = dynamic_cast<Instruction *>(use.val_);
         val->set_operand(use.arg_no_, new_val);
     }

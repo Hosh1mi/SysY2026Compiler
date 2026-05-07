@@ -729,6 +729,9 @@ public:
         this->add_operand(val);
         this->add_operand(pre_bb);
     }
+    void addIncoming(Value *val, BasicBlock *bb) {
+        this->add_phi_pair_operand(val, bb);
+    }
     virtual std::string print() override;
 
     Value *l_val_;
