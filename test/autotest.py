@@ -63,7 +63,7 @@ def main():
             continue
 
         link = subprocess.run(
-            ["g++", "out.s", "../lib/libsysy.a", "-o", "out", "-O1"],
+            ["g++", "out.s", "../lib/libsysy.a", "-o", "out"],
             capture_output=True,
             text=True,
         )
@@ -88,7 +88,7 @@ def main():
         except subprocess.TimeoutExpired:
             results.append(f"{stem} : TLE")
             total_tle += 1
-            total_time += 60.0
+            total_time += 20.0
             continue
         except Exception:
             results.append(f"{stem} : RE")
