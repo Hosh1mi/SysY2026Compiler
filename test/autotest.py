@@ -63,7 +63,7 @@ def main():
             continue
 
         link = subprocess.run(
-            ["g++", "out.s", "../lib/libsysy.a", "-o", "out"],
+            ["g++", "out.s", "../lib/libsysy.a", "-o", "out", "-O1"],
             capture_output=True,
             text=True,
         )
@@ -83,7 +83,7 @@ def main():
                 input=stdin_content,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=20,
             )
         except subprocess.TimeoutExpired:
             results.append(f"{stem} : TLE")

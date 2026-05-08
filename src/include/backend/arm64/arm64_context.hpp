@@ -81,4 +81,5 @@ private:
     std::vector<std::pair<BasicBlock*, std::pair<Value*, int>>> phiCopies_;
 
     BasicBlock *epilogueBB_ = nullptr;
+    int memclrCounter_ = 0;  // Fix 2: replaces static int memclrLoopId (thread-safety)
 };

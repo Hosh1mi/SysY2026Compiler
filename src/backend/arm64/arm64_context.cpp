@@ -6,7 +6,6 @@
 #include <iostream>
 
 // ---- helpers ----
-
 static int typeSize(Type *ty) {
     switch (ty->tid_) {
     case Type::IntegerTyID: return 4;
@@ -640,10 +639,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
             if (useLoop) {
-                static int memclrLoopId = 0;
+                // Fix 2: use member variable instead of static (thread-safe)
                 std::string sizeReg = loadInt(sizeVal);
                 std::string zeroReg = allocIntReg();
-                std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrLoopId++);
+                std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrCounter_++);
                 std::string done = loop + "_done";
                 os_ << "\tmov " << zeroReg << ", wzr\n";
                 os_ << loop << ":\n";
@@ -673,44 +672,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         int stackBytes = align16(stackArgsCount * 8);
     
         // ================================================
-        // 2. 收集需要跨调用保存的调用者寄存器
-        //    (线性扫描分配的寄存器: 整数 w19‑w28, 浮点 s8‑s15)
+        // Fix 5: w19-w28 / d8-d15 are callee-saved per AArch64 ABI.
+        // The callee guarantees to preserve them, so we must NOT
+        // save/restore them around a bl.  The prologue/epilogue already
+        // handle them for our own frame.
         // ================================================
-        std::vector<int> liveCallerIntRegs;
-        std::vector<int> liveCallerFloatRegs;
-        for (const auto &entry : assignedRegs_) {
-            if (entry.second.empty()) continue;
-            if (entry.second[0] == 'w') liveCallerIntRegs.push_back(std::stoi(entry.second.substr(1)));
-            if (entry.second[0] == 's') liveCallerFloatRegs.push_back(std::stoi(entry.second.substr(1)));
-        }
-        int callerSaveBytes = align16(static_cast<int>(liveCallerIntRegs.size() + liveCallerFloatRegs.size()) * 8);
-    
+
         // ================================================
-        // 3. 先分配并保存调用者寄存器
-        //    (使栈参数能够紧贴 sp 传递)
-        // ================================================
-        if (callerSaveBytes > 0) {
-            if (callerSaveBytes <= 4095)
-                os_ << "\tsub sp, sp, #" << callerSaveBytes << "\n";
-            else {
-                os_ << "\tmovz x17, #" << (callerSaveBytes & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((callerSaveBytes >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub sp, sp, x17\n";
-            }
-        }
-        int saveOff = 0;
-        for (int reg : liveCallerIntRegs) {
-            os_ << "\tstr x" << reg << ", [sp, #" << saveOff << "]\n";
-            saveOff += 8;
-        }
-        for (int reg : liveCallerFloatRegs) {
-            os_ << "\tstr d" << reg << ", [sp, #" << saveOff << "]\n";
-            saveOff += 8;
-        }
-    
-        // ================================================
-        // 4. 分配栈参数空间
-        //    (此时 sp 之上已有保存的寄存器，新分配的栈参数区域紧挨 sp)
+        // 3. 分配栈参数空间
         // ================================================
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
@@ -778,29 +747,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
     
         // ================================================
-        // 8. 恢复调用者寄存器
-        // ================================================
-        saveOff = 0;
-        for (int reg : liveCallerIntRegs) {
-            os_ << "\tldr x" << reg << ", [sp, #" << saveOff << "]\n";
-            saveOff += 8;
-        }
-        for (int reg : liveCallerFloatRegs) {
-            os_ << "\tldr d" << reg << ", [sp, #" << saveOff << "]\n";
-            saveOff += 8;
-        }
-        if (callerSaveBytes > 0) {
-            if (callerSaveBytes <= 4095)
-                os_ << "\tadd sp, sp, #" << callerSaveBytes << "\n";
-            else {
-                os_ << "\tmovz x17, #" << (callerSaveBytes & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((callerSaveBytes >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tadd sp, sp, x17\n";
-            }
-        }
-    
-        // ================================================
-        // 9. 处理返回值
+        // 8. 处理返回值  (Fix 5: step 8 "restore callee-saved" removed)
         // ================================================
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
@@ -853,51 +800,196 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
     std::vector<Interval> intervals;
-    int pos = 0;
 
-    int intArgIdx = 0, floatArgIdx = 0;
-    for (auto arg : func_->arguments_) {
-        if (canAssignRegister(arg)) {
-            bool passInReg = false;
-            if (isFloat(arg->type_)) {
-                if (floatArgIdx++ < 8) passInReg = true;
-            } else { // int or pointer
-                if (intArgIdx++ < 8) passInReg = true;
-            }
-            if (passInReg) {
-                defPos[arg] = 0;
-                lastUse[arg] = 0;
+    // ---- 1. 构建 CFG 前驱关系 ----
+    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+    std::vector<BasicBlock*> blocksOrder;        // 保持原始遍历顺序（用于线性编号）
+    for (auto bb : func_->basic_blocks_) {
+        blocksOrder.push_back(bb);
+        auto term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                preds[succ].push_back(bb);
             }
         }
     }
 
-    for (auto bb : func_->basic_blocks_) {
+    // ---- 2. 为每条指令分配线性序号，同时收集 Def/Use 信息 ----
+    // 指令编号从 1 开始，0 保留给函数参数的定义
+    std::map<BasicBlock*, int> blockStart, blockEnd;   // 块内第一条和最后一条指令的编号
+    std::map<Instruction*, int> instIdx;                 // 指令编号
+
+    int idx = 0;
+    // 为参数分配 def 在 0 号位置
+    for (auto arg : func_->arguments_) {
+        if (canAssignRegister(arg)) {
+            defPos[arg] = 0;
+            lastUse[arg] = 0;        // 初始为 0，后续由使用处更新
+        }
+    }
+
+    for (auto bb : blocksOrder) {
+        if (bb->instr_list_.empty()) {
+            blockStart[bb] = blockEnd[bb] = idx;
+            continue;
+        }
+
+        blockStart[bb] = idx + 1;    // 第一条指令将要占据 idx+1
         for (auto inst : bb->instr_list_) {
-            ++pos;
+            ++idx;
+            instIdx[inst] = idx;
+
+            // 如果指令产生值且可分配寄存器，记录其定义位置
             if (canAssignRegister(inst)) {
-                defPos[inst] = pos;
-                lastUse[inst] = pos;
+                defPos[inst] = idx;
+                lastUse[inst] = idx;          
             }
+
+            // 遍历指令的操作数，更新 lastUse
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
-                Value *op = inst->get_operand(i);
-                if (canAssignRegister(op)) {
-                    if (!defPos.count(op)) defPos[op] = 0;
-                    lastUse[op] = std::max(lastUse[op], pos);
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val)) {
+                    lastUse[val] = std::max(lastUse[val], idx);
                 }
             }
         }
+        blockEnd[bb] = idx;
     }
 
+    // ---- 3. 数据流分析：计算每个块的 LiveIn / LiveOut ----
+    // 收集每个块的 Def / Use（忽略 phi 的特殊性，初略地包含phi的左值/右值）
+    struct BBInfo {
+        std::set<Value*> def, use;
+    };
+    std::map<BasicBlock*, BBInfo> bbInfo;
+
+    for (auto bb : blocksOrder) {
+        BBInfo info;
+        for (auto inst : bb->instr_list_) {
+            // 处理 phi 指令：左值加入 def，右值加入对应前驱的 use（稍后单独处理）
+            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+                if (canAssignRegister(phi)) info.def.insert(phi);
+                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    auto val = phi->get_operand(i);
+                    auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                    // 将 val 加入 pred 块的 use 集合（后续会反映到 pred 的 LiveOut）
+                    bbInfo[pred].use.insert(val);
+                }
+                continue;
+            }
+
+            // 非 phi 指令
+            if (canAssignRegister(inst)) info.def.insert(inst);
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val) && !info.def.count(val)) {
+                    info.use.insert(val);      // upward exposed use
+                }
+            }
+        }
+        bbInfo[bb] = info;
+    }
+
+    // 迭代计算 LiveIn / LiveOut
+    bool changed;
+    std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
+    do {
+        changed = false;
+        for (auto bb : blocksOrder) {
+            std::set<Value*> newIn;
+
+            // LiveOut = 所有后继 LiveIn 的并集
+            std::set<Value*> newOut;
+            auto term = bb->get_terminator();
+            if (term) {
+                for (unsigned i = 0; i < term->num_ops_; ++i) {
+                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                        for (auto v : liveIn[succ]) newOut.insert(v);
+                    }
+                }
+            }
+
+            // LiveIn = use ∪ (LiveOut - def)
+            auto &info = bbInfo[bb];
+            for (auto v : info.use) newIn.insert(v);
+            for (auto v : newOut) {
+                if (!info.def.count(v)) newIn.insert(v);
+            }
+
+            if (newIn != liveIn[bb] || newOut != liveOut[bb]) changed = true;
+            liveIn[bb] = std::move(newIn);
+            liveOut[bb] = std::move(newOut);
+        }
+    } while (changed);
+
+    // ---- 2b. Fix 1: collect phi-source extent information ----
+    // For each phi instruction in successor S with source value V from
+    // predecessor P, V must stay live until the END of P (the parallel
+    // phi copy happens at P's exit).  On a back-edge (P is ordered after
+    // S in linear order), lastUse[V] = instIdx[phi_in_S] < defPos[V],
+    // which causes the interval to be silently discarded.  We fix this by
+    // ensuring end >= blockEnd[P] for every such (V, P) pair.
+    std::map<Value*, int> phiUseEnd;   // V -> max blockEnd over all pred blocks
+    for (auto bb : blocksOrder) {
+        for (auto inst : bb->instr_list_) {
+            auto phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                auto val = phi->get_operand(i);
+                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                if (!canAssignRegister(val)) continue;
+                auto it = blockEnd.find(pred);
+                if (it == blockEnd.end()) continue;
+                auto &cur = phiUseEnd[val];
+                cur = std::max(cur, it->second);
+            }
+        }
+    }
+
+    // ---- 4. 构建精确的活跃区间 ----
+    // 对于每个可分配寄存器的值，其区间需要从 def 开始，到所有使用（包括因 LiveOut 而隐含的使用）结束
     for (auto &entry : defPos) {
         Value *v = entry.first;
-        intervals.push_back({v, entry.second, lastUse[v], isAllocatableFloatValue(v->type_)});
+        int start = entry.second;
+
+        // 从 lastUse 获取最大使用指令编号
+        int end = lastUse[v];
+
+        // 扩展：如果 v 在某块的 LiveOut 中，那么它的活跃期至少要覆盖到该块的结束位置
+        for (auto bb : blocksOrder) {
+            if (liveOut[bb].count(v)) {
+                end = std::max(end, blockEnd[bb]);
+            }
+        }
+
+        // Fix 1: extend for phi sources – ensures back-edge phi sources
+        // (where instIdx[phi] < defPos[val]) get end >= blockEnd[pred].
+        {
+            auto pit = phiUseEnd.find(v);
+            if (pit != phiUseEnd.end()) {
+                end = std::max(end, pit->second);
+            }
+        }
+
+        // 对于参数，如果有使用且 end 仍然为 0，则强制扩展到整个函数（保守处理）
+        if (start == 0 && end == 0 && dynamic_cast<Argument*>(v)) {
+            // 参数但未被纳入 lastUse，可能是死参数，可忽略
+            continue;
+        }
+
+        if (end >= start) {
+            intervals.push_back({v, start, end, isAllocatableFloatValue(v->type_)});
+        }
     }
 
+    // ---- 5. 区间排序 ----
     std::sort(intervals.begin(), intervals.end(), [](const Interval &a, const Interval &b) {
         if (a.start != b.start) return a.start < b.start;
         return a.end < b.end;
     });
 
+    // ---- 6. 原有的线性扫描分配（保持不变） ----
     auto scanKind = [&](bool floats) {
         std::vector<Interval> active;
         std::set<int> freeRegs;
@@ -907,6 +999,7 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
 
         for (const auto &iv : intervals) {
             if (iv.isFloat != floats) continue;
+            // 清理已结束的区间
             for (auto it = active.begin(); it != active.end();) {
                 if (it->end < iv.start) {
                     std::string reg = assignedRegs_[it->value];
@@ -1194,15 +1287,32 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
         int slot = pc.second.second;
 
         resetRegs();
+
+        // 常量整数
         if (auto ci = dynamic_cast<ConstantInt*>(val)) {
             std::string r = allocIntReg();
             emitIntConst(ci->value_, r);
             emitStoreReg(os_, r, slot);
-        } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+        }
+        // 常量浮点
+        else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
             std::string r = allocFloatReg();
             emitFloatConst(cf->value_, r);
             emitStoreReg(os_, r, slot);
-        } else if (hasSlot(val)) {
+        }
+        // 源值已分配寄存器
+        else if (hasAssignedReg(val)) {
+            if (isFloat(val->type_)) {
+                std::string reg = assignedReg(val);
+                emitStoreReg(os_, reg, slot);
+            } else {
+                // 整型或指针
+                std::string reg = assignedReg(val, isPtr(val->type_));
+                emitStoreReg(os_, reg, slot);
+            }
+        }
+        // 源值在栈槽中（原逻辑）
+        else if (hasSlot(val)) {
             if (isFloat(val->type_)) {
                 std::string r = allocFloatReg();
                 emitLoadReg(os_, r, getSlot(val));
@@ -1217,6 +1327,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
                 emitStoreReg(os_, r, slot);
             }
         }
+        
     }
 }
 

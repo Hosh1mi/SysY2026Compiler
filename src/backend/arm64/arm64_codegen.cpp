@@ -1,6 +1,8 @@
 #include "../../include/backend/arm64/arm64_codegen.hpp"
 #include "../../include/backend/arm64/arm64_context.hpp"
 #include "../../include/mid/ir/ir.hpp"
+#include <cstring>
+#include <functional>
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -139,29 +141,28 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
     } else if (auto ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {
         os_ << "\t.word " << ci->value_ << "\n";
     } else if (auto cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {
-        int bits;
         float val = cf->value_;
-        os_ << "\t.word 0x" << std::hex << *reinterpret_cast<int*>(&val) << std::dec << "\n";
+        // Fix 3: use memcpy instead of reinterpret_cast to avoid strict-aliasing UB
+        int bits;
+        std::memcpy(&bits, &val, sizeof(bits));
+        os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
     } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
-        for (auto elem : ca->const_array) {
+        // Fix 4: use a recursive lambda to handle arbitrary nesting depth
+        std::function<void(Constant*)> emitElem = [&](Constant *elem) {
             if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
                 os_ << "\t.word " << eci->value_ << "\n";
             } else if (auto ecf = dynamic_cast<ConstantFloat*>(elem)) {
                 float val = ecf->value_;
-                os_ << "\t.word 0x" << std::hex << *reinterpret_cast<int*>(&val) << std::dec << "\n";
+                int bits;
+                std::memcpy(&bits, &val, sizeof(bits));
+                os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
             } else if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
-                for (auto sub : eca->const_array) {
-                    if (auto sci = dynamic_cast<ConstantInt*>(sub)) {
-                        os_ << "\t.word " << sci->value_ << "\n";
-                    } else if (auto scf = dynamic_cast<ConstantFloat*>(sub)) {
-                        float val = scf->value_;
-                        os_ << "\t.word 0x" << std::hex << *reinterpret_cast<int*>(&val) << std::dec << "\n";
-                    }
-                }
+                for (auto sub : eca->const_array) emitElem(sub);
             } else if (dynamic_cast<ConstantZero*>(elem)) {
                 os_ << "\t.word 0\n";
             }
-        }
+        };
+        for (auto elem : ca->const_array) emitElem(elem);
     }
     os_ << "\n";
 }
