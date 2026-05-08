@@ -153,24 +153,17 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         // 转换控制流
         if (site.is_ret_form) {
             auto term = bb->get_terminator();
-            bb->remove_instr(term);
-            delete term;
-            bb->remove_instr(call);
-            delete call;
+            bb->delete_instr(term);
+            bb->delete_instr(call);
             builder->set_insert_point(bb);
             builder->create_br(header);
         } else {
-            auto term = bb->get_terminator();  // 旧 br
-            // 删除 call
-            bb->remove_instr(call);
-            delete call;
-            // 删除旧 br
+            auto term = bb->get_terminator();
+            bb->delete_instr(call);
             BasicBlock *ret_bb = site.ret_bb;
-            bb->remove_instr(term);
+            bb->delete_instr(term);
             bb->remove_succ_basic_block(ret_bb);
             ret_bb->remove_pre_basic_block(bb);
-            delete term;
-            // 新跳转到 header
             builder->set_insert_point(bb);
             builder->create_br(header);
         }
