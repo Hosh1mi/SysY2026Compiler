@@ -4,6 +4,8 @@
 
 TODO:
 
+主要优化目标: performance/huffman* performance/matmul*
+
 IR pass: (块内疑似并非顺序排列)
 
 #### A
@@ -98,14 +100,6 @@ flowchart TD
     C3 --> F
 ```
 
-Backend:
-- 寄存器分配：图着色算法
-- 多线程
-
-Misc:
-- `autotest.py`测试改为使用clang
-- `autotest.py`打印错误信息
-
 ### 项目结构
 
 ```text
@@ -143,9 +137,8 @@ gcc out.s ../lib/libsysy.a -o out
 
 对`performance/`采用批量测试，在`test/`下运行：
 ```bash
-python3 autotest.py
+./run_tests.sh
 ```
-过程中不会在控制台打印，不会实时打印，测试结束后会打印到`test/`下的result.txt，不打印具体错误信息，出现任何错误均为RE。
 
 ### `git commit`规范
 
