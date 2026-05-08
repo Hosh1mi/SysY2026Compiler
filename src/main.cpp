@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
 
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = true; 
+	int print_asm = false; 
 	std::string output = "-";
 	int optLevel = 0;
 
@@ -107,11 +107,11 @@ int main(int argc, char **argv) {
 	GenIR genIR;
 	root->accept(genIR);
 	std::unique_ptr<Module> m = genIR.getModule();
-
+    
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
-        pm.addPass(std::make_unique<DimArrayArgSimplify>());
+            
         pm.addPass(std::make_unique<Mem2Reg>());
 		pm.addPass(std::make_unique<TailRecursionEliminate>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());

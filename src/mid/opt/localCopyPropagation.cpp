@@ -25,7 +25,7 @@ bool LocalCopyPropagation::runOnFunction(Function *func) {
                 Value *op = inst->get_operand(i);
                 auto it = copies.find(op);
                 if (it != copies.end() && it->second != op) {
-                    op->remove_use(inst);
+                    op->remove_used(inst, i);
                     inst->set_operand(i, it->second);
                     changed = true;
                 }

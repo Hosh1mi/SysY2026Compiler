@@ -1,18 +1,25 @@
-#!/usr/bin/env python3
-"""
-性能测试脚本：对 performance/ 目录下的测试用例进行编译、运行和结果比对，
-并将结果写入同目录下的 result.txt。
-最后会附加一份总结，包含 AC / WA / TLE / RE 数量及总运行时间。
-"""
-
 import os
 import subprocess
 import sys
+import re
 from pathlib import Path
 
+def parse_total_time(time_str):
+    if not time_str:
+        return 0.0
+    try:
+        match = re.match(r'(\d+)H-(\d+)M-(\d+)S-(\d+)us', time_str)
+        if match:
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = int(match.group(3))
+            microseconds = int(match.group(4))
+            return hours * 3600 + minutes * 60 + seconds + microseconds / 1_000_000
+    except (ValueError, AttributeError):
+        pass
+    return 0.0
 
 def main():
-    # 切换到脚本所在目录，保证后续相对路径有效
     script_dir = Path(__file__).resolve().parent
     os.chdir(script_dir)
 
@@ -24,23 +31,20 @@ def main():
     results = []
     sy_files = sorted(perf_dir.glob("*.sy"))
 
-    # 统计计数器
     total_ac = 0
     total_wa = 0
     total_tle = 0
     total_re = 0
-    total_time = 0.0  # 总运行时间（秒）
+    total_time = 0.0  
 
     for sy_file in sy_files:
         stem = sy_file.stem
         out_file = perf_dir / f"{stem}.out"
         in_file = perf_dir / f"{stem}.in"
 
-        # 读取期望输出（.out 文件的全部行，最后一行是预期返回值）
         with open(out_file, "r", encoding="utf-8") as f:
             expected_lines = [line.rstrip("\n") for line in f]
 
-        # 1. 编译：../build/compiler <filename>.sy -> out.s
         try:
             with open("out.s", "w") as out_f:
                 comp = subprocess.run(
@@ -58,7 +62,6 @@ def main():
             total_re += 1
             continue
 
-        # 2. 链接：g++ out.s ../lib/libsysy.a -o out -O1
         link = subprocess.run(
             ["g++", "out.s", "../lib/libsysy.a", "-o", "out", "-O1"],
             capture_output=True,
@@ -69,7 +72,6 @@ def main():
             total_re += 1
             continue
 
-        # 3. 运行，如有 .in 则提供标准输入
         stdin_content = None
         if in_file.exists():
             with open(in_file, "r", encoding="utf-8") as f:
@@ -86,42 +88,37 @@ def main():
         except subprocess.TimeoutExpired:
             results.append(f"{stem} : TLE")
             total_tle += 1
-            total_time += 30.0  # 超时按 30 秒计算
+            total_time += 60.0
             continue
         except Exception:
             results.append(f"{stem} : RE")
             total_re += 1
             continue
 
-        # 崩溃（信号终止）视为 RE
         if exec_proc.returncode < 0:
             results.append(f"{stem} : RE")
             total_re += 1
             continue
 
-        # 构建实际输出：标准输出的各行 + 最后一行是程序返回值（转为字符串）
         actual_stdout_lines = exec_proc.stdout.splitlines()
         actual_retcode = str(exec_proc.returncode)
         actual_combined = actual_stdout_lines + [actual_retcode]
 
-        # 提取总时间 TOTAL: ...（来自标准错误输出）
         total_time_str = None
+        # ---- 修改开始 ----
         for line in exec_proc.stderr.splitlines():
-            if line.startswith("TOTAL:"):
-                total_time_str = line[len("TOTAL:"):].strip()
+            line_stripped = line.strip()
+            # 不区分大小写匹配 "total" 开头的行，例如 "TOTAL:" 或 "Total time:"
+            if line_stripped.lower().startswith("total"):
+                if ":" in line_stripped:
+                    total_time_str = line_stripped.split(":", 1)[1].strip()
                 break
+        # ---- 修改结束 ----
 
-        # 将时间转换为浮点数，若不可用则按 0 处理
-        case_time = 0.0
-        if total_time_str:
-            try:
-                case_time = float(total_time_str)
-            except ValueError:
-                case_time = 0.0
+        case_time = parse_total_time(total_time_str)
 
-        time_str = f"Total time : {total_time_str}" if total_time_str else "Total time : N/A"
+        time_str = f"Total time: {total_time_str}" if total_time_str else "Total time: N/A"
 
-        # 4. 结果判定
         if actual_combined == expected_lines:
             results.append(f"{stem} : AC\n{time_str}")
             total_ac += 1
@@ -145,7 +142,6 @@ def main():
             total_wa += 1
             total_time += case_time
 
-    # 构建总结信息
     total_tests = total_ac + total_wa + total_tle + total_re
     summary = [
         "--- Summary ---",
@@ -158,10 +154,8 @@ def main():
     ]
     results.extend(summary)
 
-    # 写入最终结果
     with open("result.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
-
 
 if __name__ == "__main__":
     main()

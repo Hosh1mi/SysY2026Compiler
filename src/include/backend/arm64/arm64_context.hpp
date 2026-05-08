@@ -23,6 +23,12 @@ private:
     int getSlot(Value *v);
     bool hasSlot(Value *v) const;
 
+    // linear-scan register allocation for SSA values
+    void allocateLinearScanRegisters();
+    bool canAssignRegister(Value *v) const;
+    bool hasAssignedReg(Value *v) const;
+    std::string assignedReg(Value *v, bool asAddress = false) const;
+
     // scratch register pool
     std::string allocIntReg();
     std::string allocFloatReg();
@@ -52,6 +58,10 @@ private:
     void preparePhi();
     void emitPhiCopies(BasicBlock *bb);
 
+    void getLiveRegsAtCall(Instruction *call,
+        std::vector<int> &liveIntRegs,
+        std::vector<int> &liveFloatRegs);
+
     const char *icmpCond(ICmpInst::ICmpOp op);
     const char *fcmpCond(FCmpInst::FCmpOp op);
 
@@ -64,6 +74,8 @@ private:
 
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
+
+    std::map<Value*, std::string> assignedRegs_; // linear-scan Value* → physical reg name
 
     // (predecessor_BB, result_slot_offset) → source Value*
     std::vector<std::pair<BasicBlock*, std::pair<Value*, int>>> phiCopies_;

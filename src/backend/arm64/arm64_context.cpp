@@ -1,5 +1,6 @@
 #include "../../include/backend/arm64/arm64_context.hpp"
 #include "../../include/mid/ir/ir.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -25,6 +26,32 @@ static bool isVoid(Type *ty)   { return ty->tid_ == Type::VoidTyID; }
 static bool isLabel(Type *ty)  { return ty->tid_ == Type::LabelTyID; }
 
 static int align16(int n) { return (n + 15) & ~15; }
+
+static bool isAllocatableIntValue(Type *ty) {
+    return ty->tid_ == Type::IntegerTyID;
+}
+
+static bool isAllocatableFloatValue(Type *ty) {
+    return ty->tid_ == Type::FloatTyID;
+}
+
+static std::vector<int> collectAssignedIntRegs(const std::map<Value*, std::string> &assignedRegs) {
+    std::set<int> regs;
+    for (const auto &entry : assignedRegs) {
+        const std::string &reg = entry.second;
+        if (!reg.empty() && reg[0] == 'w') regs.insert(std::stoi(reg.substr(1)));
+    }
+    return std::vector<int>(regs.begin(), regs.end());
+}
+
+static std::vector<int> collectAssignedFloatRegs(const std::map<Value*, std::string> &assignedRegs) {
+    std::set<int> regs;
+    for (const auto &entry : assignedRegs) {
+        const std::string &reg = entry.second;
+        if (!reg.empty() && reg[0] == 's') regs.insert(std::stoi(reg.substr(1)));
+    }
+    return std::vector<int>(regs.begin(), regs.end());
+}
 
 // emit str/ldr with potentially large negative offset
 static void emitStoreReg(std::ostream &os, const std::string &reg, int off) {
@@ -77,6 +104,7 @@ void Arm64FuncContext::generate() {
     }
 
     preparePhi();
+    allocateLinearScanRegisters();
 
     emitPrologue();
     for (auto bb : func_->basic_blocks_) {
@@ -90,9 +118,9 @@ void Arm64FuncContext::emitPrologue() {
     os_ << "\t.p2align 2\n";
     os_ << func_->name_ << ":\n";
 
-    // allocate slots for arguments
+    // allocate slots for arguments that were not promoted to registers
     for (auto arg : func_->arguments_) {
-        getSlot(arg);
+        if (!hasAssignedReg(arg)) getSlot(arg);
     }
 
     // pre-scan all instructions to allocate slots
@@ -102,13 +130,18 @@ void Arm64FuncContext::emitPrologue() {
                 getSlot(inst);
             } else if (inst->type_->tid_ != Type::VoidTyID &&
                        !dynamic_cast<Constant*>(inst) &&
-                       !inst->is_store() && !inst->is_br() && !inst->is_ret()) {
+                       !inst->is_store() && !inst->is_br() && !inst->is_ret() &&
+                       !hasAssignedReg(inst)) {
                 getSlot(inst);
             }
         }
     }
 
-    int localSize = align16(frameSize_);
+    auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
+    auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
+    int localSize = align16(frameSize_ + savedRegBytes);
+    int saveOffset = -frameSize_;
 
     // stp supports only -512..504 range; use minimal stp + sub for large frames
     os_ << "\tstp x29, x30, [sp, #-16]!\n";
@@ -123,17 +156,31 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
+    for (int reg : savedIntRegs) {
+        saveOffset -= 8;
+        emitStoreReg(os_, "x" + std::to_string(reg), saveOffset);
+    }
+    for (int reg : savedFloatRegs) {
+        saveOffset -= 8;
+        emitStoreReg(os_, "d" + std::to_string(reg), saveOffset);
+    }
+
    // ----- load arguments (including register arguments and stack arguments) -----
    int intRegIdx = 0;     // x0-x7 / w0-w7
    int floatRegIdx = 0;   // s0-s7
    int stackOffset = 0;   // stack argument offset (relative to x29+16)
 
    for (auto arg : func_->arguments_) {
-       int slot = getSlot(arg);
        if (isFloat(arg->type_)) {
            if (floatRegIdx < 8) {
-               // from float register
-               emitStoreReg(os_, "s" + std::to_string(floatRegIdx++), slot);
+               std::string src = "s" + std::to_string(floatRegIdx++);
+               if (hasAssignedReg(arg)) {
+                   std::string dst = assignedReg(arg);
+                   if (dst != src) os_ << "\tfmov " << dst << ", " << src << "\n";
+               } else {
+                   int slot = getSlot(arg);
+                   emitStoreReg(os_, src, slot);
+               }
            } else {
                // from stack argument: the n-th stack argument is at [x29, #16 + stackOffset]
                int off = 16 + stackOffset;
@@ -143,6 +190,7 @@ void Arm64FuncContext::emitPrologue() {
                    os_ << "\tmovz x16, #" << off << "\n";
                    os_ << "\tldr s16, [x29, x16]\n";
                }
+               int slot = getSlot(arg);
                emitStoreReg(os_, "s16", slot);
                stackOffset += 8;
            }
@@ -153,7 +201,13 @@ void Arm64FuncContext::emitPrologue() {
                              arg->type_->tid_ == Type::ArrayTyID);
                std::string reg = isPtr ? "x" : "w";
                reg += std::to_string(intRegIdx++);
-               emitStoreReg(os_, reg, slot);
+               if (hasAssignedReg(arg)) {
+                   std::string dst = assignedReg(arg, isPtr);
+                   if (dst != reg) os_ << "\tmov " << dst << ", " << reg << "\n";
+               } else {
+                   int slot = getSlot(arg);
+                   emitStoreReg(os_, reg, slot);
+               }
            } else {
                int off = 16 + stackOffset;
                if (off <= 4095) {
@@ -162,6 +216,7 @@ void Arm64FuncContext::emitPrologue() {
                    os_ << "\tmovz x16, #" << off << "\n";
                    os_ << "\tldr x16, [x29, x16]\n";
                }
+               int slot = getSlot(arg);
                emitStoreReg(os_, "x16", slot);
                stackOffset += 8;
            }
@@ -173,7 +228,21 @@ void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
     os_ << ".L" << func_->name_ << "_epilogue:\n";
 
-    int localSize = align16(frameSize_);
+    auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
+    auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
+    int localSize = align16(frameSize_ + savedRegBytes);
+    int restoreOffset = -frameSize_;
+
+    for (int reg : savedIntRegs) {
+        restoreOffset -= 8;
+        emitLoadReg(os_, "x" + std::to_string(reg), restoreOffset);
+    }
+    for (int reg : savedFloatRegs) {
+        restoreOffset -= 8;
+        emitLoadReg(os_, "d" + std::to_string(reg), restoreOffset);
+    }
+
     if (localSize > 0) {
         if (localSize <= 4095) {
             os_ << "\tadd sp, sp, #" << localSize << "\n";
@@ -640,7 +709,37 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
 
+        std::vector<int> liveCallerIntRegs;
+        std::vector<int> liveCallerFloatRegs;
+        for (const auto &entry : assignedRegs_) {
+            if (entry.second.empty()) continue;
+            if (entry.second[0] == 'w') liveCallerIntRegs.push_back(std::stoi(entry.second.substr(1)));
+            if (entry.second[0] == 's') liveCallerFloatRegs.push_back(std::stoi(entry.second.substr(1)));
+        }
+        int callerSaveBytes = align16(static_cast<int>(liveCallerIntRegs.size() + liveCallerFloatRegs.size()) * 8);
+        if (callerSaveBytes > 0) os_ << "\tsub sp, sp, #" << callerSaveBytes << "\n";
+        int callerSaveOff = 0;
+        for (int reg : liveCallerIntRegs) {
+            os_ << "\tstr x" << reg << ", [sp, #" << callerSaveOff << "]\n";
+            callerSaveOff += 8;
+        }
+        for (int reg : liveCallerFloatRegs) {
+            os_ << "\tstr d" << reg << ", [sp, #" << callerSaveOff << "]\n";
+            callerSaveOff += 8;
+        }
+
         os_ << "\tbl " << callee->name_ << "\n";
+
+        callerSaveOff = 0;
+        for (int reg : liveCallerIntRegs) {
+            os_ << "\tldr x" << reg << ", [sp, #" << callerSaveOff << "]\n";
+            callerSaveOff += 8;
+        }
+        for (int reg : liveCallerFloatRegs) {
+            os_ << "\tldr d" << reg << ", [sp, #" << callerSaveOff << "]\n";
+            callerSaveOff += 8;
+        }
+        if (callerSaveBytes > 0) os_ << "\tadd sp, sp, #" << callerSaveBytes << "\n";
 
         // 恢复栈指针
         if (stackBytes > 0) {
@@ -683,6 +782,107 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         os_ << "\t// unsupported op_id: " << (int)inst->op_id_ << "\n";
         break;
     }
+}
+
+// ---- linear-scan register allocation ----
+
+bool Arm64FuncContext::canAssignRegister(Value *v) const {
+    if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
+    if (auto inst = dynamic_cast<Instruction*>(v)) {
+        if (inst->is_void() || inst->is_alloca() || inst->is_load() || inst->is_phi() ||
+            inst->op_id_ == Instruction::Call || inst->op_id_ == Instruction::GetElementPtr ||
+            inst->op_id_ == Instruction::BitCast) {
+            return false;
+        }
+    }
+    return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_);
+}
+
+void Arm64FuncContext::allocateLinearScanRegisters() {
+    struct Interval { Value *value; int start; int end; bool isFloat; };
+    std::map<Value*, int> defPos;
+    std::map<Value*, int> lastUse;
+    std::vector<Interval> intervals;
+    int pos = 0;
+
+    for (auto arg : func_->arguments_) {
+        if (canAssignRegister(arg)) {
+            defPos[arg] = 0;
+            lastUse[arg] = 0;
+        }
+    }
+
+    for (auto bb : func_->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            ++pos;
+            if (canAssignRegister(inst)) {
+                defPos[inst] = pos;
+                lastUse[inst] = pos;
+            }
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                Value *op = inst->get_operand(i);
+                if (canAssignRegister(op)) {
+                    if (!defPos.count(op)) defPos[op] = 0;
+                    lastUse[op] = std::max(lastUse[op], pos);
+                }
+            }
+        }
+    }
+
+    for (auto &entry : defPos) {
+        Value *v = entry.first;
+        intervals.push_back({v, entry.second, lastUse[v], isAllocatableFloatValue(v->type_)});
+    }
+
+    std::sort(intervals.begin(), intervals.end(), [](const Interval &a, const Interval &b) {
+        if (a.start != b.start) return a.start < b.start;
+        return a.end < b.end;
+    });
+
+    auto scanKind = [&](bool floats) {
+        std::vector<Interval> active;
+        std::set<int> freeRegs;
+        int first = floats ? 8 : 19;
+        int last = floats ? 15 : 28;
+        for (int r = first; r <= last; ++r) freeRegs.insert(r);
+
+        for (const auto &iv : intervals) {
+            if (iv.isFloat != floats) continue;
+            for (auto it = active.begin(); it != active.end();) {
+                if (it->end < iv.start) {
+                    std::string reg = assignedRegs_[it->value];
+                    freeRegs.insert(std::stoi(reg.substr(1)));
+                    it = active.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (freeRegs.empty()) continue;
+            int regNo = *freeRegs.begin();
+            freeRegs.erase(freeRegs.begin());
+            assignedRegs_[iv.value] = std::string(floats ? "s" : "w") + std::to_string(regNo);
+            active.push_back(iv);
+            std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
+                return a.end < b.end;
+            });
+        }
+    };
+
+    scanKind(false);
+    scanKind(true);
+}
+
+bool Arm64FuncContext::hasAssignedReg(Value *v) const {
+    return assignedRegs_.count(v) > 0;
+}
+
+std::string Arm64FuncContext::assignedReg(Value *v, bool asAddress) const {
+    auto it = assignedRegs_.find(v);
+    if (it == assignedRegs_.end()) return "";
+    if (asAddress && !it->second.empty() && it->second[0] == 'w') {
+        return "x" + it->second.substr(1);
+    }
+    return it->second;
 }
 
 // ---- slot management ----
@@ -769,6 +969,7 @@ std::string Arm64FuncContext::loadInt(Value *v) {
         emitIntConst(ci->value_, r);
         return r;
     }
+    if (hasAssignedReg(v)) return assignedReg(v);
     std::string r = allocIntReg();
     int off = getSlot(v);
     emitLoadReg(os_, r, off);
@@ -781,6 +982,7 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
         emitFloatConst(cf->value_, r);
         return r;
     }
+    if (hasAssignedReg(v)) return assignedReg(v);
     std::string r = allocFloatReg();
     int off = getSlot(v);
     emitLoadReg(os_, r, off);
@@ -798,6 +1000,7 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
         os_ << "\tmov " << r << ", #" << ci->value_ << "\n";
         return r;
     }
+    if (hasAssignedReg(v)) return assignedReg(v, true);
     // AllocaInst: the "value" is the address of its stack space
     if (dynamic_cast<AllocaInst*>(v)) {
         std::string r = allocAddrReg();
@@ -831,16 +1034,31 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
 // ---- store from register to slot ----
 
 void Arm64FuncContext::storeInt(Value *v, const std::string &reg) {
+    if (hasAssignedReg(v)) {
+        std::string target = assignedReg(v);
+        if (target != reg) os_ << "\tmov " << target << ", " << reg << "\n";
+        return;
+    }
     int off = getSlot(v);
     emitStoreReg(os_, reg, off);
 }
 
 void Arm64FuncContext::storeFloat(Value *v, const std::string &reg) {
+    if (hasAssignedReg(v)) {
+        std::string target = assignedReg(v);
+        if (target != reg) os_ << "\tfmov " << target << ", " << reg << "\n";
+        return;
+    }
     int off = getSlot(v);
     emitStoreReg(os_, reg, off);
 }
 
 void Arm64FuncContext::storeAddr(Value *v, const std::string &reg) {
+    if (hasAssignedReg(v)) {
+        std::string target = assignedReg(v, true);
+        if (target != reg) os_ << "\tmov " << target << ", " << reg << "\n";
+        return;
+    }
     int off = getSlot(v);
     emitStoreReg(os_, reg, off);
 }
