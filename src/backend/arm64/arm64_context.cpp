@@ -1281,53 +1281,53 @@ void Arm64FuncContext::preparePhi() {
 }
 
 void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
-    for (auto &pc : phiCopies_) {
+    struct Copy { Value *src; int dstSlot; };
+    std::vector<Copy> copies;
+    for(const auto &pc : phiCopies_){
         if (pc.first != bb) continue;
-        auto val = pc.second.first;
-        int slot = pc.second.second;
+        copies.push_back({pc.second.first, pc.second.second});
+    }
+    if (copies.empty()) return;
 
-        resetRegs();
+    resetRegs();
 
-        // 常量整数
+    // Phase 1: read all sources into temporary registers
+    struct Temp { std::string reg; int dstSlot; };
+    std::vector<Temp> temps;
+    for (const auto &cp : copies) {
+        Value *val = cp.src;
+        std::string tmpReg;
         if (auto ci = dynamic_cast<ConstantInt*>(val)) {
-            std::string r = allocIntReg();
-            emitIntConst(ci->value_, r);
-            emitStoreReg(os_, r, slot);
-        }
-        // 常量浮点
-        else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
-            std::string r = allocFloatReg();
-            emitFloatConst(cf->value_, r);
-            emitStoreReg(os_, r, slot);
-        }
-        // 源值已分配寄存器
-        else if (hasAssignedReg(val)) {
+            tmpReg = allocIntReg();
+            emitIntConst(ci->value_, tmpReg);
+        } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+            tmpReg = allocFloatReg();
+            emitFloatConst(cf->value_, tmpReg);
+        } else if (hasAssignedReg(val)) {
+            // Already in a persistent register – can use it directly
+            if (isFloat(val->type_))
+                tmpReg = assignedReg(val);
+            else
+                tmpReg = assignedReg(val, isPtr(val->type_));
+        } else {
+            // In memory slot
             if (isFloat(val->type_)) {
-                std::string reg = assignedReg(val);
-                emitStoreReg(os_, reg, slot);
-            } else {
-                // 整型或指针
-                std::string reg = assignedReg(val, isPtr(val->type_));
-                emitStoreReg(os_, reg, slot);
-            }
-        }
-        // 源值在栈槽中（原逻辑）
-        else if (hasSlot(val)) {
-            if (isFloat(val->type_)) {
-                std::string r = allocFloatReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
+                tmpReg = allocFloatReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
             } else if (isPtr(val->type_)) {
-                std::string r = allocAddrReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
+                tmpReg = allocAddrReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
             } else {
-                std::string r = allocIntReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
+                tmpReg = allocIntReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
             }
         }
-        
+        temps.push_back({tmpReg, cp.dstSlot});
+    }
+
+    // Phase 2: write all temporary registers to their destination slots
+    for (const auto &t : temps) {
+        emitStoreReg(os_, t.reg, t.dstSlot);
     }
 }
 
