@@ -2,6 +2,7 @@
 .git
 docs/
 build/
+prompt/
 *.o
 *.obj
 *.exe
@@ -23,3 +24,4 @@ CLAUDE.md
 test/result.txt
 test/results/
 *.txt
+remind.txt

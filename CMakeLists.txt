@@ -47,6 +47,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/localCopyPropagation.cpp
     ${SRC_DIR}/mid/opt/inlineExpand.cpp
     ${SRC_DIR}/mid/opt/loopInvariantCodeMotion.cpp
+    ${SRC_DIR}/mid/opt/indVarStrengthReduce.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
