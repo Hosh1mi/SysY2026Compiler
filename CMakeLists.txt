@@ -46,6 +46,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/algebraSimplify.cpp
     ${SRC_DIR}/mid/opt/localCopyPropagation.cpp
     ${SRC_DIR}/mid/opt/inlineExpand.cpp
+    ${SRC_DIR}/mid/opt/loopInvariantCodeMotion.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
