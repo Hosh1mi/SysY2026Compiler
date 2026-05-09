@@ -788,7 +788,7 @@ bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (auto inst = dynamic_cast<Instruction*>(v)) {
         if (inst->is_void() || inst->is_alloca() || inst->is_load() || inst->is_phi() ||
             inst->op_id_ == Instruction::Call || inst->op_id_ == Instruction::GetElementPtr ||
-            inst->op_id_ == Instruction::BitCast) {
+            inst->op_id_ == Instruction::BitCast || inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) {
             return false;
         }
     }
