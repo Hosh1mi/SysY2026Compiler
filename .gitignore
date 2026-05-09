@@ -21,4 +21,5 @@ CLAUDE.md
 *.Identifier
 .claude/
 test/result.txt
+test/results/
 *.txt
