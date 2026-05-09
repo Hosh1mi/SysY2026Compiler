@@ -2,6 +2,7 @@
 .git
 docs/
 build/
+prompt/
 *.o
 *.obj
 *.exe

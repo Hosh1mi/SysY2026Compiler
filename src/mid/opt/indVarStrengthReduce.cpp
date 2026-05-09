@@ -184,7 +184,7 @@ static Value *getEntryValue(Value *val, const std::set<BasicBlock *> &loopBlocks
     if (!inst || !loopBlocks.count(inst->parent_)) return val;
 
     auto *phi = dynamic_cast<PhiInst *>(val);
-    if (!phi) return val;
+    if (!phi) return nullptr;
     if (!visited.insert(val).second) return val;
 
     for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -356,6 +356,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
                 bool ok = true;
                 for (unsigned i = ivOpIdx + 1; i < gep->num_ops_; i++) {
+                    if (i == ivOpIdx) continue; 
                     if (!isLoopInvariant(gep->get_operand(i), loop.blocks)) {
                         ok = false;
                         break;
@@ -373,6 +374,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             if (!gep->parent_) continue;
 
             std::vector<Value *> initIndices;
+            bool failed = false;
             for (unsigned i = 1; i < gep->num_ops_; i++) {
                 Value *idx = gep->get_operand(i);
                 if (i == c.ivOpIdx) {
@@ -380,10 +382,15 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 } else {
                     // 被保留的索引必须在 preheader 中可用：若是 phi 则取其 preheader 入边值
                     auto entryVis = std::set<Value *>{};
-                    initIndices.push_back(getEntryValue(idx, loop.blocks, entryVis));
+                    Value *entryVal = getEntryValue(idx, loop.blocks, entryVis);
+                    if(!entryVal) {
+                        failed = true;
+                        break;
+                    }
+                    initIndices.push_back(entryVal);
                 }
             }
-
+            if (failed) continue;
             // 在 preheader 中创建初始 GEP（先构造后移入，保证位置在 br 之前）
             builder->set_insert_point(preheader);
             auto *initGEP = builder->create_gep(gep->get_operand(0), initIndices);
