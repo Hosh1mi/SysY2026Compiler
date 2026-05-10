@@ -1077,33 +1077,19 @@ std::string Arm64FuncContext::allocIntReg() {
 }
 
 std::string Arm64FuncContext::allocFloatReg() {
-    // 收集已被线性扫描持久分配的浮点寄存器号
-    std::set<int> reserved;
-    for (const auto &entry : assignedRegs_) {
-        const std::string &r = entry.second;
-        if (!r.empty() && r[0] == 's') {
-            reserved.insert(std::stoi(r.substr(1)));
-        }
-    }
-
-    // 优先在 s8~s15 中查找未被临时占用且未被持久占用的寄存器
-    for (int r = 8; r <= 15; r++) {
-        if (!usedFloatRegs_.count(r) && !reserved.count(r)) {
+    // 临时浮点寄存器池与持久寄存器池完全分离
+    // 持久池：s8 ~ s15（由线性扫描分配，保存在 assigndRegs_ 中）
+    // 临时池：s16 ~ s31（仅在本指令内使用，由 usedFloatRegs_ 管理）
+    for (int r = 16; r <= 31; ++r) {
+        if (!usedFloatRegs_.count(r)) {
             usedFloatRegs_.insert(r);
             return "s" + std::to_string(r);
         }
     }
-
-    // 若 s8~s15 不可用，回退到 s16~s31
-    for (int r = 16; r <= 31; r++) {
-        if (!usedFloatRegs_.count(r) && !reserved.count(r)) {
-            usedFloatRegs_.insert(r);
-            return "s" + std::to_string(r);
-        }
-    }
-
-    usedFloatRegs_.insert(8);
-    return "s8";
+    // 极端情况：16 个临时寄存器全部被占用，回退到 s16
+    // （实际在单条指令内几乎不可能发生）
+    usedFloatRegs_.insert(16);
+    return "s16";
 }
 
 std::string Arm64FuncContext::allocAddrReg() {
@@ -1281,26 +1267,38 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
     for (const auto &cp : copies) {
         Value *val = cp.src;
         std::string tmpReg;
-        if (auto ci = dynamic_cast<ConstantInt*>(val)) {
-            tmpReg = allocIntReg();
-            emitIntConst(ci->value_, tmpReg);
-        } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
-            tmpReg = allocFloatReg();
-            emitFloatConst(cf->value_, tmpReg);
-        } else if (hasAssignedReg(val)) {
-            // Already in a persistent register – can use it directly
-            if (isFloat(val->type_))
-                tmpReg = assignedReg(val);
-            else
-                tmpReg = assignedReg(val, isPtr(val->type_));
-        } else {
-            // In memory slot
-            if (isFloat(val->type_)) {
+        if (isFloat(val->type_)) {
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val);
+                tmpReg = allocFloatReg();
+                if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+                tmpReg = allocFloatReg();
+                emitFloatConst(cf->value_, tmpReg);
+            } else {
                 tmpReg = allocFloatReg();
                 emitLoadReg(os_, tmpReg, getSlot(val));
-            } else if (isPtr(val->type_)) {
+            }
+        } else if (isPtr(val->type_)) {
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val, true);
+                tmpReg = allocAddrReg();
+                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
+                tmpReg = allocAddrReg();
+                emitGlobalAddr(gv, tmpReg);
+            } else {
                 tmpReg = allocAddrReg();
                 emitLoadReg(os_, tmpReg, getSlot(val));
+            }
+        } else { // int
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val);
+                tmpReg = allocIntReg();
+                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                tmpReg = allocIntReg();
+                emitIntConst(ci->value_, tmpReg);
             } else {
                 tmpReg = allocIntReg();
                 emitLoadReg(os_, tmpReg, getSlot(val));
@@ -1333,9 +1331,9 @@ const char *Arm64FuncContext::fcmpCond(FCmpInst::FCmpOp op) {
     switch (op) {
     case FCmpInst::FCMP_UEQ: return "eq";
     case FCmpInst::FCMP_UNE: return "ne";
-    case FCmpInst::FCMP_UGT: return "gt";
-    case FCmpInst::FCMP_UGE: return "ge";
-    case FCmpInst::FCMP_ULT: return "mi";
+    case FCmpInst::FCMP_UGT: return "hi";
+    case FCmpInst::FCMP_UGE: return "hs";
+    case FCmpInst::FCMP_ULT: return "lo";
     case FCmpInst::FCMP_ULE: return "ls";
     default: return "eq";
     }
