@@ -175,7 +175,7 @@ bool AlgebraSimplify::tryAlgebraicSimplification(Instruction *inst) {
 }
 
 bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
-    if (inst->op_id_ != Instruction::Mul) return false;
+    if (inst->op_id_ != Instruction::Mul && inst->op_id_ != Instruction::UDiv && inst->op_id_ != Instruction::SDiv) return false;
     if (inst->type_->tid_ != Type::IntegerTyID) return false;
 
     Value *v1 = inst->get_operand(0);
@@ -189,6 +189,14 @@ bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
     else if (c2) { constant = c2->value_; var = v1; }
     else return false;
 
+    // For unsigned division, only constant divisor (v2) makes sense
+    if (inst->op_id_ == Instruction::UDiv && !c2)
+        return false;
+
+    // 除法只能优化除数为常数的情况 (右操作数)
+    if ((inst->op_id_ == Instruction::UDiv || inst->op_id_ == Instruction::SDiv) && !c2)
+        return false;
+
     if (constant <= 1 || constant > 16) return false;
 
     BasicBlock *bb = inst->parent_;
@@ -196,13 +204,37 @@ bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
 
     if (isPowerOfTwo(constant)) {
         int shift = log2Int(constant);
-        auto *shl = new BinaryInst(ty, Instruction::Shl, var, new ConstantInt(ty, shift), bb, true);
-        bb->add_instruction_before_inst(shl, inst);
-        inst->replace_all_use_with(shl);
+        if (inst->op_id_ == Instruction::Mul) {
+            auto *shl = new BinaryInst(ty, Instruction::Shl, var, new ConstantInt(ty, shift), bb, true);
+            bb->add_instruction_before_inst(shl, inst);
+            inst->replace_all_use_with(shl);
+        } else if (inst->op_id_ == Instruction::UDiv) {
+            auto *lshr = new BinaryInst(ty, Instruction::LShr, var, new ConstantInt(ty, shift), bb, true);
+            bb->add_instruction_before_inst(lshr, inst);
+            inst->replace_all_use_with(lshr);
+        } else { // SDiv
+            // 有符号除法向零舍入修正: (x + (x<0 ? d-1 : 0)) >> k
+            auto *sign = new BinaryInst(ty, Instruction::AShr, var, new ConstantInt(ty, 31), bb, true);
+            bb->add_instruction_before_inst(sign, inst);
+            auto *mask = new BinaryInst(ty, Instruction::LShr, sign,
+                                        new ConstantInt(ty, 32 - shift), bb, true);
+            bb->add_instruction_before_inst(mask, inst);
+            auto *biased = new BinaryInst(ty, Instruction::Add, var, mask, bb, true);
+            bb->add_instruction_before_inst(biased, inst);
+            auto *result = new BinaryInst(ty, Instruction::AShr, biased,
+                                          new ConstantInt(ty, shift), bb, true);
+            bb->add_instruction_before_inst(result, inst);
+            inst->replace_all_use_with(result);
+        }
         bb->delete_instr(inst);
         return true;
     }
 
+    // 对于非2的幂的常数，除法无法直接优化
+    if (inst->op_id_ == Instruction::UDiv || inst->op_id_ == Instruction::SDiv)
+        return false;
+
+    // ---- 乘法非幂分解 ----
     std::vector<int> shifts;
     for (int i = 0; i < 32; ++i) {
         if (constant & (1 << i)) shifts.push_back(i);
