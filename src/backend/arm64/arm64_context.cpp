@@ -788,7 +788,7 @@ bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (auto inst = dynamic_cast<Instruction*>(v)) {
         if (inst->is_void() || inst->is_alloca() || inst->is_load() || inst->is_phi() ||
             inst->op_id_ == Instruction::Call || inst->op_id_ == Instruction::GetElementPtr ||
-            inst->op_id_ == Instruction::BitCast || inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) {
+            inst->op_id_ == Instruction::BitCast ) {
             return false;
         }
     }
@@ -858,7 +858,22 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
     }
 
     // ---- 3. 数据流分析：计算每个块的 LiveIn / LiveOut ----
-    // 收集每个块的 Def / Use（忽略 phi 的特殊性，初略地包含phi的左值/右值）
+    // 收集 PHI 出口活跃信息
+     std::map<BasicBlock*, std::set<Value*>> phiOut;
+     for (auto bb : blocksOrder) {
+         for (auto inst : bb->instr_list_) {
+             auto phi = dynamic_cast<PhiInst*>(inst);
+             if (!phi) continue;
+             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                 auto val = phi->get_operand(i);
+                 auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                 if (canAssignRegister(val)) {
+                     phiOut[pred].insert(val);
+                 }
+             }
+         }
+     }
+
     struct BBInfo {
         std::set<Value*> def, use;
     };
@@ -909,7 +924,10 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                     }
                 }
             }
-
+            for (auto v : phiOut[bb]) {
+                newOut.insert(v);
+            }
+            
             // LiveIn = use ∪ (LiveOut - def)
             auto &info = bbInfo[bb];
             for (auto v : info.use) newIn.insert(v);
@@ -922,30 +940,6 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
             liveOut[bb] = std::move(newOut);
         }
     } while (changed);
-
-    // ---- 2b. Fix 1: collect phi-source extent information ----
-    // For each phi instruction in successor S with source value V from
-    // predecessor P, V must stay live until the END of P (the parallel
-    // phi copy happens at P's exit).  On a back-edge (P is ordered after
-    // S in linear order), lastUse[V] = instIdx[phi_in_S] < defPos[V],
-    // which causes the interval to be silently discarded.  We fix this by
-    // ensuring end >= blockEnd[P] for every such (V, P) pair.
-    std::map<Value*, int> phiUseEnd;   // V -> max blockEnd over all pred blocks
-    for (auto bb : blocksOrder) {
-        for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
-            if (!phi) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto val = phi->get_operand(i);
-                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (!canAssignRegister(val)) continue;
-                auto it = blockEnd.find(pred);
-                if (it == blockEnd.end()) continue;
-                auto &cur = phiUseEnd[val];
-                cur = std::max(cur, it->second);
-            }
-        }
-    }
 
     // ---- 4. 构建精确的活跃区间 ----
     // 对于每个可分配寄存器的值，其区间需要从 def 开始，到所有使用（包括因 LiveOut 而隐含的使用）结束
@@ -960,15 +954,6 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         for (auto bb : blocksOrder) {
             if (liveOut[bb].count(v)) {
                 end = std::max(end, blockEnd[bb]);
-            }
-        }
-
-        // Fix 1: extend for phi sources – ensures back-edge phi sources
-        // (where instIdx[phi] < defPos[val]) get end >= blockEnd[pred].
-        {
-            auto pit = phiUseEnd.find(v);
-            if (pit != phiUseEnd.end()) {
-                end = std::max(end, pit->second);
             }
         }
 
