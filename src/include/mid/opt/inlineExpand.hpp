@@ -1,6 +1,7 @@
 // inlineExpand.hpp (修改部分)
 #pragma once
 #include "pass.hpp"
+#include <unordered_map>
 
 class InlineExpand : public Pass {
 public:
