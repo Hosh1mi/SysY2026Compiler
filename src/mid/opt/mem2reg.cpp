@@ -305,7 +305,6 @@ void Mem2Reg::rename() {
     std::map<AllocaInst *, std::stack<Value *>> stacks;
     for (auto &info : allocas) {
         Type *ty = info.alloca->alloca_ty_;
-        // 修正 3 : 直接 new 常量，不调用不存在的 ::get
         if (ty->tid_ == Type::IntegerTyID) {
             stacks[info.alloca].push(new ConstantInt(ty, 0));
         } else if (ty->tid_ == Type::FloatTyID) {

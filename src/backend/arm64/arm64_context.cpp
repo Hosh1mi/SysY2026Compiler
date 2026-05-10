@@ -786,9 +786,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
     if (auto inst = dynamic_cast<Instruction*>(v)) {
-        if (inst->is_void() || inst->is_alloca() || inst->is_load() || inst->is_phi() ||
-            inst->op_id_ == Instruction::Call || inst->op_id_ == Instruction::GetElementPtr ||
-            inst->op_id_ == Instruction::BitCast) {
+        if (inst->is_void() || inst->is_alloca() || inst->is_phi() ||
+            inst->op_id_ == Instruction::BitCast ) {
             return false;
         }
     }
@@ -858,7 +857,22 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
     }
 
     // ---- 3. 数据流分析：计算每个块的 LiveIn / LiveOut ----
-    // 收集每个块的 Def / Use（忽略 phi 的特殊性，初略地包含phi的左值/右值）
+    // 收集 PHI 出口活跃信息
+     std::map<BasicBlock*, std::set<Value*>> phiOut;
+     for (auto bb : blocksOrder) {
+         for (auto inst : bb->instr_list_) {
+             auto phi = dynamic_cast<PhiInst*>(inst);
+             if (!phi) continue;
+             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                 auto val = phi->get_operand(i);
+                 auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                 if (canAssignRegister(val)) {
+                     phiOut[pred].insert(val);
+                 }
+             }
+         }
+     }
+
     struct BBInfo {
         std::set<Value*> def, use;
     };
@@ -909,7 +923,10 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                     }
                 }
             }
-
+            for (auto v : phiOut[bb]) {
+                newOut.insert(v);
+            }
+            
             // LiveIn = use ∪ (LiveOut - def)
             auto &info = bbInfo[bb];
             for (auto v : info.use) newIn.insert(v);
@@ -922,30 +939,6 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
             liveOut[bb] = std::move(newOut);
         }
     } while (changed);
-
-    // ---- 2b. Fix 1: collect phi-source extent information ----
-    // For each phi instruction in successor S with source value V from
-    // predecessor P, V must stay live until the END of P (the parallel
-    // phi copy happens at P's exit).  On a back-edge (P is ordered after
-    // S in linear order), lastUse[V] = instIdx[phi_in_S] < defPos[V],
-    // which causes the interval to be silently discarded.  We fix this by
-    // ensuring end >= blockEnd[P] for every such (V, P) pair.
-    std::map<Value*, int> phiUseEnd;   // V -> max blockEnd over all pred blocks
-    for (auto bb : blocksOrder) {
-        for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
-            if (!phi) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto val = phi->get_operand(i);
-                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (!canAssignRegister(val)) continue;
-                auto it = blockEnd.find(pred);
-                if (it == blockEnd.end()) continue;
-                auto &cur = phiUseEnd[val];
-                cur = std::max(cur, it->second);
-            }
-        }
-    }
 
     // ---- 4. 构建精确的活跃区间 ----
     // 对于每个可分配寄存器的值，其区间需要从 def 开始，到所有使用（包括因 LiveOut 而隐含的使用）结束
@@ -960,15 +953,6 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         for (auto bb : blocksOrder) {
             if (liveOut[bb].count(v)) {
                 end = std::max(end, blockEnd[bb]);
-            }
-        }
-
-        // Fix 1: extend for phi sources – ensures back-edge phi sources
-        // (where instIdx[phi] < defPos[val]) get end >= blockEnd[pred].
-        {
-            auto pit = phiUseEnd.find(v);
-            if (pit != phiUseEnd.end()) {
-                end = std::max(end, pit->second);
             }
         }
 
@@ -1093,33 +1077,19 @@ std::string Arm64FuncContext::allocIntReg() {
 }
 
 std::string Arm64FuncContext::allocFloatReg() {
-    // 收集已被线性扫描持久分配的浮点寄存器号
-    std::set<int> reserved;
-    for (const auto &entry : assignedRegs_) {
-        const std::string &r = entry.second;
-        if (!r.empty() && r[0] == 's') {
-            reserved.insert(std::stoi(r.substr(1)));
-        }
-    }
-
-    // 优先在 s8~s15 中查找未被临时占用且未被持久占用的寄存器
-    for (int r = 8; r <= 15; r++) {
-        if (!usedFloatRegs_.count(r) && !reserved.count(r)) {
+    // 临时浮点寄存器池与持久寄存器池完全分离
+    // 持久池：s8 ~ s15（由线性扫描分配，保存在 assigndRegs_ 中）
+    // 临时池：s16 ~ s31（仅在本指令内使用，由 usedFloatRegs_ 管理）
+    for (int r = 16; r <= 31; ++r) {
+        if (!usedFloatRegs_.count(r)) {
             usedFloatRegs_.insert(r);
             return "s" + std::to_string(r);
         }
     }
-
-    // 若 s8~s15 不可用，回退到 s16~s31
-    for (int r = 16; r <= 31; r++) {
-        if (!usedFloatRegs_.count(r) && !reserved.count(r)) {
-            usedFloatRegs_.insert(r);
-            return "s" + std::to_string(r);
-        }
-    }
-
-    usedFloatRegs_.insert(8);
-    return "s8";
+    // 极端情况：16 个临时寄存器全部被占用，回退到 s16
+    // （实际在单条指令内几乎不可能发生）
+    usedFloatRegs_.insert(16);
+    return "s16";
 }
 
 std::string Arm64FuncContext::allocAddrReg() {
@@ -1281,53 +1251,65 @@ void Arm64FuncContext::preparePhi() {
 }
 
 void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
-    for (auto &pc : phiCopies_) {
+    struct Copy { Value *src; int dstSlot; };
+    std::vector<Copy> copies;
+    for(const auto &pc : phiCopies_){
         if (pc.first != bb) continue;
-        auto val = pc.second.first;
-        int slot = pc.second.second;
+        copies.push_back({pc.second.first, pc.second.second});
+    }
+    if (copies.empty()) return;
 
-        resetRegs();
+    resetRegs();
 
-        // 常量整数
-        if (auto ci = dynamic_cast<ConstantInt*>(val)) {
-            std::string r = allocIntReg();
-            emitIntConst(ci->value_, r);
-            emitStoreReg(os_, r, slot);
-        }
-        // 常量浮点
-        else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
-            std::string r = allocFloatReg();
-            emitFloatConst(cf->value_, r);
-            emitStoreReg(os_, r, slot);
-        }
-        // 源值已分配寄存器
-        else if (hasAssignedReg(val)) {
-            if (isFloat(val->type_)) {
-                std::string reg = assignedReg(val);
-                emitStoreReg(os_, reg, slot);
+    // Phase 1: read all sources into temporary registers
+    struct Temp { std::string reg; int dstSlot; };
+    std::vector<Temp> temps;
+    for (const auto &cp : copies) {
+        Value *val = cp.src;
+        std::string tmpReg;
+        if (isFloat(val->type_)) {
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val);
+                tmpReg = allocFloatReg();
+                if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+                tmpReg = allocFloatReg();
+                emitFloatConst(cf->value_, tmpReg);
             } else {
-                // 整型或指针
-                std::string reg = assignedReg(val, isPtr(val->type_));
-                emitStoreReg(os_, reg, slot);
+                tmpReg = allocFloatReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
+            }
+        } else if (isPtr(val->type_)) {
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val, true);
+                tmpReg = allocAddrReg();
+                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
+                tmpReg = allocAddrReg();
+                emitGlobalAddr(gv, tmpReg);
+            } else {
+                tmpReg = allocAddrReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
+            }
+        } else { // int
+            if (hasAssignedReg(val)) {
+                std::string srcReg = assignedReg(val);
+                tmpReg = allocIntReg();
+                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+            } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                tmpReg = allocIntReg();
+                emitIntConst(ci->value_, tmpReg);
+            } else {
+                tmpReg = allocIntReg();
+                emitLoadReg(os_, tmpReg, getSlot(val));
             }
         }
-        // 源值在栈槽中（原逻辑）
-        else if (hasSlot(val)) {
-            if (isFloat(val->type_)) {
-                std::string r = allocFloatReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
-            } else if (isPtr(val->type_)) {
-                std::string r = allocAddrReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
-            } else {
-                std::string r = allocIntReg();
-                emitLoadReg(os_, r, getSlot(val));
-                emitStoreReg(os_, r, slot);
-            }
-        }
-        
+        temps.push_back({tmpReg, cp.dstSlot});
+    }
+
+    // Phase 2: write all temporary registers to their destination slots
+    for (const auto &t : temps) {
+        emitStoreReg(os_, t.reg, t.dstSlot);
     }
 }
 
@@ -1349,9 +1331,9 @@ const char *Arm64FuncContext::fcmpCond(FCmpInst::FCmpOp op) {
     switch (op) {
     case FCmpInst::FCMP_UEQ: return "eq";
     case FCmpInst::FCMP_UNE: return "ne";
-    case FCmpInst::FCMP_UGT: return "gt";
-    case FCmpInst::FCMP_UGE: return "ge";
-    case FCmpInst::FCMP_ULT: return "mi";
+    case FCmpInst::FCMP_UGT: return "hi";
+    case FCmpInst::FCMP_UGE: return "hs";
+    case FCmpInst::FCMP_ULT: return "lo";
     case FCmpInst::FCMP_ULE: return "ls";
     default: return "eq";
     }

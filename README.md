@@ -1,12 +1,17 @@
 # Compiler2026-NO_COMPILE_NO_LIFE
 
-### 进度
+## 进度
 
-TODO:
+### TODO
 
-主要优化目标: performance/huffman* performance/matmul*
+- algebra Simplify 无法处理非二次幂除法
+- IndVarStrengthReduce不可用
+- CSE负作用
+- 主要优化测试集: `performance/huffman*` `performance/matmul*`
 
-IR pass: (块内疑似并非顺序排列)
+### Mid
+
+> 块内疑似并非顺序排列
 
 #### A
 - [ ] Scalar replacement of array references → 数组引用的标量替换
@@ -100,7 +105,13 @@ flowchart TD
     C3 --> F
 ```
 
-### 项目结构
+### backend
+
+- [X] 线性扫描分配寄存器
+- [ ] 图着色分配寄存器
+- [X] 多线程 
+
+## 项目结构
 
 ```text
 root/
@@ -116,7 +127,7 @@ root/
 ```
 - `archive/`下存放了可进行正确性测试的脚本（-O0），运行后会在根目录生成`checklist.md`
 
-### 项目运行
+## 项目运行
 
 使用根目录下使用docker搭建环境，推荐使用以下命令以防止flex/bison生成文件里包含特定用户路径：
 ```bash
@@ -140,7 +151,7 @@ gcc out.s ../lib/libsysy.a -o out
 ./run_tests.sh
 ```
 
-### `git commit`规范
+## `git commit`规范
 
 **为了diff可读性，commit前建议检查是否开启了ide的auto formatting**
 
