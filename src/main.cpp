@@ -17,6 +17,7 @@
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
+#include "include/mid/opt/CFGSimplify.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -116,7 +117,9 @@ int main(int argc, char **argv) {
 	if(optLevel >= 1){
         // pm.addPass(std::make_unique<InlineExpand>());
         pm.addPass(std::make_unique<DimArrayArgSimplify>());
+        // pm.addPass(std::make_unique<CFGSimplify>());
         pm.addPass(std::make_unique<Mem2Reg>());
+        pm.addPass(std::make_unique<CFGSimplify>());
         pm.addPass(std::make_unique<RemoveRedundantPhis>());
         // pm.addPass(std::make_unique<IndVarStrengthReduce>());
 		pm.addPass(std::make_unique<TailRecursionEliminate>());
@@ -125,6 +128,8 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<ConstantFold>());
         pm.addPass(std::make_unique<AlgebraSimplify>());
         // pm.addPass(std::make_unique<CSE>());
+        
+        // pm.addPass(std::make_unique<RemoveRedundantPhis>());
         // pm.addPass(std::make_unique<DeadCodeDelete>());
         
 	}  

@@ -48,6 +48,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/inlineExpand.cpp
     ${SRC_DIR}/mid/opt/indVarStrengthReduce.cpp
     ${SRC_DIR}/mid/opt/removeRedundantPhis.cpp
+    ${SRC_DIR}/mid/opt/CFGSimplify.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
