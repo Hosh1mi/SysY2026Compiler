@@ -401,44 +401,48 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 break;
             }
             // ---- 除数为正且 > 1，使用 Magic Number ----
-            else {}
-            // else if (divisor > 1) {
-            //     unsigned magic;
-            //     unsigned shift;
-            //     bool negMagic;
-            //     GetSignedMagic(divisor, magic, shift, negMagic);
+            // Divisors below 8 are gueranteed to be correct
+            // TODO: Enable divisors above 8
+            // And **I HATE MATH**
+            else if (divisor > 1 && divisor < 8) {
+                unsigned magic;
+                unsigned shift;
+                bool negMagic;
+                GetSignedMagic(divisor, magic, shift, negMagic);
 
-            //     std::string wNum = loadInt(v1);          // 分子
-            //     std::string wMagic = allocIntReg();
-            //     emitIntConst(static_cast<int>(magic), wMagic);
+                std::string wNum = loadInt(v1);          // 分子
+                std::string wMagic = allocIntReg();
+                emitIntConst(static_cast<int>(magic), wMagic);
 
-            //     // 分配一个 64 位寄存器，确保不与已用 wNum / wMagic 冲突
-            //     // 安全做法：先保存分子到另一个寄存器，避免被 smull 目标覆盖
-            //     std::string wNumSafe = allocIntReg();
-            //     os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
+                // 分配一个 64 位寄存器，确保不与已用 wNum / wMagic 冲突
+                // 安全做法：先保存分子到另一个寄存器，避免被 smull 目标覆盖
+                std::string wNumSafe = allocIntReg();
+                os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
 
-            //     // 显式分配 xTemp，其低 32 位即 wTemp = "w" + xTemp.substr(1)
-            //     std::string xTemp = allocAddrReg();      // 64-bit
-            //     std::string wHi = "w" + xTemp.substr(1); // 32-bit 视图
+                // 显式分配 xTemp，其低 32 位即 wTemp = "w" + xTemp.substr(1)
+                std::string xTemp = allocAddrReg();      // 64-bit
+                std::string wHi = "w" + xTemp.substr(1); // 32-bit 视图
 
-            //     os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
-            //     os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
+                os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
+                os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
 
-            //     if (negMagic) {
-            //         os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
-            //     }
+                if (negMagic) {
+                    os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                } else {
+                    os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << ", lsr #31\n";
+                }
 
-            //     os_ << "\tasr " << wHi << ", " << wHi << ", #" << shift << "\n";
+                os_ << "\tasr " << wHi << ", " << wHi << ", #" << shift << "\n";
 
-            //     // 余数 = num - q * divisor
-            //     std::string wD = allocIntReg();
-            //     emitIntConst(divisor, wD);
-            //     std::string wResult = allocIntReg();
-            //     os_ << "\tmsub " << wResult << ", " << wHi << ", " << wD << ", " << wNumSafe << "\n";
+                // 余数 = num - q * divisor
+                std::string wD = allocIntReg();
+                emitIntConst(divisor, wD);
+                std::string wResult = allocIntReg();
+                os_ << "\tmsub " << wResult << ", " << wHi << ", " << wD << ", " << wNumSafe << "\n";
 
-            //     storeInt(inst, wResult);
-            //     break;
-            // }
+                storeInt(inst, wResult);
+                break;
+            }
             // 负除数或 0 继续走通用路径
         }
 
