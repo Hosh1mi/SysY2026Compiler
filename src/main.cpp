@@ -15,6 +15,7 @@
 #include "include/mid/opt/algebraSimplify.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
+#include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
 
@@ -126,7 +127,9 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<AlgebraSimplify>());
         // pm.addPass(std::make_unique<CSE>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
-        
+        pm.addPass(std::make_unique<LICM>());
+        pm.addPass(std::make_unique<CSE>());
+        pm.addPass(std::make_unique<DeadCodeDelete>());
 	}  
     
 	pm.run(m.get());

@@ -22,4 +22,6 @@ CLAUDE.md
 *.Identifier
 .claude/
 test/result.txt
+test/results/
+*.txt
 remind.txt

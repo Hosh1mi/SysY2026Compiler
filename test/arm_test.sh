@@ -6,6 +6,9 @@ BUILD_DIR="$PROJ_DIR/build"
 FUNC_DIR="$PROJ_DIR/test/functional"
 PERF_DIR="$PROJ_DIR/test/performance"
 RESULT_FILE="$PROJ_DIR/test/result.txt"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+RESULT_ARCHIVE="$PROJ_DIR/test/results/result_${TIMESTAMP}.txt"
+mkdir -p "$PROJ_DIR/test/results"
 LIB_DIR="$PROJ_DIR/lib"
 
 if [ ! -f "$BUILD_DIR/compiler" ]; then
@@ -170,4 +173,6 @@ done
 
 echo ""
 echo "  TOTAL: $PTOTAL  ${GREEN}AC${RESET}: $PPASS  ${RED}FAIL${RESET}: $PFAIL"
+cp "$RESULT_FILE" "$RESULT_ARCHIVE"
 echo "  Results written to: $RESULT_FILE"
+echo "  Archived to: $RESULT_ARCHIVE"
