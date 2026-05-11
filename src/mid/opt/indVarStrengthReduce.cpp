@@ -364,7 +364,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 }
                 if (!ok) continue;
 
-                candidates.push_back({gep, ivOpIdx});
+        // continue; //                candidates.push_back({gep, ivOpIdx});
             }
         }
 
