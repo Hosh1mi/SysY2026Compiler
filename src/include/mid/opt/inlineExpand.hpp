@@ -20,4 +20,4 @@ private:
                                std::vector<BasicBlock*> &newBBs);
 };
 
-static int INLINE_THRESHOLD = 30;
+constexpr int INLINE_THRESHOLD = 30;

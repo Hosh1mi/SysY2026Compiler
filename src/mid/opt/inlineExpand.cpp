@@ -27,7 +27,6 @@ void InlineExpand::execute(Module *module) {
         CallInst *call = worklist.back();
         worklist.pop_back();
 
-        // 验证 call 是否仍然有效（未被删除）
         if (!call->parent_) continue;
 
         Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
@@ -154,9 +153,26 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     IRStmtBuilder builder(callBB, caller->parent_);
     builder.create_br(calleeEntry);
 
-    // 8. 新基本块已由构造函数自动加入 caller，无需重复添加
+    // ----------------------------------------------------------------
+    // FIX 4: 修正 contBB 在 basic_blocks_ 中的位置
+    //
+    // splitBlockAfterCall 将 contBB 追加到 basic_blocks_ 末尾，
+    // cloneCalleeIntoCaller 随后又将所有 clone 块追加到末尾，
+    // 导致列表顺序为 [...原始块][contBB][clone块...]。
+    // 而 CFG 上 contBB 是所有 clone 块的后继，
+    // 正确顺序应为   [...原始块][clone块...][contBB]。
+    // 不修正会导致后续依赖块列表顺序的 RPO / 支配树分析出错。
+    // ----------------------------------------------------------------
 
-    // 9. 重新设置指令名称，避免冲突
+//    auto &bbs = caller->basic_blocks_;
+//    auto contIt = std::find(bbs.begin(), bbs.end(), contBB);
+//    if (contIt != bbs.end()) {
+//        bbs.erase(contIt);
+//        bbs.push_back(contBB);
+//    }
+
+
+    // 8. 重新设置指令名称，避免冲突
     caller->set_instr_name();
 
     return newCalls;
@@ -188,7 +204,7 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
         succ->remove_pre_basic_block(callBB);
     callBB->succ_bbs_.clear();
 
-    // 从 callBB 移除这些指令
+    // 从 callBB 移除这些指令（remove_instr 会清空 pos_in_bb，使 add_instruction 可以重新插入）
     for (auto *inst : toMove)
         callBB->remove_instr(inst);
 
@@ -199,6 +215,32 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
     contBB->succ_bbs_ = origSuccs;
     for (auto *succ : origSuccs)
         succ->add_pre_basic_block(contBB);
+
+    // ----------------------------------------------------------------
+    // FIX 2: 修正后继块中引用 callBB 的 PHI 节点
+    //
+    // 将 callBB 的后继转移给 contBB 后，callBB→succ 边已不存在，
+    // 变为 contBB→succ 边。但 succ 中以 callBB 为来源的 PHI 操作数
+    // 仍然指向 callBB，导致 use-def 链与 CFG 不一致。
+    // 必须将这些 PHI 的来源基本块操作数从 callBB 更新为 contBB，
+    // 同时维护 use_list_（移除旧 use，建立新 use）。
+    // ----------------------------------------------------------------
+    for (auto *succ : origSuccs) {
+        for (auto *inst : succ->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi) break;   // PHI 指令必须位于块头部，遇到非 PHI 即可提前退出
+            // PHI 操作数布局：[val0, bb0, val1, bb1, ...]，奇数下标为来源基本块
+            for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i) == callBB) {
+                    // 先从 callBB 的 use_list_ 中删除旧条目
+                    callBB->remove_use(phi->use_pos_[i]);
+                    // 再更新操作数并在 contBB 的 use_list_ 中注册新 use
+                    phi->operands_[i] = contBB;
+                    phi->use_pos_[i]  = contBB->add_use(phi, i);
+                }
+            }
+        }
+    }
 
     return contBB;
 }
@@ -242,12 +284,18 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
         for (auto *oldInst : oldBB->instr_list_) {
             if (auto *oldPhi = dynamic_cast<PhiInst*>(oldInst)) {
                 auto *newPhi = PhiInst::create_phi(oldPhi->type_, newBB);
+                newBB->add_instruction(newPhi);   // ← FIX 1
                 valMap[oldPhi] = newPhi;
                 phiFixups.push_back({newPhi, oldPhi});
             } else if (auto *oldBr = dynamic_cast<BranchInst*>(oldInst)) {
-                Value *cond = oldBr->num_ops_ == 3 ? mapValue(oldBr->get_operand(0), valMap, bbMap) : nullptr;
-                BasicBlock *trueBB = dynamic_cast<BasicBlock*>(mapValue(oldBr->get_operand(oldBr->num_ops_ == 3 ? 1 : 0), valMap, bbMap));
-                BasicBlock *falseBB = oldBr->num_ops_ == 3 ? dynamic_cast<BasicBlock*>(mapValue(oldBr->get_operand(2), valMap, bbMap)) : nullptr;
+                Value *cond = oldBr->num_ops_ == 3
+                              ? mapValue(oldBr->get_operand(0), valMap, bbMap)
+                              : nullptr;
+                BasicBlock *trueBB = dynamic_cast<BasicBlock*>(
+                    mapValue(oldBr->get_operand(oldBr->num_ops_ == 3 ? 1 : 0), valMap, bbMap));
+                BasicBlock *falseBB = oldBr->num_ops_ == 3
+                                      ? dynamic_cast<BasicBlock*>(mapValue(oldBr->get_operand(2), valMap, bbMap))
+                                      : nullptr;
                 if (cond)
                     new BranchInst(cond, trueBB, falseBB, newBB);
                 else
@@ -276,7 +324,8 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 vector<Value*> newArgs;
                 for (unsigned i = 0; i < oldCall->num_ops_ - 1; ++i)
                     newArgs.push_back(mapValue(oldCall->get_operand(i), valMap, bbMap));
-                auto *calleeFunc = dynamic_cast<Function*>(mapValue(oldCall->get_operand(oldCall->num_ops_-1), valMap, bbMap));
+                auto *calleeFunc = dynamic_cast<Function*>(
+                    mapValue(oldCall->get_operand(oldCall->num_ops_ - 1), valMap, bbMap));
                 new CallInst(calleeFunc, newArgs, newBB);
                 if (!oldCall->is_void())
                     valMap[oldCall] = newBB->instr_list_.back();
@@ -296,32 +345,41 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                              mapValue(oldFCmp->get_operand(1), valMap, bbMap), newBB);
                 valMap[oldFCmp] = newBB->instr_list_.back();
             } else if (auto *oldZExt = dynamic_cast<ZextInst*>(oldInst)) {
-                new ZextInst(oldZExt->op_id_, mapValue(oldZExt->get_operand(0), valMap, bbMap),
+                new ZextInst(oldZExt->op_id_,
+                             mapValue(oldZExt->get_operand(0), valMap, bbMap),
                              oldZExt->dest_ty_, newBB);
                 valMap[oldZExt] = newBB->instr_list_.back();
             } else if (auto *oldFpToSi = dynamic_cast<FpToSiInst*>(oldInst)) {
-                new FpToSiInst(oldFpToSi->op_id_, mapValue(oldFpToSi->get_operand(0), valMap, bbMap),
+                new FpToSiInst(oldFpToSi->op_id_,
+                               mapValue(oldFpToSi->get_operand(0), valMap, bbMap),
                                oldFpToSi->dest_ty_, newBB);
                 valMap[oldFpToSi] = newBB->instr_list_.back();
             } else if (auto *oldSiToFp = dynamic_cast<SiToFpInst*>(oldInst)) {
-                new SiToFpInst(oldSiToFp->op_id_, mapValue(oldSiToFp->get_operand(0), valMap, bbMap),
+                new SiToFpInst(oldSiToFp->op_id_,
+                               mapValue(oldSiToFp->get_operand(0), valMap, bbMap),
                                oldSiToFp->dest_ty_, newBB);
                 valMap[oldSiToFp] = newBB->instr_list_.back();
             } else if (auto *oldBitCast = dynamic_cast<Bitcast*>(oldInst)) {
-                new Bitcast(oldBitCast->op_id_, mapValue(oldBitCast->get_operand(0), valMap, bbMap),
+                new Bitcast(oldBitCast->op_id_,
+                            mapValue(oldBitCast->get_operand(0), valMap, bbMap),
                             oldBitCast->dest_ty_, newBB);
                 valMap[oldBitCast] = newBB->instr_list_.back();
+            // } else if (auto *oldUnary = dynamic_cast<UnaryInst*>(oldInst)) {
+            //     new UnaryInst(oldUnary->type_, oldUnary->op_id_,
+            //                   mapValue(oldUnary->get_operand(0), valMap, bbMap), newBB);
+            //     valMap[oldUnary] = newBB->instr_list_.back();
             } else {
                 assert(0 && "unhandled instruction type during inlining");
             }
         }
     }
 
-    // 填充 phi 指令
+    // 填充 phi 指令的操作数（延迟处理以支持跨块的前向引用）
     for (auto &fix : phiFixups) {
         for (unsigned i = 0; i < fix.oldPhi->num_ops_; i += 2) {
-            Value *v = mapValue(fix.oldPhi->get_operand(i), valMap, bbMap);
-            BasicBlock *bb = dynamic_cast<BasicBlock*>(mapValue(fix.oldPhi->get_operand(i+1), valMap, bbMap));
+            Value    *v  = mapValue(fix.oldPhi->get_operand(i),   valMap, bbMap);
+            BasicBlock *bb = dynamic_cast<BasicBlock*>(
+                mapValue(fix.oldPhi->get_operand(i + 1), valMap, bbMap));
             fix.newPhi->addIncoming(v, bb);
         }
     }
