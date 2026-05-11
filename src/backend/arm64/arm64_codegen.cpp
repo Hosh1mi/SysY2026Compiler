@@ -142,12 +142,10 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
         os_ << "\t.word " << ci->value_ << "\n";
     } else if (auto cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {
         float val = cf->value_;
-        // Fix 3: use memcpy instead of reinterpret_cast to avoid strict-aliasing UB
         int bits;
         std::memcpy(&bits, &val, sizeof(bits));
         os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
     } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
-        // Fix 4: use a recursive lambda to handle arbitrary nesting depth
         std::function<void(Constant*)> emitElem = [&](Constant *elem) {
             if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
                 os_ << "\t.word " << eci->value_ << "\n";
@@ -168,7 +166,6 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
 }
 
 void Arm64CodeGen::emitExtern(Function *f) {
-    // __aeabi_* 函数会作为普通外部函数处理
     (void)f;
 }
 

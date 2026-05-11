@@ -362,15 +362,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        // std::string ra = loadInt(v1);
-        // std::string rb = loadInt(v2);
-        // std::string rq = allocIntReg();
-        // std::string rr = allocIntReg();
-        // os_ << "\tsdiv " << rq << ", " << ra << ", " << rb << "\n";
-        // os_ << "\tmsub " << rr << ", " << rq << ", " << rb << ", " << ra << "\n";
-        // storeInt(inst, rr);
-        // 检查第二个操作数是否是常量
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) { // 检查第二个操作数是否是常量
             int32_t divisor = ci->value_;
 
             if (divisor == 0) { /* Fallback */ }
@@ -725,7 +717,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
             if (useLoop) {
-                // Fix 2: use member variable instead of static (thread-safe)
+                // use member variable instead of static (thread-safe)
                 std::string sizeReg = loadInt(sizeVal);
                 std::string zeroReg = allocIntReg();
                 std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrCounter_++);
@@ -742,9 +734,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
     
-        // ================================================
-        // 1. 计算参数分配信息
-        // ================================================
+        // 计算参数分配信息
         int intArg = 0, floatArg = 0;
         int stackArgsCount = 0;
         for (unsigned i = 0; i < numArgs; i++) {
@@ -756,17 +746,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
         int stackBytes = align16(stackArgsCount * 8);
-    
-        // ================================================
-        // Fix 5: w19-w28 / d8-d15 are callee-saved per AArch64 ABI.
-        // The callee guarantees to preserve them, so we must NOT
-        // save/restore them around a bl.  The prologue/epilogue already
-        // handle them for our own frame.
-        // ================================================
 
-        // ================================================
-        // 3. 分配栈参数空间
-        // ================================================
+        // 分配栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
                 os_ << "\tsub sp, sp, #" << stackBytes << "\n";
@@ -777,9 +758,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 5. 传递参数 (寄存器 + 栈)
-        // ================================================
+        // 传递参数 (寄存器 + 栈)
         intArg = 0; floatArg = 0;
         int stackIdx = 0;   // 栈参数写入偏移 (相对于 sp)
         for (unsigned i = 0; i < numArgs; i++) {
@@ -814,14 +793,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 6. 执行调用
-        // ================================================
+        // 执行调用
         os_ << "\tbl " << callee->name_ << "\n";
     
-        // ================================================
-        // 7. 回收栈参数空间
-        // ================================================
+        // 回收栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
                 os_ << "\tadd sp, sp, #" << stackBytes << "\n";
@@ -832,9 +807,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 8. 处理返回值  (Fix 5: step 8 "restore callee-saved" removed)
-        // ================================================
+        // 处理返回值 
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
                 storeFloat(inst, "s0");
@@ -1172,10 +1145,8 @@ std::string Arm64FuncContext::allocFloatReg() {
             return "s" + std::to_string(r);
         }
     }
-    // 极端情况：16 个临时寄存器全部被占用，回退到 s16
-    // （实际在单条指令内几乎不可能发生）
     usedFloatRegs_.insert(16);
-    return "s16";
+    return "s16"; // highly improbable but use s16 as a temporary register when s16-s31 are all occupied
 }
 
 std::string Arm64FuncContext::allocAddrReg() {

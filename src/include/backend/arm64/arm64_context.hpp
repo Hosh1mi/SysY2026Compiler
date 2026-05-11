@@ -58,10 +58,6 @@ private:
     void preparePhi();
     void emitPhiCopies(BasicBlock *bb);
 
-    void getLiveRegsAtCall(Instruction *call,
-        std::vector<int> &liveIntRegs,
-        std::vector<int> &liveFloatRegs);
-
     const char *icmpCond(ICmpInst::ICmpOp op);
     const char *fcmpCond(FCmpInst::FCmpOp op);
 

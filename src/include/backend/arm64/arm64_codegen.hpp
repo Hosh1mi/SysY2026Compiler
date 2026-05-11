@@ -11,7 +11,6 @@ private:
     void emitGlobal(GlobalVariable *gv);
     void emitFunction(Function *f);
     void emitExtern(Function *f);
-    bool isSpecialFunc(const std::string &name);
 
     Module *m_;
     std::ostream &os_;
