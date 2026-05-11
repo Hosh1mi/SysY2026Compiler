@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/arm64_context.hpp"
+#include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -361,6 +362,87 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+        // std::string ra = loadInt(v1);
+        // std::string rb = loadInt(v2);
+        // std::string rq = allocIntReg();
+        // std::string rr = allocIntReg();
+        // os_ << "\tsdiv " << rq << ", " << ra << ", " << rb << "\n";
+        // os_ << "\tmsub " << rr << ", " << rq << ", " << rb << ", " << ra << "\n";
+        // storeInt(inst, rr);
+        // 检查第二个操作数是否是常量
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+            int32_t divisor = ci->value_;
+
+            if (divisor == 0) { /* Fallback */ }
+            // ---- 除数为 1，余数恒为 0 ----
+            else if (divisor == 1 || divisor == -1) {
+                std::string rd = allocIntReg();
+                os_ << "\tmov " << rd << ", wzr\n";
+                storeInt(inst, rd);
+                break;
+            }
+            // ---- 除数为 2 的幂 (d > 0) ----
+            else if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
+                // rem = num - (((num >> 31) & (d-1)) + num) >> k) << k
+                int k = __builtin_ctz(divisor);   // log2(d)
+                std::string rNum = loadInt(v1);
+                std::string rSign = allocIntReg();
+                std::string rQ = allocIntReg();
+
+                os_ << "\tasr " << rSign << ", " << rNum << ", #31\n";
+                os_ << "\tand " << rSign << ", " << rSign << ", #" << (divisor - 1) << "\n";
+                os_ << "\tadd " << rQ << ", " << rNum << ", " << rSign << "\n";
+                os_ << "\tasr " << rQ << ", " << rQ << ", #" << k << "\n";
+                os_ << "\tlsl " << rQ << ", " << rQ << ", #" << k << "\n";
+
+                std::string rResult = allocIntReg();
+                os_ << "\tsub " << rResult << ", " << rNum << ", " << rQ << "\n";
+                storeInt(inst, rResult);
+                break;
+            }
+            // ---- 除数为正且 > 1，使用 Magic Number ----
+            else {}
+            // else if (divisor > 1) {
+            //     unsigned magic;
+            //     unsigned shift;
+            //     bool negMagic;
+            //     GetSignedMagic(divisor, magic, shift, negMagic);
+
+            //     std::string wNum = loadInt(v1);          // 分子
+            //     std::string wMagic = allocIntReg();
+            //     emitIntConst(static_cast<int>(magic), wMagic);
+
+            //     // 分配一个 64 位寄存器，确保不与已用 wNum / wMagic 冲突
+            //     // 安全做法：先保存分子到另一个寄存器，避免被 smull 目标覆盖
+            //     std::string wNumSafe = allocIntReg();
+            //     os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
+
+            //     // 显式分配 xTemp，其低 32 位即 wTemp = "w" + xTemp.substr(1)
+            //     std::string xTemp = allocAddrReg();      // 64-bit
+            //     std::string wHi = "w" + xTemp.substr(1); // 32-bit 视图
+
+            //     os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
+            //     os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
+
+            //     if (negMagic) {
+            //         os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+            //     }
+
+            //     os_ << "\tasr " << wHi << ", " << wHi << ", #" << shift << "\n";
+
+            //     // 余数 = num - q * divisor
+            //     std::string wD = allocIntReg();
+            //     emitIntConst(divisor, wD);
+            //     std::string wResult = allocIntReg();
+            //     os_ << "\tmsub " << wResult << ", " << wHi << ", " << wD << ", " << wNumSafe << "\n";
+
+            //     storeInt(inst, wResult);
+            //     break;
+            // }
+            // 负除数或 0 继续走通用路径
+        }
+
+        // ---- 通用 SRem (变量除数或未优化情况) ----
         std::string ra = loadInt(v1);
         std::string rb = loadInt(v2);
         std::string rq = allocIntReg();

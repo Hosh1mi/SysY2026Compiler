@@ -1,0 +1,22 @@
+int x, y;
+
+int main() {
+    putint(12345 % 17);
+    putch(10);
+    putint((-12345) % 17);
+    putch(10);
+    putint(1024 % 256);
+    putch(10);
+    putint((-1024) % 256);
+    putch(10);
+    x = 100; y = 6;
+    putint(x % y);
+    putch(10);
+    putint((-x) % y);
+    putch(10);
+    putint(x % -y);
+    putch(10);
+    putint((-x) % -y);
+    putch(10);
+    return 0;
+}
