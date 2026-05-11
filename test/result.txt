@@ -30,3 +30,13 @@ knapsack_naive-1 : AC
 Total time : 0H-0M-0S-324888us
 many_mat_cal-3 : AC
 Total time : 0H-0M-45S-206911us
+matmul1 : AC
+Total time : 0H-0M-14S-378171us
+optimization_scheduling3 : AC
+Total time : 0H-0M-0S-2314us
+shuffle0 : AC
+Total time : 0H-0M-3S-192568us
+sl1 : AC
+Total time : 0H-0M-5S-445384us
+transpose2 : AC
+Total time : 0H-0M-3S-958663us
