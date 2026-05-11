@@ -54,6 +54,7 @@ namespace std {
         size_t operator()(const ExprSignature &s) const {
             size_t h = hash<unsigned>()(s.op_id);
             h ^= hash<unsigned>()(s.extra_op) + 0x9e3779b9 + (h<<6) + (h>>2);
+            h ^= std::hash<void*>()(s.ty) + 0x9e3779b9 + (h<<6) + (h>>2); // 类型hash
             for (auto *v : s.ops) {
                 size_t ph = hash<void*>()(v);
                 h ^= ph + 0x9e3779b9 + (h<<6) + (h>>2);
@@ -205,14 +206,13 @@ build_dom_children(const std::map<BasicBlock*, BasicBlock*> &idom) {
 static void global_cse_on_function(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    // 1. 构建支配树（代码不变）
     auto idom = compute_dominators(func);
     auto dom_children = build_dom_children(idom);
     BasicBlock *entry = func->basic_blocks_.front();
 
     // 清空上次可能残留的规范化常量（注意：最后需释放）
-    for (auto &p : canonical_constants) delete p.second;
-    canonical_constants.clear();
+    // for (auto &p : canonical_constants) delete p.second;
+    // canonical_constants.clear();
 
     std::unordered_map<Value*, Value*> vn_map;
     std::unordered_map<ExprSignature, Value*> scope_map;
@@ -267,8 +267,8 @@ static void global_cse_on_function(Function *func) {
     dfs(entry);
 
     // 清理规范化常量
-    for (auto &p : canonical_constants) delete p.second;
-    canonical_constants.clear();
+    // for (auto &p : canonical_constants) delete p.second;
+    // canonical_constants.clear();
 }
 
 // ---------- CSE::execute ----------
@@ -278,4 +278,6 @@ void CSE::execute(Module *module) {
             global_cse_on_function(func);
         }
     }
+    for (auto &p : canonical_constants) delete p.second;
+    canonical_constants.clear();
 }
