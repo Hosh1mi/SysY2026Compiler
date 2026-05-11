@@ -5,10 +5,9 @@
 ### TODO
 
 - algebra Simplify 无法处理非二次幂除法
-- IndVarStrengthReduce不可用
 - CSE负作用
 - dce中removeDeadBlocks不可用   
-- 主要优化测试集: `performance/huffman*` `performance/matmul*`
+- 主要优化测试集: `performance/huffman*` `performance/matmul*` `performance/many_mat_cal*`
 
 ### Mid
 

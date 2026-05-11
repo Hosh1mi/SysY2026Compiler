@@ -126,44 +126,46 @@ bool Mem2Reg::iADomB(Instruction *ia, Instruction *ib) {
 // -----------------------------------------------------------------------
 void Mem2Reg::analyseAlloca() {
     allocas.clear();
-    for (auto inst : entryBlock->instr_list_) {
-        if (inst->op_id_ != Instruction::Alloca) continue;
-        AllocaInst *alloca = static_cast<AllocaInst *>(inst);
-        AllocaInfo info;
-        info.alloca = alloca;
-        bool promotable = true;
+    for (auto bb : currentFunc->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->op_id_ != Instruction::Alloca) continue;
+            AllocaInst *alloca = static_cast<AllocaInst *>(inst);
+            AllocaInfo info;
+            info.alloca = alloca;
+            bool promotable = true;
 
-        for (auto &use : alloca->use_list_) {
-            Instruction *user = dynamic_cast<Instruction *>(use.val_);
-            if (!user) {
-                promotable = false;
-                break;        // 如果用户不是指令，不可提升
-            }
-
-            switch (user->op_id_) {
-                case Instruction::Load: {
-                    LoadInst *load = static_cast<LoadInst *>(user);
-                    info.loads.push_back(load);
-                    info.userBlocks[load->parent_].loads.push_back(load);
-                    break;
+            for (auto &use : alloca->use_list_) {
+                Instruction *user = dynamic_cast<Instruction *>(use.val_);
+                if (!user) {
+                    promotable = false;
+                    break;        // 如果用户不是指令，不可提升
                 }
-                case Instruction::Store: {
-                    StoreInst *store = static_cast<StoreInst *>(user);
-                    if (store->get_operand(1) != alloca) {
-                        promotable = false;
+
+                switch (user->op_id_) {
+                    case Instruction::Load: {
+                        LoadInst *load = static_cast<LoadInst *>(user);
+                        info.loads.push_back(load);
+                        info.userBlocks[load->parent_].loads.push_back(load);
                         break;
                     }
-                    info.stores.push_back(store);
-                    info.userBlocks[store->parent_].stores.push_back(store);
-                    break;
+                    case Instruction::Store: {
+                        StoreInst *store = static_cast<StoreInst *>(user);
+                        if (store->get_operand(1) != alloca) {
+                            promotable = false;
+                            break;
+                        }
+                        info.stores.push_back(store);
+                        info.userBlocks[store->parent_].stores.push_back(store);
+                        break;
+                    }
+                    default:
+                        promotable = false;
+                        break;
                 }
-                default:
-                    promotable = false;
-                    break;
+                if (!promotable) break;
             }
-            if (!promotable) break;
+            if (promotable) allocas.push_back(info);
         }
-        if (promotable) allocas.push_back(info);
     }
 }
 
