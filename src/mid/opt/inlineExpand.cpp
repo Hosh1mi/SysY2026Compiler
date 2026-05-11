@@ -153,25 +153,6 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     IRStmtBuilder builder(callBB, caller->parent_);
     builder.create_br(calleeEntry);
 
-    // ----------------------------------------------------------------
-    // FIX 4: 修正 contBB 在 basic_blocks_ 中的位置
-    //
-    // splitBlockAfterCall 将 contBB 追加到 basic_blocks_ 末尾，
-    // cloneCalleeIntoCaller 随后又将所有 clone 块追加到末尾，
-    // 导致列表顺序为 [...原始块][contBB][clone块...]。
-    // 而 CFG 上 contBB 是所有 clone 块的后继，
-    // 正确顺序应为   [...原始块][clone块...][contBB]。
-    // 不修正会导致后续依赖块列表顺序的 RPO / 支配树分析出错。
-    // ----------------------------------------------------------------
-
-//    auto &bbs = caller->basic_blocks_;
-//    auto contIt = std::find(bbs.begin(), bbs.end(), contBB);
-//    if (contIt != bbs.end()) {
-//        bbs.erase(contIt);
-//        bbs.push_back(contBB);
-//    }
-
-
     // 8. 重新设置指令名称，避免冲突
     caller->set_instr_name();
 
@@ -216,15 +197,6 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
     for (auto *succ : origSuccs)
         succ->add_pre_basic_block(contBB);
 
-    // ----------------------------------------------------------------
-    // FIX 2: 修正后继块中引用 callBB 的 PHI 节点
-    //
-    // 将 callBB 的后继转移给 contBB 后，callBB→succ 边已不存在，
-    // 变为 contBB→succ 边。但 succ 中以 callBB 为来源的 PHI 操作数
-    // 仍然指向 callBB，导致 use-def 链与 CFG 不一致。
-    // 必须将这些 PHI 的来源基本块操作数从 callBB 更新为 contBB，
-    // 同时维护 use_list_（移除旧 use，建立新 use）。
-    // ----------------------------------------------------------------
     for (auto *succ : origSuccs) {
         for (auto *inst : succ->instr_list_) {
             auto *phi = dynamic_cast<PhiInst*>(inst);
@@ -284,7 +256,7 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
         for (auto *oldInst : oldBB->instr_list_) {
             if (auto *oldPhi = dynamic_cast<PhiInst*>(oldInst)) {
                 auto *newPhi = PhiInst::create_phi(oldPhi->type_, newBB);
-                newBB->add_instruction(newPhi);   // ← FIX 1
+                newBB->add_instruction(newPhi);  
                 valMap[oldPhi] = newPhi;
                 phiFixups.push_back({newPhi, oldPhi});
             } else if (auto *oldBr = dynamic_cast<BranchInst*>(oldInst)) {

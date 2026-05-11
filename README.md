@@ -4,6 +4,7 @@
 
 ### TODO
 
+- MagicNumber不可用/寄存器分配有错误
 - algebra Simplify 无法处理非二次幂除法
 - CSE负作用
 - dce中removeDeadBlocks不可用   

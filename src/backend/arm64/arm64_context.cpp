@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/arm64_context.hpp"
+#include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -361,6 +362,83 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) { // 检查第二个操作数是否是常量
+            int32_t divisor = ci->value_;
+
+            if (divisor == 0) { /* Fallback */ }
+            // ---- 除数为 1，余数恒为 0 ----
+            else if (divisor == 1 || divisor == -1) {
+                std::string rd = allocIntReg();
+                os_ << "\tmov " << rd << ", wzr\n";
+                storeInt(inst, rd);
+                break;
+            }
+            // ---- 除数为 2 的幂 (d > 0) ----
+            else if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
+                // rem = num - (((num >> 31) & (d-1)) + num) >> k) << k
+                int k = __builtin_ctz(divisor);   // log2(d)
+                std::string rNum = loadInt(v1);
+                std::string rSign = allocIntReg();
+                std::string rQ = allocIntReg();
+
+                os_ << "\tasr " << rSign << ", " << rNum << ", #31\n";
+                os_ << "\tand " << rSign << ", " << rSign << ", #" << (divisor - 1) << "\n";
+                os_ << "\tadd " << rQ << ", " << rNum << ", " << rSign << "\n";
+                os_ << "\tasr " << rQ << ", " << rQ << ", #" << k << "\n";
+                os_ << "\tlsl " << rQ << ", " << rQ << ", #" << k << "\n";
+
+                std::string rResult = allocIntReg();
+                os_ << "\tsub " << rResult << ", " << rNum << ", " << rQ << "\n";
+                storeInt(inst, rResult);
+                break;
+            }
+            // ---- 除数为正且 > 1，使用 Magic Number ----
+            // Divisors below 8 are gueranteed to be correct
+            // TODO: Enable divisors above 8
+            // And **I HATE MATH**
+            else if (divisor > 1 && divisor < 8) {
+                unsigned magic;
+                unsigned shift;
+                bool negMagic;
+                GetSignedMagic(divisor, magic, shift, negMagic);
+
+                std::string wNum = loadInt(v1);          // 分子
+                std::string wMagic = allocIntReg();
+                emitIntConst(static_cast<int>(magic), wMagic);
+
+                // 分配一个 64 位寄存器，确保不与已用 wNum / wMagic 冲突
+                // 安全做法：先保存分子到另一个寄存器，避免被 smull 目标覆盖
+                std::string wNumSafe = allocIntReg();
+                os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
+
+                // 显式分配 xTemp，其低 32 位即 wTemp = "w" + xTemp.substr(1)
+                std::string xTemp = allocAddrReg();      // 64-bit
+                std::string wHi = "w" + xTemp.substr(1); // 32-bit 视图
+
+                os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
+                os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
+
+                if (negMagic) {
+                    os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                } else {
+                    os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << ", lsr #31\n";
+                }
+
+                os_ << "\tasr " << wHi << ", " << wHi << ", #" << shift << "\n";
+
+                // 余数 = num - q * divisor
+                std::string wD = allocIntReg();
+                emitIntConst(divisor, wD);
+                std::string wResult = allocIntReg();
+                os_ << "\tmsub " << wResult << ", " << wHi << ", " << wD << ", " << wNumSafe << "\n";
+
+                storeInt(inst, wResult);
+                break;
+            }
+            // 负除数或 0 继续走通用路径
+        }
+
+        // ---- 通用 SRem (变量除数或未优化情况) ----
         std::string ra = loadInt(v1);
         std::string rb = loadInt(v2);
         std::string rq = allocIntReg();
@@ -639,7 +717,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
             if (useLoop) {
-                // Fix 2: use member variable instead of static (thread-safe)
+                // use member variable instead of static (thread-safe)
                 std::string sizeReg = loadInt(sizeVal);
                 std::string zeroReg = allocIntReg();
                 std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrCounter_++);
@@ -656,9 +734,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
     
-        // ================================================
-        // 1. 计算参数分配信息
-        // ================================================
+        // 计算参数分配信息
         int intArg = 0, floatArg = 0;
         int stackArgsCount = 0;
         for (unsigned i = 0; i < numArgs; i++) {
@@ -670,17 +746,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
         int stackBytes = align16(stackArgsCount * 8);
-    
-        // ================================================
-        // Fix 5: w19-w28 / d8-d15 are callee-saved per AArch64 ABI.
-        // The callee guarantees to preserve them, so we must NOT
-        // save/restore them around a bl.  The prologue/epilogue already
-        // handle them for our own frame.
-        // ================================================
 
-        // ================================================
-        // 3. 分配栈参数空间
-        // ================================================
+        // 分配栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
                 os_ << "\tsub sp, sp, #" << stackBytes << "\n";
@@ -691,9 +758,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 5. 传递参数 (寄存器 + 栈)
-        // ================================================
+        // 传递参数 (寄存器 + 栈)
         intArg = 0; floatArg = 0;
         int stackIdx = 0;   // 栈参数写入偏移 (相对于 sp)
         for (unsigned i = 0; i < numArgs; i++) {
@@ -728,14 +793,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 6. 执行调用
-        // ================================================
+        // 执行调用
         os_ << "\tbl " << callee->name_ << "\n";
     
-        // ================================================
-        // 7. 回收栈参数空间
-        // ================================================
+        // 回收栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
                 os_ << "\tadd sp, sp, #" << stackBytes << "\n";
@@ -746,9 +807,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
     
-        // ================================================
-        // 8. 处理返回值  (Fix 5: step 8 "restore callee-saved" removed)
-        // ================================================
+        // 处理返回值 
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
                 storeFloat(inst, "s0");
@@ -1086,10 +1145,8 @@ std::string Arm64FuncContext::allocFloatReg() {
             return "s" + std::to_string(r);
         }
     }
-    // 极端情况：16 个临时寄存器全部被占用，回退到 s16
-    // （实际在单条指令内几乎不可能发生）
     usedFloatRegs_.insert(16);
-    return "s16";
+    return "s16"; // highly improbable but use s16 as a temporary register when s16-s31 are all occupied
 }
 
 std::string Arm64FuncContext::allocAddrReg() {
