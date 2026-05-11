@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DimArrayArgSimplify>());
         pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<RemoveRedundantPhis>());
-        pm.addPass(std::make_unique<IndVarStrengthReduce>());
+        // pm.addPass(std::make_unique<IndVarStrengthReduce>());
 		pm.addPass(std::make_unique<TailRecursionEliminate>());
 		pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LocalCopyPropagation>());
