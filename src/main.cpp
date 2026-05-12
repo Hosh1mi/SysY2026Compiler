@@ -18,6 +18,7 @@
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
+#include "include/mid/opt/loopUnroll.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -128,6 +129,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CSE>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LICM>());
+        pm.addPass(std::make_unique<LoopUnroll>());
         pm.addPass(std::make_unique<CSE>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
 	}  
