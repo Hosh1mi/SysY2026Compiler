@@ -19,6 +19,7 @@
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
+#include "include/mid/opt/reassociate.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -124,6 +125,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<TailRecursionEliminate>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LocalCopyPropagation>());
+        pm.addPass(std::make_unique<Reassociate>());
         pm.addPass(std::make_unique<ConstantFold>());
         pm.addPass(std::make_unique<AlgebraSimplify>());
         pm.addPass(std::make_unique<CSE>());

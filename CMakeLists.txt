@@ -49,6 +49,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/loopInvariantCodeMotion.cpp
     ${SRC_DIR}/mid/opt/indVarStrengthReduce.cpp
     ${SRC_DIR}/mid/opt/loopUnroll.cpp
+    ${SRC_DIR}/mid/opt/reassociate.cpp
     ${SRC_DIR}/mid/opt/removeRedundantPhis.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}

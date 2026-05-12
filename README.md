@@ -35,7 +35,7 @@
 
 #### C2
 - [X] Local and global common-subexpression elimination → 局部与全局公共子表达式消除
-- [ ] Loop-invariant code motion → 循环不变代码外提
+- [X] Loop-invariant code motion → 循环不变代码外提
 
 #### C3
 - [ ] Partial-redundancy elimination → 部分冗余消除
