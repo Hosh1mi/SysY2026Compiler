@@ -532,6 +532,15 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 storeInt(inst, rd);
                 break;
             }
+            else if (divisor == 2) {
+                std::string r = loadInt(v1);
+                std::string rd = allocIntReg();
+                os_ << "\tand " << rd << ", " << r << ", #1\n";   
+                os_ << "\ttst " << r << ", " << r << "\n";        
+                os_ << "\tcneg " << rd << ", " << rd << ", mi\n"; 
+                storeInt(inst, rd);
+                break;
+            }
             // ---- 除数为 2 的幂 (d > 0) ----
             else if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
                 // rem = num - (((num >> 31) & (d-1)) + num) >> k) << k
