@@ -1,5 +1,6 @@
 #include "../../include/mid/opt/loopIdiomRecognize.hpp"
 #include <algorithm>
+#include <functional>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
