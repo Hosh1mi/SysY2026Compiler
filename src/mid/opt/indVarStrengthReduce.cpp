@@ -321,6 +321,30 @@ BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Mo
 }
 
 // -----------------------------------------------------------------------
+// 计算 GEP 中 IV 推进 1 时，地址需要增加多少元素
+// 例如 A[N][M] 中 IV 在索引 1 (i) 时步长为 M，在索引 2 (j) 时步长为 1
+// -----------------------------------------------------------------------
+static int computeElementStride(GetElementPtrInst *gep, unsigned ivOpIdx) {
+    Type *ty = static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
+    for (unsigned i = 1; i < ivOpIdx; i++) {
+        if (auto *arrTy = dynamic_cast<ArrayType *>(ty))
+            ty = arrTy->contained_;
+        else
+            return 1;
+    }
+    int stride = 0;
+    if (auto *arrTy = dynamic_cast<ArrayType *>(ty)) {
+        stride = arrTy->num_elements_;
+        Type *inner = arrTy->contained_;
+        while (auto *ia = dynamic_cast<ArrayType *>(inner)) {
+            stride *= ia->num_elements_;
+            inner = ia->contained_;
+        }
+    }
+    return stride > 0 ? stride : 1;
+}
+
+// -----------------------------------------------------------------------
 // 主体：对循环中的派生 IV 进行强度削弱
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module) {
@@ -355,7 +379,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 if (!found) continue;
 
                 bool ok = true;
-                for (unsigned i = ivOpIdx + 1; i < gep->num_ops_; i++) {
+                for (unsigned i = 1; i < gep->num_ops_; i++) {
                     if (i == ivOpIdx) continue; 
                     if (!isLoopInvariant(gep->get_operand(i), loop.blocks)) {
                         ok = false;
@@ -363,8 +387,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                     }
                 }
                 if (!ok) continue;
-
-        // continue; //                candidates.push_back({gep, ivOpIdx});
+        candidates.push_back({gep, ivOpIdx});
             }
         }
 
@@ -405,12 +428,27 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             addrPhi->addIncoming(initGEP, preheader);
 
             // 在 latch 中创建步进指令（在 br 之前）
+            int elemStride = computeElementStride(gep, c.ivOpIdx);
+            // 将标量步长归一化到 addrPhi 所指类型的元素单位
+            Type *addrTy = static_cast<PointerType*>(addrPhi->type_)->contained_;
+            while (auto *arrTy = dynamic_cast<ArrayType*>(addrTy)) {
+                elemStride /= arrTy->num_elements_;
+                addrTy = arrTy->contained_;
+            }
+            if (elemStride <= 0) elemStride = 1;
+            int effectiveStride = iv.isAdd ? elemStride : -elemStride;
             builder->set_insert_point(iv.latch);
-            auto *incrGEP = builder->create_gep(addrPhi, {iv.stride});
+            auto *incrGEP = builder->create_gep(addrPhi, {new ConstantInt(module->int32_ty_, effectiveStride)});
             iv.latch->remove_instr(incrGEP);
             iv.latch->add_instruction_before_terminator(incrGEP);
 
             addrPhi->addIncoming(incrGEP, iv.latch);
+
+            // 多 latch 场景（如 continue）：其他 latch 的前驱用 phi 自身
+            for (auto pred : loop.header->pre_bbs_) {
+                if (pred == preheader || pred == iv.latch) continue;
+                if (loop.blocks.count(pred)) addrPhi->addIncoming(addrPhi, pred);
+            }
 
             gep->replace_all_use_with(addrPhi);
             gep->parent_->delete_instr(gep);

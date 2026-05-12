@@ -902,6 +902,11 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                 }
             }
         }
+        // 保留由后继 block 的 phi 指令写入的 use，避免被覆盖
+        auto it = bbInfo.find(bb);
+        if (it != bbInfo.end()) {
+            for (auto v : it->second.use) info.use.insert(v);
+        }
         bbInfo[bb] = info;
     }
 
@@ -1261,7 +1266,9 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
 
     resetRegs();
 
-    // Phase 1: read all sources into temporary registers
+    // Phase 1: read all sources into temporary registers (x9-x15)
+    // Phase 2: write all temporary registers to their destination slots
+    // When the pool is exhausted, x16/w16 is reused — store immediately to avoid overwrite.
     struct Temp { std::string reg; int dstSlot; };
     std::vector<Temp> temps;
     for (const auto &cp : copies) {
@@ -1304,10 +1311,15 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
                 emitLoadReg(os_, tmpReg, getSlot(val));
             }
         }
-        temps.push_back({tmpReg, cp.dstSlot});
+        if (tmpReg == "x16" || tmpReg == "w16") {
+            // Overflow register: store immediately so it can be reused safely
+            emitStoreReg(os_, tmpReg, cp.dstSlot);
+            freeAddrReg(tmpReg);
+        } else {
+            temps.push_back({tmpReg, cp.dstSlot});
+        }
     }
 
-    // Phase 2: write all temporary registers to their destination slots
     for (const auto &t : temps) {
         emitStoreReg(os_, t.reg, t.dstSlot);
     }
