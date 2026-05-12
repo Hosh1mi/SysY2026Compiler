@@ -342,42 +342,183 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SDiv: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        std::string r1 = loadInt(v1);
-        std::string r2 = loadInt(v2);
-        std::string rd = allocIntReg();
-        const char *opcode = nullptr;
-        switch (inst->op_id_) {
-        case Instruction::Add: opcode = "add"; break;
-        case Instruction::Sub: opcode = "sub"; break;
-        case Instruction::Mul: opcode = "mul"; break;
-        case Instruction::SDiv: opcode = "sdiv"; break;
-        default: break;
-        }
-        os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
-        storeInt(inst, rd);
-        break;
-    }
+        bool emitted = false;
 
-    // ---- UDiv / URem (fallback to library or simple implementation) ----
-    case Instruction::UDiv:
-    case Instruction::URem: {
-        auto v1 = inst->get_operand(0);
-        auto v2 = inst->get_operand(1);
-        std::string r1 = loadInt(v1);
-        std::string r2 = loadInt(v2);
-        std::string rd = allocIntReg();
-        if (inst->op_id_ == Instruction::UDiv) {
-            os_ << "\tudiv " << rd << ", " << r1 << ", " << r2 << "\n";
-        } else {
-            std::string rq = allocIntReg();
-            os_ << "\tudiv " << rq << ", " << r1 << ", " << r2 << "\n";
-            os_ << "\tmsub " << rd << ", " << rq << ", " << r2 << ", " << r1 << "\n";
+        // =====================================================================
+        // SDiv 常量强度削减
+        // =====================================================================
+        if (inst->op_id_ == Instruction::SDiv) {
+            if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+                int32_t d = ci->value_;
+
+                if (d == 0) {
+                    // 除以 0：让 sdiv 产生实现定义结果，fall-through
+                } else if (d == 1) {
+                    // ÷1：identity
+                    std::string r = loadInt(v1);
+                    storeInt(inst, r);
+                    emitted = true;
+                } else if (d == -1) {
+                    // ÷(-1)：negate
+                    std::string r  = loadInt(v1);
+                    std::string rd = allocIntReg();
+                    os_ << "\tneg " << rd << ", " << r << "\n";
+                    storeInt(inst, rd);
+                    emitted = true;
+                } else {
+                    // 安全计算绝对值——INT32_MIN 的 -d 会溢出，特判排除
+                    // 若 d == INT32_MIN，abs_d = 0，后续条件不成立，自动 fall-through
+                    int32_t abs_d = (d > 0) ? d
+                                : (d == INT32_MIN ? 0 : -d);
+
+                    // 正/负 2 的幂统一处理
+                    if (abs_d > 0 && (abs_d & (abs_d - 1)) == 0) {
+                        int k = __builtin_ctz(abs_d);
+                        std::string rNum    = loadInt(v1);
+                        std::string rTmp    = allocIntReg();
+                        std::string rResult = allocIntReg();
+
+                        // 有符号向零舍入偏置：
+                        //   bias = (a >> 31) & (2^k - 1)
+                        // 等价写法（避免大立即数编码问题）：
+                        //   bias = (a >> 31) >>> (32 - k)
+                        // 原因：0xFFFFFFFF >> (32-k) == 2^k - 1
+                        os_ << "\tasr " << rTmp << ", " << rNum << ", #31\n";
+                        // bic rTmp, rTmp, rTmp, lsl #k
+                        os_ << "\tbic " << rTmp << ", " << rTmp << ", " << rTmp << ", lsl #" << k << "\n";
+                        // os_ << "\tlsr " << rTmp << ", " << rTmp << ", #" << (32 - k) << "\n";
+                        os_ << "\tadd " << rResult << ", " << rNum << ", " << rTmp << "\n";
+                        os_ << "\tasr " << rResult << ", " << rResult << ", #" << k << "\n";
+                        if (d < 0)
+                            os_ << "\tneg " << rResult << ", " << rResult << "\n";
+
+                        storeInt(inst, rResult);
+                        emitted = true;
+                    }
+                    // 非 2 的幂除数：fall-through 到通用 sdiv
+                }
+            }
         }
-        storeInt(inst, rd);
+
+        // =====================================================================
+        // Mul 常量强度削减
+        // 覆盖 0、±1、±2^k、±(2^k+1)、±(2^k-1) 六族因数
+        // =====================================================================
+        if (!emitted && inst->op_id_ == Instruction::Mul) {
+            // 乘法可交换——优先在 v2 找常量，找不到再看 v1
+            ConstantInt* ci  = dynamic_cast<ConstantInt*>(v2);
+            Value*       var = v1;
+            if (!ci) { ci = dynamic_cast<ConstantInt*>(v1); var = v2; }
+
+            if (ci) {
+                int32_t factor = ci->value_;
+
+                if (factor == 0) {
+                    // × 0
+                    std::string rd = allocIntReg();
+                    os_ << "\tmov " << rd << ", #0\n";
+                    storeInt(inst, rd);
+                    emitted = true;
+
+                } else if (factor == 1) {
+                    // × 1：identity
+                    std::string r = loadInt(var);
+                    storeInt(inst, r);
+                    emitted = true;
+
+                } else if (factor == -1) {
+                    // × -1：negate
+                    std::string r  = loadInt(var);
+                    std::string rd = allocIntReg();
+                    os_ << "\tneg " << rd << ", " << r << "\n";
+                    storeInt(inst, rd);
+                    emitted = true;
+
+                } else if (factor != INT32_MIN) {  // INT32_MIN 的 -factor 溢出，跳过
+                    bool    negative = (factor < 0);
+                    int32_t abs_f    = negative ? -factor : factor;
+
+                    // 情形 A：abs_f = 2^k
+                    //   正：lsl rd, r, #k
+                    //   负：lsl rd, r, #k  +  neg          各 1 条
+                    if ((abs_f & (abs_f - 1)) == 0) {
+                        int k = __builtin_ctz(abs_f);
+                        std::string r  = loadInt(var);
+                        std::string rd = allocIntReg();
+                        os_ << "\tlsl " << rd << ", " << r << ", #" << k << "\n";
+                        if (negative)
+                            os_ << "\tneg " << rd << ", " << rd << "\n";
+                        storeInt(inst, rd);
+                        emitted = true;
+                    }
+
+                    // 情形 B：abs_f = 2^k + 1（如 3,5,9,17,33…）
+                    //   正：add rd, r, r, lsl #k            1 条
+                    //   负：add rd, r, r, lsl #k  +  neg    2 条
+                    else if (int32_t m1 = abs_f - 1;
+                            m1 > 0 && (m1 & (m1 - 1)) == 0)
+                    {
+                        int k = __builtin_ctz(m1);
+                        std::string r  = loadInt(var);
+                        std::string rd = allocIntReg();
+                        os_ << "\tadd " << rd << ", " << r << ", "
+                            << r << ", lsl #" << k << "\n";
+                        if (negative)
+                            os_ << "\tneg " << rd << ", " << rd << "\n";
+                        storeInt(inst, rd);
+                        emitted = true;
+                    }
+
+                    // 情形 C：abs_f = 2^k - 1（如 3,7,15,31,63…）
+                    //   正：lsl tmp, r, #k  ;  sub rd, tmp, r    2 条
+                    //   负：factor = 1 - 2^k，即 r - r<<k
+                    //       sub rd, r, r, lsl #k                 1 条  ← 关键优化
+                    else if (int32_t p1 = abs_f + 1;   // +1 不会溢出：abs_f <= INT32_MAX-1
+                            p1 > 0 && (p1 & (p1 - 1)) == 0)
+                    {
+                        int k = __builtin_ctz(p1);
+                        std::string r  = loadInt(var);
+                        std::string rd = allocIntReg();
+                        if (negative) {
+                            // r*(1 - 2^k) = r - r*2^k
+                            os_ << "\tsub " << rd << ", " << r << ", "
+                                << r << ", lsl #" << k << "\n";
+                        } else {
+                            std::string rTmp = allocIntReg();
+                            os_ << "\tlsl " << rTmp << ", " << r << ", #" << k << "\n";
+                            os_ << "\tsub " << rd   << ", " << rTmp << ", " << r << "\n";
+                        }
+                        storeInt(inst, rd);
+                        emitted = true;
+                    }
+                    // 其余常量：fall-through 到通用 mul
+                }
+            }
+        }
+
+        // =====================================================================
+        // 通用路径（Add / Sub / Mul 无法优化，或 SDiv 非常量 / 非 2^k 除数）
+        // =====================================================================
+        if (!emitted) {
+            std::string r1 = loadInt(v1);
+            std::string r2 = loadInt(v2);
+            std::string rd = allocIntReg();
+            const char* opcode = nullptr;
+            switch (inst->op_id_) {
+                case Instruction::Add:  opcode = "add";  break;
+                case Instruction::Sub:  opcode = "sub";  break;
+                case Instruction::Mul:  opcode = "mul";  break;
+                case Instruction::SDiv: opcode = "sdiv"; break;
+                default: break;
+            }
+            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+            storeInt(inst, rd);
+        }
         break;
     }
 
     // ---- SRem: a % b = a - (a/b) * b ----
+    // Be cautious modifying this 
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
