@@ -358,13 +358,31 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 
+    // ---- UDiv / URem (fallback to library or simple implementation) ----
+    case Instruction::UDiv:
+    case Instruction::URem: {
+        auto v1 = inst->get_operand(0);
+        auto v2 = inst->get_operand(1);
+        std::string r1 = loadInt(v1);
+        std::string r2 = loadInt(v2);
+        std::string rd = allocIntReg();
+        if (inst->op_id_ == Instruction::UDiv) {
+            os_ << "\tudiv " << rd << ", " << r1 << ", " << r2 << "\n";
+        } else {
+            std::string rq = allocIntReg();
+            os_ << "\tudiv " << rq << ", " << r1 << ", " << r2 << "\n";
+            os_ << "\tmsub " << rd << ", " << rq << ", " << r2 << ", " << r1 << "\n";
+        }
+        storeInt(inst, rd);
+        break;
+    }
+
     // ---- SRem: a % b = a - (a/b) * b ----
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) { // 检查第二个操作数是否是常量
             int32_t divisor = ci->value_;
-
             if (divisor == 0) { /* Fallback */ }
             // ---- 除数为 1，余数恒为 0 ----
             else if (divisor == 1 || divisor == -1) {
@@ -446,6 +464,67 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         os_ << "\tsdiv " << rq << ", " << ra << ", " << rb << "\n";
         os_ << "\tmsub " << rr << ", " << rq << ", " << rb << ", " << ra << "\n";
         storeInt(inst, rr);
+        break;
+    }
+
+        // ---- Integer Bitwise Logical (And / Or / Xor) ----
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor: {
+        auto v1 = inst->get_operand(0);
+        auto v2 = inst->get_operand(1);
+        std::string r1 = loadInt(v1);
+        std::string rd = allocIntReg();
+
+        const char *opcode;
+        if (inst->op_id_ == Instruction::And)      opcode = "and";
+        else if (inst->op_id_ == Instruction::Or)   opcode = "orr";
+        else                                        opcode = "eor";
+
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+            // 立即数位运算：and/orr/eor wd, w1, #imm
+            // ARM64 and/orr/eor 支持的立即数格式有限（位掩码立即数），
+            // 对于简单的小常数（如 1, 3, 7, 15 等 2^n-1）通常可以编码
+            // 若不可编码，则需加载到寄存器
+            uint32_t imm = static_cast<uint32_t>(ci->value_);
+            // 简单判断：对于 and 指令，2^n-1 形式的掩码总是可编码的
+            // 对于 orr/eor，小常数也可编码
+            // 为安全起见，如果立即数较小或为位掩码形式，使用立即数
+            // 否则先加载到寄存器
+            bool useImmediate = false;
+            if (inst->op_id_ == Instruction::And) {
+                // and 指令的立即数：ARM64 支持复杂的位掩码立即数
+                // 简单启发式：值 <= 0xFFFF 或是 2^n-1 形式
+                if (imm <= 0xFFFF || (imm & (imm + 1)) == 0) {
+                    useImmediate = true;
+                }
+            } else if (inst->op_id_ == Instruction::Or) {
+                // orr 立即数也是位掩码立即数
+                if (imm <= 0xFFFF) {
+                    useImmediate = true;
+                }
+            } else {
+                // eor 立即数也是位掩码立即数
+                if (imm <= 0xFFFF) {
+                    useImmediate = true;
+                }
+            }
+
+            if (useImmediate) {
+                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+            } else {
+                // 加载立即数到寄存器
+                std::string r2 = allocIntReg();
+                emitIntConst(ci->value_, r2);
+                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+                freeIntReg(r2);
+            }
+        } else {
+            // 寄存器位运算：and/orr/eor wd, w1, w2
+            std::string r2 = loadInt(v2);
+            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+        }
+        storeInt(inst, rd);
         break;
     }
 

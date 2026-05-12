@@ -18,6 +18,7 @@
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
+#include "include/mid/opt/loopIdiomRecognize.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -116,10 +117,12 @@ int main(int argc, char **argv) {
 	PassManager pm;
 	if(optLevel >= 1){
         // pm.addPass(std::make_unique<InlineExpand>());
-        pm.addPass(std::make_unique<DimArrayArgSimplify>());
+        
         pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<RemoveRedundantPhis>());
+        pm.addPass(std::make_unique<LoopIdiomRecognition>());
         // pm.addPass(std::make_unique<IndVarStrengthReduce>());
+        pm.addPass(std::make_unique<DimArrayArgSimplify>());
         pm.addPass(std::make_unique<TailRecursionEliminate>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LocalCopyPropagation>());
