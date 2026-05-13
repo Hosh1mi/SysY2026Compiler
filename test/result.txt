@@ -1,3 +1,7 @@
+01_mm1 : AC
+Total time : 0H-0M-15S-10314us
+01_mm2 : AC
+Total time : 0H-0M-14S-952724us
 01_mm3 : AC
 Total time : 0H-0M-7S-697990us
 03_sort1 : AC
