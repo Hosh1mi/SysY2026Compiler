@@ -1074,8 +1074,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
     if (auto inst = dynamic_cast<Instruction*>(v)) {
-        if (inst->is_void() || inst->is_alloca() || inst->is_phi() ||
-            inst->op_id_ == Instruction::BitCast ) {
+        if (inst->is_void() || inst->is_alloca() || inst->is_phi() ) {
             return false;
         }
     }
