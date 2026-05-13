@@ -95,6 +95,50 @@ static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
     }
 }
 
+// Emit stp with potentially large negative offset (x29-relative)
+static void emitStorePair(std::ostream &os, const std::string &r1,
+                          const std::string &r2, int off) {
+    bool isX = (r1[0] == 'x' || r2[0] == 'x');
+    int range = isX ? 504 : 252;
+    int align = isX ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        os << "\tstp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub " << base << ", x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz " << base << ", #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk " << base << ", #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub " << base << ", x29, " << base << "\n";
+        }
+        os << "\tstp " << r1 << ", " << r2 << ", [" << base << "]\n";
+    }
+}
+
+// Emit ldp with potentially large negative offset (x29-relative)
+static void emitLoadPair(std::ostream &os, const std::string &r1,
+                         const std::string &r2, int off) {
+    bool isX = (r1[0] == 'x' || r2[0] == 'x');
+    int range = isX ? 504 : 252;
+    int align = isX ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        os << "\tldp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub " << base << ", x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz " << base << ", #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk " << base << ", #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub " << base << ", x29, " << base << "\n";
+        }
+        os << "\tldp " << r1 << ", " << r2 << ", [" << base << "]\n";
+    }
+}
+
 // ---- Arm64FuncContext ----
 
 Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os)
@@ -165,13 +209,25 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
-    for (int reg : savedIntRegs) {
-        saveOffset -= 8;
-        emitStoreReg(os_, "x" + std::to_string(reg), saveOffset);
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                          "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        }
     }
-    for (int reg : savedFloatRegs) {
-        saveOffset -= 8;
-        emitStoreReg(os_, "d" + std::to_string(reg), saveOffset);
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                          "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        }
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
@@ -255,13 +311,25 @@ void Arm64FuncContext::emitEpilogue() {
     int localSize = align16(frameSize_ + savedRegBytes);
     int restoreOffset = -frameSize_;
 
-    for (int reg : savedIntRegs) {
-        restoreOffset -= 8;
-        emitLoadReg(os_, "x" + std::to_string(reg), restoreOffset);
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                         "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        }
     }
-    for (int reg : savedFloatRegs) {
-        restoreOffset -= 8;
-        emitLoadReg(os_, "d" + std::to_string(reg), restoreOffset);
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                         "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        }
     }
 
     if (localSize > 0) {
@@ -898,19 +966,51 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- Br ----
     case Instruction::Br: {
-        // emit PHI copies before the branch
-        emitPhiCopies(inst->parent_);
+        auto parentBB = inst->parent_;
 
         if (inst->num_ops_ == 1) {
+            // Unconditional branch: emit copies for the single edge
             auto target = static_cast<BasicBlock*>(inst->get_operand(0));
+            emitPhiCopies(parentBB, target);
             os_ << "\tb " << bbLabel(func_, target) << "\n";
         } else {
+            // Conditional branch: evaluate condition FIRST, then edge-specific copies
             auto cond = inst->get_operand(0);
             auto trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
             auto falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
+
+            // Check if either edge has phi copies
+            bool hasTrue = false, hasFalse = false;
+            for (const auto &pc : phiCopies_) {
+                if (pc.pred != parentBB) continue;
+                if (pc.succ == trueBB) hasTrue = true;
+                if (pc.succ == falseBB) hasFalse = true;
+            }
+
             std::string cr = loadInt(cond);
-            os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
-            os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+
+            if (!hasTrue && !hasFalse) {
+                os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            } else if (hasTrue && !hasFalse) {
+                os_ << "\tcbz " << cr << ", " << bbLabel(func_, falseBB) << "\n";
+                emitPhiCopies(parentBB, trueBB);
+                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+            } else if (!hasTrue && hasFalse) {
+                os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
+                emitPhiCopies(parentBB, falseBB);
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            } else {
+                // Both edges have copies: use edge label
+                std::string edgeLbl = ".L" + func_->name_ + "_edge_" +
+                    std::to_string(edgeCounter_++);
+                os_ << "\tcbz " << cr << ", " << edgeLbl << "\n";
+                emitPhiCopies(parentBB, trueBB);
+                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+                os_ << edgeLbl << ":\n";
+                emitPhiCopies(parentBB, falseBB);
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            }
         }
         break;
     }
@@ -951,7 +1051,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 int bytes = sizeConst->value_;
                 constexpr int MAX_UNROLL_BYTES = 256;
                 if (bytes <= MAX_UNROLL_BYTES) {
-                    for (int off = 0; off < bytes; off += 4) {
+                    int off;
+                    for (off = 0; off + 8 <= bytes; off += 8) {
+                        if (off == 0)
+                            os_ << "\tstp wzr, wzr, [" << addr << "]\n";
+                        else
+                            os_ << "\tstp wzr, wzr, [" << addr << ", #" << off << "]\n";
+                    }
+                    if (off < bytes) {
                         if (off == 0)
                             os_ << "\tstr wzr, [" << addr << "]\n";
                         else
@@ -1089,7 +1196,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
     if (auto inst = dynamic_cast<Instruction*>(v)) {
-        if (inst->is_void() || inst->is_alloca() || inst->is_phi() ) {
+        if (inst->is_void() || inst->is_alloca() ) {
             return false;
         }
     }
@@ -1301,20 +1408,50 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                     ++it;
                 }
             }
-            if (freeRegs.empty()) continue;
-            int regNo = *freeRegs.begin();
-            freeRegs.erase(freeRegs.begin());
-            if (floats) {
-                assignedRegs_[iv.value] = "s" + std::to_string(regNo);
-            } else if (iv.isPtr) {
-                assignedRegs_[iv.value] = "x" + std::to_string(regNo);
+            if (freeRegs.empty()) {
+                // Spill heuristic: spill the active interval with the farthest
+                // endpoint, but never spill a PHI (they interact with phi copies).
+                // active is sorted by end (ascending), so scan from back.
+                bool spilled = false;
+                for (auto it = active.rbegin(); it != active.rend(); ++it) {
+                    if (it->end > iv.end && !dynamic_cast<PhiInst*>(it->value)) {
+                        int regNo = std::stoi(assignedRegs_[it->value].substr(1));
+                        assignedRegs_.erase(it->value);
+                        if (floats) {
+                            assignedRegs_[iv.value] = "s" + std::to_string(regNo);
+                        } else if (iv.isPtr) {
+                            assignedRegs_[iv.value] = "x" + std::to_string(regNo);
+                        } else {
+                            assignedRegs_[iv.value] = "w" + std::to_string(regNo);
+                        }
+                        // Erase by value from active
+                        for (auto act = active.begin(); act != active.end(); ++act) {
+                            if (act->value == it->value) { active.erase(act); break; }
+                        }
+                        active.push_back(iv);
+                        std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
+                            return a.end < b.end;
+                        });
+                        spilled = true;
+                        break;
+                    }
+                }
+                // If no spillable interval found, skip current
             } else {
-                assignedRegs_[iv.value] = "w" + std::to_string(regNo);
+                int regNo = *freeRegs.begin();
+                freeRegs.erase(freeRegs.begin());
+                if (floats) {
+                    assignedRegs_[iv.value] = "s" + std::to_string(regNo);
+                } else if (iv.isPtr) {
+                    assignedRegs_[iv.value] = "x" + std::to_string(regNo);
+                } else {
+                    assignedRegs_[iv.value] = "w" + std::to_string(regNo);
+                }
+                active.push_back(iv);
+                std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
+                    return a.end < b.end;
+                });
             }
-            active.push_back(iv);
-            std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
-                return a.end < b.end;
-            });
         }
     };
 
@@ -1556,31 +1693,29 @@ void Arm64FuncContext::preparePhi() {
             for (int i = 0; i < phi->num_ops_ / 2; i++) {
                 auto val = phi->get_operand(2 * i);
                 auto predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
-                phiCopies_.push_back({predBB, {val, phiSlot}});
+                phiCopies_.push_back({predBB, bb, val, phiSlot, phi});
             }
         }
     }
 }
 
-void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
-    struct Copy { Value *src; int dstSlot; };
-    std::vector<Copy> copies;
-    for(const auto &pc : phiCopies_){
-        if (pc.first != bb) continue;
-        copies.push_back({pc.second.first, pc.second.second});
+void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
+    std::vector<PhiCopy> copies;
+    for (const auto &pc : phiCopies_) {
+        if (pc.pred == pred && pc.succ == succ)
+            copies.push_back(pc);
     }
     if (copies.empty()) return;
 
     resetRegs();
 
-    // Phase 1: read all sources into temporary registers (x9-x15)
-    // Phase 2: write all temporary registers to their destination slots
-    // When the pool is exhausted, x16/w16 is reused — store immediately to avoid overwrite.
-    struct Temp { std::string reg; int dstSlot; };
-    std::vector<Temp> temps;
+    // ---- Phase 1: read all source values into temporaries ----
+    struct Entry { Value *phi; std::string tmpReg; int dstSlot; };
+    std::vector<Entry> entries;
     for (const auto &cp : copies) {
         Value *val = cp.src;
         std::string tmpReg;
+
         if (isFloat(val->type_)) {
             if (hasAssignedReg(val)) {
                 std::string srcReg = assignedReg(val);
@@ -1618,15 +1753,28 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *bb) {
                 emitLoadReg(os_, tmpReg, getSlot(val));
             }
         }
-        if (tmpReg == "x16" || tmpReg == "w16") {
-            // Overflow register: store immediately so it can be reused safely
-            emitStoreReg(os_, tmpReg, cp.dstSlot);
-            freeAddrReg(tmpReg);
-        } else {
-            temps.push_back({tmpReg, cp.dstSlot});
-        }
+        entries.push_back({cp.phi, tmpReg, cp.dstSlot});
     }
 
+    // ---- Phase 2: write all destinations (parallel copy semantics) ----
+    struct Temp { std::string reg; int dstSlot; };
+    std::vector<Temp> temps;
+    for (const auto &e : entries) {
+        if (e.phi && hasAssignedReg(e.phi)) {
+            bool isPhiPtr = e.phi->type_->tid_ == Type::PointerTyID;
+            std::string dstReg = assignedReg(e.phi, isPhiPtr);
+            if (isFloat(e.phi->type_)) {
+                if (e.tmpReg != dstReg) os_ << "\tfmov " << dstReg << ", " << e.tmpReg << "\n";
+            } else {
+                if (e.tmpReg != dstReg) os_ << "\tmov " << dstReg << ", " << e.tmpReg << "\n";
+            }
+        } else if (e.tmpReg == "x16" || e.tmpReg == "w16") {
+            emitStoreReg(os_, e.tmpReg, e.dstSlot);
+            freeAddrReg(e.tmpReg);
+        } else {
+            temps.push_back({e.tmpReg, e.dstSlot});
+        }
+    }
     for (const auto &t : temps) {
         emitStoreReg(os_, t.reg, t.dstSlot);
     }
