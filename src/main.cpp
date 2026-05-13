@@ -21,6 +21,7 @@
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopIdiomRecognize.hpp"
+#include "include/mid/opt/loopVectorize.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -135,6 +136,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<IndVarStrengthReduce>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LoopUnroll>());
+        pm.addPass(std::make_unique<LoopVectorize>());
 
 	}  
     

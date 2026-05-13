@@ -52,6 +52,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/reassociate.cpp
     ${SRC_DIR}/mid/opt/loopIdiomRecognize.cpp
     ${SRC_DIR}/mid/opt/removeRedundantPhis.cpp
+    ${SRC_DIR}/mid/opt/loopVectorize.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
