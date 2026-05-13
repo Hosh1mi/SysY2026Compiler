@@ -85,14 +85,13 @@ void Reassociate::collectLeafOperands(Value *root, Instruction::OpID op,
                                        std::vector<Value*> &ops,
                                        std::unordered_set<Value*> &visited) {
     auto *bin = dynamic_cast<BinaryInst*>(root);
-    // Only traverse single-use, same-opcode, same-BB chains
+    // Only traverse single-use, same-opcode chains
     if (!bin || bin->op_id_ != op || bin->use_list_.size() != 1) {
-        if (!visited.count(root)) {
-            visited.insert(root);
-            ops.push_back(root);
-        }
+        ops.push_back(root);
         return;
     }
+    // Guard against cycles (should not happen in valid SSA, but be safe)
+    if (!visited.insert(root).second) return;
     collectLeafOperands(bin->get_operand(0), op, ops, visited);
     collectLeafOperands(bin->get_operand(1), op, ops, visited);
 }
@@ -297,8 +296,7 @@ Value *Reassociate::optAddTree(BinaryInst *root, std::vector<ValueEntry> &ops) {
         }
     }
 
-    return changed ? nullptr : nullptr;
-    // nullptr means: no replacement, just rewrite the tree in order
+    return nullptr;
 }
 
 // -----------------------------------------------------------------------
@@ -308,10 +306,126 @@ void Reassociate::reassociate(BinaryInst *inst) {
     Instruction::OpID op = inst->op_id_;
     if (op != Instruction::Add && op != Instruction::Mul) return;
 
-    // Canonicalize: constants on RHS only (skip rank-based swap for safety)
+    // Canonicalize: constants on RHS
     Value *lhs = inst->get_operand(0);
     Value *rhs = inst->get_operand(1);
 
     if (dynamic_cast<Constant*>(lhs) && !dynamic_cast<Constant*>(rhs))
         swapOperands(inst);
+
+    // ---- Flatten ADD tree, optimize, rebuild ----
+    if (op != Instruction::Add) return;
+
+    BasicBlock *curBB = inst->parent_;
+    std::vector<Value*> leafOps;
+    std::unordered_set<Value*> visited;
+
+    collectLeafOperands(inst->get_operand(0), op, leafOps, visited);
+    collectLeafOperands(inst->get_operand(1), op, leafOps, visited);
+
+    for (auto *v : leafOps) {
+        auto *vi = dynamic_cast<Instruction*>(v);
+        if (vi && vi->parent_ && vi->parent_ != curBB) return;
+    }
+
+    if (leafOps.size() == 1) {
+        inst->replace_all_use_with(leafOps[0]);
+        inst->parent_->delete_instr(inst);
+        return;
+    }
+
+    // Step 2: sort by rank to group identical terms for add-to-mul
+    std::vector<ValueEntry> ops;
+    for (auto *v : leafOps) ops.push_back({v, getRank(v)});
+    std::stable_sort(ops.begin(), ops.end(),
+        [](const ValueEntry &a, const ValueEntry &b) { return a.rank > b.rank; });
+
+    // Add-to-mul: X+X+X → 3*X
+    Value *optResult = nullptr;
+    bool optimized = false;
+    for (size_t i = 0; i + 1 < ops.size(); ) {
+        Value *curr = ops[i].operand;
+        int freq = 1;
+        size_t j = i + 1;
+        while (j < ops.size() && ops[j].operand == curr) { freq++; j++; }
+        if (freq > 1) {
+            ops.erase(ops.begin() + i, ops.begin() + j);
+            auto *mul = createBinary(Instruction::Mul, curr,
+                new ConstantInt(inst->type_, freq), curBB, inst);
+            optimized = true;
+            if (ops.empty()) { optResult = mul; break; }
+            ops.insert(ops.begin(), {mul, getRank(mul)});
+        } else {
+            i++;
+        }
+    }
+
+    if (optResult) {
+        inst->replace_all_use_with(optResult);
+        inst->parent_->delete_instr(inst);
+        return;
+    }
+
+    // Step 3: Factor out common term (A*B + A*C → A*(B+C))
+    {
+        std::unordered_map<Value*, int> factorFreq;
+        Value *bestFactor = nullptr;
+        int bestFreq = 0;
+        for (auto &op : ops) {
+            auto *mulBin = dynamic_cast<BinaryInst*>(op.operand);
+            if (!mulBin || mulBin->op_id_ != Instruction::Mul || mulBin->use_list_.size() != 1)
+                continue;
+            std::vector<Value*> factors;
+            extractOneUseFactors(mulBin, factors);
+            std::unordered_set<Value*> seen;
+            for (auto *f : factors) {
+                if (!seen.insert(f).second) continue;
+                int cnt = ++factorFreq[f];
+                if (cnt > bestFreq) { bestFreq = cnt; bestFactor = f; }
+            }
+        }
+
+        if (bestFreq > 1) {
+            std::vector<Value*> innerAddOps;
+            for (size_t i = 0; i < ops.size(); ) {
+                Value *reduced = removeFactor(ops[i].operand, bestFactor);
+                if (reduced) {
+                    for (size_t j = ops.size(); j > i; ) {
+                        j--;
+                        if (ops[j].operand == ops[i].operand) {
+                            innerAddOps.push_back(reduced);
+                            ops.erase(ops.begin() + j);
+                        }
+                    }
+                } else {
+                    i++;
+                }
+            }
+
+            if (!innerAddOps.empty()) {
+                Value *addTree = rebuildAddTree(innerAddOps, curBB, inst);
+                auto *factorMul = createBinary(Instruction::Mul, addTree, bestFactor, curBB, inst);
+                optimized = true;
+                if (ops.empty()) { optResult = factorMul; }
+                else { ops.insert(ops.begin(), {factorMul, getRank(factorMul)}); }
+            }
+        }
+    }
+
+    if (optResult) {
+        inst->replace_all_use_with(optResult);
+        inst->parent_->delete_instr(inst);
+        return;
+    }
+
+    // Only rebuild if we actually optimized something; otherwise leave original alone
+    if (!optimized) return;
+
+    std::vector<Value*> sortedOps;
+    for (auto &e : ops) sortedOps.push_back(e.operand);
+    Value *newTree = rebuildTree(op, sortedOps, curBB, inst);
+    if (newTree && newTree != inst) {
+        inst->replace_all_use_with(newTree);
+        inst->parent_->delete_instr(inst);
+    }
 }
