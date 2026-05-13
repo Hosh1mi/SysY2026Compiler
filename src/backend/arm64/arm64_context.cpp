@@ -35,11 +35,16 @@ static bool isAllocatableFloatValue(Type *ty) {
     return ty->tid_ == Type::FloatTyID;
 }
 
+static bool isAllocatablePtrValue(Type *ty) {
+    return ty->tid_ == Type::PointerTyID;
+}
+
 static std::vector<int> collectAssignedIntRegs(const std::map<Value*, std::string> &assignedRegs) {
     std::set<int> regs;
     for (const auto &entry : assignedRegs) {
         const std::string &reg = entry.second;
-        if (!reg.empty() && reg[0] == 'w') regs.insert(std::stoi(reg.substr(1)));
+        if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
+            regs.insert(std::stoi(reg.substr(1)));
     }
     return std::vector<int>(regs.begin(), regs.end());
 }
@@ -732,8 +737,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto icmp = static_cast<ICmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        std::string r1 = loadInt(v1);
-        std::string r2 = loadInt(v2);
+        std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
+        std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
         std::string rd = allocIntReg();
         os_ << "\tcmp " << r1 << ", " << r2 << "\n";
         os_ << "\tcset " << rd << ", " << icmpCond(icmp->icmp_op_) << "\n";
@@ -759,7 +764,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::GetElementPtr: {
         auto gep = static_cast<GetElementPtrInst*>(inst);
         auto ptr = gep->get_operand(0);
-        std::string addr = loadAddr(ptr);          // addr 是基址寄存器
+        std::string base = loadAddr(ptr);          
+        std::string addr;
+        if(hasAssignedReg(ptr)) {
+            addr = allocAddrReg();
+            os_ << "\tmov " << addr << ", " << base << "\n";
+        } else {
+            addr = base;
+        }
     
         unsigned numIdx = gep->num_ops_ - 1;
         auto srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
@@ -910,6 +922,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (isFloat(val->type_)) {
                 std::string r = loadFloat(val);
                 os_ << "\tfmov s0, " << r << "\n";
+            } else if (isPtr(val->type_)) {
+                std::string r = loadAddr(val);
+                os_ << "\tmov x0, " << r << "\n";
             } else {
                 std::string r = loadInt(val);
                 os_ << "\tmov w0, " << r << "\n";
@@ -1078,11 +1093,11 @@ bool Arm64FuncContext::canAssignRegister(Value *v) const {
             return false;
         }
     }
-    return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_);
+    return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_) || isAllocatablePtrValue(v->type_);
 }
 
 void Arm64FuncContext::allocateLinearScanRegisters() {
-    struct Interval { Value *value; int start; int end; bool isFloat; };
+    struct Interval { Value *value; int start; int end; bool isFloat; bool isPtr;};
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
     std::vector<Interval> intervals;
@@ -1255,7 +1270,8 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         }
 
         if (end >= start) {
-            intervals.push_back({v, start, end, isAllocatableFloatValue(v->type_)});
+            bool isPtr = isAllocatablePtrValue(v->type_);
+            intervals.push_back({v, start, end, isAllocatableFloatValue(v->type_), isPtr});
         }
     }
 
@@ -1288,7 +1304,13 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
             if (freeRegs.empty()) continue;
             int regNo = *freeRegs.begin();
             freeRegs.erase(freeRegs.begin());
-            assignedRegs_[iv.value] = std::string(floats ? "s" : "w") + std::to_string(regNo);
+            if (floats) {
+                assignedRegs_[iv.value] = "s" + std::to_string(regNo);
+            } else if (iv.isPtr) {
+                assignedRegs_[iv.value] = "x" + std::to_string(regNo);
+            } else {
+                assignedRegs_[iv.value] = "w" + std::to_string(regNo);
+            }
             active.push_back(iv);
             std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
                 return a.end < b.end;
@@ -1430,7 +1452,7 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
     }
     if (auto ci = dynamic_cast<ConstantInt*>(v)) {
         std::string r = allocAddrReg();
-        os_ << "\tmov " << r << ", #" << ci->value_ << "\n";
+        emitIntConst(ci->value_, r);
         return r;
     }
     if (hasAssignedReg(v)) return assignedReg(v, true);
