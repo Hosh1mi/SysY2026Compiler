@@ -98,11 +98,17 @@ static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
 // Emit stp with potentially large negative offset (x29-relative)
 static void emitStorePair(std::ostream &os, const std::string &r1,
                           const std::string &r2, int off) {
-    bool isX = (r1[0] == 'x' || r2[0] == 'x');
-    int range = isX ? 504 : 252;
-    int align = isX ? 8 : 4;
+    // x and d registers are 64-bit, requiring 8-byte alignment for stp
+    bool is64 = (r1[0] == 'x' || r1[0] == 'd' || r2[0] == 'x' || r2[0] == 'd');
+    int range = is64 ? 504 : 252;
+    int align = is64 ? 8 : 4;
     if (off >= -range && off <= range && off % align == 0) {
         os << "\tstp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else if (off >= -256 && off <= 255) {
+        // Offset valid for single str but not stp (misaligned or out of stp range):
+        // fall back to two individual stores
+        emitStoreReg(os, r1, off);
+        emitStoreReg(os, r2, off + (is64 ? 8 : 4));  // r2 was at higher address
     } else {
         std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
         int pos = -off;
@@ -120,11 +126,15 @@ static void emitStorePair(std::ostream &os, const std::string &r1,
 // Emit ldp with potentially large negative offset (x29-relative)
 static void emitLoadPair(std::ostream &os, const std::string &r1,
                          const std::string &r2, int off) {
-    bool isX = (r1[0] == 'x' || r2[0] == 'x');
-    int range = isX ? 504 : 252;
-    int align = isX ? 8 : 4;
+    bool is64 = (r1[0] == 'x' || r1[0] == 'd' || r2[0] == 'x' || r2[0] == 'd');
+    int range = is64 ? 504 : 252;
+    int align = is64 ? 8 : 4;
     if (off >= -range && off <= range && off % align == 0) {
         os << "\tldp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else if (off >= -256 && off <= 255) {
+        // Offset valid for single ldr but not ldp: fall back to two individual loads
+        emitLoadReg(os, r1, off);
+        emitLoadReg(os, r2, off + (is64 ? 8 : 4));  // r2 was at higher address
     } else {
         std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
         int pos = -off;
