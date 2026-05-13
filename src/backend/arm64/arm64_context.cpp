@@ -95,6 +95,50 @@ static void emitLoadReg(std::ostream &os, const std::string &reg, int off) {
     }
 }
 
+// Emit stp with potentially large negative offset (x29-relative)
+static void emitStorePair(std::ostream &os, const std::string &r1,
+                          const std::string &r2, int off) {
+    bool isX = (r1[0] == 'x' || r2[0] == 'x');
+    int range = isX ? 504 : 252;
+    int align = isX ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        os << "\tstp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub " << base << ", x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz " << base << ", #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk " << base << ", #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub " << base << ", x29, " << base << "\n";
+        }
+        os << "\tstp " << r1 << ", " << r2 << ", [" << base << "]\n";
+    }
+}
+
+// Emit ldp with potentially large negative offset (x29-relative)
+static void emitLoadPair(std::ostream &os, const std::string &r1,
+                         const std::string &r2, int off) {
+    bool isX = (r1[0] == 'x' || r2[0] == 'x');
+    int range = isX ? 504 : 252;
+    int align = isX ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        os << "\tldp " << r1 << ", " << r2 << ", [x29, #" << off << "]\n";
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            os << "\tsub " << base << ", x29, #" << pos << "\n";
+        } else {
+            os << "\tmovz " << base << ", #" << (pos & 0xFFFF) << "\n";
+            os << "\tmovk " << base << ", #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os << "\tsub " << base << ", x29, " << base << "\n";
+        }
+        os << "\tldp " << r1 << ", " << r2 << ", [" << base << "]\n";
+    }
+}
+
 // ---- Arm64FuncContext ----
 
 Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os)
@@ -165,13 +209,25 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
-    for (int reg : savedIntRegs) {
-        saveOffset -= 8;
-        emitStoreReg(os_, "x" + std::to_string(reg), saveOffset);
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                          "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        }
     }
-    for (int reg : savedFloatRegs) {
-        saveOffset -= 8;
-        emitStoreReg(os_, "d" + std::to_string(reg), saveOffset);
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                          "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        }
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
@@ -255,13 +311,25 @@ void Arm64FuncContext::emitEpilogue() {
     int localSize = align16(frameSize_ + savedRegBytes);
     int restoreOffset = -frameSize_;
 
-    for (int reg : savedIntRegs) {
-        restoreOffset -= 8;
-        emitLoadReg(os_, "x" + std::to_string(reg), restoreOffset);
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                         "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        }
     }
-    for (int reg : savedFloatRegs) {
-        restoreOffset -= 8;
-        emitLoadReg(os_, "d" + std::to_string(reg), restoreOffset);
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                         "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        }
     }
 
     if (localSize > 0) {
@@ -951,7 +1019,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 int bytes = sizeConst->value_;
                 constexpr int MAX_UNROLL_BYTES = 256;
                 if (bytes <= MAX_UNROLL_BYTES) {
-                    for (int off = 0; off < bytes; off += 4) {
+                    int off;
+                    for (off = 0; off + 8 <= bytes; off += 8) {
+                        if (off == 0)
+                            os_ << "\tstp wzr, wzr, [" << addr << "]\n";
+                        else
+                            os_ << "\tstp wzr, wzr, [" << addr << ", #" << off << "]\n";
+                    }
+                    if (off < bytes) {
                         if (off == 0)
                             os_ << "\tstr wzr, [" << addr << "]\n";
                         else
