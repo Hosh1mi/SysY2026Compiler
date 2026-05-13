@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CSE>());
         pm.addPass(std::make_unique<LICM>());
         pm.addPass(std::make_unique<ConstantFold>());
-        // pm.addPass(std::make_unique<IndVarStrengthReduce>());
+        pm.addPass(std::make_unique<IndVarStrengthReduce>());
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LoopUnroll>());
 

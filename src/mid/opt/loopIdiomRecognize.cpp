@@ -88,8 +88,9 @@ int LoopIdiomRecognition::detectBitwiseLoopPattern(Function *func) {
             // 此处为了快速实现，使用 idom 近似：检查 succ 是否是 bb 的前驱且 succ 在 bb 之前出现于 postorder
             auto it_bb = std::find(postorder.begin(), postorder.end(), bb);
             auto it_succ = std::find(postorder.begin(), postorder.end(), succ);
-            if (it_succ < it_bb)  // succ 在 postorder 中更早出现 → 回边
+            if (it_succ > it_bb)  // succ 在 postorder 中更晚出现（succ 是 bb 的祖先）→ 回边
                 backEdges.push_back({bb, succ});
+
         }
     }
 
@@ -123,21 +124,27 @@ int LoopIdiomRecognition::detectBitwiseLoopPattern(Function *func) {
     int and1_count  = 0;
     int icmp_eq1_count = 0;
     int icmp_ne_count  = 0;
-    bool has_result_phi = false;
+    bool found_zero_init = false;
+    bool found_add_update = false;
     bool has_index_phi  = false;
+
+    // 收集 Add 指令的所在基本块，用于后续区分 AND/OR
+    std::vector<BasicBlock*> add_blocks;
 
     for (auto bb : loopBlocks) {
         for (auto inst : bb->instr_list_) {
             if (inst->op_id_ == Instruction::PHI) {
                 // 检查是否为 result phi（初始值 0，某个 incoming 为 add）
                 auto phi = static_cast<PhiInst*>(inst);
-                bool zero_init = false, add_update = false;
+                // Mem2Reg 后，零初始值和 Add 更新可能分布在不同的 phi 中。
+                // 例如：header 中的 phi 有零初始值（来自 entry），
+                // latch 中的 phi 有 Add（来自循环体内的条件分支）。
+                // 因此我们分别统计，不要求在同一 phi 中。
                 for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                    if (isConstInt(phi->get_operand(i), 0)) zero_init = true;
+                    if (isConstInt(phi->get_operand(i), 0)) found_zero_init = true;
                     if (auto *in = dynamic_cast<Instruction*>(phi->get_operand(i)))
-                        if (in->op_id_ == Instruction::Add) add_update = true;
+                        if (in->op_id_ == Instruction::Add) found_add_update = true;
                 }
-                if (zero_init && add_update) has_result_phi = true;
 
                 // 检查 index phi（边界等于 width 或 0 向 width 递增/递减）
                 bool bound_found = false;
@@ -173,38 +180,56 @@ int LoopIdiomRecognition::detectBitwiseLoopPattern(Function *func) {
     // 位提取：至少有两个位置提取（每个参数至少一次）
     bool extract_ok = (srem2_count >= 2 || and1_count >= 2) &&
                       (srem2_count + and1_count >= 2);
-    if (!extract_ok || !has_result_phi) return -1;
+    if (!extract_ok || !found_zero_init || !found_add_update) return -1;
 
     // 区分 AND/OR/XOR（通过条件累加路径）
     // XOR 典型特征：icmp ne 出现在条件分支，且没有 eq 1
     if (icmp_ne_count > 0 && icmp_eq1_count == 0)
         return Instruction::Xor;
 
-    // AND vs OR：看 phi 的 add 来自几个不同条件分支
-    // 我们从 result phi 的 add incoming 对应的基本块反向查找其条件
-    int add_paths = 0;
+    // AND vs OR：
+    // Mem2Reg 后，循环体内只有一个 Add 指令（条件块中的 result + power）。
+    // AND 中只有一条路径到达 Add（bit_a==1 && bit_b==1），因此 Add 块仅有 1 个前驱。
+    // OR 中有两条路径到达 Add（bit_a==1 或 bit_b==1），因此 Add 块有 2 个前驱。
+    // 我们找到 Add 指令所在的块，再检查该块的入边数量。
+    int pred_count = 0;
     for (auto bb : loopBlocks) {
         for (auto inst : bb->instr_list_) {
-            if (inst->op_id_ != Instruction::PHI) continue;
-            auto phi = static_cast<PhiInst*>(inst);
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                if (auto *add_inst = dynamic_cast<Instruction*>(phi->get_operand(i))) {
-                    if (add_inst->op_id_ == Instruction::Add) {
-                        // 找到该 add 所在的基本块（可能是 latch 或循环体内条件分支）
-                        auto *add_bb = add_inst->parent_;
-                        if (add_bb && loopBlocks.count(add_bb)) {
-                            // 统计不同的 add 指令来源
-                            add_paths++;
+            if (inst->op_id_ == Instruction::Add) {
+                // 跳过循环头 phi 的 Add（归纳变量的递增来自移位/减1，不是条件累加）
+                // 仅考虑循环体条件分支中的 Add（其父块前驱数反映条件路径数）
+                auto *add_bb = inst->parent_;
+                if (add_bb && loopBlocks.count(add_bb)) {
+                    // 检查该 Add 是否为 phi 的 incoming（即：有用例来自 phi 指令）
+                    bool feeds_phi = false;
+                    for (auto &use : inst->use_list_) {
+                        if (auto *uinst = dynamic_cast<Instruction*>(use.val_)) {
+                            if (uinst->op_id_ == Instruction::PHI)
+                                feeds_phi = true;
                         }
+                    }
+
+                    if (feeds_phi) {
+                        // 统计 Add 块在循环内/循环头的前驱数量（排除回边外的 entry 前驱）
+                        int prev_cnt = 0;
+                        for (auto pred : add_bb->pre_bbs_)
+                            if (loopBlocks.count(pred) || pred == header)
+                                prev_cnt++;
+                        pred_count = pred_count > 0 ? prev_cnt : pred_count;
+                        // 只考虑第一个符合条件的 Add
+                        break;
                     }
                 }
             }
         }
+        if (pred_count > 0) break;
     }
-    if (add_paths == 1) return Instruction::And;
-    if (add_paths >= 2) return Instruction::Or;
+
+    if (pred_count >= 2) return Instruction::Or;
+    if (pred_count == 1) return Instruction::And;
 
     return -1;
+
 }
 
 // =====================================================================
