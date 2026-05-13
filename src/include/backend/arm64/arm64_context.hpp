@@ -56,7 +56,7 @@ private:
 
     // PHI resolution
     void preparePhi();
-    void emitPhiCopies(BasicBlock *bb);
+    void emitPhiCopies(BasicBlock *pred, BasicBlock *succ);
 
     const char *icmpCond(ICmpInst::ICmpOp op);
     const char *fcmpCond(FCmpInst::FCmpOp op);
@@ -73,9 +73,16 @@ private:
 
     std::map<Value*, std::string> assignedRegs_; // linear-scan Value* → physical reg name
 
-    // (predecessor_BB, result_slot_offset) → source Value*
-    std::vector<std::pair<BasicBlock*, std::pair<Value*, int>>> phiCopies_;
+    struct PhiCopy {
+        BasicBlock *pred;
+        BasicBlock *succ;
+        Value *src;
+        int dstSlot;
+        Value *phi;
+    };
+    std::vector<PhiCopy> phiCopies_;
 
     BasicBlock *epilogueBB_ = nullptr;
-    int memclrCounter_ = 0;  // Fix 2: replaces static int memclrLoopId (thread-safety)
+    int memclrCounter_ = 0;
+    int edgeCounter_ = 0;
 };
