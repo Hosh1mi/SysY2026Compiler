@@ -29,14 +29,18 @@ void InlineExpand::execute(Module *module) {
 
         if (!call->parent_) continue;
 
+        Function *caller = call->parent_->parent_;
         Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
-        if (!callee || !canInline(callee, call->parent_->parent_))
+        if (!callee || !canInline(callee, caller))
             continue;
 
         // 执行内联，可能引入新的 call，将其加入队列
         vector<CallInst*> newCalls = performInline(call);
-        for (auto *nc : newCalls)
-            worklist.push_back(nc);
+        for (auto *nc : newCalls) {
+            // 确保新产生的 call 没有被删除且属于同一模块
+            if (nc->parent_)
+                worklist.push_back(nc);
+        }
     }
 }
 
@@ -197,6 +201,7 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
     for (auto *succ : origSuccs)
         succ->add_pre_basic_block(contBB);
 
+    // 更新后继块中 PHI 指令对前驱的引用：将 callBB 替换为 contBB
     for (auto *succ : origSuccs) {
         for (auto *inst : succ->instr_list_) {
             auto *phi = dynamic_cast<PhiInst*>(inst);
@@ -204,11 +209,8 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
             // PHI 操作数布局：[val0, bb0, val1, bb1, ...]，奇数下标为来源基本块
             for (unsigned i = 1; i < phi->num_ops_; i += 2) {
                 if (phi->get_operand(i) == callBB) {
-                    // 先从 callBB 的 use_list_ 中删除旧条目
-                    callBB->remove_use(phi->use_pos_[i]);
-                    // 再更新操作数并在 contBB 的 use_list_ 中注册新 use
-                    phi->operands_[i] = contBB;
-                    phi->use_pos_[i]  = contBB->add_use(phi, i);
+                    // 使用 set_operand 自动处理 use_list 的增删
+                    phi->set_operand(i, contBB);
                 }
             }
         }

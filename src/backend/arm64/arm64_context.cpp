@@ -1399,15 +1399,25 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
     });
 
     // ---- 6. 原有的线性扫描分配（保持不变） ----
-    auto scanKind = [&](bool floats) {
+    // 注意：必须将指针和整数寄存器池分离（xN 与 wN 共享同一物理寄存器）
+    // 指针：x19-x23（寄存器编号 19-23），整数：w24-w28（寄存器编号 24-28）
+    auto scanKind = [&](bool floats, bool ptrs) {
         std::vector<Interval> active;
         std::set<int> freeRegs;
-        int first = floats ? 8 : 19;
-        int last = floats ? 15 : 28;
+        int first, last;
+        if (floats) {
+            first = 8; last = 15;
+        } else if (ptrs) {
+            first = 19; last = 23;
+        } else {
+            first = 24; last = 28;
+        }
         for (int r = first; r <= last; ++r) freeRegs.insert(r);
 
         for (const auto &iv : intervals) {
             if (iv.isFloat != floats) continue;
+            if (!floats && iv.isPtr != ptrs) continue;
+
             // 清理已结束的区间
             for (auto it = active.begin(); it != active.end();) {
                 if (it->end < iv.start) {
@@ -1465,8 +1475,10 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         }
     };
 
-    scanKind(false);
-    scanKind(true);
+    scanKind(false, false);  // integers (w24-w28)
+    scanKind(false, true);   // pointers (x19-x23)
+    scanKind(true, false);   // floats (s8-s15)
+
 }
 
 bool Arm64FuncContext::hasAssignedReg(Value *v) const {

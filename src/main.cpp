@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
 	/* IR Pass */
 	PassManager pm;
 	if(optLevel >= 1){
-        // pm.addPass(std::make_unique<InlineExpand>());
+        pm.addPass(std::make_unique<InlineExpand>());
         pm.addPass(std::make_unique<DimArrayArgSimplify>());
         pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<RemoveRedundantPhis>());
@@ -138,7 +138,6 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<LoopUnroll>());
         // pm.addPass(std::make_unique<LoopVectorize>());
-
 	}  
     
 	pm.run(m.get());

@@ -385,6 +385,9 @@ public:
 
     //***************************
     void set_operand(unsigned i, Value* v) {
+        if (operands_[i]) {
+            operands_[i]->remove_use(use_pos_[i]);
+        }
         operands_[i] = v;
         use_pos_[i] = v->add_use(this, i);
     }
