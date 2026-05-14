@@ -3,14 +3,34 @@
 #include <vector>
 #include <queue>
 
+// 辅助函数：在 succ 的所有 phi 中删除 deadBlock 对应的入边
+static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
+    for (auto *instr : succ->instr_list_) {
+        if (!instr->is_phi()) continue;
+        auto *phi = static_cast<PhiInst *>(instr);
+        // 从后向前扫描，避免索引偏移
+        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+            if (phi->get_operand(i) == deadBlock) {
+                phi->remove_operands(i - 1, i);
+            }
+        }
+    }
+}
+
 // 将基本块的结尾从条件分支替换为无条件跳转到 target
 static void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
     auto *oldBr = dynamic_cast<BranchInst *>(bb->get_terminator());
     if (!oldBr || oldBr->num_ops_ != 3) return;
 
-    // 移除两条旧边
     auto *trueDest  = dynamic_cast<BasicBlock *>(oldBr->get_operand(1));
     auto *falseDest = dynamic_cast<BasicBlock *>(oldBr->get_operand(2));
+
+    // 确定"被抛弃"的那个目标块（不再跳转到的块）
+    BasicBlock *nonTarget = (target == trueDest) ? falseDest : trueDest;
+    // 清理 nonTarget 中引用 bb 的 phi 入边（mem2reg 后 phi 节点中会有 bb 的入边）
+    removeBBFromPhi(bb, nonTarget);
+
+    // 移除两条旧边
     bb->remove_succ_basic_block(trueDest);
     bb->remove_succ_basic_block(falseDest);
     trueDest->remove_pre_basic_block(bb);
@@ -67,7 +87,20 @@ static void updatePhis(BasicBlock *target, BasicBlock *deadBlock,
         }
 
         // 为每个前驱添加一条入边（值相同）
+        // 注意：如果某个 pred 已经存在于 target 的 phi 中（即 pred 已经有一条
+        // 直接分支到 target），再次添加会导致 phi 中出现同一个前驱的重复条目，
+        // 且两值可能不同。这种情况下应跳过，因为原条目已包含正确的值。
         for (auto *pred : preds) {
+            // 检查 pred 是否已经有一个 phi 条目
+            bool alreadyHasEntry = false;
+            for (int i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) == pred) {
+                    alreadyHasEntry = true;
+                    break;
+                }
+            }
+            if (alreadyHasEntry) continue;
+
             for (auto *val : vals) {
                 phi->addIncoming(val, pred);
             }
@@ -75,9 +108,13 @@ static void updatePhis(BasicBlock *target, BasicBlock *deadBlock,
     }
 }
 
+static BasicBlock *getEntryBlock(Function *func) {
+    return func->basic_blocks_.empty() ? nullptr : func->basic_blocks_.front();
+}
+
 static bool mergeEmptyBlock(BasicBlock *bb) {
     // 入口块不合并
-    if (bb->name_ == "label_entry") return false;
+    if (bb == getEntryBlock(bb->parent_)) return false;
 
     // 检查块内是否只有一条指令（即终止指令本身）
     // 如果块内有 phi、add、load 等其他指令，则不是空块，不可合并
@@ -88,6 +125,35 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
 
     auto *target = dynamic_cast<BasicBlock *>(br->get_operand(0));
     if (target == bb) return false; // 自环
+
+    // 检查是否有前驱既是 bb 的前驱，又已经是 target 的前驱
+    // 这种情况如果合并会导致 target 的 phi 中出现同一个前驱的重复条目
+    // 且两个值可能不同，应避免合并以避免语义歧义
+    for (auto *pred : bb->pre_bbs_) {
+        if (std::find(target->pre_bbs_.begin(), target->pre_bbs_.end(), pred) != target->pre_bbs_.end()) {
+            return false;
+        }
+    }
+
+    // 如果该块没有前驱（如 TailRecursionEliminate 新创建的 preheader），
+    // 且目标块有 phi 引用此块，则不应合并 —— 否则 phi 中来自此块的初始化条目
+    // 会丢失（updatePhis 的 preds 为空，无法补回任何条目）。
+    if (bb->pre_bbs_.empty()) {
+        if (!target->instr_list_.empty()) {
+            for (auto *instr : target->instr_list_) {
+                if (!instr->is_phi()) break;
+                auto *phi = static_cast<PhiInst *>(instr);
+                for (int i = 0; i < phi->num_ops_; i += 2) {
+                    if (phi->get_operand(i + 1) == bb)
+                        return false; // phi 引用此无前驱块，不能合并
+                }
+            }
+        }
+        // 该块无前驱且目标没有引用它的 phi，可以直接删除
+        //（它已经是死代码，不需要合并）
+        bb->parent_->remove_bb(bb);
+        return true;
+    }
 
     // 如果目标块有 phi，则需将 deadBlock 对应的入边重定向到 preds
     if (!target->instr_list_.empty() && target->instr_list_.front()->is_phi()) {
@@ -127,9 +193,10 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
 
 // 删除不可达块（无前驱的非入口块）
 static void removeDeadBlocks(Function *func) {
+    auto *entry = getEntryBlock(func);
     std::queue<BasicBlock *> worklist;
     for (auto *bb : func->basic_blocks_) {
-        if (bb->name_ != "label_entry" && bb->pre_bbs_.empty()) {
+        if (bb != entry && bb->pre_bbs_.empty()) {
             worklist.push(bb);
         }
     }
@@ -141,8 +208,11 @@ static void removeDeadBlocks(Function *func) {
         // 修改后继块的前驱列表，并检查后继是否变成不可达
         auto succs = bb->succ_bbs_; // 拷贝
         for (auto *succ : succs) {
+            // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
+            removeBBFromPhi(bb, succ);
+
             succ->remove_pre_basic_block(bb);
-            if (succ->name_ != "label_entry" && succ->pre_bbs_.empty()) {
+            if (succ != entry && succ->pre_bbs_.empty()) {
                 worklist.push(succ);
             }
         }
