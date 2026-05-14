@@ -53,6 +53,7 @@ add_executable(compiler
     ${SRC_DIR}/mid/opt/loopIdiomRecognize.cpp
     ${SRC_DIR}/mid/opt/removeRedundantPhis.cpp
     ${SRC_DIR}/mid/opt/loopVectorize.cpp
+    ${SRC_DIR}/mid/opt/CFGSimplify.cpp
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
