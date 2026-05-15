@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 
 // ---- helpers ----
@@ -402,20 +403,28 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
 
     // Helper: extract element offset from a GEP's last index.
     // Returns true if the index is "IV + const" or the IV itself.
+    // Recursively walks chained adds (e.g. add(add(IV, 1), 1) → offset 2)
+    // produced by unrolled loop bodies.
     auto extractOffset = [](Value *idx, int &off) -> bool {
-        if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
-            off = ci->value_; return true;
-        }
-        if (auto *bin = dynamic_cast<BinaryInst*>(idx)) {
-            if (!bin->is_add()) return false;
-            Value *a = bin->get_operand(0), *b = bin->get_operand(1);
-            if (auto *c = dynamic_cast<ConstantInt*>(a)) { off = c->value_; return true; }
-            if (auto *c = dynamic_cast<ConstantInt*>(b)) { off = c->value_; return true; }
-            return false;
-        }
-        // Bare IV phi (or any non-constant instruction) → offset 0
         off = 0;
-        return true;
+        while (true) {
+            if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
+                off += ci->value_; return true;
+            }
+            if (auto *bin = dynamic_cast<BinaryInst*>(idx)) {
+                if (!bin->is_add()) return false;
+                Value *a = bin->get_operand(0), *b = bin->get_operand(1);
+                auto *ca = dynamic_cast<ConstantInt*>(a);
+                auto *cb = dynamic_cast<ConstantInt*>(b);
+                if (ca && cb) { off += ca->value_ + cb->value_; return true; }
+                if (ca) { off += ca->value_; idx = b; continue; }
+                if (cb) { off += cb->value_; idx = a; continue; }
+                // Neither operand is a constant — bare IV relative
+                return true;
+            }
+            // Bare IV phi or other non-constant instruction — done
+            return true;
+        }
     };
 
     for (auto *inst : insts) {
@@ -494,6 +503,144 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         }
     }
 
+    // Helper to emit address of a GEP into a fresh address register
+    std::function<std::string(Value*)> emitGEPAddr;
+    emitGEPAddr = [&](Value *gepVal) -> std::string {
+        auto *gep = static_cast<GetElementPtrInst*>(gepVal);
+        std::string baseReg;
+        Value *base = gep->get_operand(0);
+        if (auto *gv = dynamic_cast<GlobalVariable*>(base)) {
+            baseReg = allocAddrReg();
+            os_ << "\tadrp " << baseReg << ", " << gv->name_ << "\n";
+            os_ << "\tadd " << baseReg << ", " << baseReg
+                << ", :lo12:" << gv->name_ << "\n";
+        } else if (auto *alloca = dynamic_cast<AllocaInst*>(base)) {
+            // Alloca: emit stack address computation even if a register
+            // is pre-assigned — NEON lowering runs before normal
+            // instruction emission, so no one else will emit this.
+            if (hasAssignedReg(base))
+                baseReg = assignedReg(base, true);
+            else
+                baseReg = allocAddrReg();
+            int off = getSlot(base);
+            if (off < 0) {
+                int absOff = -off;
+                if (absOff <= 4095)
+                    os_ << "\tsub " << baseReg << ", x29, #" << absOff << "\n";
+                else {
+                    os_ << "\tmovz x17, #" << (absOff & 0xFFFF) << "\n";
+                    os_ << "\tmovk x17, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
+                    os_ << "\tsub " << baseReg << ", x29, x17\n";
+                }
+            } else {
+                if (off <= 4095)
+                    os_ << "\tadd " << baseReg << ", x29, #" << off << "\n";
+                else {
+                    os_ << "\tmovz x17, #" << (off & 0xFFFF) << "\n";
+                    os_ << "\tmovk x17, #" << ((off >> 16) & 0xFFFF) << ", lsl #16\n";
+                    os_ << "\tadd " << baseReg << ", x29, x17\n";
+                }
+            }
+        } else if (dynamic_cast<GetElementPtrInst*>(base)) {
+            baseReg = emitGEPAddr(base);
+        } else {
+            baseReg = loadAddr(base);
+        }
+        Type *curTy = static_cast<PointerType*>(base->type_)->contained_;
+        for (unsigned i = 1; i < gep->num_ops_; i++) {
+            int elemSize = typeSize(curTy);
+            // Advance curTy for next iteration
+            if (curTy->tid_ == Type::ArrayTyID)
+                curTy = static_cast<ArrayType*>(curTy)->contained_;
+            else if (curTy->tid_ == Type::PointerTyID)
+                curTy = static_cast<PointerType*>(curTy)->contained_;
+
+            Value *idx = gep->get_operand(i);
+            if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
+                int offset = ci->value_ * elemSize;
+                if (offset == 0) continue;
+                if (offset > 0 && offset <= 4095)
+                    os_ << "\tadd " << baseReg << ", " << baseReg << ", #" << offset << "\n";
+                else if (offset < 0 && -offset <= 4095)
+                    os_ << "\tsub " << baseReg << ", " << baseReg << ", #" << -offset << "\n";
+                else {
+                    os_ << "\tmovz x17, #" << (abs(offset) & 0xFFFF) << "\n";
+                    os_ << "\tmovk x17, #" << ((abs(offset) >> 16) & 0xFFFF) << ", lsl #16\n";
+                    os_ << (offset > 0 ? "\tadd " : "\tsub ")
+                        << baseReg << ", " << baseReg << ", x17\n";
+                }
+                continue;
+            }
+            std::string idxReg;
+            if (hasAssignedReg(idx)) {
+                idxReg = assignedReg(idx);
+            } else {
+                idxReg = loadInt(idx);
+            }
+            std::string scaled = allocAddrReg();
+            os_ << "\tsxtw " << scaled << ", " << idxReg << "\n";
+            if (elemSize > 1) {
+                auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
+                if (isPowerOfTwo(elemSize)) {
+                    int shift = 0;
+                    while ((1 << shift) < elemSize) shift++;
+                    os_ << "\tadd " << baseReg << ", " << baseReg
+                        << ", " << scaled << ", lsl #" << shift << "\n";
+                } else {
+                    std::string elemReg = allocAddrReg();
+                    uint32_t val = static_cast<uint32_t>(elemSize);
+                    os_ << "\tmovz " << elemReg << ", #" << (val & 0xFFFF) << "\n";
+                    if (val & 0xFFFF0000)
+                        os_ << "\tmovk " << elemReg << ", #" << ((val >> 16) & 0xFFFF) << ", lsl #16\n";
+                    os_ << "\tmul " << scaled << ", " << scaled << ", " << elemReg << "\n";
+                    os_ << "\tadd " << baseReg << ", " << baseReg << ", " << scaled << "\n";
+                    freeAddrReg(elemReg);
+                }
+            } else {
+                os_ << "\tadd " << baseReg << ", " << baseReg << ", " << scaled << "\n";
+            }
+            freeAddrReg(scaled);
+        }
+        return baseReg;
+    };
+
+    // Constant store pattern: 4 stores of the same constant.
+    // e.g. for(i) A[i]=-1; A[i+1]=-1; A[i+2]=-1; A[i+3]=-1;
+    // Does not require any loads.
+    for (auto &sv : storeVecs) {
+        if (sv.stores.size() != 4) continue;
+        Value *val0 = sv.stores[0]->get_operand(0);
+        auto *ci0 = dynamic_cast<ConstantInt*>(val0);
+        if (!ci0) continue;
+        bool sameConst = true;
+        for (int i = 1; i < 4; i++) {
+            auto *ci = dynamic_cast<ConstantInt*>(sv.stores[i]->get_operand(0));
+            if (!ci || ci->value_ != ci0->value_) { sameConst = false; break; }
+        }
+        if (!sameConst) continue;
+
+        resetNEONRegs();
+        std::set<Instruction*> matched;
+
+        std::string wtmp = allocIntReg();
+        emitIntConst(ci0->value_, wtmp);
+        std::string v0 = allocNEONReg();
+        os_ << "\tdup " << v0 << ".4s, " << wtmp << "\n";
+        freeIntReg(wtmp);
+
+        std::string addr = emitGEPAddr(sv.stores[0]->get_operand(1));
+        emitNEON_st1_4s(os_, v0, addr);
+        freeAddrReg(addr);
+
+        for (int i = 0; i < 4; i++) {
+            matched.insert(sv.stores[i]);
+            matched.insert(static_cast<Instruction*>(sv.stores[i]->get_operand(1)));
+        }
+        for (auto *m : matched) neonEmitted_.insert(m);
+        resetNEONRegs();
+        return true;
+    }
+
     if (loadVecs.empty() || storeVecs.empty()) return false;
 
     // ── Find matching load→store chains ────────────────────────────
@@ -562,47 +709,7 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         if (bestScore != 4) continue;
 
         // We have a full NEON chain!
-        // Emit GEP address computations inline, then NEON loads/op/store.
         resetNEONRegs();
-
-        // Helper to emit address of a GEP into a fresh address register
-        auto emitGEPAddr = [&](Value *gepVal) -> std::string {
-            auto *gep = static_cast<GetElementPtrInst*>(gepVal);
-            std::string baseReg;
-            Value *base = gep->get_operand(0);
-            if (auto *gv = dynamic_cast<GlobalVariable*>(base)) {
-                baseReg = allocAddrReg();
-                os_ << "\tadrp " << baseReg << ", " << gv->name_ << "\n";
-                os_ << "\tadd " << baseReg << ", " << baseReg
-                    << ", :lo12:" << gv->name_ << "\n";
-            } else {
-                baseReg = hasAssignedReg(base) ? assignedReg(base, true)
-                          : loadAddr(base);
-            }
-            // Accumulate indices (skip index 0 if it's zero)
-            for (unsigned i = 1; i < gep->num_ops_; i++) {
-                Value *idx = gep->get_operand(i);
-                // Skip zero constants (first index for arrays)
-                if (auto *ci = dynamic_cast<ConstantInt*>(idx))
-                    if (ci->value_ == 0 && i == 1) continue;
-                std::string idxReg;
-                if (hasAssignedReg(idx)) {
-                    idxReg = assignedReg(idx); // wN
-                } else if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
-                    idxReg = allocIntReg();
-                    emitIntConst(ci->value_, idxReg);
-                } else {
-                    idxReg = loadInt(idx);
-                }
-                // Extend to 64-bit and scale by element size
-                std::string tmp = allocAddrReg();
-                os_ << "\tsxtw " << tmp << ", " << idxReg << "\n";
-                os_ << "\tadd " << baseReg << ", " << baseReg
-                    << ", " << tmp << ", lsl #2\n";
-                freeAddrReg(tmp);
-            }
-            return baseReg;
-        };
 
         // Emit ld1 for first load group
         std::string v0 = allocNEONReg();

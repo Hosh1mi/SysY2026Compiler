@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     bison \
     cmake \
     python3 \
+    gdb-multiarch \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
