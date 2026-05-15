@@ -4,9 +4,20 @@
 
 ### TODO
 
-- MagicNumber不可用/寄存器分配有错误
-- algebra Simplify 无法处理非二次幂除法
-- CSE负作用
+- LICM不完整
+- 矩阵乘法的内层循环展开
+- CSE无作用
+- sdiv彻底消除
+- loopTiling
+- loopInterchange
+- 寄存器极度溢出
+- 地址计算强度消减
+- sxtw冗余
+- 消除死move指令
+- NEON引入运算操作
+- 指令调度（存疑）
+- 寄存器粗化（用于消除冗余mov）
+- algebra Simplify 无法处理大于8的非二次幂取余
 - dce中removeDeadBlocks不可用   
 - 主要优化测试集: `performance/huffman*` `performance/matmul*` `performance/many_mat_cal*`
 
