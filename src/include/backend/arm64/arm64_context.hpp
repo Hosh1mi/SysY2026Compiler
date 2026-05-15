@@ -78,6 +78,7 @@ private:
     std::set<int> usedFloatRegs_;
     std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7
     std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
+    std::string deferredNEONCode_;        // NEON asm deferred to emit at correct position
 
     std::map<Value*, std::string> assignedRegs_; // linear-scan Value* → physical reg name
 

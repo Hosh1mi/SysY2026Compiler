@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <sstream>
 
 // ---- helpers ----
 static int typeSize(Type *ty) {
@@ -376,6 +377,12 @@ static void emitNEON_binop_4s(std::ostream &os, const char *neonOp,
 // and return true so the caller can skip the matched IR instructions.
 
 bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
+    // Redirect output to a temp buffer so NEON instructions are not
+    // emitted at the top of the block (before e.g. __aeabi_memclr4).
+    auto oldBuf = os_.rdbuf();
+    std::ostringstream tmpStream;
+    os_.rdbuf(tmpStream.rdbuf());
+
     // Collect non-phi, non-terminator instructions
     std::vector<Instruction*> insts;
     for (auto inst : bb->instr_list_) {
@@ -383,7 +390,10 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         if (inst->isTerminator()) break;
         insts.push_back(inst);
     }
-    if (insts.size() < 12) return false; // min 4 loads + 4 ops + 4 stores
+    if (insts.size() < 12) {
+        os_.rdbuf(oldBuf);
+        return false; // min 4 loads + 4 ops + 4 stores
+    }
 
     // ── Group loads / stores by base pointer ──────────────────────
     // key: base pointer (first GEP operand after stripping), value: list of (inst, elementOffset)
@@ -632,16 +642,21 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         emitNEON_st1_4s(os_, v0, addr);
         freeAddrReg(addr);
 
-        for (int i = 0; i < 4; i++) {
+        // Mark only the stores, not the GEPs — the GEPs must still be
+        // emitted normally so their assigned registers get set.
+        for (int i = 0; i < 4; i++)
             matched.insert(sv.stores[i]);
-            matched.insert(static_cast<Instruction*>(sv.stores[i]->get_operand(1)));
-        }
         for (auto *m : matched) neonEmitted_.insert(m);
         resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
         return true;
     }
 
-    if (loadVecs.empty() || storeVecs.empty()) return false;
+    if (loadVecs.empty() || storeVecs.empty()) {
+        os_.rdbuf(oldBuf);
+        return false;
+    }
 
     // ── Find matching load→store chains ────────────────────────────
     // For now handle the simplest case: exactly 2 load groups + 1 store group,
@@ -720,9 +735,8 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
             matched.insert(lv0->loads[1]);
             matched.insert(lv0->loads[2]);
             matched.insert(lv0->loads[3]);
-            // Also skip the GEPs that these loads used
-            for (int i = 0; i < 4; i++)
-                matched.insert(static_cast<Instruction*>(lv0->loads[i]->get_operand(0)));
+            // Don't skip load GEPs — they may have assigned registers
+            // that other instructions need.
         }
 
         // Emit ld1 for second load group
@@ -734,8 +748,6 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
             matched.insert(lv1->loads[1]);
             matched.insert(lv1->loads[2]);
             matched.insert(lv1->loads[3]);
-            for (int i = 0; i < 4; i++)
-                matched.insert(static_cast<Instruction*>(lv1->loads[i]->get_operand(0)));
         }
 
         // Emit NEON binop
@@ -754,18 +766,21 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         {
             std::string addr = emitGEPAddr(sv.stores[0]->get_operand(1));
             emitNEON_st1_4s(os_, v2, addr);
-            for (int i = 0; i < 4; i++) {
+            // Mark only the stores, not the GEPs — the GEPs must still
+            // be emitted normally so their assigned registers get set.
+            for (int i = 0; i < 4; i++)
                 matched.insert(sv.stores[i]);
-                matched.insert(static_cast<Instruction*>(sv.stores[i]->get_operand(1)));
-            }
         }
 
         // Mark all matched instructions so emitBlock skips them
         for (auto *m : matched) neonEmitted_.insert(m);
         resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
         return true;
     }
 
+    os_.rdbuf(oldBuf);
     return false;
 }
 
@@ -773,13 +788,28 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     os_ << bbLabel(func_, bb) << ":\n";
     resetRegs();
     neonEmitted_.clear();
+    deferredNEONCode_.clear();
 
     tryEmitNEON(bb);
 
+    bool neonEmitted = false;
     for (auto inst : bb->instr_list_) {
-        if (!inst->is_phi() && !neonEmitted_.count(inst)) {
+        if (inst->is_phi()) continue;
+        // Emit deferred NEON code at the position of the first
+        // NEON-lowered instruction.  This places NEON stores after
+        // __aeabi_memclr4 (zeroing) so that the values survive.
+        if (!neonEmitted && !deferredNEONCode_.empty() && neonEmitted_.count(inst)) {
+            os_ << deferredNEONCode_;
+            neonEmitted = true;
+        }
+        if (!neonEmitted_.count(inst)) {
             emitInstruction(inst);
         }
+    }
+    // If the deferred code was never flushed (e.g. NEON-matched
+    // instructions are the very last in the block), emit now.
+    if (!neonEmitted && !deferredNEONCode_.empty()) {
+        os_ << deferredNEONCode_;
     }
 }
 
