@@ -37,6 +37,12 @@ private:
     void freeAddrReg(const std::string& reg);
     void freeIntReg(const std::string &reg);
 
+    // NEON register pool + lowering
+    std::string allocNEONReg();
+    void freeNEONReg(const std::string &reg);
+    void resetNEONRegs();
+    bool tryEmitNEON(BasicBlock *bb);
+
     // load from slot/constant/global to scratch register
     std::string loadInt(Value *v);
     std::string loadFloat(Value *v);
@@ -70,6 +76,8 @@ private:
 
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
+    std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7
+    std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
 
     std::map<Value*, std::string> assignedRegs_; // linear-scan Value* → physical reg name
 

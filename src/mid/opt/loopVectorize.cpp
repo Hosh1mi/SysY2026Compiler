@@ -420,7 +420,14 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
     InductionVar iv;
     if (!findInductionVar(loop, iv)) return false;
 
-    // 5. Find memory accesses with unit stride
+    // 5. Reject loops with non-IV phis (accumulators, addresses) —
+    //    vectorization of loop-carried values is not yet implemented
+    for (auto inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        if (inst != iv.phi) return false;
+    }
+
+    // 6. Find memory accesses with unit stride
     std::vector<MemAccess> loads, stores;
     if (!analyzeStrideAccesses(loop, iv, loads, stores)) return false;
 

@@ -359,12 +359,318 @@ static std::string bbLabel(Function *f, BasicBlock *bb) {
     return f->name_ + "_" + bb->name_;
 }
 
+// Forward declarations for NEON emit helpers (defined after Arm64FuncContext)
+static void emitNEON_ld1_4s(std::ostream &os, const std::string &vreg,
+                             const std::string &addr);
+static void emitNEON_st1_4s(std::ostream &os, const std::string &vreg,
+                             const std::string &addr);
+static void emitNEON_binop_4s(std::ostream &os, const char *neonOp,
+                               const std::string &vd, const std::string &vn,
+                               const std::string &vm);
+
+// ── NEON lowering: IR pattern → SIMD instructions ───────────────────────
+// Scan a basic block for groups of 4 scalar loads / stores / binops
+// that form a stride-1 vectorizable pattern.  When a complete
+// load→(op)→store chain is found, emit compact NEON instructions
+// and return true so the caller can skip the matched IR instructions.
+
+bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
+    // Collect non-phi, non-terminator instructions
+    std::vector<Instruction*> insts;
+    for (auto inst : bb->instr_list_) {
+        if (inst->is_phi()) continue;
+        if (inst->isTerminator()) break;
+        insts.push_back(inst);
+    }
+    if (insts.size() < 12) return false; // min 4 loads + 4 ops + 4 stores
+
+    // ── Group loads / stores by base pointer ──────────────────────
+    // key: base pointer (first GEP operand after stripping), value: list of (inst, elementOffset)
+    std::map<Value*, std::vector<std::pair<Instruction*, int>>> loadGroups;
+    std::map<Value*, std::vector<std::pair<Instruction*, int>>> storeGroups;
+
+    // Also track: load → vector of 4 loads that form a NEON group
+    // and the gep index operands that give the element offset
+    struct NEONGroup {
+        std::vector<LoadInst*> loads;
+        std::vector<StoreInst*> stores;
+        std::vector<BinaryInst*> binops;
+        Value *base;         // common base pointer
+        Value *ivBase;       // the IV or IV+k value that the element offset is relative to
+        int offset0;         // element offset of first access
+    };
+
+    // Helper: extract element offset from a GEP's last index.
+    // Returns true if the index is "IV + const" or the IV itself.
+    auto extractOffset = [](Value *idx, int &off) -> bool {
+        if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
+            off = ci->value_; return true;
+        }
+        if (auto *bin = dynamic_cast<BinaryInst*>(idx)) {
+            if (!bin->is_add()) return false;
+            Value *a = bin->get_operand(0), *b = bin->get_operand(1);
+            if (auto *c = dynamic_cast<ConstantInt*>(a)) { off = c->value_; return true; }
+            if (auto *c = dynamic_cast<ConstantInt*>(b)) { off = c->value_; return true; }
+            return false;
+        }
+        // Bare IV phi (or any non-constant instruction) → offset 0
+        off = 0;
+        return true;
+    };
+
+    for (auto *inst : insts) {
+        if (inst->is_load()) {
+            auto *ld = static_cast<LoadInst*>(inst);
+            Value *ptr = ld->get_operand(0);
+            auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
+            if (!gep || gep->num_ops_ < 2) continue;
+            Value *base = gep->get_operand(0);
+            Value *lastIdx = gep->get_operand(gep->num_ops_ - 1);
+            int elemOff = 0;
+            if (!extractOffset(lastIdx, elemOff)) continue;
+            loadGroups[base].push_back({inst, elemOff});
+        } else if (inst->is_store()) {
+            auto *st = static_cast<StoreInst*>(inst);
+            Value *ptr = st->get_operand(1);
+            auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
+            if (!gep || gep->num_ops_ < 2) continue;
+            Value *base = gep->get_operand(0);
+            Value *lastIdx = gep->get_operand(gep->num_ops_ - 1);
+            int elemOff = 0;
+            if (!extractOffset(lastIdx, elemOff)) continue;
+            storeGroups[base].push_back({inst, elemOff});
+        }
+    }
+
+    // ── Find groups of 4 loads with consecutive element offsets ───
+    struct LoadVec { Value *base; int off0; std::vector<LoadInst*> loads; };
+    std::vector<LoadVec> loadVecs;
+
+    for (auto &[base, entries] : loadGroups) {
+        // Sort by element offset
+        std::sort(entries.begin(), entries.end(),
+            [](auto &a, auto &b) { return a.second < b.second; });
+        // Look for runs of 4 consecutive offsets
+        for (size_t i = 0; i + 3 < entries.size(); ) {
+            int off0 = entries[i].second;
+            if (entries[i+1].second == off0 + 1 &&
+                entries[i+2].second == off0 + 2 &&
+                entries[i+3].second == off0 + 3) {
+                LoadVec lv;
+                lv.base = base;
+                lv.off0 = off0;
+                for (int j = 0; j < 4; j++)
+                    lv.loads.push_back(static_cast<LoadInst*>(entries[i+j].first));
+                loadVecs.push_back(lv);
+                i += 4;
+            } else {
+                i++;
+            }
+        }
+    }
+
+    // ── Find groups of 4 stores with consecutive element offsets ──
+    struct StoreVec { Value *base; int off0; std::vector<StoreInst*> stores; };
+    std::vector<StoreVec> storeVecs;
+
+    for (auto &[base, entries] : storeGroups) {
+        std::sort(entries.begin(), entries.end(),
+            [](auto &a, auto &b) { return a.second < b.second; });
+        for (size_t i = 0; i + 3 < entries.size(); ) {
+            int off0 = entries[i].second;
+            if (entries[i+1].second == off0 + 1 &&
+                entries[i+2].second == off0 + 2 &&
+                entries[i+3].second == off0 + 3) {
+                StoreVec sv;
+                sv.base = base;
+                sv.off0 = off0;
+                for (int j = 0; j < 4; j++)
+                    sv.stores.push_back(static_cast<StoreInst*>(entries[i+j].first));
+                storeVecs.push_back(sv);
+                i += 4;
+            } else {
+                i++;
+            }
+        }
+    }
+
+    if (loadVecs.empty() || storeVecs.empty()) return false;
+
+    // ── Find matching load→store chains ────────────────────────────
+    // For now handle the simplest case: exactly 2 load groups + 1 store group,
+    // where the stores' values come from binops of the two loaded values.
+    //
+    // Load vec 0: 4 loads from base B, offsets o, o+1, o+2, o+3
+    // Load vec 1: 4 loads from base C, offsets p, p+1, p+2, p+3
+    // For each store in the store vec, trace its value operand back to
+    //   a binop that uses the corresponding loaded values.
+    //
+    // If this holds for all 4 lanes, emit:
+    //   ld1 {v0.4s}, [B_ptr]
+    //   ld1 {v1.4s}, [C_ptr]
+    //   <op> v2.4s, v0.4s, v1.4s
+    //   st1 {v2.4s}, [A_ptr]
+
+    for (auto &sv : storeVecs) {
+        if (sv.stores.size() != 4) continue;
+        std::set<Instruction*> matched;
+
+        // Collect the value operands of the 4 stores
+        Value *storeVals[4];
+        for (int i = 0; i < 4; i++)
+            storeVals[i] = sv.stores[i]->get_operand(0);
+
+        // Find the binop chain: all 4 store values must be the same kind of binop
+        auto *bin0 = dynamic_cast<BinaryInst*>(storeVals[0]);
+        if (!bin0 || !bin0->is_binary()) continue;
+        if (!bin0->is_add() && !bin0->is_sub() && bin0->op_id_ != Instruction::Mul) continue;
+
+        bool ok = true;
+        for (int i = 1; i < 4; i++) {
+            auto *b = dynamic_cast<BinaryInst*>(storeVals[i]);
+            if (!b || b->op_id_ != bin0->op_id_) { ok = false; break; }
+        }
+        if (!ok) continue;
+
+        // Map load values to lane positions for each load vec
+        // For each load vec, map: load instruction → lane index (0,1,2,3)
+        int bestScore = 0;
+        LoadVec *lv0 = nullptr, *lv1 = nullptr;
+
+        for (auto &lvA : loadVecs) {
+            for (auto &lvB : loadVecs) {
+                if (&lvA == &lvB) continue;
+                // Check if each binop uses one load from lvA and one from lvB
+                int score = 0;
+                for (int lane = 0; lane < 4 && score >= 0; lane++) {
+                    Value *op0 = static_cast<BinaryInst*>(storeVals[lane])->get_operand(0);
+                    Value *op1 = static_cast<BinaryInst*>(storeVals[lane])->get_operand(1);
+                    bool foundA = false, foundB = false;
+                    for (int j = 0; j < 4; j++) {
+                        if (op0 == lvA.loads[j]) foundA = true;
+                        if (op1 == lvA.loads[j]) foundA = true;
+                        if (op0 == lvB.loads[j]) foundB = true;
+                        if (op1 == lvB.loads[j]) foundB = true;
+                    }
+                    if (foundA && foundB) score++;
+                    else score = -1;
+                }
+                if (score > bestScore) { bestScore = score; lv0 = &lvA; lv1 = &lvB; }
+            }
+        }
+
+        if (bestScore != 4) continue;
+
+        // We have a full NEON chain!
+        // Emit GEP address computations inline, then NEON loads/op/store.
+        resetNEONRegs();
+
+        // Helper to emit address of a GEP into a fresh address register
+        auto emitGEPAddr = [&](Value *gepVal) -> std::string {
+            auto *gep = static_cast<GetElementPtrInst*>(gepVal);
+            std::string baseReg;
+            Value *base = gep->get_operand(0);
+            if (auto *gv = dynamic_cast<GlobalVariable*>(base)) {
+                baseReg = allocAddrReg();
+                os_ << "\tadrp " << baseReg << ", " << gv->name_ << "\n";
+                os_ << "\tadd " << baseReg << ", " << baseReg
+                    << ", :lo12:" << gv->name_ << "\n";
+            } else {
+                baseReg = hasAssignedReg(base) ? assignedReg(base, true)
+                          : loadAddr(base);
+            }
+            // Accumulate indices (skip index 0 if it's zero)
+            for (unsigned i = 1; i < gep->num_ops_; i++) {
+                Value *idx = gep->get_operand(i);
+                // Skip zero constants (first index for arrays)
+                if (auto *ci = dynamic_cast<ConstantInt*>(idx))
+                    if (ci->value_ == 0 && i == 1) continue;
+                std::string idxReg;
+                if (hasAssignedReg(idx)) {
+                    idxReg = assignedReg(idx); // wN
+                } else if (auto *ci = dynamic_cast<ConstantInt*>(idx)) {
+                    idxReg = allocIntReg();
+                    emitIntConst(ci->value_, idxReg);
+                } else {
+                    idxReg = loadInt(idx);
+                }
+                // Extend to 64-bit and scale by element size
+                std::string tmp = allocAddrReg();
+                os_ << "\tsxtw " << tmp << ", " << idxReg << "\n";
+                os_ << "\tadd " << baseReg << ", " << baseReg
+                    << ", " << tmp << ", lsl #2\n";
+                freeAddrReg(tmp);
+            }
+            return baseReg;
+        };
+
+        // Emit ld1 for first load group
+        std::string v0 = allocNEONReg();
+        {
+            std::string addr = emitGEPAddr(lv0->loads[0]->get_operand(0));
+            emitNEON_ld1_4s(os_, v0, addr);
+            matched.insert(lv0->loads[0]);
+            matched.insert(lv0->loads[1]);
+            matched.insert(lv0->loads[2]);
+            matched.insert(lv0->loads[3]);
+            // Also skip the GEPs that these loads used
+            for (int i = 0; i < 4; i++)
+                matched.insert(static_cast<Instruction*>(lv0->loads[i]->get_operand(0)));
+        }
+
+        // Emit ld1 for second load group
+        std::string v1 = allocNEONReg();
+        {
+            std::string addr = emitGEPAddr(lv1->loads[0]->get_operand(0));
+            emitNEON_ld1_4s(os_, v1, addr);
+            matched.insert(lv1->loads[0]);
+            matched.insert(lv1->loads[1]);
+            matched.insert(lv1->loads[2]);
+            matched.insert(lv1->loads[3]);
+            for (int i = 0; i < 4; i++)
+                matched.insert(static_cast<Instruction*>(lv1->loads[i]->get_operand(0)));
+        }
+
+        // Emit NEON binop
+        std::string v2 = allocNEONReg();
+        const char *neonOp = nullptr;
+        switch (bin0->op_id_) {
+            case Instruction::Add: neonOp = "add"; break;
+            case Instruction::Sub: neonOp = "sub"; break;
+            case Instruction::Mul: neonOp = "mul"; break;
+            default: neonOp = "add"; break;
+        }
+        emitNEON_binop_4s(os_, neonOp, v2, v0, v1);
+        for (int i = 0; i < 4; i++) matched.insert(static_cast<Instruction*>(storeVals[i]));
+
+        // Emit st1 for store group
+        {
+            std::string addr = emitGEPAddr(sv.stores[0]->get_operand(1));
+            emitNEON_st1_4s(os_, v2, addr);
+            for (int i = 0; i < 4; i++) {
+                matched.insert(sv.stores[i]);
+                matched.insert(static_cast<Instruction*>(sv.stores[i]->get_operand(1)));
+            }
+        }
+
+        // Mark all matched instructions so emitBlock skips them
+        for (auto *m : matched) neonEmitted_.insert(m);
+        resetNEONRegs();
+        return true;
+    }
+
+    return false;
+}
+
 void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     os_ << bbLabel(func_, bb) << ":\n";
     resetRegs();
+    neonEmitted_.clear();
+
+    tryEmitNEON(bb);
 
     for (auto inst : bb->instr_list_) {
-        if (!inst->is_phi()) {
+        if (!inst->is_phi() && !neonEmitted_.count(inst)) {
             emitInstruction(inst);
         }
     }
@@ -1398,25 +1704,19 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         return a.end < b.end;
     });
 
-    // ---- 6. 原有的线性扫描分配（保持不变） ----
-    // 注意：必须将指针和整数寄存器池分离（xN 与 wN 共享同一物理寄存器）
-    // 指针：x19-x23（寄存器编号 19-23），整数：w24-w28（寄存器编号 24-28）
-    auto scanKind = [&](bool floats, bool ptrs) {
+    // ---- 6. Linear-scan allocation ----
+    // Integer and pointer intervals share the same physical register pool
+    // (e.g. x19 and w19 are the same register, distinguished by prefix only).
+    // The pool of 10 registers (r19-r28) is sufficient for typical functions.
+    auto scanKind = [&](bool floats) {
         std::vector<Interval> active;
         std::set<int> freeRegs;
-        int first, last;
-        if (floats) {
-            first = 8; last = 15;
-        } else if (ptrs) {
-            first = 19; last = 23;
-        } else {
-            first = 24; last = 28;
-        }
+        int first = floats ? 8 : 19;
+        int last  = floats ? 15 : 28;
         for (int r = first; r <= last; ++r) freeRegs.insert(r);
 
         for (const auto &iv : intervals) {
             if (iv.isFloat != floats) continue;
-            if (!floats && iv.isPtr != ptrs) continue;
 
             // 清理已结束的区间
             for (auto it = active.begin(); it != active.end();) {
@@ -1475,9 +1775,8 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         }
     };
 
-    scanKind(false, false);  // integers (w24-w28)
-    scanKind(false, true);   // pointers (x19-x23)
-    scanKind(true, false);   // floats (s8-s15)
+    scanKind(false);  // int + ptr (w19-w28 / x19-x28)
+    scanKind(true);   // floats (s8-s15)
 
 }
 
@@ -1515,6 +1814,46 @@ int Arm64FuncContext::getSlot(Value *v) {
 
 bool Arm64FuncContext::hasSlot(Value *v) const {
     return slots_.count(v) > 0;
+}
+
+// ---- NEON register pool (v0-v7 scratch, v8-v15 preserved) ----
+
+void Arm64FuncContext::resetNEONRegs() {
+    usedNEONRegs_.clear();
+}
+
+std::string Arm64FuncContext::allocNEONReg() {
+    for (int r = 0; r <= 7; r++) {
+        if (!usedNEONRegs_.count(r)) {
+            usedNEONRegs_.insert(r);
+            return "v" + std::to_string(r);
+        }
+    }
+    usedNEONRegs_.insert(0);
+    return "v0";
+}
+
+void Arm64FuncContext::freeNEONReg(const std::string &reg) {
+    if (reg.size() >= 2 && reg[0] == 'v') {
+        usedNEONRegs_.erase(std::stoi(reg.substr(1)));
+    }
+}
+
+static void emitNEON_ld1_4s(std::ostream &os, const std::string &vreg,
+                             const std::string &addr) {
+    os << "\tld1 {" << vreg << ".4s}, [" << addr << "]\n";
+}
+
+static void emitNEON_st1_4s(std::ostream &os, const std::string &vreg,
+                             const std::string &addr) {
+    os << "\tst1 {" << vreg << ".4s}, [" << addr << "]\n";
+}
+
+static void emitNEON_binop_4s(std::ostream &os, const char *neonOp,
+                               const std::string &vd, const std::string &vn,
+                               const std::string &vm) {
+    os << "\t" << neonOp << " " << vd << ".4s, " << vn
+       << ".4s, " << vm << ".4s\n";
 }
 
 // ---- scratch register pool ----

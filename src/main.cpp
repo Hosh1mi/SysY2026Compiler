@@ -149,10 +149,11 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 死代码消除
 
         // ========== Phase 3: CSE & 全局优化 ==========
-        pm.addPass(std::make_unique<CSE>());                  // 公共子表达式消除
         pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
-        pm.addPass(std::make_unique<AlgebraSimplify>());      // 化简新表达式
-        pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播新复制
+        pm.addPass(std::make_unique<CSE>());                  // 公共子表达式消除
+        // pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
+        // pm.addPass(std::make_unique<AlgebraSimplify>());      // 化简新表达式
+        // pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播新复制
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
 
@@ -163,7 +164,7 @@ int main(int argc, char **argv) {
         // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        // pm.addPass(std::make_unique<LoopVectorize>());     // 循环向量化（实验性）
+        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化（实验性）
         pm.addPass(std::make_unique<ConstantFold>());         // 展开后大量折叠
         pm.addPass(std::make_unique<AlgebraSimplify>());      // 展开后代数简化
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 展开后消除死代码
