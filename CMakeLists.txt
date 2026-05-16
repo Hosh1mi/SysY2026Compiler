@@ -36,6 +36,7 @@ add_executable(compiler
     ${SRC_DIR}/frontend/checker/errReporter.cpp
     ${SRC_DIR}/backend/arm64/arm64_codegen.cpp
     ${SRC_DIR}/backend/arm64/arm64_context.cpp
+    ${SRC_DIR}/backend/arm64/arm64_neon.cpp
     ${SRC_DIR}/backend/arm64/arm64_peephole.cpp
     ${SRC_DIR}/mid/opt/deadCodeDelete.cpp
     ${SRC_DIR}/mid/opt/passManager.cpp
