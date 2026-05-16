@@ -76,7 +76,7 @@ private:
 
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
-    std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7
+    std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7, v16-v31
     std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
     std::string deferredNEONCode_;        // NEON asm deferred to emit at correct position
 

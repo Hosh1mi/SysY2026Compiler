@@ -1,11 +1,15 @@
 #include "../include/backend/arm64/arm64_context.hpp"
 #include "../include/mid/ir/ir.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
 #include <vector>
+
+#define NEON_LOG(msg) if (debugNEON) std::cerr << "[NEON] " << msg << "\n"
 
 static int typeSize(Type *ty) {
     switch (ty->tid_) {
@@ -50,7 +54,14 @@ void Arm64FuncContext::resetNEONRegs() {
 }
 
 std::string Arm64FuncContext::allocNEONReg() {
+    // Caller-saved NEON registers: v0-v7, v16-v31 (24 regs total)
     for (int r = 0; r <= 7; r++) {
+        if (!usedNEONRegs_.count(r)) {
+            usedNEONRegs_.insert(r);
+            return "v" + std::to_string(r);
+        }
+    }
+    for (int r = 16; r <= 31; r++) {
         if (!usedNEONRegs_.count(r)) {
             usedNEONRegs_.insert(r);
             return "v" + std::to_string(r);
@@ -71,6 +82,10 @@ void Arm64FuncContext::freeNEONReg(const std::string &reg) {
 // and return true so the caller can skip the matched IR instructions.
 
 bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
+    static bool debugNEON = std::getenv("NEON_DEBUG") != nullptr;
+
+    NEON_LOG("=== block: " + func_->name_ + "::" + bb->name_ + " ===");
+
     // Redirect output to a temp buffer so NEON instructions are not
     // emitted at the top of the block (before e.g. __aeabi_memclr4).
     auto oldBuf = os_.rdbuf();
@@ -152,9 +167,14 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
     }
 
     if (insts.size() < 4 && !isLoopBody) {
+        NEON_LOG("  reject: too few insts (" << insts.size() << ") and not loop body");
         os_.rdbuf(oldBuf);
         return false;
     }
+
+    if (isLoopBody)
+        NEON_LOG("  loop body: IV=" << (loopIV ? loopIV->name_ : "?")
+                 << " stride=" << loopStride);
 
     // ── Group loads / stores by base pointer ──────────────────────
     // key: base pointer (first GEP operand after stripping), value: list of (inst, elementOffset)
@@ -274,6 +294,25 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         }
     }
 
+    NEON_LOG("  loadGroups=" << loadGroups.size()
+             << " loadVecs=" << loadVecs.size()
+             << " storeGroups=" << storeGroups.size()
+             << " storeVecs=" << storeVecs.size());
+    if (debugNEON) {
+        for (auto &[base, entries] : loadGroups) {
+            std::cerr << "  load base=" << (!base->name_.empty() ? base->name_ : "?")
+                      << " offsets:";
+            for (auto &e : entries) std::cerr << " " << e.second;
+            std::cerr << "\n";
+        }
+        for (auto &[base, entries] : storeGroups) {
+            std::cerr << "  store base=" << (!base->name_.empty() ? base->name_ : "?")
+                      << " offsets:";
+            for (auto &e : entries) std::cerr << " " << e.second;
+            std::cerr << "\n";
+        }
+    }
+
     // Helper to emit address of a GEP into a fresh address register
     std::function<std::string(Value*)> emitGEPAddr;
     emitGEPAddr = [&](Value *gepVal) -> std::string {
@@ -380,6 +419,12 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         int storeCount = 0;
         for (auto *i : insts) if (i->is_store()) storeCount++;
         bool tryLoopBody = isLoopBody && storeCount == 1 && insts.size() <= 8;
+        if (!isLoopBody && debugNEON)
+            NEON_LOG("  reject loop-body: not loop body");
+        else if (isLoopBody && storeCount != 1 && debugNEON)
+            NEON_LOG("  reject loop-body: storeCount=" << storeCount << " (need 1)");
+        else if (isLoopBody && insts.size() > 8 && debugNEON)
+            NEON_LOG("  reject loop-body: insts.size()=" << insts.size() << " (max 8)");
         if (tryLoopBody) {
             for (auto *inst : insts) {
                 if (!inst->is_store()) continue;
@@ -510,6 +555,8 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         }
         if (!sameConst) continue;
 
+        NEON_LOG("  pattern: const-fill val=" << ci0->value_ << " off0=" << sv.off0);
+
         resetNEONRegs();
         std::set<Instruction*> matched;
 
@@ -534,11 +581,305 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         return true;
     }
 
+    // ── Arbitrary scalar fill ──────────────────────────────────────
+    // Extends constant fill: 4 stores of the same arbitrary Value*,
+    // not necessarily a constant.  Load into GP reg, dup, st1.
+    for (auto &sv : storeVecs) {
+        if (sv.stores.size() < 4) continue;
+        Value *v0 = sv.stores[0]->get_operand(0);
+        // Skip constants — already handled above
+        if (dynamic_cast<ConstantInt*>(v0) || dynamic_cast<ConstantFloat*>(v0))
+            continue;
+        bool sameVal = true;
+        for (int i = 1; i < 4; i++) {
+            if (sv.stores[i]->get_operand(0) != v0) { sameVal = false; break; }
+        }
+        if (!sameVal) continue;
+
+        NEON_LOG("  pattern: scalar-fill off0=" << sv.off0);
+
+        resetNEONRegs();
+        bool isFloat = v0->type_->tid_ == Type::FloatTyID;
+        std::string srcReg;
+        if (hasAssignedReg(v0)) {
+            srcReg = assignedReg(v0);
+        } else if (isFloat) {
+            srcReg = loadFloat(v0);
+        } else {
+            srcReg = loadInt(v0);
+        }
+
+        std::string vreg = allocNEONReg();
+        if (isFloat) {
+            // float: dup v.4s, vN.s[0] — use the SIMD reg directly
+            // assignedReg for float returns "sN", need "vN" for dup lane
+            std::string vSrc = srcReg;
+            if (!vSrc.empty() && vSrc[0] == 's')
+                vSrc = "v" + vSrc.substr(1);
+            os_ << "\tdup " << vreg << ".4s, " << vSrc << ".s[0]\n";
+        } else {
+            os_ << "\tdup " << vreg << ".4s, " << srcReg << "\n";
+        }
+
+        std::string addr = emitGEPAddr(sv.stores[0]->get_operand(1));
+        emitNEON_st1_4s(os_, vreg, addr);
+        freeAddrReg(addr);
+
+        for (int i = 0; i < 4; i++)
+            neonEmitted_.insert(sv.stores[i]);
+        resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
+        return true;
+    }
+
     if (loadVecs.empty() || storeVecs.empty()) {
+        if (debugNEON) {
+            if (loadVecs.empty())  NEON_LOG("  reject: no loadVecs");
+            if (storeVecs.empty()) NEON_LOG("  reject: no storeVecs");
+        }
         os_.rdbuf(oldBuf);
         return false;
     }
 
+    // ── load-load-binop-store pattern ──────────────────────────────
+    // Matches: x0=load A[i+0]; y0=load B[i+0]; z0=add x0,y0; store z0,C[i+0]
+    //          ... (×4 consecutive)
+    // Emits:  ld1 {vA.4s}, [A]; ld1 {vB.4s}, [B]; op vC.4s, vA.4s, vB.4s; st1 {vC.4s}, [C]
+    for (auto &sv : storeVecs) {
+        if (sv.stores.size() < 4) continue;
+
+        // Each stored value must be a BinaryInst of the same opcode
+        BinaryInst *bins[4] = {};
+        Instruction::OpID op;
+        bool valid = true;
+        for (int i = 0; i < 4; i++) {
+            bins[i] = dynamic_cast<BinaryInst*>(sv.stores[i]->get_operand(0));
+            if (!bins[i]) { valid = false; break; }
+            if (i == 0) op = bins[i]->op_id_;
+            else if (bins[i]->op_id_ != op) { valid = false; break; }
+        }
+        if (!valid) {
+            if (debugNEON) NEON_LOG("  reject binop-store: not all binops or mixed ops, off0=" << sv.off0);
+            continue;
+        }
+
+        const char *neonOp = nullptr;
+        bool commutative = false;
+        switch (op) {
+        case Instruction::Add:  neonOp = "add";  commutative = true; break;
+        case Instruction::Mul:  neonOp = "mul";  commutative = true; break;
+        case Instruction::Sub:  neonOp = "sub";  break;
+        case Instruction::FAdd: neonOp = "fadd"; commutative = true; break;
+        case Instruction::FMul: neonOp = "fmul"; commutative = true; break;
+        case Instruction::FSub: neonOp = "fsub"; break;
+        default:
+            if (debugNEON) NEON_LOG("  reject binop-store: unsupported op off0=" << sv.off0);
+            continue;
+        }
+
+        // For each binop, extract the two LoadInsts and group by GEP base.
+        // Determine (baseA, posA) and (baseB, posB) from first binop, then verify.
+        Value *baseA = nullptr, *baseB = nullptr;
+        int posA = -1, posB = -1;  // which operand position (0 or 1)
+        struct LoadInfo { LoadInst *ld; GetElementPtrInst *gep; int offset; };
+        LoadInfo liA[4] = {}, liB[4] = {};
+
+        for (int i = 0; i < 4; i++) {
+            auto *l0 = dynamic_cast<LoadInst*>(bins[i]->get_operand(0));
+            auto *l1 = dynamic_cast<LoadInst*>(bins[i]->get_operand(1));
+            if (!l0 || !l1) { valid = false; break; }
+            auto *g0 = dynamic_cast<GetElementPtrInst*>(l0->get_operand(0));
+            auto *g1 = dynamic_cast<GetElementPtrInst*>(l1->get_operand(0));
+            if (!g0 || !g1) { valid = false; break; }
+            Value *b0 = g0->get_operand(0);
+            Value *b1 = g1->get_operand(0);
+
+            // Handle the case where both operands come from the same base
+            // (e.g. A[i] = A[i] * A[i]).  This is a splat, not a two-load binop.
+            if (i == 0 && b0 == b1) { valid = false; break; }
+
+            if (i == 0) {
+                baseA = b0; posA = 0;
+                baseB = b1; posB = 1;
+            }
+
+            // Determine which operand goes to which base
+            LoadInst *ldA = nullptr, *ldB = nullptr;
+            GetElementPtrInst *gepA = nullptr, *gepB = nullptr;
+            if (b0 == baseA && b1 == baseB) {
+                ldA = l0; gepA = g0; ldB = l1; gepB = g1;
+            } else if (b0 == baseB && b1 == baseA) {
+                if (!commutative) { valid = false; break; }
+                ldA = l1; gepA = g1; ldB = l0; gepB = g0;
+            } else {
+                valid = false; break;
+            }
+
+            Value *idxA = gepA->get_operand(gepA->num_ops_ - 1);
+            Value *idxB = gepB->get_operand(gepB->num_ops_ - 1);
+            int offA, offB;
+            if (!extractOffset(idxA, offA) || !extractOffset(idxB, offB))
+                { valid = false; break; }
+            liA[i] = {ldA, gepA, offA};
+            liB[i] = {ldB, gepB, offB};
+        }
+
+        if (!valid || !baseA || !baseB) continue;
+
+        // Verify consecutive offsets for both load groups
+        int off0 = sv.off0;
+        for (int i = 0; i < 4; i++) {
+            if (liA[i].offset != off0 + i) { valid = false; break; }
+            if (liB[i].offset != off0 + i) { valid = false; break; }
+        }
+        if (!valid) {
+            if (debugNEON) NEON_LOG("  reject binop-store: non-consecutive load offsets, off0=" << sv.off0);
+            continue;
+        }
+
+        NEON_LOG("  pattern: load-load-binop-store op=" << neonOp
+                 << " off0=" << off0
+                 << " baseA=" << (!baseA->name_.empty() ? baseA->name_ : "?")
+                 << " baseB=" << (!baseB->name_.empty() ? baseB->name_ : "?"));
+
+        resetNEONRegs();
+        std::string vA = allocNEONReg();
+        std::string vB = allocNEONReg();
+        std::string vC = allocNEONReg();
+
+        std::string addrA = emitGEPAddr(liA[0].gep);
+        std::string addrB = emitGEPAddr(liB[0].gep);
+        emitNEON_ld1_4s(os_, vA, addrA);
+        emitNEON_ld1_4s(os_, vB, addrB);
+        emitNEON_binop_4s(os_, neonOp, vC, vA, vB);
+        freeAddrReg(addrA);
+        freeAddrReg(addrB);
+
+        std::string addrC = emitGEPAddr(
+            static_cast<GetElementPtrInst*>(sv.stores[0]->get_operand(1)));
+        emitNEON_st1_4s(os_, vC, addrC);
+        freeAddrReg(addrC);
+
+        for (int i = 0; i < 4; i++) {
+            neonEmitted_.insert(liA[i].ld);
+            neonEmitted_.insert(liB[i].ld);
+            neonEmitted_.insert(bins[i]);
+            neonEmitted_.insert(sv.stores[i]);
+        }
+        resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
+        return true;
+    }
+
+    // ── addv reduction pattern ─────────────────────────────────────
+    // Matches: s1=add sum,x0; s2=add s1,x1; s3=add s2,x2; s4=add s3,x3;
+    //          where x0..x3 are 4 consecutive loads from the same base.
+    // Emits:  ld1 {v0.4s}, [addr]; addv/faddv s1, v0.4s; fmov+add
+    for (auto &lv : loadVecs) {
+        if (lv.loads.size() < 4) continue;
+
+        // Find the add that consumes each load.  Each load must have
+        // exactly one user, and that user must be an add/fadd.
+        BinaryInst *adds[4] = {};
+        Value *accum = nullptr;
+        bool valid = true;
+        bool isFloat = false;
+
+        for (int i = 0; i < 4; i++) {
+            LoadInst *ld = lv.loads[i];
+            if (ld->use_list_.size() != 1) { valid = false; break; }
+            auto *bin = dynamic_cast<BinaryInst*>(ld->use_list_.begin()->val_);
+            if (!bin || (!bin->is_add() && !bin->is_fadd())) { valid = false; break; }
+            adds[i] = bin;
+            if (i == 0) isFloat = bin->is_fadd();
+            else if (isFloat != (bool)bin->is_fadd()) { valid = false; break; }
+        }
+        if (!valid) continue;
+
+        // Determine the accumulator: the operand of adds[0] that is NOT lv.loads[0]
+        if (adds[0]->get_operand(0) == lv.loads[0])
+            accum = adds[0]->get_operand(1);
+        else if (adds[0]->get_operand(1) == lv.loads[0])
+            accum = adds[0]->get_operand(0);
+        else continue;
+
+        // Accumulator must not be one of the 4 loads
+        bool accumIsLoad = false;
+        for (int i = 0; i < 4; i++)
+            if (accum == lv.loads[i]) { accumIsLoad = true; break; }
+        if (accumIsLoad) continue;
+
+        // Verify the chain: adds[i] consumes adds[i-1] + lv.loads[i]
+        for (int i = 1; i < 4; i++) {
+            Value *op0 = adds[i]->get_operand(0);
+            Value *op1 = adds[i]->get_operand(1);
+            if (!((op0 == adds[i-1] && op1 == lv.loads[i]) ||
+                  (op1 == adds[i-1] && op0 == lv.loads[i]))) {
+                valid = false; break;
+            }
+        }
+        if (!valid) {
+            if (debugNEON) NEON_LOG("  reject reduction: adds not chained, off0=" << lv.off0);
+            continue;
+        }
+
+        NEON_LOG("  pattern: reduction " << (isFloat ? "faddv" : "addv")
+                 << " off0=" << lv.off0);
+
+        resetNEONRegs();
+        std::string vLd = allocNEONReg();
+        std::string addr = emitGEPAddr(
+            static_cast<GetElementPtrInst*>(lv.loads[0]->get_operand(0)));
+        emitNEON_ld1_4s(os_, vLd, addr);
+        freeAddrReg(addr);
+
+        // Destination register for the final result (adds[3])
+        std::string dstReg;
+        if (hasAssignedReg(adds[3]))
+            dstReg = assignedReg(adds[3]);
+        else if (isFloat)
+            dstReg = allocFloatReg();
+        else
+            dstReg = allocIntReg();
+
+        if (isFloat) {
+            // faddv sLd, vLd.4s  →  fadd sDst, sAccum, sLd
+            std::string sLd = "s" + vLd.substr(1);
+            os_ << "\tfaddv " << sLd << ", " << vLd << ".4s\n";
+            std::string accReg;
+            if (hasAssignedReg(accum))
+                accReg = assignedReg(accum);
+            else
+                accReg = loadFloat(accum);
+            os_ << "\tfadd " << dstReg << ", " << accReg << ", " << sLd << "\n";
+        } else {
+            // addv sLd, vLd.4s  →  fmov wTmp, sLd  →  add wDst, wAccum, wTmp
+            std::string sLd = "s" + vLd.substr(1);
+            os_ << "\taddv " << sLd << ", " << vLd << ".4s\n";
+            std::string wTmp = allocIntReg();
+            os_ << "\tfmov " << wTmp << ", " << sLd << "\n";
+            std::string accReg;
+            if (hasAssignedReg(accum))
+                accReg = assignedReg(accum);
+            else
+                accReg = loadInt(accum);
+            os_ << "\tadd " << dstReg << ", " << accReg << ", " << wTmp << "\n";
+            freeIntReg(wTmp);
+        }
+
+        for (int i = 0; i < 4; i++) {
+            neonEmitted_.insert(lv.loads[i]);
+            neonEmitted_.insert(adds[i]);
+        }
+        resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
+        return true;
+    }
+
+    if (debugNEON) NEON_LOG("  no pattern matched");
     os_.rdbuf(oldBuf);
     return false;
 }

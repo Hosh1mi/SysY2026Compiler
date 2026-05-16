@@ -171,7 +171,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CFGSimplify>());          // 展开后化简 CFG
 
         // ========== Phase 5: 最终清理 ==========
-        pm.addPass(std::make_unique<CFGSimplify>());          // 最后化简
+        // pm.addPass(std::make_unique<CFGSimplify>());          // 最后化简
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理冗余 phi
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 最终 DCE
 	}  
