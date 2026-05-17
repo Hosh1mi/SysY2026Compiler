@@ -355,7 +355,14 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         } else if (dynamic_cast<GetElementPtrInst*>(base)) {
             baseReg = emitGEPAddr(base);
         } else {
-            baseReg = loadAddr(base);
+            // loadAddr may return a register shared with a function
+            // argument or other live value.  Copy into a fresh register
+            // so the in-place address arithmetic below does not corrupt
+            // the original (which must survive across loop iterations).
+            std::string srcReg = loadAddr(base);
+            baseReg = allocAddrReg();
+            if (baseReg != srcReg)
+                os_ << "\tmov " << baseReg << ", " << srcReg << "\n";
         }
         Type *curTy = static_cast<PointerType*>(base->type_)->contained_;
         for (unsigned i = 1; i < gep->num_ops_; i++) {
@@ -538,7 +545,7 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
                 return true;
             }
         }
-        if (isLoopBody) { os_.rdbuf(oldBuf); return false; }
+        // if (isLoopBody) { os_.rdbuf(oldBuf); return false; }
     }
 
     // Constant store pattern: 4 stores of the same constant.
@@ -628,6 +635,187 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
 
         for (int i = 0; i < 4; i++)
             neonEmitted_.insert(sv.stores[i]);
+        resetNEONRegs();
+        deferredNEONCode_ = tmpStream.str();
+        os_.rdbuf(oldBuf);
+        return true;
+    }
+
+    // ── addv reduction pattern ─────────────────────────────────────
+    // Matches: s1=add sum,x0; s2=add s1,x1; s3=add s2,x2; s4=add s3,x3;
+    //          where x0..x3 are 4 consecutive loads from the same base.
+    // Needs only loadVecs (no storeVecs required).  Must run before
+    // the loadVecs+storeVecs gate used by patterns that need both.
+    // Emits:  ld1 {v0.4s}, [addr]; addv/faddv s1, v0.4s; fmov+add
+    for (auto &lv : loadVecs) {
+        if (lv.loads.size() < 4) continue;
+
+        // Find the add that consumes each load.  Each load must have
+        // exactly one user, and that user must be an add/fadd.
+        BinaryInst *adds[4] = {};
+        Value *accum = nullptr;
+        bool valid = true;
+        bool isFloat = false;
+
+        for (int i = 0; i < 4; i++) {
+            LoadInst *ld = lv.loads[i];
+            if (ld->use_list_.size() != 1) { valid = false; break; }
+            auto *bin = dynamic_cast<BinaryInst*>(ld->use_list_.begin()->val_);
+            if (!bin || (!bin->is_add() && !bin->is_fadd())) { valid = false; break; }
+            adds[i] = bin;
+            if (i == 0) isFloat = bin->is_fadd();
+            else if (isFloat != (bool)bin->is_fadd()) { valid = false; break; }
+        }
+        if (!valid) continue;
+
+        // Skip float reductions: faddp computes (a+b)+(c+d) while the
+        // scalar chain computes (((acc+a)+b)+c)+d.  The different
+        // rounding order causes WA on exact-match tests.
+        if (isFloat) {
+            if (debugNEON) NEON_LOG("  reject reduction: float (non-associative), off0=" << lv.off0);
+            continue;
+        }
+
+        // Determine the accumulator: the operand of adds[0] that is NOT lv.loads[0]
+        if (adds[0]->get_operand(0) == lv.loads[0])
+            accum = adds[0]->get_operand(1);
+        else if (adds[0]->get_operand(1) == lv.loads[0])
+            accum = adds[0]->get_operand(0);
+        else continue;
+
+        // Accumulator must not be one of the 4 loads
+        bool accumIsLoad = false;
+        for (int i = 0; i < 4; i++)
+            if (accum == lv.loads[i]) { accumIsLoad = true; break; }
+        if (accumIsLoad) continue;
+
+        // Verify the chain: adds[i] consumes adds[i-1] + lv.loads[i]
+        for (int i = 1; i < 4; i++) {
+            Value *op0 = adds[i]->get_operand(0);
+            Value *op1 = adds[i]->get_operand(1);
+            if (!((op0 == adds[i-1] && op1 == lv.loads[i]) ||
+                  (op1 == adds[i-1] && op0 == lv.loads[i]))) {
+                valid = false; break;
+            }
+        }
+        if (!valid) {
+            if (debugNEON) NEON_LOG("  reject reduction: adds not chained, off0=" << lv.off0);
+            continue;
+        }
+
+        // Before emitting anything, verify we can handle the IV chain.
+        // The 4 loads' GEP indices form an IV chain: ivPhi, ivPhi+1,
+        // ivPhi+2, ivPhi+3.  The final IV update is ivPhi+4.  We emit
+        // it inline to prevent the normal scalar emission from clobbering
+        // the addv result register before the phi copy can read it.
+        auto gepIdx = [](LoadInst *ld) -> Value* {
+            auto *g = static_cast<GetElementPtrInst*>(ld->get_operand(0));
+            return g->get_operand(g->num_ops_ - 1);
+        };
+
+        Value *idxChain[4];
+        for (int i = 0; i < 4; i++)
+            idxChain[i] = gepIdx(lv.loads[i]);
+        Value *ivBase = idxChain[0];
+
+        // Find the IV update: user of idxChain[3] that is add with constant 1
+        Instruction *ivUpd = nullptr;
+        if (auto *lastAdd = dynamic_cast<BinaryInst*>(idxChain[3])) {
+            for (auto &use : lastAdd->use_list_) {
+                auto *upd = dynamic_cast<BinaryInst*>(use.val_);
+                if (!upd || !upd->is_add()) continue;
+                auto *c0 = dynamic_cast<ConstantInt*>(upd->get_operand(0));
+                auto *c1 = dynamic_cast<ConstantInt*>(upd->get_operand(1));
+                if ((c0 && c0->value_ == 1) || (c1 && c1->value_ == 1)) {
+                    ivUpd = upd;
+                    break;
+                }
+            }
+        }
+
+        // Refuse to emit addv if we cannot find and handle the IV update.
+        // Without it, the scalar IV emission will overwrite the result
+        // register before the phi copy.
+        if (!ivUpd) {
+            if (debugNEON) NEON_LOG("  reject reduction: IV update not found, off0=" << lv.off0);
+            continue;
+        }
+
+        NEON_LOG("  pattern: reduction " << (isFloat ? "faddv" : "addv")
+                 << " off0=" << lv.off0);
+
+        resetNEONRegs();
+        std::string vLd = allocNEONReg();
+        std::string addr = emitGEPAddr(
+            static_cast<GetElementPtrInst*>(lv.loads[0]->get_operand(0)));
+        emitNEON_ld1_4s(os_, vLd, addr);
+        freeAddrReg(addr);
+
+        // Compute the reduction into a scratch register, then save
+        // to adds[3] via storeInt/storeFloat.
+        std::string dstReg = isFloat ? allocFloatReg() : allocIntReg();
+
+        if (isFloat) {
+            // faddp (pairwise add) to reduce 4 lanes to 1 scalar:
+            //   faddp vN.4s, vN.4s, vN.4s  → vN[0]=vN[0]+vN[1], vN[1]=vN[2]+vN[3]
+            //   faddp sN, vN.2s            → sN = vN[0]+vN[1]
+            os_ << "\tfaddp " << vLd << ".4s, " << vLd << ".4s, " << vLd << ".4s\n";
+            std::string sLd = "s" + vLd.substr(1);
+            os_ << "\tfaddp " << sLd << ", " << vLd << ".2s\n";
+            std::string accReg;
+            if (hasAssignedReg(accum))
+                accReg = assignedReg(accum);
+            else
+                accReg = loadFloat(accum);
+            os_ << "\tfadd " << dstReg << ", " << accReg << ", " << sLd << "\n";
+        } else {
+            std::string sLd = "s" + vLd.substr(1);
+            os_ << "\taddv " << sLd << ", " << vLd << ".4s\n";
+            std::string wTmp = allocIntReg();
+            os_ << "\tfmov " << wTmp << ", " << sLd << "\n";
+            std::string accReg;
+            if (hasAssignedReg(accum))
+                accReg = assignedReg(accum);
+            else
+                accReg = loadInt(accum);
+            os_ << "\tadd " << dstReg << ", " << accReg << ", " << wTmp << "\n";
+            freeIntReg(wTmp);
+        }
+        if (isFloat)
+            storeFloat(adds[3], dstReg);
+        else {
+            storeInt(adds[3], dstReg);
+            freeIntReg(dstReg);
+        }
+
+        // Mark and emit the IV chain + update
+        for (int i = 1; i < 4; i++) {
+            if (auto *ivAdd = dynamic_cast<BinaryInst*>(idxChain[i]))
+                if (ivAdd->is_add())
+                    neonEmitted_.insert(ivAdd);
+        }
+        neonEmitted_.insert(ivUpd);
+        {
+            std::string ivReg, updReg;
+            ivReg = hasAssignedReg(ivBase) ? assignedReg(ivBase) : loadInt(ivBase);
+            updReg = hasAssignedReg(ivUpd) ? assignedReg(ivUpd) : allocIntReg();
+            os_ << "\tadd " << updReg << ", " << ivReg << ", #4\n";
+            if (!hasAssignedReg(ivBase))
+                storeInt(ivBase, ivReg);
+            if (!hasAssignedReg(ivUpd) && ivUpd->use_list_.size() > 0)
+                storeInt(ivUpd, updReg);
+        }
+
+        for (int i = 0; i < 4; i++) {
+            // Mark the GEP that produces the load's pointer operand.
+            // The GEP must also be skipped, otherwise its normal scalar
+            // emission will clobber registers we depend on (e.g. the
+            // addv result stored via storeInt).
+            if (auto *ldGep = dynamic_cast<GetElementPtrInst*>(lv.loads[i]->get_operand(0)))
+                neonEmitted_.insert(ldGep);
+            neonEmitted_.insert(lv.loads[i]);
+            neonEmitted_.insert(adds[i]);
+        }
         resetNEONRegs();
         deferredNEONCode_ = tmpStream.str();
         os_.rdbuf(oldBuf);
@@ -767,112 +955,6 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
             neonEmitted_.insert(liB[i].ld);
             neonEmitted_.insert(bins[i]);
             neonEmitted_.insert(sv.stores[i]);
-        }
-        resetNEONRegs();
-        deferredNEONCode_ = tmpStream.str();
-        os_.rdbuf(oldBuf);
-        return true;
-    }
-
-    // ── addv reduction pattern ─────────────────────────────────────
-    // Matches: s1=add sum,x0; s2=add s1,x1; s3=add s2,x2; s4=add s3,x3;
-    //          where x0..x3 are 4 consecutive loads from the same base.
-    // Emits:  ld1 {v0.4s}, [addr]; addv/faddv s1, v0.4s; fmov+add
-    for (auto &lv : loadVecs) {
-        if (lv.loads.size() < 4) continue;
-
-        // Find the add that consumes each load.  Each load must have
-        // exactly one user, and that user must be an add/fadd.
-        BinaryInst *adds[4] = {};
-        Value *accum = nullptr;
-        bool valid = true;
-        bool isFloat = false;
-
-        for (int i = 0; i < 4; i++) {
-            LoadInst *ld = lv.loads[i];
-            if (ld->use_list_.size() != 1) { valid = false; break; }
-            auto *bin = dynamic_cast<BinaryInst*>(ld->use_list_.begin()->val_);
-            if (!bin || (!bin->is_add() && !bin->is_fadd())) { valid = false; break; }
-            adds[i] = bin;
-            if (i == 0) isFloat = bin->is_fadd();
-            else if (isFloat != (bool)bin->is_fadd()) { valid = false; break; }
-        }
-        if (!valid) continue;
-
-        // Determine the accumulator: the operand of adds[0] that is NOT lv.loads[0]
-        if (adds[0]->get_operand(0) == lv.loads[0])
-            accum = adds[0]->get_operand(1);
-        else if (adds[0]->get_operand(1) == lv.loads[0])
-            accum = adds[0]->get_operand(0);
-        else continue;
-
-        // Accumulator must not be one of the 4 loads
-        bool accumIsLoad = false;
-        for (int i = 0; i < 4; i++)
-            if (accum == lv.loads[i]) { accumIsLoad = true; break; }
-        if (accumIsLoad) continue;
-
-        // Verify the chain: adds[i] consumes adds[i-1] + lv.loads[i]
-        for (int i = 1; i < 4; i++) {
-            Value *op0 = adds[i]->get_operand(0);
-            Value *op1 = adds[i]->get_operand(1);
-            if (!((op0 == adds[i-1] && op1 == lv.loads[i]) ||
-                  (op1 == adds[i-1] && op0 == lv.loads[i]))) {
-                valid = false; break;
-            }
-        }
-        if (!valid) {
-            if (debugNEON) NEON_LOG("  reject reduction: adds not chained, off0=" << lv.off0);
-            continue;
-        }
-
-        NEON_LOG("  pattern: reduction " << (isFloat ? "faddv" : "addv")
-                 << " off0=" << lv.off0);
-
-        resetNEONRegs();
-        std::string vLd = allocNEONReg();
-        std::string addr = emitGEPAddr(
-            static_cast<GetElementPtrInst*>(lv.loads[0]->get_operand(0)));
-        emitNEON_ld1_4s(os_, vLd, addr);
-        freeAddrReg(addr);
-
-        // Destination register for the final result (adds[3])
-        std::string dstReg;
-        if (hasAssignedReg(adds[3]))
-            dstReg = assignedReg(adds[3]);
-        else if (isFloat)
-            dstReg = allocFloatReg();
-        else
-            dstReg = allocIntReg();
-
-        if (isFloat) {
-            // faddv sLd, vLd.4s  →  fadd sDst, sAccum, sLd
-            std::string sLd = "s" + vLd.substr(1);
-            os_ << "\tfaddv " << sLd << ", " << vLd << ".4s\n";
-            std::string accReg;
-            if (hasAssignedReg(accum))
-                accReg = assignedReg(accum);
-            else
-                accReg = loadFloat(accum);
-            os_ << "\tfadd " << dstReg << ", " << accReg << ", " << sLd << "\n";
-        } else {
-            // addv sLd, vLd.4s  →  fmov wTmp, sLd  →  add wDst, wAccum, wTmp
-            std::string sLd = "s" + vLd.substr(1);
-            os_ << "\taddv " << sLd << ", " << vLd << ".4s\n";
-            std::string wTmp = allocIntReg();
-            os_ << "\tfmov " << wTmp << ", " << sLd << "\n";
-            std::string accReg;
-            if (hasAssignedReg(accum))
-                accReg = assignedReg(accum);
-            else
-                accReg = loadInt(accum);
-            os_ << "\tadd " << dstReg << ", " << accReg << ", " << wTmp << "\n";
-            freeIntReg(wTmp);
-        }
-
-        for (int i = 0; i < 4; i++) {
-            neonEmitted_.insert(lv.loads[i]);
-            neonEmitted_.insert(adds[i]);
         }
         resetNEONRegs();
         deferredNEONCode_ = tmpStream.str();
