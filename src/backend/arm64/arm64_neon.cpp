@@ -355,14 +355,15 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
         } else if (dynamic_cast<GetElementPtrInst*>(base)) {
             baseReg = emitGEPAddr(base);
         } else {
-            // loadAddr may return a register shared with a function
-            // argument or other live value.  Copy into a fresh register
-            // so the in-place address arithmetic below does not corrupt
-            // the original (which must survive across loop iterations).
-            std::string srcReg = loadAddr(base);
-            baseReg = allocAddrReg();
-            if (baseReg != srcReg)
-                os_ << "\tmov " << baseReg << ", " << srcReg << "\n";
+            baseReg = loadAddr(base);
+            // loadAddr may return a pre-assigned callee-saved register
+            // (e.g. a function parameter). Copy it before adding offsets
+            // so the original register is not corrupted.
+            if (gep->num_ops_ > 1) {
+                std::string fresh = allocAddrReg();
+                os_ << "\tmov " << fresh << ", " << baseReg << "\n";
+                baseReg = fresh;
+            }
         }
         Type *curTy = static_cast<PointerType*>(base->type_)->contained_;
         for (unsigned i = 1; i < gep->num_ops_; i++) {
@@ -538,6 +539,25 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
                     std::string ivDst = hasAssignedReg(loopIV) ? assignedReg(loopIV)
                         : loadInt(loopIV);
                     os_ << "\tadd " << ivDst << ", " << ivDst << ", #4\n";
+                    // If loopIncr result is spilled, update the spill slot
+                    // so the phi copy at the end of this block loads the
+                    // correct value instead of stale pre-NEON data.
+                    if (!hasAssignedReg(loopIncr)) {
+                        int slot = getSlot(loopIncr);
+                        if (slot >= -256 && slot <= 255) {
+                            os_ << "\tstr " << ivDst << ", [x29, #" << slot << "]\n";
+                        } else {
+                            int pos = -slot;
+                            if (pos <= 4095)
+                                os_ << "\tsub x17, x29, #" << pos << "\n";
+                            else {
+                                os_ << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+                                os_ << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+                                os_ << "\tsub x17, x29, x17\n";
+                            }
+                            os_ << "\tstr " << ivDst << ", [x17]\n";
+                        }
+                    }
                 }
 
                 deferredNEONCode_ = tmpStream.str();

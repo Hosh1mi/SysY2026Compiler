@@ -486,13 +486,106 @@ static bool tryDeadStore(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
+// Rule 7: eliminate redundant sub x17, x29, #N
+//   sub x17, x29, #N  ... (no write to x17) ...  sub x17, x29, #N  →  delete second
+static bool tryRedundantSub(std::vector<ParsedLine> &lines, size_t idx) {
+	auto &l0 = lines[idx];
+	if (l0.mnemonic != "sub") return false;
+	if (l0.operands.size() < 3) return false;
+	// Must be: sub x17, x29, #N
+	if (l0.operands[0] != "x17" || l0.operands[1] != "x29") return false;
+	const std::string &imm = l0.operands[2];
+	if (imm.empty() || imm[0] != '#') return false;
+
+	auto w = instructionWindow(lines, idx + 1, 3);
+	for (size_t wi : w) {
+		auto &li = lines[wi];
+		// If x17 is written by any non-sub instruction, stop tracking
+		if (li.mnemonic != "sub") {
+		if (lineWritesReg(li, "x17")) return false;
+		// Calls may clobber x17
+		if (isCallBarrier(li.mnemonic)) return false;
+		continue;
+		}
+		// It's a sub — check if it's the same sub x17, x29, #N
+		if (li.operands.size() >= 3 &&
+			li.operands[0] == "x17" && li.operands[1] == "x29" &&
+			li.operands[2] == imm) {
+		li.raw.clear();
+		li.kind = LineKind::Empty;
+		return true;
+		}
+		// Different sub (writes x17 to a different value) — stop
+		return false;
+	}
+	return false;
+}
+
+// Rule 8: store-load forwarding through x17 (after sub x17, x29, #N)
+//   sub x17, x29, #N  then  str rA, [x17]  then  (no write x17)  ldr rB, [x17]
+//   →  keep sub+str,  change ldr to mov rB, rA
+static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
+	// Look for: sub x17, x29, #N at idx, then str rA, [x17] at idx+1
+	auto &l0 = lines[idx];
+	if (l0.mnemonic != "sub") return false;
+	if (l0.operands.size() < 3) return false;
+	if (l0.operands[0] != "x17" || l0.operands[1] != "x29") return false;
+
+	auto w = instructionWindow(lines, idx + 1, 4); // 4-insn window for sub+str+...+ldr
+	if (w.size() < 2) return false;
+
+	// First instruction after sub must be str rA, [x17]
+	auto &lStr = lines[w[0]];
+	if (lStr.mnemonic != "str" || lStr.operands.size() < 2) return false;
+	auto mStr = parseMemOp(lStr.operands[1]);
+	if (!mStr.valid || mStr.base != "x17") return false;
+
+	std::string srcReg = lStr.operands[0];
+	char cls = regClass(srcReg);
+	if (cls != 'w' && cls != 'x' && cls != 's') return false;
+	if (srcReg == "wzr" || srcReg == "xzr") return false;
+
+	// Scan remaining window for ldr rB, [x17]
+	for (size_t j = 1; j < w.size(); ++j) {
+		auto &li = lines[w[j]];
+		if (li.mnemonic != "ldr") {
+		if (isCallBarrier(li.mnemonic)) return false;
+		if (lineWritesReg(li, "x17")) return false;
+		if (lineWritesReg(li, srcReg)) return false;
+		if (li.mnemonic == "str" && li.operands.size() >= 2) {
+			auto mi = parseMemOp(li.operands[1]);
+			if (mi.valid && mi.base == "x17") return false; // str via x17 overwrites
+		}
+		continue;
+		}
+		if (li.operands.size() < 2) continue;
+		auto mLdr = parseMemOp(li.operands[1]);
+		if (!mLdr.valid || mLdr.base != "x17") continue;
+
+		std::string dstReg = li.operands[0];
+		if (regClass(dstReg) != cls) return false;
+
+		if (dstReg == srcReg) {
+		li.raw.clear();
+		li.kind = LineKind::Empty;
+		} else {
+		std::string movOp = (cls == 's') ? "fmov" : "mov";
+		li.raw = makeInsn(movOp, {dstReg, srcReg});
+		li.mnemonic = movOp;
+		li.operands = {dstReg, srcReg};
+		}
+		return true;
+	}
+	return false;
+}
+
 // ── Main optimization loop ──────────────────────────────────────────
 
 std::string peepholeOptimize(const std::string &asmText) {
 	if (asmText.empty()) return asmText;
 
 	std::string current = asmText;
-	const int MAX_ITERS = 10;
+	const int MAX_ITERS = 30;
 
 	for (int iter = 0; iter < MAX_ITERS; ++iter) {
 		auto lines = parseLines(current);
@@ -504,7 +597,9 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (trySelfMove(lines, i))           { changed = true; break; }
 			if (tryZeroStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
+			if (tryRedundantSub(lines, i))       { changed = true; break; }
 			if (tryDeadStore(lines, i))          { changed = true; break; }
+			if (tryStoreLoadForwardX17(lines, i)){ changed = true; break; }
 			if (tryMergeStores(lines, i))        { changed = true; break; }
 			if (tryMergeLoads(lines, i))         { changed = true; break; }
 		}
