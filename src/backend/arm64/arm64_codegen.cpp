@@ -147,21 +147,53 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
         std::memcpy(&bits, &val, sizeof(bits));
         os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
     } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
-        std::function<void(Constant*)> emitElem = [&](Constant *elem) {
-            if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
-                os_ << "\t.word " << eci->value_ << "\n";
-            } else if (auto ecf = dynamic_cast<ConstantFloat*>(elem)) {
-                float val = ecf->value_;
-                int bits;
-                std::memcpy(&bits, &val, sizeof(bits));
-                os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
-            } else if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
-                for (auto sub : eca->const_array) emitElem(sub);
-            } else if (dynamic_cast<ConstantZero*>(elem)) {
-                os_ << "\t.word 0\n";
+        // Check if all elements are zero — use .zero for compactness
+        std::function<bool(Constant*)> allZero = [&](Constant *elem) -> bool {
+            if (auto eci = dynamic_cast<ConstantInt*>(elem))
+                return eci->value_ == 0;
+            if (auto ecf = dynamic_cast<ConstantFloat*>(elem))
+                return ecf->value_ == 0.0f;
+            if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
+                for (auto sub : eca->const_array)
+                    if (!allZero(sub)) return false;
+                return true;
             }
+            return dynamic_cast<ConstantZero*>(elem) != nullptr;
         };
-        for (auto elem : ca->const_array) emitElem(elem);
+        bool isAllZero = true;
+        for (auto elem : ca->const_array)
+            if (!allZero(elem)) { isAllZero = false; break; }
+
+        if (isAllZero) {
+            int totalElements = 1;
+            Type *cur = pointee;
+            while (auto arrTy = dynamic_cast<ArrayType*>(cur)) {
+                totalElements *= arrTy->num_elements_;
+                cur = arrTy->contained_;
+            }
+            int elemSize = 4;
+            if (cur->tid_ == Type::IntegerTyID)
+                elemSize = static_cast<IntegerType*>(cur)->num_bits_ / 8;
+            else if (cur->tid_ == Type::FloatTyID)
+                elemSize = 4;
+            os_ << "\t.zero " << (totalElements * elemSize) << "\n";
+        } else {
+            std::function<void(Constant*)> emitElem = [&](Constant *elem) {
+                if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
+                    os_ << "\t.word " << eci->value_ << "\n";
+                } else if (auto ecf = dynamic_cast<ConstantFloat*>(elem)) {
+                    float val = ecf->value_;
+                    int bits;
+                    std::memcpy(&bits, &val, sizeof(bits));
+                    os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
+                } else if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
+                    for (auto sub : eca->const_array) emitElem(sub);
+                } else if (dynamic_cast<ConstantZero*>(elem)) {
+                    os_ << "\t.word 0\n";
+                }
+            };
+            for (auto elem : ca->const_array) emitElem(elem);
+        }
     }
     os_ << "\n";
 }
