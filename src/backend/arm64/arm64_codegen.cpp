@@ -52,6 +52,7 @@ void Arm64CodeGen::generate() {
     // 4核CPU，扣除核心2、3后最多可用2个线程
     if (numThreads <= 2) numThreads = 1;
     else numThreads = numThreads - 2;  // 对于4核=2线程
+    // std::cout << "Using " << numThreads << " threads for code generation.\n";
 
     // 6. 将函数均匀分配给各线程（轮转分配）
     std::vector<std::vector<Function*>> partitions(numThreads);

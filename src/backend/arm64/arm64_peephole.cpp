@@ -1,6 +1,8 @@
 #include "../../include/backend/arm64/arm64_peephole.hpp"
 #include <cctype>
 #include <cstdlib>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -579,6 +581,125 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
+// Rule 9: sxtw CSE within basic blocks.
+//   Repeated sxtw xA, wB (same source wB) in the same basic block:
+//   cache (i64)wB in a free x-register after the first sxtw, then
+//   replace later sxtw with mov xA, xCache.
+static const std::vector<std::string> sxtwCacheCandidates = {
+    "x11", "x12", "x13", "x14", "x15"
+};
+
+static bool trySxtwCSE(std::vector<ParsedLine> &lines) {
+    bool changed = false;
+
+    // Find basic blocks: sequences of instructions between labels
+    for (size_t bbStart = 0; bbStart < lines.size(); ) {
+        // Skip non-instruction lines at the start
+        while (bbStart < lines.size() && lines[bbStart].kind != LineKind::Instruction)
+            ++bbStart;
+        if (bbStart >= lines.size()) break;
+
+        // Find the end of this basic block (next label or directive)
+        size_t bbEnd = bbStart;
+        while (bbEnd < lines.size() && lines[bbEnd].kind == LineKind::Instruction)
+            ++bbEnd;
+
+        // Collect all sxtw instructions in this block, grouped by source register
+        // Map: source w-register → vector of (line index, dest x-register)
+        struct SxtwInfo { size_t idx; std::string dstReg; };
+        std::map<std::string, std::vector<SxtwInfo>> sxtwGroups;
+
+        for (size_t i = bbStart; i < bbEnd; ++i) {
+            auto &l = lines[i];
+            if (l.kind != LineKind::Instruction) continue;
+            if (l.mnemonic != "sxtw" || l.operands.size() < 2) continue;
+            std::string dst = l.operands[0];
+            std::string src = l.operands[1];
+            if (regClass(dst) != 'x') continue;
+            if (regClass(src) != 'w') continue;
+            sxtwGroups[src].push_back({i, dst});
+        }
+
+        // Process each group with ≥3 occurrences (need at least 3 to amortize
+        // the cache-setup mov)
+        for (auto &[srcReg, group] : sxtwGroups) {
+            if (group.size() < 3) continue;
+
+            // Find a free cache register: x11-x15 not written anywhere
+            // from the basic-block start to the last sxtw of this group.
+            // Must scan from bbStart (not group.front().idx) because a
+            // previous peephole pass may have inserted a cache mov for
+            // a different source register before this group's first sxtw.
+            std::set<std::string> writtenRegs;
+            for (size_t i = bbStart; i <= group.back().idx; ++i) {
+                auto &l = lines[i];
+                if (l.kind != LineKind::Instruction) continue;
+                for (const auto &cand : sxtwCacheCandidates)
+                    if (lineWritesReg(l, cand))
+                        writtenRegs.insert(cand);
+                // Also track w-variant writes (wN write zero-extends to xN)
+                for (const auto &cand : sxtwCacheCandidates)
+                    if (!cand.empty() && cand[0] == 'x') {
+                        std::string wVer = "w" + cand.substr(1);
+                        if (lineWritesReg(l, wVer))
+                            writtenRegs.insert(cand);
+                    }
+            }
+            std::string cacheReg;
+            for (const auto &cand : sxtwCacheCandidates) {
+                if (!writtenRegs.count(cand) && cand != group.front().dstReg) {
+                    cacheReg = cand; break;
+                }
+            }
+            if (cacheReg.empty()) continue;
+
+            // Also verify srcReg is not modified between first and last sxtw
+            bool srcModified = false;
+            for (size_t i = group.front().idx + 1; i < group.back().idx; ++i) {
+                if (lines[i].kind != LineKind::Instruction) continue;
+                if (lineWritesReg(lines[i], srcReg)) { srcModified = true; break; }
+                // Calls clobber caller-saved registers
+                if (isCallBarrier(lines[i].mnemonic)) { srcModified = true; break; }
+            }
+            if (srcModified) continue;
+
+            // --- Apply the optimization ---
+            // 1. After the first sxtw, insert: mov cacheReg, dstReg
+            auto &first = lines[group.front().idx];
+            std::string firstDst = first.operands[0];
+            // Change first sxtw to also write cacheReg (can't; sxtw only has one dst).
+            // Instead, emit sxtw as-is, then add mov cacheReg, firstDst after it.
+            ParsedLine cacheLine;
+            cacheLine.kind = LineKind::Instruction;
+            cacheLine.mnemonic = "mov";
+            cacheLine.operands = {cacheReg, firstDst};
+            cacheLine.raw = makeInsn("mov", {cacheReg, firstDst});
+            lines.insert(lines.begin() + group.front().idx + 1, cacheLine);
+
+            // Adjust all subsequent indices (they shifted by 1)
+            for (auto &info : group)
+                if (info.idx > group.front().idx) ++info.idx;
+            ++bbEnd; // block end also shifted
+
+            // 2. Replace subsequent sxtw with mov dstReg, cacheReg
+            for (size_t gi = 1; gi < group.size(); ++gi) {
+                auto &l = lines[group[gi].idx];
+                std::string dstReg = l.operands[0];
+                l.mnemonic = "mov";
+                l.operands = {dstReg, cacheReg};
+                l.raw = makeInsn("mov", {dstReg, cacheReg});
+            }
+
+            changed = true;
+            break; // one group per block per pass to keep indices stable
+        }
+
+        bbStart = bbEnd;
+    }
+
+    return changed;
+}
+
 // ── Main optimization loop ──────────────────────────────────────────
 
 std::string peepholeOptimize(const std::string &asmText) {
@@ -590,6 +711,9 @@ std::string peepholeOptimize(const std::string &asmText) {
 	for (int iter = 0; iter < MAX_ITERS; ++iter) {
 		auto lines = parseLines(current);
 		bool changed = false;
+
+		// Block-level pass: sxtw CSE (operates on whole function)
+		if (trySxtwCSE(lines)) changed = true;
 
 		for (size_t i = 0; i < lines.size(); ++i) {
 			if (lines[i].kind != LineKind::Instruction) continue;
