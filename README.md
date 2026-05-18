@@ -12,7 +12,7 @@
 - loopInterchange
 - 寄存器极度溢出
 - 地址计算强度消减
-- sxtw冗余
+- sxtw冗余(maybe done)
 - 消除死move指令
 - NEON引入运算操作
 - 指令调度（存疑）
