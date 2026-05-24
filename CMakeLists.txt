@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set(INCLUDE_DIR ${SRC_DIR}/include)
-set(GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 find_package(BISON REQUIRED)
 find_package(FLEX REQUIRED)
@@ -26,40 +25,12 @@ flex_target(
 
 add_flex_bison_dependency(Lexer Parser)
 
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${SRC_DIR}/*.cpp)
+
 add_executable(compiler
-    ${SRC_DIR}/main.cpp
-    ${SRC_DIR}/frontend/ast/ast.cpp
-    ${SRC_DIR}/frontend/ast/astPrinter.cpp
-    ${SRC_DIR}/mid/ir/ir.cpp
-    ${SRC_DIR}/mid/ir/irGen.cpp
-    ${SRC_DIR}/frontend/checker/checker.cpp
-    ${SRC_DIR}/frontend/checker/errReporter.cpp
-    ${SRC_DIR}/backend/arm64/arm64_codegen.cpp
-    ${SRC_DIR}/backend/arm64/arm64_context.cpp
-    ${SRC_DIR}/backend/arm64/arm64_neon.cpp
-    ${SRC_DIR}/backend/arm64/arm64_peephole.cpp
-    ${SRC_DIR}/mid/opt/deadCodeDelete.cpp
-    ${SRC_DIR}/mid/opt/passManager.cpp
-    ${SRC_DIR}/mid/opt/arraySimplify.cpp
-    ${SRC_DIR}/mid/opt/mem2reg.cpp
-    ${SRC_DIR}/mid/opt/tailRecursionEliminate.cpp
-    ${SRC_DIR}/mid/opt/constFold.cpp
-    ${SRC_DIR}/mid/opt/constSubexprEliminate.cpp
-    ${SRC_DIR}/mid/opt/algebraSimplify.cpp
-    ${SRC_DIR}/mid/opt/localCopyPropagation.cpp
-    ${SRC_DIR}/mid/opt/inlineExpand.cpp
-    ${SRC_DIR}/mid/opt/loopInvariantCodeMotion.cpp
-    ${SRC_DIR}/mid/opt/indVarStrengthReduce.cpp
-    ${SRC_DIR}/mid/opt/loopUnroll.cpp
-    ${SRC_DIR}/mid/opt/reassociate.cpp
-    ${SRC_DIR}/mid/opt/loopIdiomRecognize.cpp
-    ${SRC_DIR}/mid/opt/removeRedundantPhis.cpp
-    ${SRC_DIR}/mid/opt/loopVectorize.cpp
-    ${SRC_DIR}/mid/opt/CFGSimplify.cpp
+    ${SRC_FILES}
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
 )
 
-target_include_directories(compiler PRIVATE
-    ${INCLUDE_DIR}
-)
+target_include_directories(compiler PRIVATE ${INCLUDE_DIR})
