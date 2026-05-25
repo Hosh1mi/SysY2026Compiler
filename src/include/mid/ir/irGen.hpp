@@ -184,6 +184,10 @@ public:
         scope.push("putfarray", put_float_array);
         scope.push("_sysy_starttime", sysy_start_time);
         scope.push("_sysy_stoptime", sysy_stop_time);
+        scope.push("memcpy", memcpy);
+        scope.push("memclr", memclr);
+        scope.push("memset", memset);
+        scope.push("llvm_memset", llvm_memset);
     }
     std::unique_ptr<Module> getModule() {
         return std::move(module);
