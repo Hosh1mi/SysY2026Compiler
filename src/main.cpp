@@ -22,6 +22,7 @@
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
+#include "include/mid/opt/sroa.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -42,7 +43,7 @@ int main(int argc, char **argv) {
 
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = true; 
+	int print_asm = false; 
 	std::string output = "-";
 	int optLevel = 0;
 
@@ -90,10 +91,10 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // Set default to asm for now
-    if (!print_ir && !print_asm) {
-        print_asm = true;
-    }
+    // // Set default to asm for now
+    // if (!print_ir && !print_asm) {
+    //     print_asm = true;
+    // }
 
     yyin = fopen(filename, "r");
     if (!yyin) {
@@ -117,6 +118,7 @@ int main(int argc, char **argv) {
         // pm.addPass(std::make_unique<InlineExpand>());
         pm.addPass(std::make_unique<DimArrayArgSimplify>());  // 清理数组参数
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
+        pm.addPass(std::make_unique<SROA>());                 // 将聚合 alloca 拆分为标量 alloca
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
         // pm.addPass(std::make_unique<CFGSimplify>());          // 再化简 CFG
@@ -138,7 +140,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理外提后死代码
         
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化（实验性）
+        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 展开后消除死代码
         pm.addPass(std::make_unique<CFGSimplify>());          // 展开后化简 CFG
