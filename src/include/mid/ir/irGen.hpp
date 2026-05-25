@@ -21,7 +21,7 @@ public:
 
     // push a name to scope
     // return true if successful
-    // return false if this name already exits
+    // return false if this name already exists
     // but func name could be same with variable name
     bool push(std::string name, Value *val) {
         bool result;
@@ -184,11 +184,6 @@ public:
         scope.push("putfarray", put_float_array);
         scope.push("_sysy_starttime", sysy_start_time);
         scope.push("_sysy_stoptime", sysy_stop_time);
-        scope.push("memcpy", memcpy);
-        scope.push("memclr", memclr);
-        scope.push("memset", memset);
-        scope.push("llvm.memset.p0.i32", llvm_memset);
-        // scope.push("malloc",my_malloc);
     }
     std::unique_ptr<Module> getModule() {
         return std::move(module);
