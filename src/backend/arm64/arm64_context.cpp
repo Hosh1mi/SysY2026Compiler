@@ -261,16 +261,16 @@ void Arm64FuncContext::emitPrologue() {
             } else {
                 int off = 16 + stackOffset;
                 if (off <= 4095) {
-                    os_ << "\tldr x17, [x29, #" << off << "]\n";
+                    os_ << "\tldr s17, [x29, #" << off << "]\n";
                 } else {
                     os_ << "\tmovz x17, #" << off << "\n";
-                    os_ << "\tldr x17, [x29, x17]\n";
+                    os_ << "\tldr s17, [x29, x17]\n";
                 }
                 int slot = getSlot(arg);
-                emitStoreReg(os_, "x17", slot);
+                emitStoreReg(os_, "s17", slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
-                    os_ << "\tfmov " << dst << ", s17\n";   // 浮点参数用 s17
+                    os_ << "\tfmov " << dst << ", s17\n";
                 }
                 stackOffset += 8;
             }
