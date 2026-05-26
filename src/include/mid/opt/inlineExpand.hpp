@@ -7,8 +7,10 @@ class InlineExpand : public Pass {
 public:
     void execute(Module *module) override;
 private:
-    bool canInline(Function *callee, Function *caller);
+    bool canInline(CallInst *call, Function *callee, Function *caller);
+    unsigned countCallSites(Function *callee, Module *module);
     unsigned countInstructions(Function *func);
+    bool hasLoops(Function *func);
     // 返回内联过程中新产生的 call 指令列表
     std::vector<CallInst*> performInline(CallInst *callInst);
     std::vector<BasicBlock*> getRPO(Function *func);
@@ -20,4 +22,7 @@ private:
                                std::vector<BasicBlock*> &newBBs);
 };
 
-constexpr int INLINE_THRESHOLD = 30;
+constexpr int INLINE_THRESHOLD = 50;
+constexpr int INLINE_ALWAYS_THRESHOLD = 6;
+constexpr int INLINE_LOOP_THRESHOLD = 20;
+constexpr int INLINE_COST_BUDGET = 200;

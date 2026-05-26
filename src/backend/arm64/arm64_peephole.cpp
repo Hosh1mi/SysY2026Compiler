@@ -324,6 +324,8 @@ static bool tryStoreLoadForward(std::vector<ParsedLine> &lines, size_t idx) {
 		}
 		continue;
 		}
+		// An ldr that writes srcReg makes forwarding unsafe
+		if (lineWritesReg(li, srcReg)) return false;
 		if (li.operands.size() < 2) continue;
 		auto m1 = parseMemOp(li.operands[1]);
 		if (!m1.valid || m1.base != "x29" || m1.offset != m0.offset) continue;

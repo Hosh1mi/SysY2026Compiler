@@ -115,16 +115,13 @@ int main(int argc, char **argv) {
     // TODO：设计合适的Pass Pipeline
 	PassManager pm;
 	if(optLevel >= 1){
-        // pm.addPass(std::make_unique<InlineExpand>());
         pm.addPass(std::make_unique<DimArrayArgSimplify>());  // 清理数组参数
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
         pm.addPass(std::make_unique<SROA>());                 // 将聚合 alloca 拆分为标量 alloca
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 再化简 CFG
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 尾部消除后清理 CFG
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         pm.addPass(std::make_unique<ConstantFold>());         // 常数折叠
         pm.addPass(std::make_unique<AlgebraSimplify>());      // 代数简化
@@ -135,13 +132,14 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CSE>());                  // 公共子表达式消除
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
 
+        pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<ConstantFold>());         // 外提后折叠
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理外提后死代码
-        
+
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        
+
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 展开后消除死代码
         pm.addPass(std::make_unique<CFGSimplify>());          // 展开后化简 CFG
 

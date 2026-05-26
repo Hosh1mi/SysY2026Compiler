@@ -530,23 +530,18 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
                     emitNEON_st1_4s(os_, v0, stAddr);
                     freeAddrReg(stAddr);
                 }
-                os_ << rlbl << ":\n";
 
-                neonEmitted_.insert(si);
-                neonEmitted_.insert(ld);
-                if (loopIncr) {
-                    neonEmitted_.insert(loopIncr);
+                // === NEON path epilogue: increment IV by 4, branch to header ===
+                {
                     std::string ivDst = hasAssignedReg(loopIV) ? assignedReg(loopIV)
                         : loadInt(loopIV);
                     os_ << "\tadd " << ivDst << ", " << ivDst << ", #4\n";
-                    // If loopIncr result is spilled, update the spill slot
-                    // so the phi copy at the end of this block loads the
-                    // correct value instead of stale pre-NEON data.
-                    if (!hasAssignedReg(loopIncr)) {
-                        int slot = getSlot(loopIncr);
-                        if (slot >= -256 && slot <= 255) {
+                    // Update loopIV spill slot
+                    if (!hasAssignedReg(loopIV)) {
+                        int slot = getSlot(loopIV);
+                        if (slot >= -256 && slot <= 255)
                             os_ << "\tstr " << ivDst << ", [x29, #" << slot << "]\n";
-                        } else {
+                        else {
                             int pos = -slot;
                             if (pos <= 4095)
                                 os_ << "\tsub x17, x29, #" << pos << "\n";
@@ -558,7 +553,80 @@ bool Arm64FuncContext::tryEmitNEON(BasicBlock *bb) {
                             os_ << "\tstr " << ivDst << ", [x17]\n";
                         }
                     }
+                    // Update loopIncr spill slot so the phi gets the correct value
+                    if (loopIncr && !hasAssignedReg(loopIncr)) {
+                        int slot = getSlot(loopIncr);
+                        if (slot >= -256 && slot <= 255)
+                            os_ << "\tstr " << ivDst << ", [x29, #" << slot << "]\n";
+                        else {
+                            int pos = -slot;
+                            if (pos <= 4095)
+                                os_ << "\tsub x17, x29, #" << pos << "\n";
+                            else {
+                                os_ << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+                                os_ << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+                                os_ << "\tsub x17, x29, x17\n";
+                            }
+                            os_ << "\tstr " << ivDst << ", [x17]\n";
+                        }
+                    }
+                    os_ << "\tb " << func_->name_ << "_" << loopHeader->name_ << "\n";
                 }
+
+                // === Scalar remainder path ===
+                // Uses the addresses already computed by the normal codegen
+                // for the gep instructions (which run before the NEON code).
+                os_ << rlbl << ":\n";
+                {
+                    std::string ldAddr = loadAddr(ld->get_operand(0));
+                    std::string stAddr = loadAddr(si->get_operand(1));
+                    std::string sReg = allocIntReg();
+                    os_ << "\tldr " << sReg << ", [" << ldAddr << "]\n";
+                    os_ << "\tstr " << sReg << ", [" << stAddr << "]\n";
+                    freeIntReg(sReg);
+                    // Scalar increment
+                    std::string ivDst = hasAssignedReg(loopIV) ? assignedReg(loopIV)
+                        : loadInt(loopIV);
+                    os_ << "\tadd " << ivDst << ", " << ivDst << ", #" << loopStride << "\n";
+                    if (!hasAssignedReg(loopIV)) {
+                        int slot = getSlot(loopIV);
+                        if (slot >= -256 && slot <= 255)
+                            os_ << "\tstr " << ivDst << ", [x29, #" << slot << "]\n";
+                        else {
+                            int pos = -slot;
+                            if (pos <= 4095)
+                                os_ << "\tsub x17, x29, #" << pos << "\n";
+                            else {
+                                os_ << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+                                os_ << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+                                os_ << "\tsub x17, x29, x17\n";
+                            }
+                            os_ << "\tstr " << ivDst << ", [x17]\n";
+                        }
+                    }
+                    if (loopIncr && !hasAssignedReg(loopIncr)) {
+                        int slot = getSlot(loopIncr);
+                        if (slot >= -256 && slot <= 255)
+                            os_ << "\tstr " << ivDst << ", [x29, #" << slot << "]\n";
+                        else {
+                            int pos = -slot;
+                            if (pos <= 4095)
+                                os_ << "\tsub x17, x29, #" << pos << "\n";
+                            else {
+                                os_ << "\tmovz x17, #" << (pos & 0xFFFF) << "\n";
+                                os_ << "\tmovk x17, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+                                os_ << "\tsub x17, x29, x17\n";
+                            }
+                            os_ << "\tstr " << ivDst << ", [x17]\n";
+                        }
+                    }
+                    os_ << "\tb " << func_->name_ << "_" << loopHeader->name_ << "\n";
+                }
+
+                neonEmitted_.insert(si);
+                neonEmitted_.insert(ld);
+                if (loopIncr)
+                    neonEmitted_.insert(loopIncr);
 
                 deferredNEONCode_ = tmpStream.str();
                 os_.rdbuf(oldBuf);

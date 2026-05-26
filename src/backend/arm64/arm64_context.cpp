@@ -1265,11 +1265,39 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
     std::map<Value*, int> lastUse;
     std::vector<Interval> intervals;
 
-    // ---- 1. 构建 CFG 前驱关系 ----
+    // ---- 1. 构建 CFG 前驱关系并计算 RPO ----
+    // 必须使用 RPO 保证 def 在 use 之前处理，否则线性扫描会产生错误的活跃区间
     std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
-    std::vector<BasicBlock*> blocksOrder;        // 保持原始遍历顺序（用于线性编号）
-    for (auto bb : func_->basic_blocks_) {
-        blocksOrder.push_back(bb);
+    std::vector<BasicBlock*> blocksOrder;
+
+    {
+        std::set<BasicBlock*> visited;
+        std::function<void(BasicBlock*)> dfs = [&](BasicBlock *bb) {
+            visited.insert(bb);
+            auto term = bb->get_terminator();
+            if (term) {
+                for (unsigned i = 0; i < term->num_ops_; ++i) {
+                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                        if (!visited.count(succ))
+                            dfs(succ);
+                    }
+                }
+            }
+            blocksOrder.push_back(bb);   // 后序
+        };
+
+        if (!func_->basic_blocks_.empty())
+            dfs(func_->basic_blocks_[0]);
+
+        for (auto bb : func_->basic_blocks_) {
+            if (!visited.count(bb))
+                dfs(bb);
+        }
+
+        std::reverse(blocksOrder.begin(), blocksOrder.end());  // 逆后序
+    }
+
+    for (auto bb : blocksOrder) {
         auto term = bb->get_terminator();
         if (!term) continue;
         for (unsigned i = 0; i < term->num_ops_; ++i) {
