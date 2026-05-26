@@ -195,7 +195,18 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 		return (l.operands.size() >= 2 &&
 		        (l.operands[0] == r || l.operands[1] == r));
 	}
-	if (!l.operands.empty() && l.operands[0] == r) return true;
+	if (!l.operands.empty()) {
+		const std::string &dst = l.operands[0];
+		if (dst == r) return true;
+		// ARM64 register aliasing: wN and xN share the same physical register,
+		// as do sN and dN. A write to either width clobbers the other.
+		if (dst.size() >= 2 && r.size() >= 2) {
+			char clsDst = dst[0], clsR = r[0];
+			bool sameFile = ((clsDst == 'w' || clsDst == 'x') && (clsR == 'w' || clsR == 'x')) ||
+			                ((clsDst == 's' || clsDst == 'd') && (clsR == 's' || clsR == 'd'));
+			if (sameFile && dst.substr(1) == r.substr(1)) return true;
+		}
+	}
 	return false;
 }
 

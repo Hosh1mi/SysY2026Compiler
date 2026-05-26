@@ -23,8 +23,8 @@ private:
     int getSlot(Value *v);
     bool hasSlot(Value *v) const;
 
-    // linear-scan register allocation for SSA values
-    void allocateLinearScanRegisters();
+    // graph-coloring register allocation for SSA values
+    void allocateRegisters();
     bool canAssignRegister(Value *v) const;
     bool hasAssignedReg(Value *v) const;
     std::string assignedReg(Value *v, bool asAddress = false) const;
@@ -80,7 +80,7 @@ private:
     std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
     std::string deferredNEONCode_;        // NEON asm deferred to emit at correct position
 
-    std::map<Value*, std::string> assignedRegs_; // linear-scan Value* → physical reg name
+    std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
 
     struct PhiCopy {
         BasicBlock *pred;

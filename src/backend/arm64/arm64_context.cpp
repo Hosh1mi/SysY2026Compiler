@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -169,7 +170,7 @@ void Arm64FuncContext::generate() {
     }
 
     preparePhi();
-    allocateLinearScanRegisters();
+    allocateRegisters();
 
     emitPrologue();
     for (auto bb : func_->basic_blocks_) {
@@ -1247,26 +1248,25 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     }
 }
 
-// ---- linear-scan register allocation ----
+// ---- graph-coloring register allocation ----
 
 bool Arm64FuncContext::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
     if (auto inst = dynamic_cast<Instruction*>(v)) {
-        if (inst->is_void() || inst->is_alloca() ) {
+        if (inst->is_void() || inst->is_alloca()) {
             return false;
         }
     }
     return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_) || isAllocatablePtrValue(v->type_);
 }
 
-void Arm64FuncContext::allocateLinearScanRegisters() {
-    struct Interval { Value *value; int start; int end; bool isFloat; bool isPtr;};
+void Arm64FuncContext::allocateRegisters() {
+    struct Interval { Value *value; int start; int end; bool isFloat; bool isPtr; };
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
     std::vector<Interval> intervals;
 
-    // ---- 1. 构建 CFG 前驱关系并计算 RPO ----
-    // 必须使用 RPO 保证 def 在 use 之前处理，否则线性扫描会产生错误的活跃区间
+    // ---- 1. RPO block order & predecessor map ----
     std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
     std::vector<BasicBlock*> blocksOrder;
 
@@ -1283,7 +1283,7 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                     }
                 }
             }
-            blocksOrder.push_back(bb);   // 后序
+            blocksOrder.push_back(bb);
         };
 
         if (!func_->basic_blocks_.empty())
@@ -1294,7 +1294,7 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                 dfs(bb);
         }
 
-        std::reverse(blocksOrder.begin(), blocksOrder.end());  // 逆后序
+        std::reverse(blocksOrder.begin(), blocksOrder.end());
     }
 
     for (auto bb : blocksOrder) {
@@ -1307,17 +1307,15 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         }
     }
 
-    // ---- 2. 为每条指令分配线性序号，同时收集 Def/Use 信息 ----
-    // 指令编号从 1 开始，0 保留给函数参数的定义
-    std::map<BasicBlock*, int> blockStart, blockEnd;   // 块内第一条和最后一条指令的编号
-    std::map<Instruction*, int> instIdx;                 // 指令编号
+    // ---- 2. Instruction numbering ----
+    std::map<BasicBlock*, int> blockStart, blockEnd;
+    std::map<Instruction*, int> instIdx;
 
     int idx = 0;
-    // 为参数分配 def 在 0 号位置
     for (auto arg : func_->arguments_) {
         if (canAssignRegister(arg)) {
             defPos[arg] = 0;
-            lastUse[arg] = 0;        // 初始为 0，后续由使用处更新
+            lastUse[arg] = 0;
         }
     }
 
@@ -1327,18 +1325,16 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
             continue;
         }
 
-        blockStart[bb] = idx + 1;    // 第一条指令将要占据 idx+1
+        blockStart[bb] = idx + 1;
         for (auto inst : bb->instr_list_) {
             ++idx;
             instIdx[inst] = idx;
 
-            // 如果指令产生值且可分配寄存器，记录其定义位置
             if (canAssignRegister(inst)) {
                 defPos[inst] = idx;
-                lastUse[inst] = idx;          
+                lastUse[inst] = idx;
             }
 
-            // 遍历指令的操作数，更新 lastUse
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
                 auto val = inst->get_operand(i);
                 if (canAssignRegister(val)) {
@@ -1349,53 +1345,46 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         blockEnd[bb] = idx;
     }
 
-    // ---- 3. 数据流分析：计算每个块的 LiveIn / LiveOut ----
-    // 收集 PHI 出口活跃信息
-     std::map<BasicBlock*, std::set<Value*>> phiOut;
-     for (auto bb : blocksOrder) {
-         for (auto inst : bb->instr_list_) {
-             auto phi = dynamic_cast<PhiInst*>(inst);
-             if (!phi) continue;
-             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                 auto val = phi->get_operand(i);
-                 auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                 if (canAssignRegister(val)) {
-                     phiOut[pred].insert(val);
-                 }
-             }
-         }
-     }
+    // ---- 3. Data-flow analysis: LiveIn / LiveOut ----
+    std::map<BasicBlock*, std::set<Value*>> phiOut;
+    for (auto bb : blocksOrder) {
+        for (auto inst : bb->instr_list_) {
+            auto phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                auto val = phi->get_operand(i);
+                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                if (canAssignRegister(val)) {
+                    phiOut[pred].insert(val);
+                }
+            }
+        }
+    }
 
-    struct BBInfo {
-        std::set<Value*> def, use;
-    };
+    struct BBInfo { std::set<Value*> def, use; };
     std::map<BasicBlock*, BBInfo> bbInfo;
 
     for (auto bb : blocksOrder) {
         BBInfo info;
         for (auto inst : bb->instr_list_) {
-            // 处理 phi 指令：左值加入 def，右值加入对应前驱的 use（稍后单独处理）
             if (auto phi = dynamic_cast<PhiInst*>(inst)) {
                 if (canAssignRegister(phi)) info.def.insert(phi);
                 for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                     auto val = phi->get_operand(i);
                     auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                    // 将 val 加入 pred 块的 use 集合（后续会反映到 pred 的 LiveOut）
                     bbInfo[pred].use.insert(val);
                 }
                 continue;
             }
 
-            // 非 phi 指令
             if (canAssignRegister(inst)) info.def.insert(inst);
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
                 auto val = inst->get_operand(i);
                 if (canAssignRegister(val) && !info.def.count(val)) {
-                    info.use.insert(val);      // upward exposed use
+                    info.use.insert(val);
                 }
             }
         }
-        // 保留由后继 block 的 phi 指令写入的 use，避免被覆盖
         auto it = bbInfo.find(bb);
         if (it != bbInfo.end()) {
             for (auto v : it->second.use) info.use.insert(v);
@@ -1403,15 +1392,12 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         bbInfo[bb] = info;
     }
 
-    // 迭代计算 LiveIn / LiveOut
     bool changed;
     std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
     do {
         changed = false;
         for (auto bb : blocksOrder) {
             std::set<Value*> newIn;
-
-            // LiveOut = 所有后继 LiveIn 的并集
             std::set<Value*> newOut;
             auto term = bb->get_terminator();
             if (term) {
@@ -1421,11 +1407,8 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
                     }
                 }
             }
-            for (auto v : phiOut[bb]) {
-                newOut.insert(v);
-            }
-            
-            // LiveIn = use ∪ (LiveOut - def)
+            for (auto v : phiOut[bb]) newOut.insert(v);
+
             auto &info = bbInfo[bb];
             for (auto v : info.use) newIn.insert(v);
             for (auto v : newOut) {
@@ -1438,114 +1421,226 @@ void Arm64FuncContext::allocateLinearScanRegisters() {
         }
     } while (changed);
 
-    // ---- 4. 构建精确的活跃区间 ----
-    // 对于每个可分配寄存器的值，其区间需要从 def 开始，到所有使用（包括因 LiveOut 而隐含的使用）结束
+    // ---- 4. Build live intervals ----
     for (auto &entry : defPos) {
         Value *v = entry.first;
         int start = entry.second;
-
-        // 从 lastUse 获取最大使用指令编号
         int end = lastUse[v];
 
-        // 扩展：如果 v 在某块的 LiveOut 中，那么它的活跃期至少要覆盖到该块的结束位置
         for (auto bb : blocksOrder) {
             if (liveOut[bb].count(v)) {
                 end = std::max(end, blockEnd[bb]);
             }
         }
 
-        // 对于参数，如果有使用且 end 仍然为 0，则强制扩展到整个函数（保守处理）
-        if (start == 0 && end == 0 && dynamic_cast<Argument*>(v)) {
-            // 参数但未被纳入 lastUse，可能是死参数，可忽略
+        if (start == 0 && end == 0 && dynamic_cast<Argument*>(v))
             continue;
-        }
 
         if (end >= start) {
-            bool isPtr = isAllocatablePtrValue(v->type_);
-            intervals.push_back({v, start, end, isAllocatableFloatValue(v->type_), isPtr});
+            intervals.push_back({v, start, end,
+                                 isAllocatableFloatValue(v->type_),
+                                 isAllocatablePtrValue(v->type_)});
         }
     }
 
-    // ---- 5. 区间排序 ----
-    std::sort(intervals.begin(), intervals.end(), [](const Interval &a, const Interval &b) {
-        if (a.start != b.start) return a.start < b.start;
-        return a.end < b.end;
-    });
+    // ---- 5. Compute dominators (iterative algorithm) ----
+    BasicBlock *entry = func_->basic_blocks_[0];
+    std::map<BasicBlock*, std::set<BasicBlock*>> doms;
+    for (auto bb : blocksOrder) {
+        if (bb == entry)
+            doms[bb] = {entry};
+        else {
+            for (auto b : blocksOrder)
+                doms[bb].insert(b);
+        }
+    }
 
-    // ---- 6. Linear-scan allocation ----
-    // Integer and pointer intervals share the same physical register pool
-    // (e.g. x19 and w19 are the same register, distinguished by prefix only).
-    // The pool of 10 registers (r19-r28) is sufficient for typical functions.
-    auto scanKind = [&](bool floats) {
-        std::vector<Interval> active;
-        std::set<int> freeRegs;
-        int first = floats ? 8 : 19;
-        int last  = floats ? 15 : 28;
-        for (int r = first; r <= last; ++r) freeRegs.insert(r);
-
-        for (const auto &iv : intervals) {
-            if (iv.isFloat != floats) continue;
-
-            // 清理已结束的区间
-            for (auto it = active.begin(); it != active.end();) {
-                if (it->end < iv.start) {
-                    std::string reg = assignedRegs_[it->value];
-                    freeRegs.insert(std::stoi(reg.substr(1)));
-                    it = active.erase(it);
+    bool domChanged;
+    do {
+        domChanged = false;
+        for (auto bb : blocksOrder) {
+            if (bb == entry) continue;
+            std::set<BasicBlock*> inter;
+            bool firstPred = true;
+            for (auto pred : preds[bb]) {
+                if (firstPred) {
+                    inter = doms[pred];
+                    firstPred = false;
                 } else {
-                    ++it;
+                    std::set<BasicBlock*> temp;
+                    for (auto b : inter)
+                        if (doms[pred].count(b))
+                            temp.insert(b);
+                    inter = std::move(temp);
                 }
             }
-            if (freeRegs.empty()) {
-                // Spill heuristic: spill the active interval with the farthest
-                // endpoint, but never spill a PHI (they interact with phi copies).
-                // active is sorted by end (ascending), so scan from back.
-                bool spilled = false;
-                for (auto it = active.rbegin(); it != active.rend(); ++it) {
-                    if (it->end > iv.end && !dynamic_cast<PhiInst*>(it->value)) {
-                        int regNo = std::stoi(assignedRegs_[it->value].substr(1));
-                        assignedRegs_.erase(it->value);
-                        if (floats) {
-                            assignedRegs_[iv.value] = "s" + std::to_string(regNo);
-                        } else if (iv.isPtr) {
-                            assignedRegs_[iv.value] = "x" + std::to_string(regNo);
-                        } else {
-                            assignedRegs_[iv.value] = "w" + std::to_string(regNo);
-                        }
-                        // Erase by value from active
-                        for (auto act = active.begin(); act != active.end(); ++act) {
-                            if (act->value == it->value) { active.erase(act); break; }
-                        }
-                        active.push_back(iv);
-                        std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
-                            return a.end < b.end;
-                        });
-                        spilled = true;
-                        break;
+            inter.insert(bb);
+            if (inter != doms[bb]) {
+                doms[bb] = std::move(inter);
+                domChanged = true;
+            }
+        }
+    } while (domChanged);
+
+    // ---- 6. Loop depth based on dominators ----
+    std::map<BasicBlock*, int> loopDepth;
+    for (auto bb : blocksOrder) loopDepth[bb] = 0;
+
+    for (auto bb : blocksOrder) {
+        auto term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
+            if (!succ) continue;
+            // Back edge: succ dominates bb
+            if (doms[bb].count(succ)) {
+                std::set<BasicBlock*> loopBlocks;
+                std::function<void(BasicBlock*)> collect = [&](BasicBlock *b) {
+                    if (!loopBlocks.insert(b).second) return;
+                    if (b == succ) return;
+                    for (auto pred : preds[b])
+                        collect(pred);
+                };
+                collect(bb);
+                loopBlocks.insert(succ);
+                for (auto b : loopBlocks) loopDepth[b]++;
+            }
+        }
+    }
+
+    // ---- 7. Spill cost: sum of (10 ^ loopDepth) per use ----
+    std::map<Value*, double> spillCost;
+    for (auto &iv : intervals) {
+        double cost = 0;
+        for (auto &use : iv.value->use_list_) {
+            auto inst = dynamic_cast<Instruction*>(use.val_);
+            if (!inst) continue;
+            int depth = loopDepth[inst->parent_];
+            cost += std::pow(10.0, depth);
+        }
+        if (dynamic_cast<Argument*>(iv.value))
+            cost /= 2.0;
+        if (cost < 1.0) cost = 1.0;
+        spillCost[iv.value] = cost;
+    }
+
+    // ---- 8. Separate intervals into pools ----
+    std::vector<Interval> intPool, floatPool;
+    for (auto &iv : intervals) {
+        if (iv.isFloat)
+            floatPool.push_back(iv);
+        else
+            intPool.push_back(iv);
+    }
+
+    // ---- 9. Optimistic graph coloring (Chaitin-Briggs) ----
+    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat) {
+        if (pool.empty()) return;
+
+        // Sort by start for efficient interference detection
+        std::vector<Interval> sorted = pool;
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const Interval &a, const Interval &b) { return a.start < b.start; });
+
+        // Build interference graph (adjacency list)
+        std::map<Value*, std::set<Value*>> adj;
+        for (auto &iv : sorted) adj[iv.value];
+
+        for (size_t i = 0; i < sorted.size(); i++) {
+            for (size_t j = i + 1;
+                 j < sorted.size() && sorted[j].start <= sorted[i].end; j++) {
+                adj[sorted[i].value].insert(sorted[j].value);
+                adj[sorted[j].value].insert(sorted[i].value);
+            }
+        }
+
+        // Worklist and stack for simplify-select
+        std::set<Value*> worklist;
+        for (auto &iv : sorted) worklist.insert(iv.value);
+
+        std::vector<Value*> stack;
+        std::set<Value*> potentialSpills;
+
+        // ---- Simplify phase ----
+        while (!worklist.empty()) {
+            bool found = false;
+            for (auto it = worklist.begin(); it != worklist.end(); ++it) {
+                Value *v = *it;
+                int degree = 0;
+                for (auto n : adj[v])
+                    if (worklist.count(n)) degree++;
+                if (degree < K) {
+                    stack.push_back(v);
+                    worklist.erase(it);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // All nodes have degree >= K: spill the one with lowest cost/degree
+                double bestCost = 1e100;
+                Value *best = nullptr;
+                for (auto v : worklist) {
+                    int degree = 0;
+                    for (auto n : adj[v])
+                        if (worklist.count(n)) degree++;
+                    double cost = spillCost[v] / (degree + 1);
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = v;
                     }
                 }
-                // If no spillable interval found, skip current
-            } else {
-                int regNo = *freeRegs.begin();
-                freeRegs.erase(freeRegs.begin());
-                if (floats) {
-                    assignedRegs_[iv.value] = "s" + std::to_string(regNo);
-                } else if (iv.isPtr) {
-                    assignedRegs_[iv.value] = "x" + std::to_string(regNo);
-                } else {
-                    assignedRegs_[iv.value] = "w" + std::to_string(regNo);
+                stack.push_back(best);
+                worklist.erase(best);
+                potentialSpills.insert(best);
+            }
+        }
+
+        // ---- Select phase: assign colors ----
+        std::map<Value*, int> colors;
+
+        while (!stack.empty()) {
+            Value *v = stack.back();
+            stack.pop_back();
+
+            std::set<int> neighborColors;
+            for (auto n : adj[v]) {
+                auto it = colors.find(n);
+                if (it != colors.end())
+                    neighborColors.insert(it->second);
+            }
+
+            int color = -1;
+            for (int c = 0; c < K; c++) {
+                if (!neighborColors.count(c)) {
+                    color = c;
+                    break;
                 }
-                active.push_back(iv);
-                std::sort(active.begin(), active.end(), [](const Interval &a, const Interval &b) {
-                    return a.end < b.end;
-                });
+            }
+
+            if (color >= 0) {
+                colors[v] = color;
+                potentialSpills.erase(v);
+            }
+        }
+
+        // Record assignments
+        int baseReg = isFloat ? 8 : 19;
+        for (auto &kv : colors) {
+            int regNo = baseReg + kv.second;
+            if (isFloat) {
+                assignedRegs_[kv.first] = "s" + std::to_string(regNo);
+            } else if (isAllocatablePtrValue(kv.first->type_)) {
+                assignedRegs_[kv.first] = "x" + std::to_string(regNo);
+            } else {
+                assignedRegs_[kv.first] = "w" + std::to_string(regNo);
             }
         }
     };
 
-    scanKind(false);  // int + ptr (w19-w28 / x19-x28)
-    scanKind(true);   // floats (s8-s15)
-
+    colorPool(intPool, 10, false);  // int+ptr: w19-w28 / x19-x28 (10 regs)
+    colorPool(floatPool, 8, true);  // float: s8-s15 (8 regs)
 }
 
 bool Arm64FuncContext::hasAssignedReg(Value *v) const {
