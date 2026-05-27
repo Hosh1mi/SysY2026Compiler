@@ -371,8 +371,11 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     tryEmitNEON(bb);
 
     bool neonEmitted = false;
-    for (auto inst : bb->instr_list_) {
+    auto &instrs = bb->instr_list_;
+    for (auto it = instrs.begin(); it != instrs.end(); ++it) {
+        auto inst = *it;
         if (inst->is_phi()) continue;
+
         // Emit deferred NEON code at the position of the first
         // NEON-lowered instruction.  This places NEON stores after
         // __aeabi_memclr4 (zeroing) so that the values survive.
@@ -380,9 +383,23 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             os_ << deferredNEONCode_;
             neonEmitted = true;
         }
-        if (!neonEmitted_.count(inst)) {
-            emitInstruction(inst);
+        if (neonEmitted_.count(inst)) continue;
+
+        // ICmp + Br fusion: cmp + b.cond instead of cmp + cset + cbnz
+        if (inst->op_id_ == Instruction::ICmp) {
+            auto icmp = static_cast<ICmpInst*>(inst);
+            auto next = std::next(it);
+            if (next != instrs.end()) {
+                auto br = dynamic_cast<BranchInst*>(*next);
+                if (br && br->num_ops_ == 3 && br->get_operand(0) == icmp && icmp->use_list_.size() == 1) {
+                    emitFusedCmpBranch(icmp, br);
+                    ++it; // skip Br
+                    continue;
+                }
+            }
         }
+
+        emitInstruction(inst);
     }
     // If the deferred code was never flushed (e.g. NEON-matched
     // instructions are the very last in the block), emit now.
@@ -1992,6 +2009,78 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
     }
     for (const auto &t : temps) {
         emitStoreReg(os_, t.reg, t.dstSlot);
+    }
+}
+
+// ---- ICmp + Br fusion ----
+
+static const char *invertCond(const char *cond) {
+    if (strcmp(cond, "eq") == 0) return "ne";
+    if (strcmp(cond, "ne") == 0) return "eq";
+    if (strcmp(cond, "gt") == 0) return "le";
+    if (strcmp(cond, "ge") == 0) return "lt";
+    if (strcmp(cond, "lt") == 0) return "ge";
+    if (strcmp(cond, "le") == 0) return "gt";
+    if (strcmp(cond, "hi") == 0) return "ls";
+    if (strcmp(cond, "hs") == 0) return "lo";
+    if (strcmp(cond, "lo") == 0) return "hs";
+    if (strcmp(cond, "ls") == 0) return "hi";
+    return cond;
+}
+
+void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
+    auto v1 = icmp->get_operand(0);
+    auto v2 = icmp->get_operand(1);
+    std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
+
+    auto trueBB  = static_cast<BasicBlock*>(br->get_operand(1));
+    auto falseBB = static_cast<BasicBlock*>(br->get_operand(2));
+    BasicBlock *parentBB = br->parent_;
+
+    const char *cond = icmpCond(icmp->icmp_op_);
+
+    // Emit cmp with immediate if possible (ARM64 cmp imm is 12-bit: 0-4095)
+    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        int val = ci->value_;
+        if (val >= 0 && val <= 4095) {
+            os_ << "\tcmp " << r1 << ", #" << val << "\n";
+        } else {
+            std::string r2 = allocIntReg();
+            emitIntConst(val, r2);
+            os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+        }
+    } else {
+        std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
+        os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+    }
+
+    // Check for phi copies on edges
+    bool hasTrue = false, hasFalse = false;
+    for (const auto &pc : phiCopies_) {
+        if (pc.pred != parentBB) continue;
+        if (pc.succ == trueBB)  hasTrue  = true;
+        if (pc.succ == falseBB) hasFalse = true;
+    }
+
+    if (!hasTrue && !hasFalse) {
+        os_ << "\tb." << cond << " " << bbLabel(func_, trueBB) << "\n";
+        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+    } else if (hasTrue && !hasFalse) {
+        os_ << "\tb." << invertCond(cond) << " " << bbLabel(func_, falseBB) << "\n";
+        emitPhiCopies(parentBB, trueBB);
+        os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+    } else if (!hasTrue && hasFalse) {
+        os_ << "\tb." << cond << " " << bbLabel(func_, trueBB) << "\n";
+        emitPhiCopies(parentBB, falseBB);
+        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+    } else {
+        std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
+        os_ << "\tb." << invertCond(cond) << " " << edgeLbl << "\n";
+        emitPhiCopies(parentBB, trueBB);
+        os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+        os_ << edgeLbl << ":\n";
+        emitPhiCopies(parentBB, falseBB);
+        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
     }
 }
 
