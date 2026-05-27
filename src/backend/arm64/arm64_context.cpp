@@ -1946,6 +1946,14 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
     std::vector<Entry> entries;
     for (const auto &cp : copies) {
         Value *val = cp.src;
+
+        // Skip identity copies: src and dst already share the same register
+        if (hasAssignedReg(val) && cp.phi && hasAssignedReg(cp.phi)) {
+            bool asPtr = isPtr(val->type_);
+            if (assignedReg(val, asPtr) == assignedReg(cp.phi, asPtr))
+                continue;
+        }
+
         std::string tmpReg;
 
         if (isFloat(val->type_)) {
