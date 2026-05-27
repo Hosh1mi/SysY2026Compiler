@@ -1,120 +1,120 @@
 01_mm1 : AC
-Total time : 0H-0M-2S-558249us
+Total time : 0H-0M-2S-475060us
 01_mm2 : AC
-Total time : 0H-0M-2S-540594us
+Total time : 0H-0M-2S-508050us
 01_mm3 : AC
-Total time : 0H-0M-2S-533210us
+Total time : 0H-0M-2S-432609us
 03_sort1 : AC
-Total time : 0H-0M-0S-960393us
+Total time : 0H-0M-0S-980162us
 03_sort2 : AC
-Total time : 0H-0M-0S-44466us
+Total time : 0H-0M-0S-43194us
 03_sort3 : AC
-Total time : 0H-0M-0S-155899us
+Total time : 0H-0M-0S-148031us
 conv2d-1 : AC
-Total time : 0H-0M-2S-47247us
+Total time : 0H-0M-1S-995834us
 conv2d-2 : AC
-Total time : 0H-0M-0S-546969us
+Total time : 0H-0M-0S-585763us
 conv2d-3 : AC
-Total time : 0H-0M-0S-185096us
+Total time : 0H-0M-0S-182491us
 crc1 : AC
-Total time : 0H-0M-0S-50367us
+Total time : 0H-0M-0S-48840us
 crc2 : AC
-Total time : 0H-0M-0S-53652us
+Total time : 0H-0M-0S-50379us
 crc3 : AC
-Total time : 0H-0M-0S-50292us
+Total time : 0H-0M-0S-84191us
 crypto-1 : AC
-Total time : 0H-0M-0S-183197us
+Total time : 0H-0M-0S-182648us
 crypto-2 : AC
-Total time : 0H-0M-0S-143975us
+Total time : 0H-0M-0S-128382us
 crypto-3 : AC
-Total time : 0H-0M-0S-76845us
+Total time : 0H-0M-0S-75056us
 fft0 : AC
-Total time : 0H-0M-6S-514549us
+Total time : 0H-0M-6S-397059us
 fft1 : AC
-Total time : 0H-0M-13S-687119us
+Total time : 0H-0M-13S-556725us
 fft2 : AC
-Total time : 0H-0M-0S-37408us
+Total time : 0H-0M-0S-36714us
 h-1-01 : AC
-Total time : 0H-0M-29S-863068us
+Total time : 0H-0M-30S-431117us
 h-1-02 : AC
-Total time : 0H-0M-2S-611509us
+Total time : 0H-0M-2S-640907us
 h-1-03 : AC
-Total time : 0H-0M-14S-334631us
+Total time : 0H-0M-14S-551002us
 h-10-01 : AC
-Total time : 0H-0M-0S-7946us
+Total time : 0H-0M-0S-7456us
 h-10-02 : AC
-Total time : 0H-0M-0S-14045us
+Total time : 0H-0M-0S-14048us
 h-10-03 : AC
-Total time : 0H-0M-0S-22956us
+Total time : 0H-0M-0S-38130us
 h-4-01 : AC
-Total time : 0H-0M-1S-222278us
+Total time : 0H-0M-1S-245909us
 h-4-02 : AC
-Total time : 0H-0M-4S-53566us
+Total time : 0H-0M-4S-93945us
 h-4-03 : AC
-Total time : 0H-0M-7S-491684us
+Total time : 0H-0M-7S-514658us
 h-5-01 : AC
-Total time : 0H-0M-2S-401575us
+Total time : 0H-0M-2S-381795us
 h-5-02 : AC
-Total time : 0H-0M-2S-342557us
+Total time : 0H-0M-2S-361563us
 h-5-03 : AC
-Total time : 0H-0M-2S-372897us
+Total time : 0H-0M-2S-415853us
 h-8-01 : AC
-Total time : 0H-0M-1S-481283us
+Total time : 0H-0M-1S-368264us
 h-8-02 : AC
-Total time : 0H-0M-1S-406380us
+Total time : 0H-0M-1S-369175us
 h-8-03 : AC
-Total time : 0H-0M-1S-423256us
+Total time : 0H-0M-1S-374419us
 h-9-01 : AC
-Total time : 0H-0M-0S-3505us
+Total time : 0H-0M-0S-3351us
 h-9-02 : AC
-Total time : 0H-0M-0S-3193us
+Total time : 0H-0M-0S-3448us
 h-9-03 : AC
-Total time : 0H-0M-0S-3406us
+Total time : 0H-0M-0S-3695us
 huffman-01 : AC
-Total time : 0H-0M-39S-121390us
+Total time : 0H-0M-39S-265860us
 huffman-02 : AC
-Total time : 0H-0M-39S-271699us
+Total time : 0H-0M-39S-231692us
 huffman-03 : AC
-Total time : 0H-0M-39S-413383us
+Total time : 0H-0M-39S-190082us
 knapsack_naive-1 : AC
-Total time : 0H-0M-0S-313484us
+Total time : 0H-0M-0S-268150us
 knapsack_naive-2 : AC
-Total time : 0H-0M-0S-289285us
+Total time : 0H-0M-1S-434149us
 knapsack_naive-3 : AC
-Total time : 0H-0M-0S-292465us
+Total time : 0H-0M-0S-272317us
 many_mat_cal-1 : AC
-Total time : 0H-0M-36S-42377us
+Total time : 0H-0M-34S-998458us
 many_mat_cal-2 : AC
-Total time : 0H-0M-34S-588596us
+Total time : 0H-0M-34S-651230us
 many_mat_cal-3 : AC
-Total time : 0H-0M-34S-766480us
+Total time : 0H-0M-34S-850250us
 matmul1 : AC
-Total time : 0H-0M-10S-617041us
+Total time : 0H-0M-10S-595315us
 matmul2 : AC
-Total time : 0H-0M-10S-644029us
+Total time : 0H-0M-10S-721245us
 matmul3 : AC
-Total time : 0H-0M-10S-600205us
+Total time : 0H-0M-10S-702695us
 optimization_scheduling1 : AC
-Total time : 0H-0M-0S-2773us
+Total time : 0H-0M-0S-2576us
 optimization_scheduling2 : AC
-Total time : 0H-0M-0S-2732us
+Total time : 0H-0M-0S-2871us
 optimization_scheduling3 : AC
-Total time : 0H-0M-0S-2880us
+Total time : 0H-0M-0S-3002us
 shuffle0 : AC
-Total time : 0H-0M-3S-250581us
+Total time : 0H-0M-2S-789763us
 shuffle1 : AC
-Total time : 0H-0M-1S-400154us
+Total time : 0H-0M-1S-331543us
 shuffle2 : AC
-Total time : 0H-0M-0S-86216us
+Total time : 0H-0M-0S-104510us
 sl1 : AC
-Total time : 0H-0M-4S-173456us
+Total time : 0H-0M-4S-453907us
 sl2 : AC
-Total time : 0H-0M-0S-966444us
+Total time : 0H-0M-0S-964163us
 sl3 : AC
-Total time : 0H-0M-0S-421484us
+Total time : 0H-0M-0S-415562us
 transpose0 : AC
-Total time : 0H-0M-1S-31072us
+Total time : 0H-0M-0S-916692us
 transpose1 : AC
-Total time : 0H-0M-1S-460791us
+Total time : 0H-0M-1S-397644us
 transpose2 : AC
-Total time : 0H-0M-2S-500015us
+Total time : 0H-0M-2S-357317us

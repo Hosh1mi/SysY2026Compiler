@@ -163,6 +163,20 @@ static std::string makeInsn(const std::string &mnemonic,
 
 // ── helper: count occurrences of a register in a line's operands ────
 
+// Check if r is read as a source operand (not just written as destination)
+static bool lineReadsReg(const ParsedLine &l, const std::string &r) {
+    if (l.operands.empty()) return false;
+    // For most instructions, operands[0] is destination, rest are sources
+    for (size_t i = 1; i < l.operands.size(); ++i)
+        if (l.operands[i] == r) return true;
+    // Stores, compares, branches: operands[0] is also a source
+    if (l.mnemonic == "str" || l.mnemonic == "stp" || l.mnemonic == "stur" ||
+        l.mnemonic == "cbnz" || l.mnemonic == "cbz" ||
+        l.mnemonic == "cmp" || l.mnemonic == "fcmp" || l.mnemonic == "tst")
+        if (l.operands[0] == r) return true;
+    return false;
+}
+
 static bool lineUsesReg(const ParsedLine &l, const std::string &r) {
 	for (const auto &op : l.operands) {
 		// Check as whole word match
@@ -192,8 +206,14 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 		return false;
 	// ldp writes two registers: ldp r0, r1, [...]
 	if (l.mnemonic == "ldp") {
-		return (l.operands.size() >= 2 &&
-		        (l.operands[0] == r || l.operands[1] == r));
+		for (int i = 0; i < 2 && i < (int)l.operands.size(); ++i) {
+			const std::string &op = l.operands[i];
+			if (op == r) return true;
+			if (op.size() >= 2 && r.size() >= 2 &&
+			    ((op[0] == 'w' || op[0] == 'x') && (r[0] == 'w' || r[0] == 'x')) &&
+			    op.substr(1) == r.substr(1)) return true;
+		}
+		return false;
 	}
 	if (!l.operands.empty()) {
 		const std::string &dst = l.operands[0];
@@ -234,7 +254,45 @@ static std::vector<size_t> instructionWindow(const std::vector<ParsedLine> &line
 // ── RULE implementations ────────────────────────────────────────────
 // Each returns true if it made a change.
 
-// Rule 1: delete mov r, r  and  fmov r, r
+// Rule 1: forward mov  —  mov rA, rB  +  mov rC, rA  →  mov rC, rB
+static bool tryForwardMov(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "mov") return false;
+    if (l0.operands.size() < 2) return false;
+
+    std::string rA = l0.operands[0];
+    std::string rB = l0.operands[1];
+    if (rA == rB) return false;
+
+    auto w = instructionWindow(lines, idx + 1, 1);
+    if (w.empty()) return false;
+    auto &l1 = lines[w[0]];
+    if (l1.mnemonic != "mov") return false;
+    if (l1.operands.size() < 2) return false;
+    if (l1.operands[1] != rA) return false;
+
+    // rA must not be read after the second mov — scan until rA is overwritten
+    int seen = 0;
+    bool safe = false;
+    for (size_t j = w[0] + 1; j < lines.size() && seen < 30; ++j) {
+        if (lines[j].kind != LineKind::Instruction) continue;
+        ++seen;
+        if (lineReadsReg(lines[j], rA)) return false;  // rA read → unsafe
+        if (lineWritesReg(lines[j], rA)) { safe = true; break; }
+    }
+    if (!safe) return false;  // rA not overwritten within window → conservative
+
+    // Transform: mov rC, rA  →  mov rC, rB
+    l1.operands[1] = rB;
+    l1.raw = makeInsn("mov", l1.operands);
+
+    // Delete first mov
+    l0.raw.clear();
+    l0.kind = LineKind::Empty;
+    return true;
+}
+
+// Rule 2: delete mov r, r  and  fmov r, r
 static bool trySelfMove(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l = lines[idx];
 	if (l.mnemonic != "mov" && l.mnemonic != "fmov") return false;
@@ -247,7 +305,7 @@ static bool trySelfMove(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 2: movz wN, #0  +  str wN, [...]  →  str wzr, [...]
+// Rule 3: movz wN, #0  +  str wN, [...]  →  str wzr, [...]
 //         mov  wN, wzr +  str wN, [...]  →  str wzr, [...]
 //         mov  wN, #0  +  str wN, [...]  →  str wzr, [...]
 static bool tryZeroStore(std::vector<ParsedLine> &lines, size_t idx) {
@@ -296,7 +354,7 @@ static bool tryZeroStore(std::vector<ParsedLine> &lines, size_t idx) {
 	return true;
 }
 
-// Rule 3: store-load forwarding (x29 base only)
+// Rule 4: store-load forwarding (x29 base only)
 //   str rA, [x29, #OFF]  then  ldr rB, [x29, #OFF]  →  keep str, mov rB, rA
 static bool tryStoreLoadForward(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l0 = lines[idx];
@@ -361,7 +419,7 @@ static bool tryStoreLoadForward(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 4: adjacent store merging → stp  (x29 base only)
+// Rule 5: adjacent store merging → stp  (x29 base only)
 static bool tryMergeStores(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l0 = lines[idx];
 	if (l0.mnemonic != "str") return false;
@@ -410,7 +468,7 @@ static bool tryMergeStores(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 5: adjacent load merging → ldp  (x29 base only)
+// Rule 6: adjacent load merging → ldp  (x29 base only)
 static bool tryMergeLoads(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l0 = lines[idx];
 	if (l0.mnemonic != "ldr") return false;
@@ -463,7 +521,7 @@ static bool tryMergeLoads(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 6: dead store elimination (x29 base only)
+// Rule 7: dead store elimination (x29 base only)
 //   str rA, [x29, #OFF]  then  str rB, [x29, #OFF]  →  delete first
 static bool tryDeadStore(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l0 = lines[idx];
@@ -499,7 +557,7 @@ static bool tryDeadStore(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 7: eliminate redundant sub x17, x29, #N
+// Rule 8: eliminate redundant sub x17, x29, #N
 //   sub x17, x29, #N  ... (no write to x17) ...  sub x17, x29, #N  →  delete second
 static bool tryRedundantSub(std::vector<ParsedLine> &lines, size_t idx) {
 	auto &l0 = lines[idx];
@@ -534,7 +592,7 @@ static bool tryRedundantSub(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 8: store-load forwarding through x17 (after sub x17, x29, #N)
+// Rule 9: store-load forwarding through x17 (after sub x17, x29, #N)
 //   sub x17, x29, #N  then  str rA, [x17]  then  (no write x17)  ldr rB, [x17]
 //   →  keep sub+str,  change ldr to mov rB, rA
 static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
@@ -607,6 +665,7 @@ std::string peepholeOptimize(const std::string &asmText) {
 		for (size_t i = 0; i < lines.size(); ++i) {
 			if (lines[i].kind != LineKind::Instruction) continue;
 
+			if (tryForwardMov(lines, i))         { changed = true; break; }
 			if (trySelfMove(lines, i))           { changed = true; break; }
 			if (tryZeroStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
