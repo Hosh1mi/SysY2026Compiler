@@ -479,19 +479,18 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if (abs_d > 0 && (abs_d & (abs_d - 1)) == 0) {
                         int k = __builtin_ctz(abs_d);
                         std::string rNum    = loadInt(v1);
-                        std::string rTmp    = allocIntReg();
                         std::string rResult = allocIntReg();
 
-                        // 有符号向零舍入偏置：
-                        //   bias = (a >> 31) & (2^k - 1)
-                        // 等价写法（避免大立即数编码问题）：
-                        //   bias = (a >> 31) >>> (32 - k)
-                        // 原因：0xFFFFFFFF >> (32-k) == 2^k - 1
-                        os_ << "\tasr " << rTmp << ", " << rNum << ", #31\n";
-                        // bic rTmp, rTmp, rTmp, lsl #k
-                        os_ << "\tbic " << rTmp << ", " << rTmp << ", " << rTmp << ", lsl #" << k << "\n";
-                        // os_ << "\tlsr " << rTmp << ", " << rTmp << ", #" << (32 - k) << "\n";
-                        os_ << "\tadd " << rResult << ", " << rNum << ", " << rTmp << "\n";
+                        if (k == 1) {
+                            // ÷2:  barrel-shifter folds bias into add
+                            //   bias = rNum >>> 31  (0 or 1)
+                            os_ << "\tadd " << rResult << ", " << rNum << ", " << rNum << ", lsr #31\n";
+                        } else {
+                            std::string rTmp = allocIntReg();
+                            os_ << "\tasr " << rTmp << ", " << rNum << ", #31\n";
+                            os_ << "\tbic " << rTmp << ", " << rTmp << ", " << rTmp << ", lsl #" << k << "\n";
+                            os_ << "\tadd " << rResult << ", " << rNum << ", " << rTmp << "\n";
+                        }
                         os_ << "\tasr " << rResult << ", " << rResult << ", #" << k << "\n";
                         if (d < 0)
                             os_ << "\tneg " << rResult << ", " << rResult << "\n";
@@ -1508,7 +1507,23 @@ void Arm64FuncContext::allocateRegisters() {
         }
     }
 
-    // ---- 7. Spill cost: sum of (10 ^ loopDepth) per use ----
+    // ---- 7. Phi coalesce affinity ----
+    std::map<Value*, std::set<Value*>> phiAffinity;
+    for (auto bb : blocksOrder) {
+        for (auto inst : bb->instr_list_) {
+            auto phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi || !canAssignRegister(phi)) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                auto val = phi->get_operand(i);
+                if (canAssignRegister(val)) {
+                    phiAffinity[phi].insert(val);
+                    phiAffinity[val].insert(phi);
+                }
+            }
+        }
+    }
+
+    // ---- 8. Spill cost: sum of (10 ^ loopDepth) per use ----
     std::map<Value*, double> spillCost;
     for (auto &iv : intervals) {
         double cost = 0;
@@ -1548,7 +1563,7 @@ void Arm64FuncContext::allocateRegisters() {
 
         for (size_t i = 0; i < sorted.size(); i++) {
             for (size_t j = i + 1;
-                 j < sorted.size() && sorted[j].start <= sorted[i].end; j++) {
+                 j < sorted.size() && sorted[j].start < sorted[i].end; j++) {
                 adj[sorted[i].value].insert(sorted[j].value);
                 adj[sorted[j].value].insert(sorted[i].value);
             }
@@ -1612,10 +1627,26 @@ void Arm64FuncContext::allocateRegisters() {
             }
 
             int color = -1;
-            for (int c = 0; c < K; c++) {
-                if (!neighborColors.count(c)) {
-                    color = c;
-                    break;
+
+            // Biased: prefer color of already-colored phi partners
+            auto affIt = phiAffinity.find(v);
+            if (affIt != phiAffinity.end()) {
+                for (auto partner : affIt->second) {
+                    auto pc = colors.find(partner);
+                    if (pc != colors.end() && !neighborColors.count(pc->second)) {
+                        color = pc->second;
+                        break;
+                    }
+                }
+            }
+
+            // Fallback: lowest available color
+            if (color < 0) {
+                for (int c = 0; c < K; c++) {
+                    if (!neighborColors.count(c)) {
+                        color = c;
+                        break;
+                    }
                 }
             }
 

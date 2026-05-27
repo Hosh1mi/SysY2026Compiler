@@ -175,7 +175,7 @@ bool AlgebraSimplify::tryAlgebraicSimplification(Instruction *inst) {
 }
 
 bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
-    if (inst->op_id_ != Instruction::Mul && inst->op_id_ != Instruction::UDiv && inst->op_id_ != Instruction::SDiv) return false;
+    if (inst->op_id_ != Instruction::Mul && inst->op_id_ != Instruction::UDiv) return false;
     if (inst->type_->tid_ != Type::IntegerTyID) return false;
 
     Value *v1 = inst->get_operand(0);
@@ -212,19 +212,6 @@ bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
             auto *lshr = new BinaryInst(ty, Instruction::LShr, var, new ConstantInt(ty, shift), bb, true);
             bb->add_instruction_before_inst(lshr, inst);
             inst->replace_all_use_with(lshr);
-        } else { // SDiv
-            // 有符号除法向零舍入修正: (x + (x<0 ? d-1 : 0)) >> k
-            auto *sign = new BinaryInst(ty, Instruction::AShr, var, new ConstantInt(ty, 31), bb, true);
-            bb->add_instruction_before_inst(sign, inst);
-            auto *mask = new BinaryInst(ty, Instruction::LShr, sign,
-                                        new ConstantInt(ty, 32 - shift), bb, true);
-            bb->add_instruction_before_inst(mask, inst);
-            auto *biased = new BinaryInst(ty, Instruction::Add, var, mask, bb, true);
-            bb->add_instruction_before_inst(biased, inst);
-            auto *result = new BinaryInst(ty, Instruction::AShr, biased,
-                                          new ConstantInt(ty, shift), bb, true);
-            bb->add_instruction_before_inst(result, inst);
-            inst->replace_all_use_with(result);
         }
         bb->delete_instr(inst);
         return true;
