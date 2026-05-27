@@ -197,7 +197,18 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 		return (l.operands.size() >= 2 &&
 		        (l.operands[0] == r || l.operands[1] == r));
 	}
-	if (!l.operands.empty() && l.operands[0] == r) return true;
+	if (!l.operands.empty()) {
+		const std::string &dst = l.operands[0];
+		if (dst == r) return true;
+		// ARM64 register aliasing: wN and xN share the same physical register,
+		// as do sN and dN. A write to either width clobbers the other.
+		if (dst.size() >= 2 && r.size() >= 2) {
+			char clsDst = dst[0], clsR = r[0];
+			bool sameFile = ((clsDst == 'w' || clsDst == 'x') && (clsR == 'w' || clsR == 'x')) ||
+			                ((clsDst == 's' || clsDst == 'd') && (clsR == 's' || clsR == 'd'));
+			if (sameFile && dst.substr(1) == r.substr(1)) return true;
+		}
+	}
 	return false;
 }
 
@@ -326,6 +337,8 @@ static bool tryStoreLoadForward(std::vector<ParsedLine> &lines, size_t idx) {
 		}
 		continue;
 		}
+		// An ldr that writes srcReg makes forwarding unsafe
+		if (lineWritesReg(li, srcReg)) return false;
 		if (li.operands.size() < 2) continue;
 		auto m1 = parseMemOp(li.operands[1]);
 		if (!m1.valid || m1.base != "x29" || m1.offset != m0.offset) continue;
@@ -581,7 +594,89 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 	return false;
 }
 
-// Rule 9: sxtw CSE within basic blocks.
+// Rule 9: mul + add/sub fusion → madd / msub / mneg
+//   mul wA, wB, wC  then  add wD, wA, wE  →  madd wD, wB, wC, wE
+//   mul wA, wB, wC  then  sub wD, wE, wA  →  msub wD, wB, wC, wE
+//   mul wA, wB, wC  then  sub wD, wzr, wA  →  mneg wD, wB, wC
+static bool tryMulAddFusion(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &lMul = lines[idx];
+    if (lMul.mnemonic != "mul" || lMul.operands.size() < 3) return false;
+
+    std::string mulDst = lMul.operands[0];   // wA
+    std::string mulOp1 = lMul.operands[1];   // wB
+    std::string mulOp2 = lMul.operands[2];   // wC
+    char cls = regClass(mulDst);
+    if (cls != 'w' && cls != 'x') return false;
+    if (regClass(mulOp1) != cls || regClass(mulOp2) != cls) return false;
+
+    auto w = instructionWindow(lines, idx + 1, 4);
+    for (size_t wi : w) {
+        auto &li = lines[wi];
+
+        // Bail if mul result is clobbered or used for something else
+        if (lineWritesReg(li, mulDst)) return false;
+        if (lineWritesReg(li, mulOp1)) return false;
+        if (lineWritesReg(li, mulOp2)) return false;
+        if (isCallBarrier(li.mnemonic)) return false;
+
+        // Check if mulDst is used by this instruction but not as operand 0 of add/sub
+        if (li.mnemonic != "add" && li.mnemonic != "sub") {
+            if (lineUsesReg(li, mulDst)) return false; // used elsewhere, can't fuse
+            continue;
+        }
+        if (li.operands.size() < 3) continue;
+
+        std::string addDst = li.operands[0];
+        std::string addOp1 = li.operands[1];
+        std::string addOp2 = li.operands[2];
+        if (regClass(addDst) != cls) continue;
+
+        // madd: mul wA, wB, wC  +  add wD, wA, wE  (or add wD, wE, wA)
+        if (li.mnemonic == "add") {
+            if (addOp1 == mulDst && regClass(addOp2) == cls) {
+                // add wD, wA, wE → madd wD, wB, wC, wE
+                lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                li.raw = makeInsn("madd", {addDst, mulOp1, mulOp2, addOp2});
+                li.mnemonic = "madd";
+                li.operands = {addDst, mulOp1, mulOp2, addOp2};
+                return true;
+            }
+            if (addOp2 == mulDst && regClass(addOp1) == cls) {
+                // add wD, wE, wA → madd wD, wB, wC, wE
+                lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                li.raw = makeInsn("madd", {addDst, mulOp1, mulOp2, addOp1});
+                li.mnemonic = "madd";
+                li.operands = {addDst, mulOp1, mulOp2, addOp1};
+                return true;
+            }
+            return false; // add but doesn't use mulDst → stop looking
+        }
+
+        // msub: mul wA, wB, wC  +  sub wD, wE, wA  →  msub wD, wB, wC, wE
+        if (li.mnemonic == "sub") {
+            if (addOp2 == mulDst && regClass(addOp1) == cls) {
+                // sub wD, wE, wA → msub wD, wB, wC, wE  (= wE - wB*wC)
+                lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                li.raw = makeInsn("msub", {addDst, mulOp1, mulOp2, addOp1});
+                li.mnemonic = "msub";
+                li.operands = {addDst, mulOp1, mulOp2, addOp1};
+                return true;
+            }
+            // mneg: mul wA, wB, wC  +  sub wD, wzr, wA  →  mneg wD, wB, wC
+            if (addOp2 == mulDst && (addOp1 == "wzr" || addOp1 == "xzr")) {
+                lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                li.raw = makeInsn("mneg", {addDst, mulOp1, mulOp2});
+                li.mnemonic = "mneg";
+                li.operands = {addDst, mulOp1, mulOp2};
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+// Rule 10: sxtw CSE within basic blocks.
 //   Repeated sxtw xA, wB (same source wB) in the same basic block:
 //   cache (i64)wB in a free x-register after the first sxtw, then
 //   replace later sxtw with mov xA, xCache.
@@ -719,6 +814,7 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (lines[i].kind != LineKind::Instruction) continue;
 
 			if (trySelfMove(lines, i))           { changed = true; break; }
+			if (tryMulAddFusion(lines, i))      { changed = true; break; }
 			if (tryZeroStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
 			if (tryRedundantSub(lines, i))       { changed = true; break; }

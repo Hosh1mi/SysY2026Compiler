@@ -20,9 +20,9 @@
 #include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
-#include "include/mid/opt/loopIdiomRecognize.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
+#include "include/mid/opt/sroa.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
 
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
 
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = true; 
+	int print_asm = false; 
 	std::string output = "-";
 	int optLevel = 0;
 
@@ -91,10 +91,10 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // Set default to asm for now
-    if (!print_ir && !print_asm) {
-        print_asm = true;
-    }
+    // // Set default to asm for now
+    // if (!print_ir && !print_asm) {
+    //     print_asm = true;
+    // }
 
     yyin = fopen(filename, "r");
     if (!yyin) {
@@ -106,73 +106,43 @@ int main(int argc, char **argv) {
 	// Lexer, Parser, and generate AST
 	yyparse();
 
-	// Check errors of AST
-	// ErrorReporter errorReporter(std::cerr);
-	// Checker checker(errorReporter);
-	// checker.visit(*root);
-
 	/* mid */
 	// Generate IR from AST
 	GenIR genIR;
 	root->accept(genIR);
 	std::unique_ptr<Module> m = genIR.getModule();
 
-	/* IR Pass */
-	// ────────────────────────────────────────────────────────────
-	//  Pass Pipeline 设计说明
-	//
-	//  整体分为 5 个阶段:
-	//  1. 规范化 (Canonicalization)     → SSA + CFG Cleanup
-	//  2. 早期标量优化                 → 基本代数优化、尾递归消除
-	//  3. CSE & 全局优化               → 公共子表达式消除 + 清理
-	//  4. 循环优化                     → LICM → IVS → Unroll
-	//  5. 最终清理                     → 为代码生成做准备
-	// ────────────────────────────────────────────────────────────
+    // TODO：设计合适的Pass Pipeline
 	PassManager pm;
 	if(optLevel >= 1){
-        // ========== Phase 1: 规范化 ==========
-        // pm.addPass(std::make_unique<InlineExpand>());
         pm.addPass(std::make_unique<DimArrayArgSimplify>());  // 清理数组参数
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
+        pm.addPass(std::make_unique<SROA>());                 // 将聚合 alloca 拆分为标量 alloca
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 再化简 CFG
 
-        // ========== Phase 2: 早期标量优化 ==========
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 尾部消除后清理 CFG
-        pm.addPass(std::make_unique<LoopIdiomRecognition>()); // 识别循环惯用模式
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         pm.addPass(std::make_unique<ConstantFold>());         // 常数折叠
         pm.addPass(std::make_unique<AlgebraSimplify>());      // 代数简化
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 死代码消除
 
-        // ========== Phase 3: CSE & 全局优化 ==========
         pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
         pm.addPass(std::make_unique<CSE>());                  // 公共子表达式消除
-        // pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
-        // pm.addPass(std::make_unique<AlgebraSimplify>());      // 化简新表达式
-        // pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播新复制
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
 
-        // ========== Phase 4: 循环优化 ==========
+        pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<ConstantFold>());         // 外提后折叠
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理外提后死代码
-        // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
+
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化（实验性）
-        // pm.addPass(std::make_unique<ConstantFold>());         // 展开后大量折叠
-        // pm.addPass(std::make_unique<AlgebraSimplify>());      // 展开后代数简化
+        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
+
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 展开后消除死代码
         pm.addPass(std::make_unique<CFGSimplify>());          // 展开后化简 CFG
 
-        // ========== Phase 5: 最终清理 ==========
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 最后化简
-        // pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理冗余 phi
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 最终 DCE
 	}  
     

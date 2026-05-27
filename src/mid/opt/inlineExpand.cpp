@@ -10,7 +10,6 @@
 using namespace std;
 
 void InlineExpand::execute(Module *module) {
-    // 工作队列：存储所有待内联的 CallInst
     vector<CallInst*> worklist;
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
@@ -22,7 +21,7 @@ void InlineExpand::execute(Module *module) {
         }
     }
 
-    // 循环处理，因为内联可能引入新的 call
+
     while (!worklist.empty()) {
         CallInst *call = worklist.back();
         worklist.pop_back();
@@ -31,13 +30,11 @@ void InlineExpand::execute(Module *module) {
 
         Function *caller = call->parent_->parent_;
         Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
-        if (!callee || !canInline(callee, caller))
+        if (!callee || !canInline(call, callee, caller))
             continue;
 
-        // 执行内联，可能引入新的 call，将其加入队列
         vector<CallInst*> newCalls = performInline(call);
         for (auto *nc : newCalls) {
-            // 确保新产生的 call 没有被删除且属于同一模块
             if (nc->parent_)
                 worklist.push_back(nc);
         }
@@ -51,12 +48,70 @@ unsigned InlineExpand::countInstructions(Function *func) {
     return cnt;
 }
 
-bool InlineExpand::canInline(Function *callee, Function *caller) {
+bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller) {
     if (callee->is_declaration() || callee == caller)
         return false;
-    if (countInstructions(callee) > INLINE_THRESHOLD)
+
+    unsigned size = countInstructions(callee);
+
+    if (size > INLINE_THRESHOLD)
         return false;
+
+    if (size <= INLINE_ALWAYS_THRESHOLD)
+        return true;
+
+    // 包含循环的函数内联收益低，使用更严格的阈值
+    if (hasLoops(callee) && size > INLINE_LOOP_THRESHOLD)
+        return false;
+
+    // 递归函数内联会导致 worklist 无限展开
+    for (auto bb : callee->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (auto *c = dynamic_cast<CallInst*>(inst)) {
+                if (c->get_operand(c->num_ops_ - 1) == callee)
+                    return false;
+            }
+        }
+    }
+
+    unsigned sites = countCallSites(callee, caller->parent_);
+
+    if (sites == 1)
+        return true;
+
+    if (size * sites > INLINE_COST_BUDGET)
+        return false;
+
     return true;
+}
+
+unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
+    unsigned count = 0;
+    for (auto func : module->function_list_) {
+        for (auto bb : func->basic_blocks_) {
+            for (auto inst : bb->instr_list_) {
+                if (auto *call = dynamic_cast<CallInst*>(inst)) {
+                    if (call->get_operand(call->num_ops_ - 1) == callee)
+                        ++count;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+bool InlineExpand::hasLoops(Function *func) {
+    auto rpo = getRPO(func);
+    unordered_map<BasicBlock*, int> rpoIdx;
+    for (int i = 0; i < (int)rpo.size(); ++i)
+        rpoIdx[rpo[i]] = i;
+    for (auto *bb : rpo) {
+        for (auto *succ : bb->succ_bbs_) {
+            if (rpoIdx[succ] <= rpoIdx[bb])
+                return true;  // 回边 = 循环
+        }
+    }
+    return false;
 }
 
 // 获取函数的逆后序（RPO）

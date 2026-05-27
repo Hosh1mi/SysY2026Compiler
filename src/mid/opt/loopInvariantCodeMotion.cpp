@@ -68,29 +68,30 @@ BasicBlock *LICM::intersect(BasicBlock *a, BasicBlock *b) {
 }
 
 bool LICM::dominates(BasicBlock *a, BasicBlock *b) {
-    while (b != idom_[b]) {   // walk up until entry (idom[entry]==entry)
+    while (b != idom_[b]) {
         if (b == a) return true;
         b = idom_[b];
     }
-    return b == a;            // b is now entry
+    return b == a;
 }
 
 // ── Loop detection ─────────────────────────────────────────────────────────
 
 std::vector<LICM::Loop> LICM::findLoops(Function *func) {
-    std::vector<Loop> loops;
+    // 相同 header 的多条回边属于同一个 loop。若每条回边各自形成独立 loop，
+    // 其不完整的 body 会让 getPreheader 认为有多个"外部前驱"而返回 nullptr，
+    // 导致 LICM 静默跳过整个循环。
+    std::map<BasicBlock*, Loop> headerToLoop;
 
     for (auto bb : func->basic_blocks_) {
         for (auto succ : bb->succ_bbs_) {
-            // back edge: bb -> succ  and  succ dominates bb
             if (!idom_.count(succ)) continue;
             if (!dominates(succ, bb)) continue;
 
-            Loop loop;
+            auto &loop = headerToLoop[succ];
             loop.header = succ;
-            loop.latch  = bb;
+            if (!loop.latch) loop.latch = bb;
 
-            // collect loop body by reverse-traversal from latch to header
             loop.blocks.insert(succ);
             std::queue<BasicBlock*> wl;
             wl.push(bb);
@@ -100,22 +101,23 @@ std::vector<LICM::Loop> LICM::findLoops(Function *func) {
                 for (auto pred : cur->pre_bbs_)
                     if (!loop.blocks.count(pred)) wl.push(pred);
             }
-            loops.push_back(std::move(loop));
         }
     }
+
+    std::vector<Loop> loops;
+    for (auto &kv : headerToLoop)
+        loops.push_back(std::move(kv.second));
     return loops;
 }
 
-// Return the unique predecessor of the loop header that is outside the loop,
-// or nullptr if there are zero or multiple such predecessors.
 BasicBlock *LICM::getPreheader(const Loop &loop) {
     BasicBlock *pre = nullptr;
     for (auto pred : loop.header->pre_bbs_) {
-        if (loop.blocks.count(pred)) continue; // inside loop
-        if (pre) return nullptr;               // multiple outside preds
+        if (loop.blocks.count(pred)) continue;
+        if (pre) return nullptr;
         pre = pred;
     }
-    return pre; // nullptr if no outside pred (entry is header)
+    return pre;
 }
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
@@ -128,11 +130,10 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
 
     auto inst = dynamic_cast<Instruction*>(val);
     if (!inst) return true;
-    if (toHoist.count(inst)) return true;        // will be hoisted
-    return !loopBlocks.count(inst->parent_);     // defined outside loop
+    if (toHoist.count(inst)) return true;
+    return !loopBlocks.count(inst->parent_);
 }
 
-// Walk GEP/bitcast chains to the ultimate base Value.
 static Value *getBase(Value *ptr) {
     while (true) {
         if (auto gep = dynamic_cast<GetElementPtrInst*>(ptr)) { ptr = gep->get_operand(0); continue; }
@@ -150,6 +151,29 @@ bool LICM::hasStoreToSameBase(const Loop &loop, Value *base) {
     return false;
 }
 
+// 检查 loop 中的 call 是否会写入 base 指向的地址。
+// 对本模块定义的函数：扫描其 body 中的直接 store。
+// 对声明式函数（外部函数）：保守假设可能写入任何地址。
+bool LICM::doesAnyCallWriteToBase(const Loop &loop, Value *base) {
+    for (auto bb : loop.blocks) {
+        for (auto inst : bb->instr_list_) {
+            if (!inst->is_call()) continue;
+            auto *call = static_cast<CallInst *>(inst);
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || callee->is_declaration())
+                return true; // 外部函数，保守拒绝
+            // 扫描被调用函数的 body，检查是否有 store 写入同一地址
+            for (auto *cbb : callee->basic_blocks_)
+                for (auto *ci : cbb->instr_list_)
+                    if (ci->is_store() &&
+                        getBase(ci->get_operand(1)) == base)
+                        return true;
+        }
+    }
+    return false;
+}
+
 bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
                           const std::set<Instruction*>& toHoist, bool loopHasCalls) {
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
@@ -157,16 +181,15 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
         return false;
 
     if (inst->is_load()) {
-        // Only hoist loads when no calls exist in the loop (calls may modify globals/args)
-        if (loopHasCalls) return false;
         Value *base = getBase(inst->get_operand(0));
-        // Only hoist if no store writes to the same base inside the loop.
-        // Covers globals, arguments, and allocas (e.g. loop-local counters that are
-        // invariant within an inner loop).
-        return !hasStoreToSameBase(loop, base);
+        // 检查循环内是否有直接 store 写入同一地址
+        if (hasStoreToSameBase(loop, base)) return false;
+        // 若循环内有 call，检查被调用函数是否会写入此地址。
+        // 不再一刀切拒绝所有 load，只拒绝对应 base 可能被 call 修改的 load。
+        if (loopHasCalls && doesAnyCallWriteToBase(loop, base)) return false;
+        return true;
     }
 
-    // BinaryInst, UnaryInst, GEP, ICmp, FCmp, ZExt, etc. are pure
     return true;
 }
 
@@ -176,25 +199,18 @@ bool LICM::runOnLoop(const Loop &loop) {
     BasicBlock *preheader = getPreheader(loop);
     if (!preheader) return false;
 
-    // NOTE: eliminateTrivialHeaderPhis was disabled due to miscompilation on h-10
-    // (incorrect phi elimination when a loop has multiple predecessors or when
-    // non_latch_val resolves to a phi in a different loop context).
-
     bool changed = false;
 
-    // Precompute once: if any call exists in the loop, loads cannot be hoisted safely
     bool loopHasCalls = false;
     for (auto bb : loop.blocks)
         for (auto inst : bb->instr_list_)
             if (inst->is_call()) { loopHasCalls = true; goto done_call_scan; }
     done_call_scan:;
 
-    // Iterate until no more candidates (handles chains: GEP → Load)
     bool progress = true;
     while (progress) {
         progress = false;
 
-        // Collect candidates in program order across all loop blocks
         std::set<Instruction*> toHoist;
         for (auto bb : loop.blocks) {
             for (auto inst : bb->instr_list_) {
@@ -213,19 +229,17 @@ bool LICM::runOnLoop(const Loop &loop) {
 
         if (toHoist.empty()) break;
 
-        // Move candidates to preheader in a single ordered pass
         for (auto bb : loop.blocks) {
             auto it = bb->instr_list_.begin();
             while (it != bb->instr_list_.end()) {
                 Instruction *inst = *it;
                 if (!toHoist.count(inst)) { ++it; continue; }
 
-                it = bb->instr_list_.end(); // will be re-assigned
+                it = bb->instr_list_.end();
                 bb->remove_instr(inst);
                 inst->parent_ = preheader;
                 preheader->add_instruction_before_terminator(inst);
 
-                // restart iteration for this bb from the beginning
                 it = bb->instr_list_.begin();
                 progress = true;
                 changed  = true;
@@ -236,8 +250,6 @@ bool LICM::runOnLoop(const Loop &loop) {
     return changed;
 }
 
-// Remove single-predecessor block phis: %v = phi [x, pred] → replace %v with x everywhere.
-// These are semantically equivalent to direct uses and block the invariance chain.
 void LICM::eliminateSinglePredPhis(Function *func) {
     bool changed = true;
     while (changed) {
@@ -258,8 +270,6 @@ void LICM::eliminateSinglePredPhis(Function *func) {
     }
 }
 
-// Remove trivial self-loop header phis: %v = phi [x, preheader], [%v, latch]
-// → replace %v with x everywhere.  The loop never changes the value.
 void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     bool changed = true;
     while (changed) {
@@ -270,7 +280,7 @@ void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
             if (!phi) break;
 
             Value *non_latch_val = nullptr;
-            bool self_loop = true;   // until proven otherwise
+            bool self_loop = true;
             bool valid = true;
 
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -285,12 +295,8 @@ void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
             }
 
             if (valid && self_loop && non_latch_val) {
-                // Safety check: only eliminate if non_latch_val is defined OUTSIDE the loop.
-                // If non_latch_val is itself inside the loop (e.g. another loop's phi),
-                // elimination would create dangling references when instructions are hoisted.
                 auto nv_inst = dynamic_cast<Instruction*>(non_latch_val);
                 if (nv_inst && loop.blocks.count(nv_inst->parent_)) {
-                    // non_latch_val is inside the loop — skip this phi to avoid miscompilation
                     ++it;
                     continue;
                 }
@@ -308,14 +314,12 @@ void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
 void LICM::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    // Simplify pass-through phis before loop analysis so LICM sees cleaner values.
     eliminateSinglePredPhis(func);
 
     auto rpo = computeRPO(func);
     computeDominators(rpo);
     auto loops = findLoops(func);
 
-    // Process smaller (inner) loops first
     std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
         return a.blocks.size() < b.blocks.size();
     });

@@ -31,6 +31,7 @@ private:
     bool isSafeToHoist(Instruction *inst, const Loop &loop,
                        const std::set<Instruction*>& toHoist, bool loopHasCalls);
     bool hasStoreToSameBase(const Loop &loop, Value *base);
+    static bool doesAnyCallWriteToBase(const Loop &loop, Value *base);
     bool runOnLoop(const Loop &loop);
 
     std::map<BasicBlock*, BasicBlock*> idom_;
