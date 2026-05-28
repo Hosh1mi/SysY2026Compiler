@@ -689,6 +689,8 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 //   mul wA, wB, wC  then  add wD, wA, wE  →  madd wD, wB, wC, wE
 //   mul wA, wB, wC  then  sub wD, wE, wA  →  msub wD, wB, wC, wE
 //   mul wA, wB, wC  then  sub wD, wzr, wA  →  mneg wD, wB, wC
+// Also handles a single mov forwarding the mul result:
+//   mul wA, wB, wC  then  mov wD, wA  then  add wE, wD, wF  →  madd wE, wB, wC, wF
 static bool tryMulAddFusion(std::vector<ParsedLine> &lines, size_t idx) {
     auto &lMul = lines[idx];
     if (lMul.mnemonic != "mul" || lMul.operands.size() < 3) return false;
@@ -700,19 +702,43 @@ static bool tryMulAddFusion(std::vector<ParsedLine> &lines, size_t idx) {
     if (cls != 'w' && cls != 'x') return false;
     if (regClass(mulOp1) != cls || regClass(mulOp2) != cls) return false;
 
-    auto w = instructionWindow(lines, idx + 1, 4);
+    std::string fwdDst;   // forwarded register (if mov interposes)
+    size_t fwdIdx = 0;     // index of the mov line to clear later
+
+    auto w = instructionWindow(lines, idx + 1, 6);
     for (size_t wi : w) {
         auto &li = lines[wi];
 
-        // Bail if mul result is clobbered or used for something else
+        // Bail if mul result or forwarded reg is clobbered
         if (lineWritesReg(li, mulDst)) return false;
+        if (!fwdDst.empty() && lineWritesReg(li, fwdDst)) return false;
         if (lineWritesReg(li, mulOp1)) return false;
         if (lineWritesReg(li, mulOp2)) return false;
         if (isCallBarrier(li.mnemonic)) return false;
 
-        // Check if mulDst is used by this instruction but not as operand 0 of add/sub
+        // --- mov forwarding: mov wD, wA where wA == mulDst ---
+        if (li.mnemonic == "mov" && li.operands.size() >= 2) {
+            std::string movDst = li.operands[0];
+            std::string movSrc = li.operands[1];
+            if (fwdDst.empty() && movSrc == mulDst && regClass(movDst) == cls) {
+                // Track the forwarded register
+                fwdDst = movDst;
+                fwdIdx = wi;
+                continue;
+            }
+            // Another mov — not our forwarded register, bail if it uses mulDst
+            if (lineUsesReg(li, mulDst)) return false;
+            if (!fwdDst.empty() && lineUsesReg(li, fwdDst)) return false;
+            continue;
+        }
+
+        // --- effective source register for the add/sub ---
+        std::string effectiveSrc = fwdDst.empty() ? mulDst : fwdDst;
+
+        // Check if effectiveSrc is used by this non-add/sub instruction
         if (li.mnemonic != "add" && li.mnemonic != "sub") {
-            if (lineUsesReg(li, mulDst)) return false; // used elsewhere, can't fuse
+            if (lineUsesReg(li, mulDst)) return false;
+            if (!fwdDst.empty() && lineUsesReg(li, fwdDst)) return false;
             continue;
         }
         if (li.operands.size() < 3) continue;
@@ -722,40 +748,34 @@ static bool tryMulAddFusion(std::vector<ParsedLine> &lines, size_t idx) {
         std::string addOp2 = li.operands[2];
         if (regClass(addDst) != cls) continue;
 
-        // madd: mul wA, wB, wC  +  add wD, wA, wE  (or add wD, wE, wA)
+        // ---- madd ----
         if (li.mnemonic == "add") {
-            if (addOp1 == mulDst && regClass(addOp2) == cls) {
-                // add wD, wA, wE → madd wD, wB, wC, wE
+            if ((addOp1 == effectiveSrc && regClass(addOp2) == cls) ||
+                (addOp2 == effectiveSrc && regClass(addOp1) == cls)) {
+                std::string acc = (addOp1 == effectiveSrc) ? addOp2 : addOp1;
                 lMul.raw.clear(); lMul.kind = LineKind::Empty;
-                li.raw = makeInsn("madd", {addDst, mulOp1, mulOp2, addOp2});
+                if (!fwdDst.empty()) {lines[fwdIdx].raw.clear(); lines[fwdIdx].kind = LineKind::Empty;}
+                li.raw = makeInsn("madd", {addDst, mulOp1, mulOp2, acc});
                 li.mnemonic = "madd";
-                li.operands = {addDst, mulOp1, mulOp2, addOp2};
+                li.operands = {addDst, mulOp1, mulOp2, acc};
                 return true;
             }
-            if (addOp2 == mulDst && regClass(addOp1) == cls) {
-                // add wD, wE, wA → madd wD, wB, wC, wE
-                lMul.raw.clear(); lMul.kind = LineKind::Empty;
-                li.raw = makeInsn("madd", {addDst, mulOp1, mulOp2, addOp1});
-                li.mnemonic = "madd";
-                li.operands = {addDst, mulOp1, mulOp2, addOp1};
-                return true;
-            }
-            return false; // add but doesn't use mulDst → stop looking
+            return false;
         }
 
-        // msub: mul wA, wB, wC  +  sub wD, wE, wA  →  msub wD, wB, wC, wE
+        // ---- msub / mneg ----
         if (li.mnemonic == "sub") {
-            if (addOp2 == mulDst && regClass(addOp1) == cls) {
-                // sub wD, wE, wA → msub wD, wB, wC, wE  (= wE - wB*wC)
+            if (addOp2 == effectiveSrc && regClass(addOp1) == cls) {
                 lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                if (!fwdDst.empty()) {lines[fwdIdx].raw.clear(); lines[fwdIdx].kind = LineKind::Empty;}
                 li.raw = makeInsn("msub", {addDst, mulOp1, mulOp2, addOp1});
                 li.mnemonic = "msub";
                 li.operands = {addDst, mulOp1, mulOp2, addOp1};
                 return true;
             }
-            // mneg: mul wA, wB, wC  +  sub wD, wzr, wA  →  mneg wD, wB, wC
-            if (addOp2 == mulDst && (addOp1 == "wzr" || addOp1 == "xzr")) {
+            if (addOp2 == effectiveSrc && (addOp1 == "wzr" || addOp1 == "xzr")) {
                 lMul.raw.clear(); lMul.kind = LineKind::Empty;
+                if (!fwdDst.empty()) {lines[fwdIdx].raw.clear(); lines[fwdIdx].kind = LineKind::Empty;}
                 li.raw = makeInsn("mneg", {addDst, mulOp1, mulOp2});
                 li.mnemonic = "mneg";
                 li.operands = {addDst, mulOp1, mulOp2};
