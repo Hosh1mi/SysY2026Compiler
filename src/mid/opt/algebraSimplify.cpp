@@ -175,6 +175,32 @@ bool AlgebraSimplify::tryAlgebraicSimplification(Instruction *inst) {
 }
 
 bool AlgebraSimplify::tryStrengthReduction(Instruction *inst) {
+    // ── srem by power-of-two decomposition ─────────────────────────
+    // srem %x, 2  used only by icmp eq %r, 1  →  and %x, 1
+    // This replaces an expensive sdiv+mul+sub sequence with a single AND.
+    if (inst->op_id_ == Instruction::SRem && inst->type_->tid_ == Type::IntegerTyID) {
+        Value *v2 = inst->get_operand(1);
+        auto *c2 = dynamic_cast<ConstantInt*>(v2);
+        if (!c2 || c2->value_ != 2) return false;
+        // Only decompose if the sole user is icmp eq %r, 1
+        if (inst->use_list_.size() != 1) return false;
+        auto *user = dynamic_cast<ICmpInst*>((*inst->use_list_.begin()).val_);
+        if (!user || user->op_id_ != Instruction::ICmp) return false;
+        if (user->icmp_op_ != ICmpInst::ICMP_EQ) return false;
+        auto *cUser0 = dynamic_cast<ConstantInt*>(user->get_operand(0));
+        auto *cUser1 = dynamic_cast<ConstantInt*>(user->get_operand(1));
+        if (!((cUser0 && cUser0->value_ == 1) || (cUser1 && cUser1->value_ == 1)))
+            return false;
+        // srem(x,2)==1  ⇔  (x & 1) == 1  for non-negative x
+        Value *x = inst->get_operand(0);
+        auto *andInst = new BinaryInst(inst->type_, Instruction::And,
+            x, new ConstantInt(inst->type_, 1), inst->parent_, true);
+        inst->parent_->add_instruction_before_inst(andInst, inst);
+        inst->replace_all_use_with(andInst);
+        inst->parent_->delete_instr(inst);
+        return true;
+    }
+
     if (inst->op_id_ != Instruction::Mul && inst->op_id_ != Instruction::UDiv) return false;
     if (inst->type_->tid_ != Type::IntegerTyID) return false;
 
