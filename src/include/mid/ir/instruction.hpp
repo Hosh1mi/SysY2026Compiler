@@ -226,16 +226,10 @@ public:
 // 地址计算：getelementptr [5 x [4 x i32]], [5 x [4 x i32]]* @a, i32 0, i32 2, i32 3
 class GetElementPtrInst : public Instruction {
 public:
-    GetElementPtrInst(Value* ptr, std::vector<Value*> idxs, BasicBlock* bb) :
-        Instruction(bb->parent_->parent_->get_pointer_type(get_GEP_return_type(ptr, idxs.size())),
-                    Instruction::GetElementPtr, idxs.size() + 1, bb) {
-        set_operand(0, ptr);
-        for (size_t i = 0; i < idxs.size(); i++) {
-            set_operand(i + 1, idxs[i]);
-        }
-    }
-    // 根据 ptr 和索引层数推导 GEP 返回的元素类型
-    Type* get_GEP_return_type(Value* ptr, size_t idxs_size) {
+    // 根据 ptr 和索引层数推导普通 GEP 的返回元素类型。
+    // 保持现有语义：当 base 指向数组时，第一个索引通常只是“进入当前聚合对象”，
+    // 真正消耗数组层数的是后续索引（例如 gep @a, 0, i）。
+    static Type* infer_GEP_return_type(Value* ptr, size_t idxs_size) {
         Type* ty = static_cast<PointerType*>(ptr->type_)->contained_;
         if (ty->tid_ == Type::ArrayTyID) {
             ArrayType* arr_ty = static_cast<ArrayType*>(ty);
@@ -248,6 +242,55 @@ public:
         }
         return ty;
     }
+
+    // 专用于 split 后 suffix GEP 的返回元素类型推导。
+    // 这时 base 已经是 prefix GEP 的结果指针，第一个索引就应当继续向下消耗一层。
+    static Type* infer_split_suffix_GEP_return_type(Value* ptr, size_t idxs_size) {
+        Type* ty = static_cast<PointerType*>(ptr->type_)->contained_;
+        for (size_t i = 0; i < idxs_size; i++) {
+            if (ty->tid_ != Type::ArrayTyID) break;
+            ty = static_cast<ArrayType*>(ty)->contained_;
+        }
+        return ty;
+    }
+
+private:
+    GetElementPtrInst(Type* result_elem_ty, Value* ptr,
+                      const std::vector<Value*>& idxs,
+                      BasicBlock* bb, bool no_insert)
+        : Instruction(bb->parent_->parent_->get_pointer_type(result_elem_ty),
+                      Instruction::GetElementPtr, idxs.size() + 1) {
+        if (!no_insert) {
+            bool ok = bb->add_instruction(this);
+            assert(ok && "GetElementPtrInst inserted twice into BasicBlock");
+        } else {
+            this->parent_ = bb;
+        }
+
+        set_operand(0, ptr);
+        for (size_t i = 0; i < idxs.size(); i++) {
+            set_operand(i + 1, idxs[i]);
+        }
+    }
+
+public:
+    GetElementPtrInst(Value* ptr, std::vector<Value*> idxs, BasicBlock* bb)
+        : GetElementPtrInst(infer_GEP_return_type(ptr, idxs.size()), ptr, idxs, bb, false) {}
+
+    // 仅创建，不自动插入到 BB；调用方应使用 add_instruction_before_inst /
+    // add_instruction_before_terminator / add_instruction 等 API 安全挂接。
+    GetElementPtrInst(Value* ptr, std::vector<Value*> idxs, BasicBlock* bb, bool no_insert)
+        : GetElementPtrInst(infer_GEP_return_type(ptr, idxs.size()), ptr, idxs, bb, no_insert) {}
+
+    static GetElementPtrInst* create_split_suffix_gep(Value* ptr,
+                                                      const std::vector<Value*>& idxs,
+                                                      BasicBlock* bb,
+                                                      bool no_insert = false) {
+        return new GetElementPtrInst(
+            infer_split_suffix_GEP_return_type(ptr, idxs.size()),
+            ptr, idxs, bb, no_insert);
+    }
+
     virtual std::string print() override;
 };
 

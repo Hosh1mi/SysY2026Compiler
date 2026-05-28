@@ -16,6 +16,7 @@
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
@@ -133,6 +134,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
 
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
+        // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<ConstantFold>());         // 外提后折叠
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理外提后死代码

@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <functional>
 #include <queue>
@@ -206,7 +207,69 @@ bool LICM::runOnLoop(const Loop &loop) {
         for (auto inst : bb->instr_list_)
             if (inst->is_call()) { loopHasCalls = true; goto done_call_scan; }
     done_call_scan:;
+#if 0
+    // ── GEP splitting ──────────────────────────────────────────────
+    // Split multi-dimensional GEPs at the invariant/variant boundary.
+    // The invariant prefix will be hoisted by the main loop below.
+    {
+        std::set<Instruction*> emptyHoist; // no instructions hoisted yet
+        for (auto *bb : loop.blocks) {
+            std::vector<Instruction*> insts(bb->instr_list_.begin(),
+                                            bb->instr_list_.end());
+            for (auto *inst : insts) {
+                auto *gep = dynamic_cast<GetElementPtrInst*>(inst);
+                if (!gep) continue;
+                unsigned numIdx = gep->num_ops_ - 1;
+                if (numIdx < 2) continue;
 
+                // Find first variant index
+                unsigned splitIdx = 0;
+                for (unsigned i = 1; i <= numIdx; i++) {
+                    if (!isInvariant(gep->get_operand(i), loop.blocks,
+                                     emptyHoist, &loop))
+                        break;
+                    splitIdx = i;
+                }
+                if (splitIdx == 0 || splitIdx == numIdx) continue;
+
+                // Build invariant prefix GEP
+                std::vector<Value*> prefixIdxs;
+                for (unsigned i = 1; i <= splitIdx; i++)
+                    prefixIdxs.push_back(gep->get_operand(i));
+                auto *prefixGEP = new GetElementPtrInst(
+                    gep->get_operand(0), prefixIdxs, bb, true);
+
+                bool inserted = bb->add_instruction_before_inst(prefixGEP, inst);
+                if (!inserted) {
+                    prefixGEP->remove_use_of_ops();
+                    delete prefixGEP;
+                    continue;
+                }
+
+                // Build variant suffix GEP using the prefix as base
+                std::vector<Value*> variantIdxs;
+                for (unsigned i = splitIdx + 1; i <= numIdx; i++)
+                    variantIdxs.push_back(gep->get_operand(i));
+                auto *suffixGEP = GetElementPtrInst::create_split_suffix_gep(
+                    prefixGEP, variantIdxs, bb, true);
+
+                inserted = bb->add_instruction_before_inst(suffixGEP, inst);
+                if (!inserted) {
+                    bb->delete_instr(prefixGEP);
+                    suffixGEP->remove_use_of_ops();
+                    delete suffixGEP;
+                    continue;
+                }
+
+                // Replace original with suffix; prefix/suffix are already inserted
+                // immediately before the original GEP in BB order.
+                inst->replace_all_use_with(suffixGEP);
+                bb->delete_instr(inst);
+                changed = true;
+            }
+        }
+    }
+#endif
     bool progress = true;
     while (progress) {
         progress = false;

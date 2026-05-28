@@ -68,10 +68,10 @@ namespace std {
 static bool is_safe_to_eliminate(Instruction *inst) {
     if (inst->is_void()) return false;          // store / br / ret / void call
     if (inst->is_call()) return false;
-    if (inst->is_load() || inst->is_store()) return false;
+    if (inst->is_store()) return false;
     if (inst->is_alloca()) return false;
     if (inst->is_phi()) return false;
-    return true;  // Binary/Unary/ICmp/FCmp/GetElementPtr/ZExt/FPtoSI/SItoFP/BitCast
+    return true;  // Load/Binary/Unary/ICmp/FCmp/GetElementPtr/ZExt/FPtoSI/SItoFP/BitCast
 }
 
 // 判断二元运算是否可交换
@@ -218,6 +218,18 @@ static void global_cse_on_function(Function *func) {
     std::unordered_map<ExprSignature, Value*> scope_map;
 
     std::function<void(BasicBlock*)> dfs = [&](BasicBlock *bb) {
+        // 进入新基本块时，清除父块缓存的 load 条目。
+        // 跨块 load CSE 需要正确的别名/存储分析，仅靠支配树作用域不够：
+        // 兄弟块中的 store 可能尚未处理，却已错误消除另一兄弟块中的 load。
+        if (bb != entry) {
+            for (auto si = scope_map.begin(); si != scope_map.end(); ) {
+                if (si->first.op_id == Instruction::Load)
+                    si = scope_map.erase(si);
+                else
+                    ++si;
+            }
+        }
+
         std::vector<Instruction*> to_delete;
         std::vector<ExprSignature> added_sigs;   // 本块添加的签名，用于退出时擦除
 
@@ -227,6 +239,14 @@ static void global_cse_on_function(Function *func) {
 
             if (!is_safe_to_eliminate(inst)) {
                 vn_map[inst] = inst;
+                if (inst->is_store() || inst->is_call()) {
+                    for (auto si = scope_map.begin(); si != scope_map.end(); ) {
+                        if (si->first.op_id == Instruction::Load)
+                            si = scope_map.erase(si);
+                        else
+                            ++si;
+                    }
+                }
                 continue;
             }
 
