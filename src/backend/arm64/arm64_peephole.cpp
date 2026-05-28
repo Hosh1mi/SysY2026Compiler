@@ -537,8 +537,10 @@ static bool tryRedundantSub(std::vector<ParsedLine> &lines, size_t idx) {
 }
 
 // Rule 8: store-load forwarding through x17 (after sub x17, x29, #N)
-//   sub x17, x29, #N  then  str rA, [x17]  then  (no write x17)  ldr rB, [x17]
-//   →  keep sub+str,  change ldr to mov rB, rA
+//   sub x17, x29, #N  then  str rA, [x17]  then later sub x17, x29, #N  ldr rB, [x17]
+//   →  keep sub+str, replace the later sub+ldr with mov rB, rA.
+// x17 may be temporarily reused (sub to a different offset) between the
+// store and the load, as long as the original slot [x29-#N] isn't overwritten.
 static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 	// Look for: sub x17, x29, #N at idx, then str rA, [x17] at idx+1
 	auto &l0 = lines[idx];
@@ -546,7 +548,12 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 	if (l0.operands.size() < 3) return false;
 	if (l0.operands[0] != "x17" || l0.operands[1] != "x29") return false;
 
-	auto w = instructionWindow(lines, idx + 1, 4); // 4-insn window for sub+str+...+ldr
+	// Extract the immediate offset from the first sub
+	const std::string &immStr0 = l0.operands[2];
+	if (immStr0.empty() || immStr0[0] != '#') return false;
+	int origImm = std::atoi(immStr0.c_str() + 1);
+
+	auto w = instructionWindow(lines, idx + 1, 20);
 	if (w.size() < 2) return false;
 
 	// First instruction after sub must be str rA, [x17]
@@ -560,35 +567,61 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 	if (cls != 'w' && cls != 'x' && cls != 's') return false;
 	if (srcReg == "wzr" || srcReg == "xzr") return false;
 
-	// Scan remaining window for ldr rB, [x17]
+	// Track x17: which slot it points to, whether orig slot was overwritten
+	int curImm = origImm;
+	bool origOverwritten = false;
+
 	for (size_t j = 1; j < w.size(); ++j) {
 		auto &li = lines[w[j]];
-		if (li.mnemonic != "ldr") {
 		if (isCallBarrier(li.mnemonic)) return false;
-		if (lineWritesReg(li, "x17")) return false;
 		if (lineWritesReg(li, srcReg)) return false;
-		if (li.mnemonic == "str" && li.operands.size() >= 2) {
-			auto mi = parseMemOp(li.operands[1]);
-			if (mi.valid && mi.base == "x17") return false; // str via x17 overwrites
+
+		// sub x17, x29, #M: x17 now points to slot M
+		if (li.mnemonic == "sub" && li.operands.size() >= 3 &&
+		    li.operands[0] == "x17" && li.operands[1] == "x29") {
+			const std::string &imm2 = li.operands[2];
+			if (!imm2.empty() && imm2[0] == '#')
+				curImm = std::atoi(imm2.c_str() + 1);
+			continue;
 		}
-		continue;
+		// Any non-sub write to x17 loses our address
+		if (lineWritesReg(li, "x17")) return false;
+
+		// str/stp via x17 overwrites the CURRENT slot
+		if (li.mnemonic == "str" || li.mnemonic == "stp") {
+			int opIdx = (li.mnemonic == "str" && li.operands.size() >= 2) ? 1 : -1;
+			if (li.mnemonic == "stp" && li.operands.size() >= 3) opIdx = 2;
+			if (opIdx >= 0) {
+				auto mi = parseMemOp(li.operands[opIdx]);
+				if (mi.valid && mi.base == "x17" && curImm == origImm)
+					origOverwritten = true;
+			}
+			continue;
 		}
+
+		// ldr via x17: load from current slot
+		if (li.mnemonic != "ldr") continue;
 		if (li.operands.size() < 2) continue;
 		auto mLdr = parseMemOp(li.operands[1]);
 		if (!mLdr.valid || mLdr.base != "x17") continue;
+		if (curImm != origImm || origOverwritten) continue;
 
 		std::string dstReg = li.operands[0];
 		if (regClass(dstReg) != cls) return false;
 
-		if (dstReg == srcReg) {
-		li.raw.clear();
-		li.kind = LineKind::Empty;
+		// Found! Replace the preceding sub + this ldr with mov.
+		if (dstReg != srcReg) {
+			std::string movOp = (cls == 's') ? "fmov" : "mov";
+			li.raw = makeInsn(movOp, {dstReg, srcReg});
+			li.mnemonic = movOp;
+			li.operands = {dstReg, srcReg};
 		} else {
-		std::string movOp = (cls == 's') ? "fmov" : "mov";
-		li.raw = makeInsn(movOp, {dstReg, srcReg});
-		li.mnemonic = movOp;
-		li.operands = {dstReg, srcReg};
+			li.raw.clear();
+			li.kind = LineKind::Empty;
 		}
+		// Also delete the sub that set up this ldr (turns to empty)
+		lines[w[j-1]].raw.clear();
+		lines[w[j-1]].kind = LineKind::Empty;
 		return true;
 	}
 	return false;

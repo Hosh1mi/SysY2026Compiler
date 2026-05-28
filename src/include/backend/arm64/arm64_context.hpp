@@ -63,6 +63,7 @@ private:
     // PHI resolution
     void preparePhi();
     void emitPhiCopies(BasicBlock *pred, BasicBlock *succ);
+    void emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br);
 
     const char *icmpCond(ICmpInst::ICmpOp op);
     const char *fcmpCond(FCmpInst::FCmpOp op);
