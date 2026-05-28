@@ -22,7 +22,7 @@ private:
                                std::vector<BasicBlock*> &newBBs);
 };
 
-constexpr int INLINE_THRESHOLD = 50;
+constexpr int INLINE_THRESHOLD = 70;
 constexpr int INLINE_ALWAYS_THRESHOLD = 6;
 constexpr int INLINE_LOOP_THRESHOLD = 30;
-constexpr int INLINE_COST_BUDGET = 200;
+constexpr int INLINE_COST_BUDGET = 300;

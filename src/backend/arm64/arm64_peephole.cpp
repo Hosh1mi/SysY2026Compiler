@@ -680,6 +680,16 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 		// Also delete the sub that set up this ldr (turns to empty)
 		lines[w[j-1]].raw.clear();
 		lines[w[j-1]].kind = LineKind::Empty;
+		
+		// Delete the sub that set up this ldr, but only if it
+		// actually is a sub (Rule 7 may have already deleted it).
+		auto &prevLine = lines[w[j-1]];
+		if (prevLine.mnemonic == "sub" && prevLine.operands.size() >= 3 &&
+		    prevLine.operands[0] == "x17" && prevLine.operands[1] == "x29") {
+			prevLine.raw.clear();
+			prevLine.kind = LineKind::Empty;
+		}
+
 		return true;
 	}
 	return false;
