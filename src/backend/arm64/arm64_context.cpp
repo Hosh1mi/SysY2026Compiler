@@ -422,16 +422,31 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Store: {
         auto val = inst->get_operand(0);
         auto ptr = inst->get_operand(1);
-        std::string addr = loadAddr(ptr);
-        if (isFloat(val->type_)) {
-            std::string r = loadFloat(val);
-            os_ << "\tstr " << r << ", [" << addr << "]\n";
-        } else if (isPtr(val->type_)) {          
-            std::string r = loadAddr(val);       
-            os_ << "\tstr " << r << ", [" << addr << "]\n";
+        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+            std::string base = allocAddrReg();
+            os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
+            if (isFloat(val->type_)) {
+                std::string r = loadFloat(val);
+                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+            } else if (isPtr(val->type_)) {
+                std::string r = loadAddr(val);
+                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+            } else {
+                std::string r = loadInt(val);
+                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+            }
         } else {
-            std::string r = loadInt(val);
-            os_ << "\tstr " << r << ", [" << addr << "]\n";
+            std::string addr = loadAddr(ptr);
+            if (isFloat(val->type_)) {
+                std::string r = loadFloat(val);
+                os_ << "\tstr " << r << ", [" << addr << "]\n";
+            } else if (isPtr(val->type_)) {
+                std::string r = loadAddr(val);
+                os_ << "\tstr " << r << ", [" << addr << "]\n";
+            } else {
+                std::string r = loadInt(val);
+                os_ << "\tstr " << r << ", [" << addr << "]\n";
+            }
         }
         break;
     }
@@ -439,19 +454,37 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     // ---- Load ----
     case Instruction::Load: {
         auto ptr = inst->get_operand(0);
-        std::string addr = loadAddr(ptr);
-        if (isFloat(inst->type_)) {
-            std::string r = allocFloatReg();
-            os_ << "\tldr " << r << ", [" << addr << "]\n";
-            storeFloat(inst, r);
-        } else if (isPtr(inst->type_)) {
-            std::string r = allocAddrReg();
-            os_ << "\tldr " << r << ", [" << addr << "]\n";
-            storeAddr(inst, r);
+        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+            std::string base = allocAddrReg();
+            os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
+            if (isFloat(inst->type_)) {
+                std::string r = allocFloatReg();
+                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                storeFloat(inst, r);
+            } else if (isPtr(inst->type_)) {
+                std::string r = allocAddrReg();
+                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                storeAddr(inst, r);
+            } else {
+                std::string r = allocIntReg();
+                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                storeInt(inst, r);
+            }
         } else {
-            std::string r = allocIntReg();
-            os_ << "\tldr " << r << ", [" << addr << "]\n";
-            storeInt(inst, r);
+            std::string addr = loadAddr(ptr);
+            if (isFloat(inst->type_)) {
+                std::string r = allocFloatReg();
+                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                storeFloat(inst, r);
+            } else if (isPtr(inst->type_)) {
+                std::string r = allocAddrReg();
+                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                storeAddr(inst, r);
+            } else {
+                std::string r = allocIntReg();
+                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                storeInt(inst, r);
+            }
         }
         break;
     }
