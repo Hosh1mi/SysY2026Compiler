@@ -12,6 +12,7 @@ prompt/
 *.swp
 *.swo
 *.s
+*.ll
 out
 checklist.md
 test/performance/
