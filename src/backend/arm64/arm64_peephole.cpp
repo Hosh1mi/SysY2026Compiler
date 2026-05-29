@@ -677,9 +677,6 @@ static bool tryStoreLoadForwardX17(std::vector<ParsedLine> &lines, size_t idx) {
 			li.raw.clear();
 			li.kind = LineKind::Empty;
 		}
-		// Also delete the sub that set up this ldr (turns to empty)
-		lines[w[j-1]].raw.clear();
-		lines[w[j-1]].kind = LineKind::Empty;
 		
 		// Delete the sub that set up this ldr, but only if it
 		// actually is a sub (Rule 7 may have already deleted it).
