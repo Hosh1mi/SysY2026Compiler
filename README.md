@@ -6,40 +6,81 @@
 
 <table>
   <tr style="background-color:#f6f8fa;">
-    <th style="width:25%">模块</th>
-    <th>待办事项</th>
+    <th style="width:25%">Module</th>
+    <th>TODO</th>
   </tr>
   
   <tr>
-    <td rowspan="8" style="vertical-align:top;"><b>中端优化</b></td>
-    <td>新增 LoopRotate 变换 pass</td>
+    <td style="vertical-align:top;"><b>Mid-opt</b></td>
+    <td>LoopRotate pass</td>
   </tr>
-  <tr><td>新增 LoopTiling 分块 pass</td></tr>
-  <tr><td>新增 LoopInterchange 交换 pass</td></tr>
-  <tr><td>矩阵乘法内层循环展开</td></tr>
-  <tr><td>实现更彻底的死代码消除（DCE）</td></tr>
-  <tr><td>实现稀疏条件常量传播（SCCP）</td></tr>
-  <tr><td>用正规 InstCombine 替换现有 algebraSimplify</td></tr>
-  <tr><td>将 CSE 拆分为 EarlyCSE 与 GVN 两个独立 pass</td></tr>
+  <tr>
+    <td></td>
+    <td>LoopTiling pass</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>LoopInterchange pass</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>矩阵乘法内层循环展开</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>实现更彻底的死代码消除（DCE）</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>实现稀疏条件常量传播（SCCP）</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>用正规 InstCombine 替换现有 algebraSimplify</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>将 CSE 拆分为 EarlyCSE 与 GVN pass</td>
+  </tr>
   
   <tr>
     <td><b>Pass 管理</b></td>
-    <td>建立合理的 pass 顺序管理机制</td>
+    <td>建立合理的 pass 顺序管理机制（可能需要使某些pass存在返回值）</td>
   </tr>
   
   <tr>
-    <td rowspan="5" style="vertical-align:top;"><b>后端改进</b></td>
-    <td>拆分 backend 巨型文件，按功能模块化</td></tr>
-  <tr><td>实现叶子函数栈帧省略优化</td></tr>
-  <tr><td>完善 NEON 指令支持，使所有预期指令工作</td></tr>
-  <tr><td>规范化汇编头部全局量的分布方式</td></tr>
-  <tr><td>将 label 改为具体有意义的命名</td></tr>
+    <td style="vertical-align:top;"><b>Backend</b></td>
+    <td>拆分巨型文件</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>实现叶子函数栈帧省略优化</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>去掉arm64前缀</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>完善 NEON 指令支持</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>规范头部全局量分布</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>label 具体有意义的命名</td>
+  </tr>
   
   <tr>
-    <td rowspan="2" style="vertical-align:top;"><b>问题修复</b></td>
-    <td>排查部分测试集上寄存器溢出到栈的异常情况</td>
+    <td style="vertical-align:top;"><b>问题修复</b></td>
+    <td>排查部分测试集上函数内联后寄存器溢出的异常情况</td>
   </tr>
-  <tr><td>修复魔数相关算法的实现错误</td></tr>
+  <tr>
+    <td></td>
+    <td>修复魔数相关算法的实现错误</td>
+  </tr>
   
   <tr>
     <td><b>特性支持</b></td>
