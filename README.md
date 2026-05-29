@@ -4,125 +4,48 @@
 
 ### TODO
 
-- LICM不完整
-- 矩阵乘法的内层循环展开
-- CSE无作用
-- sdiv彻底消除
-- loopTiling
-- loopInterchange
-- 寄存器极度溢出
-- 地址计算强度消减
-- sxtw冗余(maybe done)
-- 消除死move指令
-- NEON引入运算操作
-- 指令调度（存疑）
-- 寄存器粗化（用于消除冗余mov）
-- algebra Simplify 无法处理大于8的非二次幂取余
-- dce中removeDeadBlocks不可用   
-- 主要优化测试集: `performance/huffman*` `performance/matmul*` `performance/many_mat_cal*`
-
-### Mid
-
-> 块内疑似并非顺序排列
-
-#### A
-- [ ] Scalar replacement of array references → 数组引用的标量替换
-- [ ] Data-cache optimizations → 数据缓存优化
-
-#### B
-- [X] Scalar replacement of aggregates (*mem2reg*) → 聚合体的标量替换
-- [ ] Procedure integration → 过程集成（过程内联）
-- [X] Tail-call optimization, including tail-recursion elimination → 尾调用优化（包括尾递归消除）
-- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
-- [X] Interprocedural constant propagation → 过程间常量传播
-- [ ] Procedure specialization and cloning → 过程特化与克隆
-- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
-
-#### C1
-- [ ] Global value numbering → 全局值编号
-- [X] Local and global copy propagation → 局部与全局拷贝传播
-- [ ] Sparse conditional constant propagation → 稀疏条件常量传播
-- [ ] Dead-code elimination → 死代码消除
-
-#### C2
-- [X] Local and global common-subexpression elimination → 局部与全局公共子表达式消除
-- [X] Loop-invariant code motion → 循环不变代码外提
-
-#### C3
-- [ ] Partial-redundancy elimination → 部分冗余消除
-
-#### C4
-- [ ] Dead-code elimination → 死代码消除
-- [ ] Code hoisting → 代码上提
-- [ ] Induction-variable strength reduction → 归纳变量强度削弱
-- [ ] Linear-function test replacement → 线性函数测试替换
-- [ ] Induction-variable removal → 归纳变量删除
-- [ ] Unnecessary bounds-checking elimination → 不必要的边界检查消除
-- [ ] Control-flow optimizations → 控制流优化
-
-#### D
-- [ ] In-line expansion → 内联展开
-- [ ] Leaf-routine optimization → 叶例程优化
-- [ ] Shrink wrapping → 收缩包装
-- [ ] Machine idioms → 机器习语
-- [ ] Tail merging → 尾合并
-- [ ] Branch optimizations and conditional moves → 分支优化与条件传送
-- [ ] Dead-code elimination → 死代码消除
-- [ ] Software pipelining, with loop unrolling, variable expansion, register renaming, and hierarchical reduction → 软件流水（含循环展开、变量扩展、寄存器重命名和层次化归约）
-- [ ] Basic-block and branch scheduling 1 → 基本块与分支调度 1
-- [ ] Register allocation by graph coloring → 图着色寄存器分配
-- [ ] Basic-block and branch scheduling 2 → 基本块与分支调度 2
-- [ ] Intraprocedural I-cache optimization → 过程内指令缓存优化
-- [ ] Instruction prefetching → 指令预取
-- [ ] Data prefetching → 数据预取
-- [ ] Branch prediction → 分支预测
-
-#### E
-- [ ] Interprocedural register allocation → 过程间寄存器分配
-- [ ] Aggregation of global references → 全局引用的聚合
-- [ ] Interprocedural I-cache optimization → 过程间指令缓存优化
-
-#### 附加（来自图末尾）
-- [X] Constant folding → 常量折叠
-- [X] Algebraic simplifications → 代数简化
-- [ ] Reassociation → 重组
-    
-```mermaid
-flowchart TD
-    A["Scalar replacement of array references<br>Data-cache optimizations"]
-    B["Procedure integration<br>Tail-call optimization, including tail-recursion elimination<br>Scalar replacement of aggregates<br>Sparse conditional constant propagation<br>Interprocedural constant propagation<br>Procedure specialization and cloning"]
-    C1["Global value numbering<br>Local and global copy propagation<br>Sparse conditional constant propagation<br>Dead-code elimination"]
-    C2["Local and global common-subexpression elimination<br>Loop-invariant code motion"]
-    C3["Partial-redundancy elimination"]
-    C4["Dead-code elimination<br>Code hoisting<br>Induction-variable strength reduction<br>Linear-function test replacement<br>Induction-variable removal<br>Unnecessary bounds-checking elimination<br>Control-flow optimizations"]
-    D["In-line expansion<br>Leaf-routine optimization<br>Shrink wrapping<br>Machine idioms<br>Tail merging<br>Branch optimizations and conditional moves<br>Dead-code elimination<br>Software pipelining, with loop unrolling, variable expansion, register renaming, and hierarchical reduction<br>Basic-block and branch scheduling 1<br>Register allocation by graph coloring<br>Basic-block and branch scheduling 2<br>Intraprocedural I-cache optimization<br>Instruction prefetching<br>Data prefetching<br>Branch prediction"]
-    E["Interprocedural register allocation<br>Aggregation of global references<br>Interprocedural I-cache optimization"]
-    F["Constant folding"]
-    G["algebraic simplifications including reassociation"]
-
-    A --> B
-    B --> C1
-    C1 --> C2
-    C1 --> C3
-    C2 --> C4
-    C3 --> C4
-    C4 --> D
-    D --> C4
-    D --> E
-    B --> G
-    C4 --> G
-    D --> G
-    C1 --> F
-    C2 --> F
-    C3 --> F
-```
-
-### backend
-
-- [X] 线性扫描分配寄存器
-- [ ] 图着色分配寄存器
-- [X] 多线程 
-- [X] 窥孔优化
+<table>
+  <tr style="background-color:#f6f8fa;">
+    <th style="width:25%">模块</th>
+    <th>待办事项</th>
+  </tr>
+  
+  <tr>
+    <td rowspan="8" style="vertical-align:top;"><b>中端优化</b></td>
+    <td>新增 LoopRotate 变换 pass</td>
+  </tr>
+  <tr><td>新增 LoopTiling 分块 pass</td></tr>
+  <tr><td>新增 LoopInterchange 交换 pass</td></tr>
+  <tr><td>矩阵乘法内层循环展开</td></tr>
+  <tr><td>实现更彻底的死代码消除（DCE）</td></tr>
+  <tr><td>实现稀疏条件常量传播（SCCP）</td></tr>
+  <tr><td>用正规 InstCombine 替换现有 algebraSimplify</td></tr>
+  <tr><td>将 CSE 拆分为 EarlyCSE 与 GVN 两个独立 pass</td></tr>
+  
+  <tr>
+    <td><b>Pass 管理</b></td>
+    <td>建立合理的 pass 顺序管理机制</td>
+  </tr>
+  
+  <tr>
+    <td rowspan="5" style="vertical-align:top;"><b>后端改进</b></td>
+    <td>拆分 backend 巨型文件，按功能模块化</td></tr>
+  <tr><td>实现叶子函数栈帧省略优化</td></tr>
+  <tr><td>完善 NEON 指令支持，使所有预期指令工作</td></tr>
+  <tr><td>规范化汇编头部全局量的分布方式</td></tr>
+  <tr><td>将 label 改为具体有意义的命名</td></tr>
+  
+  <tr>
+    <td rowspan="2" style="vertical-align:top;"><b>问题修复</b></td>
+    <td>排查部分测试集上寄存器溢出到栈的异常情况</td>
+  </tr>
+  <tr><td>修复魔数相关算法的实现错误</td></tr>
+  
+  <tr>
+    <td><b>特性支持</b></td>
+    <td>完整支持 Vec 向量类型</td>
+  </tr>
+</table>
 
 ## 项目结构
 
