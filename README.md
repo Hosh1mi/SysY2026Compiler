@@ -88,22 +88,6 @@
   </tr>
 </table>
 
-## 项目结构
-
-```text
-root/
-├── archive/
-├── lib/
-├── test/
-└── src/
-    ├── include/
-    ├── frontend/
-    ├── mid/
-    ├── backend/
-    └── main.cpp
-```
-- `archive/`下存放了可进行正确性测试的脚本（-O0），运行后会在根目录生成`checklist.md`
-
 ## 项目运行
 
 使用根目录下使用docker搭建环境，推荐使用以下命令以防止flex/bison生成文件里包含特定用户路径：
