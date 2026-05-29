@@ -33,6 +33,7 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::Alloca, "alloca"},
     {Instruction::Load, "load"},
     {Instruction::Store, "store"},
+    {Instruction::Select, "select"},
     {Instruction::GetElementPtr, "getelementptr"},
     {Instruction::ZExt, "zext"},
     {Instruction::FPtoSI, "fptosi"},
@@ -218,6 +219,15 @@ std::string FCmpInst::print() {
     } else {
         instr_ir += print_as_op(this->get_operand(1), true);
     }
+    return instr_ir;
+}
+
+// %v = select i1 %cond, %true_val, %false_val
+std::string SelectInst::print() {
+    std::string instr_ir = "%" + this->name_ + " = select i1 "
+        + print_as_op(this->get_operand(0), false) + ", "
+        + print_as_op(this->get_operand(1), true) + ", "
+        + print_as_op(this->get_operand(2), true);
     return instr_ir;
 }
 

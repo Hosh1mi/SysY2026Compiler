@@ -1,7 +1,9 @@
 #include "../../include/mid/opt/CFGSimplify.hpp"
 #include "../../include/mid/ir/ir.hpp"
-#include <vector>
+#include "../../include/mid/ir/instruction.hpp"
+#include <algorithm>
 #include <queue>
+#include <vector>
 
 // 辅助函数：在 succ 的所有 phi 中删除 deadBlock 对应的入边
 static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
@@ -248,19 +250,191 @@ static bool foldConstantBranches(Function *func) {
     return changed;
 }
 
-// 主入口
+// ── helpers for diamond→select conversion ──────────────────────────
+
+static bool isSafeToSpeculate(Instruction *inst) {
+    if (inst->is_load())  return false;
+    if (inst->is_store()) return false;
+    if (inst->is_call())  return false;
+    if (inst->is_div())   return false;
+    if (inst->is_rem())   return false;
+    if (inst->is_ret())   return false;
+    if (inst->is_br())    return false;
+    return true;
+}
+
+static bool operandsAvailableInBlock(Instruction *inst, BasicBlock *targetBB) {
+    for (unsigned i = 0; i < inst->num_ops_; i++) {
+        auto *def = dynamic_cast<Instruction*>(inst->get_operand(i));
+        if (!def) continue;
+        if (def->parent_ == inst->parent_) return false;
+    }
+    return true;
+}
+
+// Clone a speculate-safe instruction.  Only BinaryInst (add/sub/mul/etc.)
+// appears in practice; other types fall through to nullptr (safe skip).
+static Instruction *cloneInstruction(Instruction *inst, BasicBlock *newBB) {
+    if (auto *bin = dynamic_cast<BinaryInst*>(inst))
+        return new BinaryInst(inst->type_, bin->op_id_,
+            bin->get_operand(0), bin->get_operand(1), newBB, true);
+    return nullptr;
+}
+
+// Convert if-else diamond patterns to select instructions.
+//   BB_cond: icmp + br → BB_true / BB_false
+//   BB_true: 1 inst + br → BB_merge
+//   BB_false: 1 inst + br → BB_merge (or BB_false == BB_merge)
+//   BB_merge: phi taking values from the two paths
+// →
+//   BB_cond: select → br BB_merge  (true/false handled by dead-block cleanup)
+bool CFGSimplify::convertDiamondsToSelect(Function *func) {
+    bool changed = false;
+
+    for (auto *bb : func->basic_blocks_) {
+        auto *term = bb->get_terminator();
+        if (!term || !term->is_br() || term->num_ops_ != 3) continue;
+
+        auto *icmp = dynamic_cast<ICmpInst*>(term->get_operand(0));
+        if (!icmp || icmp->parent_ != bb) continue;
+        auto it = std::find(bb->instr_list_.rbegin(), bb->instr_list_.rend(), term);
+        if (it == bb->instr_list_.rend() || *++it != icmp) continue;
+        if (icmp->use_list_.size() != 1) continue;
+
+        auto *trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
+        auto *falseBB = static_cast<BasicBlock*>(term->get_operand(2));
+        if (trueBB == falseBB) continue;
+
+        // CFG: true/false must have exactly one predecessor (this cond block)
+        if (trueBB->pre_bbs_.size() != 1) continue;
+
+        auto getSingle = [](BasicBlock *b) -> Instruction* {
+            Instruction *f = nullptr;
+            for (auto *i : b->instr_list_) {
+                if (i->is_phi()) continue;
+                if (i->isTerminator()) break;
+                if (f) return nullptr;
+                f = i;
+            }
+            return f;
+        };
+
+        Instruction *trueInst = getSingle(trueBB);
+        if (!trueInst) continue;
+        auto *trueTerm = trueBB->get_terminator();
+        if (!trueTerm || !trueTerm->is_br() || trueTerm->num_ops_ != 1) continue;
+        auto *mergeBB = static_cast<BasicBlock*>(trueTerm->get_operand(0));
+
+        // Pattern B: false path goes directly to merge
+        bool isPatternB = (falseBB == mergeBB);
+        Instruction *falseInst = nullptr;
+        if (!isPatternB) {
+            falseInst = getSingle(falseBB);
+            if (!falseInst) continue;
+            auto *falseTerm = falseBB->get_terminator();
+            if (!falseTerm || !falseTerm->is_br() || falseTerm->num_ops_ != 1) continue;
+            if (static_cast<BasicBlock*>(falseTerm->get_operand(0)) != mergeBB) continue;
+        }
+
+        // Safety: only speculate-safe instructions
+        if (!isSafeToSpeculate(trueInst)) continue;
+        if (falseInst && !isSafeToSpeculate(falseInst)) continue;
+        if (!operandsAvailableInBlock(trueInst, bb)) continue;
+        if (falseInst && !operandsAvailableInBlock(falseInst, bb)) continue;
+
+        // Find phi in mergeBB
+        PhiInst *phi = nullptr;
+        Value *falseVal = nullptr;
+        for (auto *i : mergeBB->instr_list_) {
+            if (!i->is_phi()) break;
+            auto *p = static_cast<PhiInst*>(i);
+            Value *vT = nullptr, *vF = nullptr;
+            for (unsigned k = 0; k < p->num_ops_; k += 2) {
+                if (static_cast<BasicBlock*>(p->get_operand(k + 1)) == trueBB)
+                    vT = p->get_operand(k);
+                if (falseInst && static_cast<BasicBlock*>(p->get_operand(k + 1)) == falseBB)
+                    vF = p->get_operand(k);
+                if (isPatternB && static_cast<BasicBlock*>(p->get_operand(k + 1)) == bb)
+                    vF = p->get_operand(k);
+            }
+            if (vT == trueInst && vF) { phi = p; falseVal = vF; break; }
+        }
+        if (!phi || !falseVal) continue;
+
+        // Phi must have exactly 2 incoming edges (from the diamond only).
+        // Additional edges mean the phi is used outside this diamond;
+        // replacing it would break SSA dominance.
+        if (phi->num_ops_ != 4) continue;
+
+        // Only convert if mergeBB has at most 0 non-phi, non-terminator
+        // instruction.  This prevents the select's register from being
+        // clobbered by other instructions in the merge block (critical
+        // for loop-carried values).
+        {
+            int nonPhiCount = 0;
+            for (auto *i : mergeBB->instr_list_) {
+                if (i->is_phi()) continue;
+                if (i->isTerminator()) break;
+                if (++nonPhiCount > 1) break;
+            }
+            if (nonPhiCount > 0) continue;
+        }
+
+        // Clone the speculate-safe instructions into condBB
+        auto *trueClone = cloneInstruction(trueInst, bb);
+        if (!trueClone) continue;
+        bb->add_instruction_before_inst(trueClone, term);
+
+        Value *falseOperand = falseVal;
+        if (falseInst) {
+            auto *falseClone = cloneInstruction(falseInst, bb);
+            if (!falseClone) continue;
+            bb->add_instruction_before_inst(falseClone, term);
+            falseOperand = falseClone;
+        }
+
+        // Create select; keep phi as a relay (don't delete it)
+        auto *sel = new SelectInst(icmp, trueClone, falseOperand, trueClone->type_);
+        bb->add_instruction_before_inst(sel, term);
+        phi->replace_all_use_with(sel);
+        // Don't delete phi — it may have uses from outside the diamond
+        // (loop back-edges).  RemoveRedundantPhis will clean it up later.
+
+        // Replace conditional branch with unconditional jump to mergeBB
+        bb->delete_instr(term);
+        for (auto *old : bb->succ_bbs_)
+            old->remove_pre_basic_block(bb);
+        bb->succ_bbs_.clear();
+        bb->succ_bbs_.push_back(mergeBB);
+        // mergeBB->add_pre_basic_block(bb);
+        new BranchInst(mergeBB, bb);  // ← was missing! Phi copies need this.
+
+        // Fix merge predecessor links: remove trueBB/falseBB
+        mergeBB->remove_pre_basic_block(trueBB);
+        if (!isPatternB)
+            mergeBB->remove_pre_basic_block(falseBB);
+        mergeBB->add_pre_basic_block(bb);
+        changed = true;
+    }
+
+    return changed;
+}
+
 void CFGSimplify::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
 
+        // 0. diamond→select: clone + speculate, select creation
+        // convertDiamondsToSelect(func);
+
         bool changed = true;
         while (changed) {
             changed = false;
-
+            changed |= convertDiamondsToSelect(func);
             // 1. 折叠常量分支
             changed |= foldConstantBranches(func);
 
-            // 2. 合并空基本块
+            // 3. 合并空基本块
             // 需要遍历副本，因为集合在遍历中可能被修改
             std::vector<BasicBlock *> bbs(func->basic_blocks_.begin(), func->basic_blocks_.end());
             for (auto *bb : bbs) {

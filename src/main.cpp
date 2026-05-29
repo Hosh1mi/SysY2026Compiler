@@ -134,6 +134,12 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
 
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
+        pm.addPass(std::make_unique<ConstantFold>());         // 折叠内联后常量
+        pm.addPass(std::make_unique<CFGSimplify>());          // 内联后化简 CFG
+        pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理冗余 phi
+        pm.addPass(std::make_unique<ConstantFold>());         // 折叠内联后常量
+        pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
+
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<ConstantFold>());         // 外提后折叠

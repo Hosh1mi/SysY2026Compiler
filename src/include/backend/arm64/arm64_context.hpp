@@ -63,6 +63,8 @@ private:
     // PHI resolution
     void preparePhi();
     void emitPhiCopies(BasicBlock *pred, BasicBlock *succ);
+    bool tryEmitCSel(ICmpInst *icmp, BranchInst *br);
+    bool tryEmitCCmpCSel(ICmpInst *icmp, BranchInst *br);
     void emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br);
 
     const char *icmpCond(ICmpInst::ICmpOp op);
@@ -79,6 +81,8 @@ private:
     std::set<int> usedFloatRegs_;
     std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7, v16-v31
     std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
+    std::set<BasicBlock*> blockSkipped_;  // blocks handled by csel, don't emit
+    std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
     std::string deferredNEONCode_;        // NEON asm deferred to emit at correct position
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)

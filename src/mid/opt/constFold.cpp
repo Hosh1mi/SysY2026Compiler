@@ -33,6 +33,19 @@ bool ConstantFold::runOnFunction(Function *func, Module *module) {
 }
 
 Constant* ConstantFold::tryFold(Instruction *instr, Module *module) {
+    // Phi 节点：若所有 incoming 值（排除自引用）相同且为常数，替换为该常数
+    if (auto *phi = dynamic_cast<PhiInst*>(instr)) {
+        Value *common = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            Value *v = phi->get_operand(i);
+            if (v == phi) continue;          // skip self-reference
+            if (!common) common = v;
+            else if (common != v) return nullptr;
+        }
+        if (auto *c = dynamic_cast<Constant*>(common))
+            return c;
+        return nullptr;
+    }
     // 二元算术指令
     if (auto *bin = dynamic_cast<BinaryInst*>(instr)) {
         return foldBinary(bin, module);

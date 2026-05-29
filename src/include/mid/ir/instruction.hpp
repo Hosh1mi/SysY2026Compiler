@@ -21,6 +21,7 @@ public:
         FAdd, FSub, FMul, FDiv,                 // 浮点二元运算
         Shl, LShr, AShr, And, Or, Xor,           // 位运算
         Alloca, Load, Store,                     // 内存操作
+        Select,                                  // select i1 cond, T val1, F val2
         GetElementPtr,                           // 地址计算
         ZExt, FPtoSI, SItoFP, BitCast,           // 类型转换
         ICmp, FCmp, PHI, Call                    // 比较、phi、调用
@@ -171,6 +172,21 @@ public:
     }
     virtual std::string print() override;
     FCmpOp fcmp_op_;
+};
+
+// select i1 %cond, T %true_val, F %false_val  →  backend: csel
+class SelectInst : public Instruction {
+public:
+    SelectInst(Value *cond, Value *tv, Value *fv, BasicBlock *bb)
+        : Instruction(tv->type_, Instruction::Select, 3, bb) {
+        set_operand(0, cond); set_operand(1, tv); set_operand(2, fv);
+    }
+    // no-insert constructor (caller adds to BB manually)
+    SelectInst(Value *cond, Value *tv, Value *fv, Type *ty)
+        : Instruction(ty, Instruction::Select, 3) {
+        set_operand(0, cond); set_operand(1, tv); set_operand(2, fv);
+    }
+    virtual std::string print() override;
 };
 
 // 函数调用
