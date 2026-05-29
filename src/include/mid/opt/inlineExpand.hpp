@@ -11,6 +11,9 @@ private:
     unsigned countCallSites(Function *callee, Module *module);
     unsigned countInstructions(Function *func);
     bool hasLoops(Function *func);
+    bool isCallInLoop(CallInst *call);
+    int weighInstruction(Instruction *inst);
+    int estimateConstantFoldBenefit(CallInst *call, Function *callee);
     // 返回内联过程中新产生的 call 指令列表
     std::vector<CallInst*> performInline(CallInst *callInst);
     std::vector<BasicBlock*> getRPO(Function *func);
@@ -22,7 +25,8 @@ private:
                                std::vector<BasicBlock*> &newBBs);
 };
 
-constexpr int INLINE_THRESHOLD = 70;
+constexpr int INLINE_THRESHOLD = 80;
 constexpr int INLINE_ALWAYS_THRESHOLD = 6;
-constexpr int INLINE_LOOP_THRESHOLD = 30;
 constexpr int INLINE_COST_BUDGET = 300;
+constexpr int CALL_OVERHEAD = 8;
+constexpr int LOOP_MULTIPLIER = 5;

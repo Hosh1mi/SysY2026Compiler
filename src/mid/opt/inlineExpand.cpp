@@ -48,21 +48,208 @@ unsigned InlineExpand::countInstructions(Function *func) {
     return cnt;
 }
 
+int InlineExpand::weighInstruction(Instruction *inst) {
+    switch (inst->op_id_) {
+        case Instruction::Ret:
+        case Instruction::Br:
+        case Instruction::Alloca:
+        case Instruction::PHI:
+            return 0;
+        case Instruction::Add:
+        case Instruction::Sub:
+        case Instruction::ICmp:
+        case Instruction::FCmp:
+        case Instruction::ZExt:
+        case Instruction::BitCast:
+        case Instruction::Load:
+        case Instruction::Store:
+        case Instruction::FNeg:
+            return 1;
+        case Instruction::Mul:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
+        case Instruction::FAdd:
+        case Instruction::FSub:
+        case Instruction::GetElementPtr:
+            return 2;
+        case Instruction::SDiv:
+        case Instruction::SRem:
+        case Instruction::UDiv:
+        case Instruction::URem:
+        case Instruction::FMul:
+        case Instruction::FDiv:
+            return 4;
+        case Instruction::Call: {
+            // For calls to functions that will certainly be inlined,
+            // use the callee's weight instead of the expensive call weight.
+            auto *callee = dynamic_cast<Function*>(
+                inst->get_operand(inst->num_ops_ - 1));
+            if (callee && !callee->is_declaration() &&
+                countInstructions(callee) <= INLINE_ALWAYS_THRESHOLD) {
+                int w = 0;
+                for (auto bb : callee->basic_blocks_)
+                    for (auto i : bb->instr_list_)
+                        w += weighInstruction(i);
+                return w;
+            }
+            return 5;
+        }
+        case Instruction::FPtoSI:
+        case Instruction::SItoFP:
+            return 5;
+        default:
+            return 2;
+    }
+}
+
+
+int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) {
+    // Phase A: seed known-constant set from constant actual arguments
+    std::unordered_set<Value*> knownConst;
+    unsigned numArgs = std::min((unsigned)callee->arguments_.size(),
+                                call->num_ops_ - 1);
+    for (unsigned i = 0; i < numArgs; i++) {
+        Value *actual = call->get_operand(i);
+        if (dynamic_cast<ConstantInt*>(actual) ||
+            dynamic_cast<ConstantFloat*>(actual) ||
+            dynamic_cast<ConstantZero*>(actual)) {
+            knownConst.insert(callee->arguments_[i]);
+        }
+    }
+    if (knownConst.empty()) return 0;
+
+    // Phase B: forward propagation through callee in RPO order
+    auto rpo = getRPO(callee);
+    int foldBenefit = 0;
+
+    for (auto *bb : rpo) {
+        for (auto *inst : bb->instr_list_) {
+            // Check all operands are known-constant
+            auto allConst = [&](Instruction *i) {
+                for (unsigned k = 0; k < i->num_ops_; k++) {
+                    Value *op = i->get_operand(k);
+                    // Skip basic block operands (phi incoming blocks, branch targets)
+                    if (dynamic_cast<BasicBlock*>(op)) continue;
+                    if (!knownConst.count(op)) return false;
+                }
+                return true;
+            };
+
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
+                bool allIncomingConst = true;
+                for (unsigned k = 0; k < phi->num_ops_; k += 2) {
+                    Value *incVal = phi->get_operand(k);
+                    if (!knownConst.count(incVal)) {
+                        allIncomingConst = false;
+                        break;
+                    }
+                }
+                if (allIncomingConst && phi->num_ops_ >= 2)
+                    knownConst.insert(phi);
+            } else if (auto *bin = dynamic_cast<BinaryInst*>(inst)) {
+                if (allConst(bin)) {
+                    knownConst.insert(bin);
+                    foldBenefit += weighInstruction(bin);
+                }
+            } else if (auto *icmp = dynamic_cast<ICmpInst*>(inst)) {
+                if (allConst(icmp)) {
+                    knownConst.insert(icmp);
+                    foldBenefit += weighInstruction(icmp);
+                }
+            } else if (auto *fcmp = dynamic_cast<FCmpInst*>(inst)) {
+                if (allConst(fcmp)) {
+                    knownConst.insert(fcmp);
+                    foldBenefit += weighInstruction(fcmp);
+                }
+            } else if (auto *zext = dynamic_cast<ZextInst*>(inst)) {
+                if (knownConst.count(zext->get_operand(0))) {
+                    knownConst.insert(zext);
+                    foldBenefit += weighInstruction(zext);
+                }
+            } else if (auto *fptosi = dynamic_cast<FpToSiInst*>(inst)) {
+                if (knownConst.count(fptosi->get_operand(0))) {
+                    knownConst.insert(fptosi);
+                    foldBenefit += weighInstruction(fptosi);
+                }
+            } else if (auto *sitofp = dynamic_cast<SiToFpInst*>(inst)) {
+                if (knownConst.count(sitofp->get_operand(0))) {
+                    knownConst.insert(sitofp);
+                    foldBenefit += weighInstruction(sitofp);
+                }
+            } else if (auto *bc = dynamic_cast<Bitcast*>(inst)) {
+                if (knownConst.count(bc->get_operand(0))) {
+                    knownConst.insert(bc);
+                    foldBenefit += weighInstruction(bc);
+                }
+            } else if (auto *br = dynamic_cast<BranchInst*>(inst)) {
+                if (br->num_ops_ == 3 && knownConst.count(br->get_operand(0))) {
+                    foldBenefit += weighInstruction(br);
+                    // Dead-block sweep: blocks reachable ONLY through untaken path
+                    Value *condVal = br->get_operand(0);
+                    // We know cond is constant but not which value; conservatively
+                    // compute dead blocks for BOTH paths and take the minimum.
+                    BasicBlock *takenBB = static_cast<BasicBlock*>(br->get_operand(1));
+                    BasicBlock *untakenBB = static_cast<BasicBlock*>(br->get_operand(2));
+
+                    auto reachableFrom = [&](BasicBlock *start, BasicBlock *exclude) {
+                        std::unordered_set<BasicBlock*> visited;
+                        std::vector<BasicBlock*> stack;
+                        if (start != exclude) stack.push_back(start);
+                        while (!stack.empty()) {
+                            BasicBlock *cur = stack.back(); stack.pop_back();
+                            if (!visited.insert(cur).second) continue;
+                            if (cur == exclude) continue;
+                            auto *term = cur->get_terminator();
+                            if (!term) continue;
+                            for (unsigned k = 0; k < term->num_ops_; k++) {
+                                if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(k)))
+                                    if (!visited.count(succ) && succ != exclude)
+                                        stack.push_back(succ);
+                            }
+                        }
+                        return visited;
+                    };
+
+                    auto reachableFromTaken = reachableFrom(takenBB, nullptr);
+                    auto reachableFromUntaken = reachableFrom(untakenBB, nullptr);
+
+                    int deadFromTaken = 0, deadFromUntaken = 0;
+                    for (auto *b : rpo) {
+                        if (b == takenBB || b == untakenBB) continue;
+                        if (!reachableFromTaken.count(b)) {
+                            for (auto *i : b->instr_list_)
+                                deadFromTaken += weighInstruction(i);
+                        }
+                        if (!reachableFromUntaken.count(b)) {
+                            for (auto *i : b->instr_list_)
+                                deadFromUntaken += weighInstruction(i);
+                        }
+                    }
+                    // Conservative: use the minimum dead-block benefit
+                    foldBenefit += std::min(deadFromTaken, deadFromUntaken);
+                }
+            }
+        }
+    }
+
+    return foldBenefit;
+}
+
 bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller) {
     if (callee->is_declaration() || callee == caller)
         return false;
+    
+    unsigned raw = countInstructions(callee);
 
-    unsigned size = countInstructions(callee);
-
-    if (size > INLINE_THRESHOLD)
+    if (raw > INLINE_THRESHOLD)
         return false;
 
-    if (size <= INLINE_ALWAYS_THRESHOLD)
+    if (raw <= INLINE_ALWAYS_THRESHOLD)
         return true;
-
-    // 包含循环的函数内联收益低，使用更严格的阈值
-    if (hasLoops(callee) && size > INLINE_LOOP_THRESHOLD)
-        return false;
 
     // 递归函数内联会导致 worklist 无限展开
     for (auto bb : callee->basic_blocks_) {
@@ -79,10 +266,34 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller)
     if (sites == 1)
         return true;
 
-    if (size * sites > INLINE_COST_BUDGET)
-        return false;
+    int weightedCost = 0;
+    for (auto bb : callee->basic_blocks_)
+        for (auto inst : bb->instr_list_)
+            weightedCost += weighInstruction(inst);
 
-    return true;
+    // Estimate saved overhead and fold benefit.
+    bool callInLoop = isCallInLoop(call);
+    int savedOverhead = CALL_OVERHEAD;
+    if (callInLoop && weightedCost <= CALL_OVERHEAD * 3)
+        savedOverhead *= LOOP_MULTIPLIER;
+    int foldBenefit = estimateConstantFoldBenefit(call, callee);
+
+    // Net benefit decision
+    int netBenefit = savedOverhead + foldBenefit - weightedCost;
+
+    if (netBenefit > 0)
+        return true;
+
+    // Code bloat guard for multi-site inlines
+    int totalBloat = weightedCost * (int)sites;
+    if (totalBloat > INLINE_COST_BUDGET) {
+        // Override only if constant-fold eliminates > 50% of the function
+        if (foldBenefit < weightedCost / 2)
+            return false;
+        return true;
+    }
+
+    return false;
 }
 
 unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
@@ -100,15 +311,25 @@ unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
     return count;
 }
 
-bool InlineExpand::hasLoops(Function *func) {
+bool InlineExpand::isCallInLoop(CallInst *call) {
+    auto *bb = call->parent_;
+    auto *func = bb->parent_;
+
     auto rpo = getRPO(func);
     unordered_map<BasicBlock*, int> rpoIdx;
     for (int i = 0; i < (int)rpo.size(); ++i)
         rpoIdx[rpo[i]] = i;
-    for (auto *bb : rpo) {
-        for (auto *succ : bb->succ_bbs_) {
-            if (rpoIdx[succ] <= rpoIdx[bb])
-                return true;  // 回边 = 循环
+
+    unordered_set<BasicBlock*> visited;
+    vector<BasicBlock*> stack = {bb};
+    while (!stack.empty()) {
+        auto *cur = stack.back(); stack.pop_back();
+        if (!visited.insert(cur).second) continue;
+        for (auto *pred : cur->pre_bbs_) {
+            if (!rpoIdx.count(pred) || !rpoIdx.count(cur)) continue;
+            if (rpoIdx[pred] >= rpoIdx[cur])
+                return true;
+            stack.push_back(pred);
         }
     }
     return false;
