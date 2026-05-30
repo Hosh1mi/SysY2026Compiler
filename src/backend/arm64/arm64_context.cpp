@@ -46,8 +46,13 @@ static std::vector<int> collectAssignedIntRegs(const std::map<Value*, std::strin
     std::set<int> regs;
     for (const auto &entry : assignedRegs) {
         const std::string &reg = entry.second;
-        if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
-            regs.insert(std::stoi(reg.substr(1)));
+        if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x')) {
+            int r = std::stoi(reg.substr(1));
+            // Only callee-saved registers (r19-r28) need save/restore.
+            // Caller-saved regs (r0-r18) including pre-colored args must not
+            // be saved — doing so would clobber the return value on restore.
+            if (r >= 19) regs.insert(r);
+        }
     }
     return std::vector<int>(regs.begin(), regs.end());
 }
@@ -56,7 +61,11 @@ static std::vector<int> collectAssignedFloatRegs(const std::map<Value*, std::str
     std::set<int> regs;
     for (const auto &entry : assignedRegs) {
         const std::string &reg = entry.second;
-        if (!reg.empty() && reg[0] == 's') regs.insert(std::stoi(reg.substr(1)));
+        if (!reg.empty() && reg[0] == 's') {
+            int r = std::stoi(reg.substr(1));
+            // Only callee-saved float registers (s8-s15).
+            if (r >= 8 && r <= 15) regs.insert(r);
+        }
     }
     return std::vector<int>(regs.begin(), regs.end());
 }
@@ -254,11 +263,18 @@ void Arm64FuncContext::emitPrologue() {
         if (isFloat(arg->type_)) {
             if (floatRegIdx < 8) {
                 std::string src = "s" + std::to_string(floatRegIdx++);
-                int slot = getSlot(arg);
-                emitStoreReg(os_, src, slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
-                    if (dst != src) os_ << "\tfmov " << dst << ", " << src << "\n";
+                    if (dst == src) {
+                        // Pre-colored to incoming register — no spill needed
+                    } else {
+                        int slot = getSlot(arg);
+                        emitStoreReg(os_, src, slot);
+                        os_ << "\tfmov " << dst << ", " << src << "\n";
+                    }
+                } else {
+                    int slot = getSlot(arg);
+                    emitStoreReg(os_, src, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
@@ -283,11 +299,18 @@ void Arm64FuncContext::emitPrologue() {
                             arg->type_->tid_ == Type::ArrayTyID);
                 std::string reg = isPtr ? "x" : "w";
                 reg += std::to_string(intRegIdx++);
-                int slot = getSlot(arg);
-                emitStoreReg(os_, reg, slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg, isPtr);
-                    if (dst != reg) os_ << "\tmov " << dst << ", " << reg << "\n";
+                    if (dst == reg) {
+                        // Pre-colored to incoming register — no spill needed
+                    } else {
+                        int slot = getSlot(arg);
+                        emitStoreReg(os_, reg, slot);
+                        os_ << "\tmov " << dst << ", " << reg << "\n";
+                    }
+                } else {
+                    int slot = getSlot(arg);
+                    emitStoreReg(os_, reg, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
@@ -1404,9 +1427,35 @@ void Arm64FuncContext::allocateRegisters() {
     std::map<BasicBlock*, int> blockStart, blockEnd;
     std::map<Instruction*, int> instIdx;
 
+    // ---- 0. Leaf-function argument pre-coloring ----
+    // In leaf functions (no calls), arguments can safely stay in their
+    // incoming physical registers (w0-w7 / s0-s7) since nothing clobbers them.
+    bool isLeaf = true;
+    for (auto bb : func_->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_call()) { isLeaf = false; break; }
+        }
+        if (!isLeaf) break;
+    }
+    if (isLeaf) {
+        int intArgIdx = 0, floatArgIdx = 0;
+        for (auto arg : func_->arguments_) {
+            if (!canAssignRegister(arg)) continue;
+            if (isAllocatableFloatValue(arg->type_)) {
+                if (floatArgIdx < 8)
+                    assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
+            } else {
+                if (intArgIdx < 8) {
+                    bool isPtr = isAllocatablePtrValue(arg->type_);
+                    assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+                }
+            }
+        }
+    }
+
     int idx = 0;
     for (auto arg : func_->arguments_) {
-        if (canAssignRegister(arg)) {
+        if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
             defPos[arg] = 0;
             lastUse[arg] = 0;
         }
