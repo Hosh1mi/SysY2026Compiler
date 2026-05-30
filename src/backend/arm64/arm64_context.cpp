@@ -195,9 +195,31 @@ void Arm64FuncContext::emitPrologue() {
     os_ << "\t.p2align 2\n";
     os_ << func_->name_ << ":\n";
 
-    // allocate slots for arguments that were not promoted to registers
-    for (auto arg : func_->arguments_) {
-        getSlot(arg);
+    // Allocate slots for arguments that actually need them.
+    // Pre-colored args (leaf functions, assigned to their incoming register)
+    // stay in w0-w7/s0-s7 and never need a stack slot.
+    {
+        int intArgIdx = 0, floatArgIdx = 0;
+        for (auto arg : func_->arguments_) {
+            if (isFloat(arg->type_)) {
+                if (floatArgIdx < 8) {
+                    std::string src = "s" + std::to_string(floatArgIdx++);
+                    if (hasAssignedReg(arg) && assignedReg(arg) == src)
+                        continue; // pre-colored — no slot needed
+                }
+            } else {
+                if (intArgIdx < 8) {
+                    bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
+                                arg->type_->tid_ == Type::ArrayTyID);
+                    std::string reg = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+                    if (hasAssignedReg(arg)) {
+                        std::string dst = assignedReg(arg, isPtr);
+                        if (dst == reg) continue; // pre-colored — no slot needed
+                    }
+                }
+            }
+            getSlot(arg);
+        }
     }
 
     // pre-scan all instructions to allocate slots
@@ -209,6 +231,20 @@ void Arm64FuncContext::emitPrologue() {
                        !dynamic_cast<Constant*>(inst) &&
                        !inst->is_store() && !inst->is_br() && !inst->is_ret() &&
                        !hasAssignedReg(inst)) {
+                // Skip ICmp whose only user is a Select —
+                // the Select emits its own cmp, the ICmp is never stored.
+                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) continue;
+                }
+                // Skip Select whose only user is a Ret —
+                // the csel writes directly to w0, no stack slot needed.
+                if (inst->op_id_ == Instruction::Select &&
+                    inst->use_list_.size() == 1 &&
+                    !isFloat(inst->type_)) {
+                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+                    if (user) continue;
+                }
                 getSlot(inst);
             }
         }
