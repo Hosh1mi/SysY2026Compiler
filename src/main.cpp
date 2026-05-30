@@ -14,6 +14,7 @@
 #include "include/mid/opt/earlyCSE.hpp"
 #include "include/mid/opt/gvn.hpp"
 #include "include/mid/opt/algebraSimplify.hpp"
+#include "include/mid/opt/sccp.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
@@ -25,8 +26,42 @@
 #include "include/mid/opt/loopVectorize.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
 #include "include/mid/opt/sroa.hpp"
+#include "include/mid/opt/unifyExitNodes.hpp"
 
 #include "include/backend/arm64/arm64_codegen.hpp"
+
+// ── Pipeline helper modules ──────────────────────────────────────────
+// Group common pass sequences for reusable cleanup after transforms.
+
+// ConstantFold → AlgebraSimplify → DeadCodeDelete
+static void make_basic_clean(PassManager &pm) {
+    pm.addPass(std::make_unique<ConstantFold>());
+    pm.addPass(std::make_unique<AlgebraSimplify>());
+    pm.addPass(std::make_unique<DeadCodeDelete>());
+}
+
+// DeadCodeDelete → CFGSimplify → RemoveRedundantPhis
+static void make_cfg_clean(PassManager &pm) {
+    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<RemoveRedundantPhis>());
+}
+
+// ConstantFold → AlgebraSimplify → DeadCodeDelete → CFGSimplify → RemoveRedundantPhis
+static void make_deep_clean(PassManager &pm) {
+    make_basic_clean(pm);
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<RemoveRedundantPhis>());
+    pm.addPass(std::make_unique<DeadCodeDelete>()); // 再来一轮 DCE，清理 CFGSimplify/RemoveRedundantPhis 产生的新死代码
+}
+
+// DeadCodeDelete × 4 + CFGSimplify × 4 (aggressive post-unroll cleanup)
+static void make_unroll_clean(PassManager &pm) {
+    for (int i = 0; i < 4; i++) {
+        pm.addPass(std::make_unique<DeadCodeDelete>());
+        pm.addPass(std::make_unique<CFGSimplify>());
+    }
+}
 
 #include <fstream>
 #include <iostream>
@@ -124,36 +159,30 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
+        pm.addPass(std::make_unique<SCCP>());                  // 稀疏条件常量传播
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
-        pm.addPass(std::make_unique<ConstantFold>());         // 常数折叠
-        pm.addPass(std::make_unique<AlgebraSimplify>());      // 代数简化
+        make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
         pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 死代码消除
+        make_basic_clean(pm);
 
-        pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
         pm.addPass(std::make_unique<GVN>());                  // 全局值编号
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
+        make_basic_clean(pm);
 
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        pm.addPass(std::make_unique<ConstantFold>());         // 折叠内联后常量
-        pm.addPass(std::make_unique<CFGSimplify>());          // 内联后化简 CFG
-        pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理冗余 phi
-        pm.addPass(std::make_unique<ConstantFold>());         // 折叠内联后常量
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
+        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
 
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
-        pm.addPass(std::make_unique<ConstantFold>());         // 外提后折叠
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理外提后死代码
+        make_basic_clean(pm);
+        pm.addPass(std::make_unique<SCCP>());                  // 稀疏条件常量传播
 
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 展开后消除死代码
-        pm.addPass(std::make_unique<CFGSimplify>());          // 展开后化简 CFG
+        make_unroll_clean(pm);                                // DCE+CFG ×4
 
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 最终 DCE
+        // pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（最后一步，方便 codegen）
 	}  
     
 	pm.run(m.get());

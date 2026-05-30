@@ -3,9 +3,8 @@
 
 void AlgebraSimplify::execute(Module *module) {
     for (auto func : module->function_list_) {
-        if (!func->is_declaration()) {
-            runOnFunction(func);
-        }
+        if (func->is_declaration()) continue;
+        runOnFunction(func);
     }
 }
 
