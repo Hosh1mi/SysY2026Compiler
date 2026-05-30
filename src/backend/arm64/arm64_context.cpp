@@ -255,11 +255,12 @@ void Arm64FuncContext::emitPrologue() {
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int saveOffset = -frameSize_;
+    needsFrame_ = (localSize > 0);
 
-    // stp supports only -512..504 range; use minimal stp + sub for large frames
-    os_ << "\tstp x29, x30, [sp, #-16]!\n";
-    os_ << "\tmov x29, sp\n";
-    if (localSize > 0) {
+    if (needsFrame_) {
+        // stp supports only -512..504 range; use minimal stp + sub for large frames
+        os_ << "\tstp x29, x30, [sp, #-16]!\n";
+        os_ << "\tmov x29, sp\n";
         if (localSize <= 4095) {
             os_ << "\tsub sp, sp, #" << localSize << "\n";
         } else {
@@ -378,6 +379,11 @@ void Arm64FuncContext::emitPrologue() {
 void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
     os_ << ".L" << func_->name_ << "_epilogue:\n";
+
+    if (!needsFrame_) {
+        os_ << "\tret\n";
+        return;
+    }
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
@@ -1261,7 +1267,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
         }
-        os_ << "\tb .L" << func_->name_ << "_epilogue\n";
+        if (needsFrame_)
+            os_ << "\tb .L" << func_->name_ << "_epilogue\n";
+        else
+            os_ << "\tret\n";
         break;
     }
 
