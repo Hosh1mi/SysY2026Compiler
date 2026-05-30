@@ -174,6 +174,7 @@ int main(int argc, char **argv) {
 
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
+        // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
         make_basic_clean(pm);
         pm.addPass(std::make_unique<SCCP>());                  // 稀疏条件常量传播
 

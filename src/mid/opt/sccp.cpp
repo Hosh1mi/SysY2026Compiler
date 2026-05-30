@@ -1,5 +1,6 @@
 #include "../../include/mid/opt/sccp.hpp"
 #include "../../include/mid/ir/instruction.hpp"
+#include <iostream>
 #include <map>
 #include <queue>
 #include <set>
@@ -180,6 +181,7 @@ bool SCCP::runOnFunction(Function *func) {
 
     // ── Apply: replace constant instructions (alloc ConstInt here only) ─
     bool changed2 = false;
+    int replaced = 0;
     for (auto &[val, lat] : lattice) {
         if (!lat.isConstant()) continue;
         auto *inst = dynamic_cast<Instruction*>(val);
@@ -188,8 +190,13 @@ bool SCCP::runOnFunction(Function *func) {
         inst->replace_all_use_with(new ConstantInt(inst->type_, lat.constVal()));
         inst->parent_->delete_instr(inst);
         changed2 = true;
+        replaced++;
     }
+#ifdef SCCP_DEBUG
+    if (replaced > 0)
+        std::cerr << "[SCCP] " << func->name_ << ": replaced " << replaced << " insts\n";
     return changed2;
+#endif
 }
 
 void SCCP::execute(Module *module) {
