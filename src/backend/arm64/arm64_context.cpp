@@ -30,13 +30,6 @@ static bool isLabel(Type *ty)  { return ty->tid_ == Type::LabelTyID; }
 
 static int align16(int n) { return (n + 15) & ~15; }
 
-static bool isLeafFunction(Function *func) {
-    for (auto *bb : func->basic_blocks_)
-        for (auto *inst : bb->instr_list_)
-            if (inst->is_call()) return false;
-    return true;
-}
-
 static bool isAllocatableIntValue(Type *ty) {
     return ty->tid_ == Type::IntegerTyID;
 }
@@ -53,8 +46,13 @@ static std::vector<int> collectAssignedIntRegs(const std::map<Value*, std::strin
     std::set<int> regs;
     for (const auto &entry : assignedRegs) {
         const std::string &reg = entry.second;
-        if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
-            regs.insert(std::stoi(reg.substr(1)));
+        if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x')) {
+            int r = std::stoi(reg.substr(1));
+            // Only callee-saved registers (r19-r28) need save/restore.
+            // Caller-saved regs (r0-r18) including pre-colored args must not
+            // be saved — doing so would clobber the return value on restore.
+            if (r >= 19) regs.insert(r);
+        }
     }
     return std::vector<int>(regs.begin(), regs.end());
 }
@@ -63,7 +61,11 @@ static std::vector<int> collectAssignedFloatRegs(const std::map<Value*, std::str
     std::set<int> regs;
     for (const auto &entry : assignedRegs) {
         const std::string &reg = entry.second;
-        if (!reg.empty() && reg[0] == 's') regs.insert(std::stoi(reg.substr(1)));
+        if (!reg.empty() && reg[0] == 's') {
+            int r = std::stoi(reg.substr(1));
+            // Only callee-saved float registers (s8-s15).
+            if (r >= 8 && r <= 15) regs.insert(r);
+        }
     }
     return std::vector<int>(regs.begin(), regs.end());
 }
@@ -193,10 +195,31 @@ void Arm64FuncContext::emitPrologue() {
     os_ << "\t.p2align 2\n";
     os_ << func_->name_ << ":\n";
 
-    // allocate slots for arguments that were not promoted to registers
-    for (auto arg : func_->arguments_) {
-        if (!hasAssignedReg(arg))
+    // Allocate slots for arguments that actually need them.
+    // Pre-colored args (leaf functions, assigned to their incoming register)
+    // stay in w0-w7/s0-s7 and never need a stack slot.
+    {
+        int intArgIdx = 0, floatArgIdx = 0;
+        for (auto arg : func_->arguments_) {
+            if (isFloat(arg->type_)) {
+                if (floatArgIdx < 8) {
+                    std::string src = "s" + std::to_string(floatArgIdx++);
+                    if (hasAssignedReg(arg) && assignedReg(arg) == src)
+                        continue; // pre-colored — no slot needed
+                }
+            } else {
+                if (intArgIdx < 8) {
+                    bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
+                                arg->type_->tid_ == Type::ArrayTyID);
+                    std::string reg = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+                    if (hasAssignedReg(arg)) {
+                        std::string dst = assignedReg(arg, isPtr);
+                        if (dst == reg) continue; // pre-colored — no slot needed
+                    }
+                }
+            }
             getSlot(arg);
+        }
     }
 
     // pre-scan all instructions to allocate slots
@@ -208,63 +231,63 @@ void Arm64FuncContext::emitPrologue() {
                        !dynamic_cast<Constant*>(inst) &&
                        !inst->is_store() && !inst->is_br() && !inst->is_ret() &&
                        !hasAssignedReg(inst)) {
+                // Skip ICmp whose only user is a Select —
+                // the Select emits its own cmp, the ICmp is never stored.
+                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) continue;
+                }
+                // Skip Select whose only user is a Ret —
+                // the csel writes directly to w0, no stack slot needed.
+                if (inst->op_id_ == Instruction::Select &&
+                    inst->use_list_.size() == 1 &&
+                    !isFloat(inst->type_)) {
+                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+                    if (user) continue;
+                }
                 getSlot(inst);
             }
         }
     }
 
-    bool leaf = isLeafFunction(func_);
-
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-
-    // For leaf functions only callee-saved regs (w19+/s8+) need saving;
-    // the pool uses w9-w15 / s16-s31 which are caller-saved — no save needed.
-    if (leaf) {
-        savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-            [](int r) { return r < 19; }), savedIntRegs.end());
-        savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-            [](int r) { return r < 8; }), savedFloatRegs.end());
-    }
-
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int saveOffset = -frameSize_;
-    bool needFrame = !leaf || localSize > 0;
+    needsFrame_ = (localSize > 0);
 
-    // Frame setup — skipped for trivial leaf functions (no stack needed)
-    if (needFrame) {
+    if (needsFrame_) {
+        // stp supports only -512..504 range; use minimal stp + sub for large frames
         os_ << "\tstp x29, x30, [sp, #-16]!\n";
         os_ << "\tmov x29, sp\n";
-        if (localSize > 0) {
-            if (localSize <= 4095) {
-                os_ << "\tsub sp, sp, #" << localSize << "\n";
-            } else {
-                os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub sp, sp, x17\n";
-            }
+        if (localSize <= 4095) {
+            os_ << "\tsub sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tsub sp, sp, x17\n";
         }
+    }
 
-        for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
-            if (i + 1 < savedIntRegs.size()) {
-                saveOffset -= 16;
-                emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                              "x" + std::to_string(savedIntRegs[i]), saveOffset);
-            } else {
-                saveOffset -= 8;
-                emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
-            }
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                          "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
         }
-        for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
-            if (i + 1 < savedFloatRegs.size()) {
-                saveOffset -= 16;
-                emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                              "d" + std::to_string(savedFloatRegs[i]), saveOffset);
-            } else {
-                saveOffset -= 8;
-                emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
-            }
+    }
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                          "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
         }
     }
 
@@ -279,7 +302,13 @@ void Arm64FuncContext::emitPrologue() {
                 std::string src = "s" + std::to_string(floatRegIdx++);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
-                    if (dst != src) os_ << "\tfmov " << dst << ", " << src << "\n";
+                    if (dst == src) {
+                        // Pre-colored to incoming register — no spill needed
+                    } else {
+                        int slot = getSlot(arg);
+                        emitStoreReg(os_, src, slot);
+                        os_ << "\tfmov " << dst << ", " << src << "\n";
+                    }
                 } else {
                     int slot = getSlot(arg);
                     emitStoreReg(os_, src, slot);
@@ -292,12 +321,11 @@ void Arm64FuncContext::emitPrologue() {
                     os_ << "\tmovz x17, #" << off << "\n";
                     os_ << "\tldr s17, [x29, x17]\n";
                 }
+                int slot = getSlot(arg);
+                emitStoreReg(os_, "s17", slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
                     os_ << "\tfmov " << dst << ", s17\n";
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, "s17", slot);
                 }
                 stackOffset += 8;
             }
@@ -310,7 +338,13 @@ void Arm64FuncContext::emitPrologue() {
                 reg += std::to_string(intRegIdx++);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg, isPtr);
-                    if (dst != reg) os_ << "\tmov " << dst << ", " << reg << "\n";
+                    if (dst == reg) {
+                        // Pre-colored to incoming register — no spill needed
+                    } else {
+                        int slot = getSlot(arg);
+                        emitStoreReg(os_, reg, slot);
+                        os_ << "\tmov " << dst << ", " << reg << "\n";
+                    }
                 } else {
                     int slot = getSlot(arg);
                     emitStoreReg(os_, reg, slot);
@@ -323,6 +357,8 @@ void Arm64FuncContext::emitPrologue() {
                     os_ << "\tmovz x17, #" << off << "\n";
                     os_ << "\tldr x17, [x29, x17]\n";
                 }
+                int slot = getSlot(arg);
+                emitStoreReg(os_, "x17", slot);
                 if (hasAssignedReg(arg)) {
                     bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
                                 arg->type_->tid_ == Type::ArrayTyID);
@@ -330,11 +366,9 @@ void Arm64FuncContext::emitPrologue() {
                     if (isPtr) {
                         if (dst != "x17") os_ << "\tmov " << dst << ", x17\n";
                     } else {
+                        // dst 形如 "w24"，从 x17 取出低 32 位
                         os_ << "\tmov " << dst << ", w17\n";
                     }
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, "x17", slot);
                 }
                 stackOffset += 8;
             }
@@ -344,63 +378,50 @@ void Arm64FuncContext::emitPrologue() {
 
 void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
+    os_ << ".L" << func_->name_ << "_epilogue:\n";
 
-    bool leaf = isLeafFunction(func_);
+    if (!needsFrame_) {
+        os_ << "\tret\n";
+        return;
+    }
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-
-    if (leaf) {
-        savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-            [](int r) { return r < 19; }), savedIntRegs.end());
-        savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-            [](int r) { return r < 8; }), savedFloatRegs.end());
-    }
-
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int restoreOffset = -frameSize_;
-    bool needFrame = !leaf || localSize > 0;
 
-    // For trivial leaf functions the epilogue is just "ret", which is already
-    // emitted inline by the Ret handler — skip the dead label entirely.
-    if (!needFrame) return;
-
-    os_ << ".L" << func_->name_ << "_epilogue:\n";
-
-    {
-        for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
-            if (i + 1 < savedIntRegs.size()) {
-                restoreOffset -= 16;
-                emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                             "x" + std::to_string(savedIntRegs[i]), restoreOffset);
-            } else {
-                restoreOffset -= 8;
-                emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
-            }
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                         "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
         }
-        for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
-            if (i + 1 < savedFloatRegs.size()) {
-                restoreOffset -= 16;
-                emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                             "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
-            } else {
-                restoreOffset -= 8;
-                emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
-            }
-        }
-
-        if (localSize > 0) {
-            if (localSize <= 4095) {
-                os_ << "\tadd sp, sp, #" << localSize << "\n";
-            } else {
-                os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tadd sp, sp, x17\n";
-            }
-        }
-        os_ << "\tldp x29, x30, [sp], #16\n";
     }
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                         "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        }
+    }
+
+    if (localSize > 0) {
+        if (localSize <= 4095) {
+            os_ << "\tadd sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tadd sp, sp, x17\n";
+        }
+    }
+    os_ << "\tldp x29, x30, [sp], #16\n";
     os_ << "\tret\n";
 }
 
@@ -1000,11 +1021,23 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             os_ << "\tcmp " << r1 << ", " << r2 << "\n";
         }
 
-        std::string dstReg  = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        std::string dstReg;
+        // If this Select's only user is a Ret, write directly to w0/x0
+        // to avoid a redundant mov in the Ret emission.
+        bool directRet = false;
+        if (!isFloat(inst->type_) && inst->use_list_.size() == 1) {
+            auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+            if (user) directRet = true;
+        }
+        if (directRet) {
+            dstReg = isPtr(inst->type_) ? "x0" : "w0";
+        } else {
+            dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        }
         std::string trueReg = hasAssignedReg(tv)  ? assignedReg(tv)  : loadInt(tv);
         std::string falseReg= hasAssignedReg(fv)  ? assignedReg(fv)  : loadInt(fv);
         os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << cond << "\n";
-        if (!hasAssignedReg(inst)) storeInt(inst, dstReg);
+        if (!directRet && !hasAssignedReg(inst)) storeInt(inst, dstReg);
         break;
     }
 
@@ -1213,32 +1246,31 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Ret: {
         if (inst->num_ops_ > 0) {
             auto val = inst->get_operand(0);
-            if (isFloat(val->type_)) {
-                std::string r = loadFloat(val);
-                os_ << "\tfmov s0, " << r << "\n";
-            } else if (isPtr(val->type_)) {
-                std::string r = loadAddr(val);
-                os_ << "\tmov x0, " << r << "\n";
-            } else {
-                std::string r = loadInt(val);
-                os_ << "\tmov w0, " << r << "\n";
+            // If val is a non-float Select whose only user is this Ret,
+            // the csel already wrote the result to w0/x0 — skip the mov.
+            bool alreadyInW0 = false;
+            if (!isFloat(val->type_)) {
+                if (auto si = dynamic_cast<SelectInst*>(val)) {
+                    if (si->use_list_.size() == 1) alreadyInW0 = true;
+                }
+            }
+            if (!alreadyInW0) {
+                if (isFloat(val->type_)) {
+                    std::string r = loadFloat(val);
+                    os_ << "\tfmov s0, " << r << "\n";
+                } else if (isPtr(val->type_)) {
+                    std::string r = loadAddr(val);
+                    os_ << "\tmov x0, " << r << "\n";
+                } else {
+                    std::string r = loadInt(val);
+                    os_ << "\tmov w0, " << r << "\n";
+                }
             }
         }
-        // For trivial leaf functions (no frame, no callee-saved regs),
-        // the epilogue is just "ret" — emit it directly.
-        if (isLeafFunction(func_) && frameSize_ == 0) {
-            auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
-            auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-            savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-                [](int r) { return r < 19; }), savedIntRegs.end());
-            savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-                [](int r) { return r < 8; }), savedFloatRegs.end());
-            if (savedIntRegs.empty() && savedFloatRegs.empty()) {
-                os_ << "\tret\n";
-                break;
-            }
-        }
-        os_ << "\tb .L" << func_->name_ << "_epilogue\n";
+        if (needsFrame_)
+            os_ << "\tb .L" << func_->name_ << "_epilogue\n";
+        else
+            os_ << "\tret\n";
         break;
     }
 
@@ -1462,9 +1494,35 @@ void Arm64FuncContext::allocateRegisters() {
     std::map<BasicBlock*, int> blockStart, blockEnd;
     std::map<Instruction*, int> instIdx;
 
+    // ---- 0. Leaf-function argument pre-coloring ----
+    // In leaf functions (no calls), arguments can safely stay in their
+    // incoming physical registers (w0-w7 / s0-s7) since nothing clobbers them.
+    bool isLeaf = true;
+    for (auto bb : func_->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_call()) { isLeaf = false; break; }
+        }
+        if (!isLeaf) break;
+    }
+    if (isLeaf) {
+        int intArgIdx = 0, floatArgIdx = 0;
+        for (auto arg : func_->arguments_) {
+            if (!canAssignRegister(arg)) continue;
+            if (isAllocatableFloatValue(arg->type_)) {
+                if (floatArgIdx < 8)
+                    assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
+            } else {
+                if (intArgIdx < 8) {
+                    bool isPtr = isAllocatablePtrValue(arg->type_);
+                    assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+                }
+            }
+        }
+    }
+
     int idx = 0;
     for (auto arg : func_->arguments_) {
-        if (canAssignRegister(arg)) {
+        if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
             defPos[arg] = 0;
             lastUse[arg] = 0;
         }
@@ -1482,8 +1540,26 @@ void Arm64FuncContext::allocateRegisters() {
             instIdx[inst] = idx;
 
             if (canAssignRegister(inst)) {
-                defPos[inst] = idx;
-                lastUse[inst] = idx;
+                // Skip ICmp whose only user is a Select —
+                // the Select emits its own cmp, so the ICmp's register is never read.
+                bool skipForSelect = false;
+                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                // Skip Select whose only user is a Ret —
+                // the csel will write directly to w0, no register needed.
+                if (!skipForSelect &&
+                    inst->op_id_ == Instruction::Select &&
+                    inst->use_list_.size() == 1 &&
+                    !isFloat(inst->type_)) {
+                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                if (!skipForSelect) {
+                    defPos[inst] = idx;
+                    lastUse[inst] = idx;
+                }
             }
 
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
@@ -1701,7 +1777,7 @@ void Arm64FuncContext::allocateRegisters() {
     }
 
     // ---- 9. Optimistic graph coloring (Chaitin-Briggs) ----
-    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat, bool leaf) {
+    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat) {
         if (pool.empty()) return;
 
         // Sort by start for efficient interference detection
@@ -1808,16 +1884,9 @@ void Arm64FuncContext::allocateRegisters() {
             }
         }
 
-        // Record assignments.
-        // Leaf pools use w0-w7 / s0-s7 (caller-saved, disjoint from temp
-        // regs w9-w15 / s16-s31).  Non-leaf pools use w19-w28 / s8-s15.
+        // Record assignments
+        int baseReg = isFloat ? 8 : 19;
         for (auto &kv : colors) {
-            int baseReg;
-            if (leaf) {
-                baseReg = 0;               // w0-w7 / s0-s7
-            } else {
-                baseReg = isFloat ? 8 : 19; // s8-s15 / w19-w28
-            }
             int regNo = baseReg + kv.second;
             if (isFloat) {
                 assignedRegs_[kv.first] = "s" + std::to_string(regNo);
@@ -1829,12 +1898,8 @@ void Arm64FuncContext::allocateRegisters() {
         }
     };
 
-    bool leaf = isLeafFunction(func_);
-    // Leaf pools use caller-saved argument registers (w0-w7 / s0-s7),
-    // kept disjoint from the temp register pool (w9-w15 / s16-s31).
-    // Non-leaf pools use callee-saved registers (w19-w28 / s8-s15).
-    colorPool(intPool,   leaf ? 8 : 10, false, leaf);
-    colorPool(floatPool, leaf ? 8 : 8,  true,  leaf);
+    colorPool(intPool, 10, false);  // int+ptr: w19-w28 / x19-x28 (10 regs)
+    colorPool(floatPool, 8, true);  // float: s8-s15 (8 regs)
 }
 
 bool Arm64FuncContext::hasAssignedReg(Value *v) const {
