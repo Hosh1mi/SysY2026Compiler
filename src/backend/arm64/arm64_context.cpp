@@ -1536,6 +1536,44 @@ void Arm64FuncContext::allocateRegisters() {
         }
     }
 
+    // Build color→physical-register mapping.
+    // Leaf functions:  w0-w7 + w19-w28 (18 regs), excluding pre-colored args.
+    // Non-leaf:        w19-w28 only (10 callee-saved, caller-saved unsafe).
+    std::vector<int> intColorToReg;
+    std::vector<int> floatColorToReg;
+    {
+        // Collect pre-colored int register numbers to avoid conflicts.
+        std::set<int> precoloredIntRegs;
+        for (auto &kv : assignedRegs_) {
+            const std::string &reg = kv.second;
+            if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
+                precoloredIntRegs.insert(std::stoi(reg.substr(1)));
+        }
+        if (isLeaf) {
+            // Caller-saved first (lower colors → bias for short-lived values)
+            for (int r : {0,1,2,3,4,5,6,7, 19,20,21,22,23,24,25,26,27,28}) {
+                if (!precoloredIntRegs.count(r))
+                    intColorToReg.push_back(r);
+            }
+        } else {
+            for (int r = 19; r <= 28; ++r) {
+                if (!precoloredIntRegs.count(r))
+                    intColorToReg.push_back(r);
+            }
+        }
+        // Float: s8-s15 for all functions (s0-s7 pre-colored for leaf args).
+        std::set<int> precoloredFloatRegs;
+        for (auto &kv : assignedRegs_) {
+            const std::string &reg = kv.second;
+            if (!reg.empty() && reg[0] == 's')
+                precoloredFloatRegs.insert(std::stoi(reg.substr(1)));
+        }
+        for (int r = 8; r <= 15; ++r) {
+            if (!precoloredFloatRegs.count(r))
+                floatColorToReg.push_back(r);
+        }
+    }
+
     int idx = 0;
     for (auto arg : func_->arguments_) {
         if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
@@ -1793,8 +1831,10 @@ void Arm64FuncContext::allocateRegisters() {
     }
 
     // ---- 9. Optimistic graph coloring (Chaitin-Briggs) ----
-    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat) {
+    auto colorPool = [&](const std::vector<Interval> &pool,
+                         const std::vector<int> &colorToReg, bool isFloat) {
         if (pool.empty()) return;
+        int K = (int)colorToReg.size();
 
         // Sort by start for efficient interference detection
         std::vector<Interval> sorted = pool;
@@ -1901,9 +1941,8 @@ void Arm64FuncContext::allocateRegisters() {
         }
 
         // Record assignments
-        int baseReg = isFloat ? 8 : 19;
         for (auto &kv : colors) {
-            int regNo = baseReg + kv.second;
+            int regNo = colorToReg[kv.second];
             if (isFloat) {
                 assignedRegs_[kv.first] = "s" + std::to_string(regNo);
             } else if (isAllocatablePtrValue(kv.first->type_)) {
@@ -1914,8 +1953,8 @@ void Arm64FuncContext::allocateRegisters() {
         }
     };
 
-    colorPool(intPool, 10, false);  // int+ptr: w19-w28 / x19-x28 (10 regs)
-    colorPool(floatPool, 8, true);  // float: s8-s15 (8 regs)
+    colorPool(intPool, intColorToReg, false);
+    colorPool(floatPool, floatColorToReg, true);
 }
 
 bool Arm64FuncContext::hasAssignedReg(Value *v) const {
