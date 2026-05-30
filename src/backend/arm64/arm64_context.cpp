@@ -30,13 +30,6 @@ static bool isLabel(Type *ty)  { return ty->tid_ == Type::LabelTyID; }
 
 static int align16(int n) { return (n + 15) & ~15; }
 
-static bool isLeafFunction(Function *func) {
-    for (auto *bb : func->basic_blocks_)
-        for (auto *inst : bb->instr_list_)
-            if (inst->is_call()) return false;
-    return true;
-}
-
 static bool isAllocatableIntValue(Type *ty) {
     return ty->tid_ == Type::IntegerTyID;
 }
@@ -195,8 +188,7 @@ void Arm64FuncContext::emitPrologue() {
 
     // allocate slots for arguments that were not promoted to registers
     for (auto arg : func_->arguments_) {
-        if (!hasAssignedReg(arg))
-            getSlot(arg);
+        getSlot(arg);
     }
 
     // pre-scan all instructions to allocate slots
@@ -213,58 +205,43 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
-    bool leaf = isLeafFunction(func_);
-
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-
-    // For leaf functions only callee-saved regs (w19+/s8+) need saving;
-    // the pool uses w9-w15 / s16-s31 which are caller-saved — no save needed.
-    if (leaf) {
-        savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-            [](int r) { return r < 19; }), savedIntRegs.end());
-        savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-            [](int r) { return r < 8; }), savedFloatRegs.end());
-    }
-
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int saveOffset = -frameSize_;
-    bool needFrame = !leaf || localSize > 0;
 
-    // Frame setup — skipped for trivial leaf functions (no stack needed)
-    if (needFrame) {
-        os_ << "\tstp x29, x30, [sp, #-16]!\n";
-        os_ << "\tmov x29, sp\n";
-        if (localSize > 0) {
-            if (localSize <= 4095) {
-                os_ << "\tsub sp, sp, #" << localSize << "\n";
-            } else {
-                os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub sp, sp, x17\n";
-            }
+    // stp supports only -512..504 range; use minimal stp + sub for large frames
+    os_ << "\tstp x29, x30, [sp, #-16]!\n";
+    os_ << "\tmov x29, sp\n";
+    if (localSize > 0) {
+        if (localSize <= 4095) {
+            os_ << "\tsub sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tsub sp, sp, x17\n";
         }
+    }
 
-        for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
-            if (i + 1 < savedIntRegs.size()) {
-                saveOffset -= 16;
-                emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                              "x" + std::to_string(savedIntRegs[i]), saveOffset);
-            } else {
-                saveOffset -= 8;
-                emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
-            }
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                          "x" + std::to_string(savedIntRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
         }
-        for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
-            if (i + 1 < savedFloatRegs.size()) {
-                saveOffset -= 16;
-                emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                              "d" + std::to_string(savedFloatRegs[i]), saveOffset);
-            } else {
-                saveOffset -= 8;
-                emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
-            }
+    }
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            saveOffset -= 16;
+            emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                          "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        } else {
+            saveOffset -= 8;
+            emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
         }
     }
 
@@ -277,12 +254,11 @@ void Arm64FuncContext::emitPrologue() {
         if (isFloat(arg->type_)) {
             if (floatRegIdx < 8) {
                 std::string src = "s" + std::to_string(floatRegIdx++);
+                int slot = getSlot(arg);
+                emitStoreReg(os_, src, slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
                     if (dst != src) os_ << "\tfmov " << dst << ", " << src << "\n";
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, src, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
@@ -292,12 +268,11 @@ void Arm64FuncContext::emitPrologue() {
                     os_ << "\tmovz x17, #" << off << "\n";
                     os_ << "\tldr s17, [x29, x17]\n";
                 }
+                int slot = getSlot(arg);
+                emitStoreReg(os_, "s17", slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
                     os_ << "\tfmov " << dst << ", s17\n";
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, "s17", slot);
                 }
                 stackOffset += 8;
             }
@@ -308,12 +283,11 @@ void Arm64FuncContext::emitPrologue() {
                             arg->type_->tid_ == Type::ArrayTyID);
                 std::string reg = isPtr ? "x" : "w";
                 reg += std::to_string(intRegIdx++);
+                int slot = getSlot(arg);
+                emitStoreReg(os_, reg, slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg, isPtr);
                     if (dst != reg) os_ << "\tmov " << dst << ", " << reg << "\n";
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, reg, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
@@ -323,6 +297,8 @@ void Arm64FuncContext::emitPrologue() {
                     os_ << "\tmovz x17, #" << off << "\n";
                     os_ << "\tldr x17, [x29, x17]\n";
                 }
+                int slot = getSlot(arg);
+                emitStoreReg(os_, "x17", slot);
                 if (hasAssignedReg(arg)) {
                     bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
                                 arg->type_->tid_ == Type::ArrayTyID);
@@ -330,11 +306,9 @@ void Arm64FuncContext::emitPrologue() {
                     if (isPtr) {
                         if (dst != "x17") os_ << "\tmov " << dst << ", x17\n";
                     } else {
+                        // dst 形如 "w24"，从 x17 取出低 32 位
                         os_ << "\tmov " << dst << ", w17\n";
                     }
-                } else {
-                    int slot = getSlot(arg);
-                    emitStoreReg(os_, "x17", slot);
                 }
                 stackOffset += 8;
             }
@@ -344,63 +318,45 @@ void Arm64FuncContext::emitPrologue() {
 
 void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
-
-    bool leaf = isLeafFunction(func_);
+    os_ << ".L" << func_->name_ << "_epilogue:\n";
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-
-    if (leaf) {
-        savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-            [](int r) { return r < 19; }), savedIntRegs.end());
-        savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-            [](int r) { return r < 8; }), savedFloatRegs.end());
-    }
-
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int restoreOffset = -frameSize_;
-    bool needFrame = !leaf || localSize > 0;
 
-    // For trivial leaf functions the epilogue is just "ret", which is already
-    // emitted inline by the Ret handler — skip the dead label entirely.
-    if (!needFrame) return;
-
-    os_ << ".L" << func_->name_ << "_epilogue:\n";
-
-    {
-        for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
-            if (i + 1 < savedIntRegs.size()) {
-                restoreOffset -= 16;
-                emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                             "x" + std::to_string(savedIntRegs[i]), restoreOffset);
-            } else {
-                restoreOffset -= 8;
-                emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
-            }
+    for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
+        if (i + 1 < savedIntRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
+                         "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
         }
-        for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
-            if (i + 1 < savedFloatRegs.size()) {
-                restoreOffset -= 16;
-                emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                             "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
-            } else {
-                restoreOffset -= 8;
-                emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
-            }
-        }
-
-        if (localSize > 0) {
-            if (localSize <= 4095) {
-                os_ << "\tadd sp, sp, #" << localSize << "\n";
-            } else {
-                os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tadd sp, sp, x17\n";
-            }
-        }
-        os_ << "\tldp x29, x30, [sp], #16\n";
     }
+    for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
+        if (i + 1 < savedFloatRegs.size()) {
+            restoreOffset -= 16;
+            emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
+                         "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        } else {
+            restoreOffset -= 8;
+            emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        }
+    }
+
+    if (localSize > 0) {
+        if (localSize <= 4095) {
+            os_ << "\tadd sp, sp, #" << localSize << "\n";
+        } else {
+            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
+            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tadd sp, sp, x17\n";
+        }
+    }
+    os_ << "\tldp x29, x30, [sp], #16\n";
     os_ << "\tret\n";
 }
 
@@ -1224,20 +1180,6 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 os_ << "\tmov w0, " << r << "\n";
             }
         }
-        // For trivial leaf functions (no frame, no callee-saved regs),
-        // the epilogue is just "ret" — emit it directly.
-        if (isLeafFunction(func_) && frameSize_ == 0) {
-            auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
-            auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-            savedIntRegs.erase(std::remove_if(savedIntRegs.begin(), savedIntRegs.end(),
-                [](int r) { return r < 19; }), savedIntRegs.end());
-            savedFloatRegs.erase(std::remove_if(savedFloatRegs.begin(), savedFloatRegs.end(),
-                [](int r) { return r < 8; }), savedFloatRegs.end());
-            if (savedIntRegs.empty() && savedFloatRegs.empty()) {
-                os_ << "\tret\n";
-                break;
-            }
-        }
         os_ << "\tb .L" << func_->name_ << "_epilogue\n";
         break;
     }
@@ -1701,7 +1643,7 @@ void Arm64FuncContext::allocateRegisters() {
     }
 
     // ---- 9. Optimistic graph coloring (Chaitin-Briggs) ----
-    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat, bool leaf) {
+    auto colorPool = [&](const std::vector<Interval> &pool, int K, bool isFloat) {
         if (pool.empty()) return;
 
         // Sort by start for efficient interference detection
@@ -1808,16 +1750,9 @@ void Arm64FuncContext::allocateRegisters() {
             }
         }
 
-        // Record assignments.
-        // Leaf pools use w0-w7 / s0-s7 (caller-saved, disjoint from temp
-        // regs w9-w15 / s16-s31).  Non-leaf pools use w19-w28 / s8-s15.
+        // Record assignments
+        int baseReg = isFloat ? 8 : 19;
         for (auto &kv : colors) {
-            int baseReg;
-            if (leaf) {
-                baseReg = 0;               // w0-w7 / s0-s7
-            } else {
-                baseReg = isFloat ? 8 : 19; // s8-s15 / w19-w28
-            }
             int regNo = baseReg + kv.second;
             if (isFloat) {
                 assignedRegs_[kv.first] = "s" + std::to_string(regNo);
@@ -1829,12 +1764,8 @@ void Arm64FuncContext::allocateRegisters() {
         }
     };
 
-    bool leaf = isLeafFunction(func_);
-    // Leaf pools use caller-saved argument registers (w0-w7 / s0-s7),
-    // kept disjoint from the temp register pool (w9-w15 / s16-s31).
-    // Non-leaf pools use callee-saved registers (w19-w28 / s8-s15).
-    colorPool(intPool,   leaf ? 8 : 10, false, leaf);
-    colorPool(floatPool, leaf ? 8 : 8,  true,  leaf);
+    colorPool(intPool, 10, false);  // int+ptr: w19-w28 / x19-x28 (10 regs)
+    colorPool(floatPool, 8, true);  // float: s8-s15 (8 regs)
 }
 
 bool Arm64FuncContext::hasAssignedReg(Value *v) const {
