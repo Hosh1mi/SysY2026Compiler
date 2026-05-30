@@ -195,8 +195,8 @@ bool SCCP::runOnFunction(Function *func) {
 #ifdef SCCP_DEBUG
     if (replaced > 0)
         std::cerr << "[SCCP] " << func->name_ << ": replaced " << replaced << " insts\n";
-    return changed2;
 #endif
+    return changed2;
 }
 
 void SCCP::execute(Module *module) {
