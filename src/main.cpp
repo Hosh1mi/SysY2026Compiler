@@ -173,6 +173,9 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
         make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
 
+        pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
+        pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
+
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
@@ -183,7 +186,7 @@ int main(int argc, char **argv) {
 
         make_basic_clean(pm);                                 // 最后再来一轮基本清理，清理向量化产生的死代码等
         make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理，清理向量化产生的冗余分支等
-        // pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（最后一步，方便 codegen）
+        
 	}  
     
 	pm.run(m.get());
