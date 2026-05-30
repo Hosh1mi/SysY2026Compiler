@@ -255,7 +255,16 @@ void Arm64FuncContext::emitPrologue() {
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
     int localSize = align16(frameSize_ + savedRegBytes);
     int saveOffset = -frameSize_;
-    needsFrame_ = (localSize > 0);
+
+    // Determine whether the function has any call instructions.
+    bool hasCalls = false;
+    for (auto bb : func_->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_call()) { hasCalls = true; break; }
+        }
+        if (hasCalls) break;
+    }
+    needsFrame_ = (localSize > 0) || hasCalls;
 
     if (needsFrame_) {
         // stp supports only -512..504 range; use minimal stp + sub for large frames
