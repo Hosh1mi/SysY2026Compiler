@@ -18,7 +18,6 @@ void IndVarStrengthReduce::runOnFunction(Function *func) {
     for (auto &loop : loops) {
         processLoop(loop, func, module);
     }
-    func->set_instr_name();
 }
 
 // -----------------------------------------------------------------------

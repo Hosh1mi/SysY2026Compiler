@@ -32,10 +32,6 @@
   </tr>
   <tr>
     <td></td>
-    <td>实现稀疏条件常量传播（SCCP）</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>用正规 InstCombine 替换现有 algebraSimplify</td>
   </tr>
   

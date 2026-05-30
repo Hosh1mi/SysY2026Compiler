@@ -7,7 +7,6 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
-#include <sstream>
 
 // ---- helpers ----
 static int typeSize(Type *ty) {
@@ -2219,82 +2218,87 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
 
     resetRegs();
 
-    // ---- Phase 1: read all source values into temporaries ----
-    struct Entry { Value *phi; std::string tmpReg; int dstSlot; };
-    std::vector<Entry> entries;
-    for (const auto &cp : copies) {
-        Value *val = cp.src;
+    // Process phi copies in batches to preserve parallel copy semantics
+    // (all sources read before any destination written, within a batch)
+    // while never exceeding the scratch register pool capacity (r9–r16 = 8).
+    // Float copies use a separate pool (s16–s31 = 16) so they are fine.
+    static const int MAX_BATCH = 7;  // leave one register for address base
+    size_t idx = 0;
+    while (idx < copies.size()) {
+        // ---- Phase 1: load up to MAX_BATCH source values ----
+        struct Entry { Value *phi; std::string tmpReg; int dstSlot; bool isFloat; };
+        std::vector<Entry> entries;
+        for (size_t end = std::min(idx + MAX_BATCH, copies.size()); idx < end; ++idx) {
+            const auto &cp = copies[idx];
+            Value *val = cp.src;
 
-        // Skip identity copies: src and dst already share the same register
-        if (hasAssignedReg(val) && cp.phi && hasAssignedReg(cp.phi)) {
-            bool asPtr = isPtr(val->type_);
-            if (assignedReg(val, asPtr) == assignedReg(cp.phi, asPtr))
-                continue;
+            if (hasAssignedReg(val) && cp.phi && hasAssignedReg(cp.phi)) {
+                bool asPtr = isPtr(val->type_);
+                if (assignedReg(val, asPtr) == assignedReg(cp.phi, asPtr))
+                    continue;
+            }
+
+            std::string tmpReg;
+            if (isFloat(val->type_)) {
+                if (hasAssignedReg(val)) {
+                    std::string srcReg = assignedReg(val);
+                    tmpReg = allocFloatReg();
+                    if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
+                } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+                    tmpReg = allocFloatReg();
+                    emitFloatConst(cf->value_, tmpReg);
+                } else {
+                    tmpReg = allocFloatReg();
+                    emitLoadReg(os_, tmpReg, getSlot(val));
+                }
+            } else if (isPtr(val->type_)) {
+                if (hasAssignedReg(val)) {
+                    std::string srcReg = assignedReg(val, true);
+                    tmpReg = allocAddrReg();
+                    if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+                } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
+                    tmpReg = allocAddrReg();
+                    emitGlobalAddr(gv, tmpReg);
+                } else {
+                    tmpReg = allocAddrReg();
+                    emitLoadReg(os_, tmpReg, getSlot(val));
+                }
+            } else { // int
+                if (hasAssignedReg(val)) {
+                    std::string srcReg = assignedReg(val);
+                    tmpReg = allocIntReg();
+                    if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+                } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                    tmpReg = allocIntReg();
+                    emitIntConst(ci->value_, tmpReg);
+                } else {
+                    tmpReg = allocIntReg();
+                    emitLoadReg(os_, tmpReg, getSlot(val));
+                }
+            }
+            entries.push_back({cp.phi, tmpReg, cp.dstSlot, isFloat(val->type_)});
         }
 
-        std::string tmpReg;
-
-        if (isFloat(val->type_)) {
-            if (hasAssignedReg(val)) {
-                std::string srcReg = assignedReg(val);
-                tmpReg = allocFloatReg();
-                if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
-            } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
-                tmpReg = allocFloatReg();
-                emitFloatConst(cf->value_, tmpReg);
+        // ---- Phase 2: write all destinations in this batch, then free ----
+        for (const auto &e : entries) {
+            if (e.phi && hasAssignedReg(e.phi)) {
+                bool isPhiPtr = e.phi->type_->tid_ == Type::PointerTyID;
+                std::string dstReg = assignedReg(e.phi, isPhiPtr);
+                if (e.isFloat) {
+                    if (e.tmpReg != dstReg) os_ << "\tfmov " << dstReg << ", " << e.tmpReg << "\n";
+                } else {
+                    if (e.tmpReg != dstReg) os_ << "\tmov " << dstReg << ", " << e.tmpReg << "\n";
+                }
             } else {
-                tmpReg = allocFloatReg();
-                emitLoadReg(os_, tmpReg, getSlot(val));
-            }
-        } else if (isPtr(val->type_)) {
-            if (hasAssignedReg(val)) {
-                std::string srcReg = assignedReg(val, true);
-                tmpReg = allocAddrReg();
-                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
-            } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
-                tmpReg = allocAddrReg();
-                emitGlobalAddr(gv, tmpReg);
-            } else {
-                tmpReg = allocAddrReg();
-                emitLoadReg(os_, tmpReg, getSlot(val));
-            }
-        } else { // int
-            if (hasAssignedReg(val)) {
-                std::string srcReg = assignedReg(val);
-                tmpReg = allocIntReg();
-                if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
-            } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
-                tmpReg = allocIntReg();
-                emitIntConst(ci->value_, tmpReg);
-            } else {
-                tmpReg = allocIntReg();
-                emitLoadReg(os_, tmpReg, getSlot(val));
+                emitStoreReg(os_, e.tmpReg, e.dstSlot);
             }
         }
-        entries.push_back({cp.phi, tmpReg, cp.dstSlot});
-    }
-
-    // ---- Phase 2: write all destinations (parallel copy semantics) ----
-    struct Temp { std::string reg; int dstSlot; };
-    std::vector<Temp> temps;
-    for (const auto &e : entries) {
-        if (e.phi && hasAssignedReg(e.phi)) {
-            bool isPhiPtr = e.phi->type_->tid_ == Type::PointerTyID;
-            std::string dstReg = assignedReg(e.phi, isPhiPtr);
-            if (isFloat(e.phi->type_)) {
-                if (e.tmpReg != dstReg) os_ << "\tfmov " << dstReg << ", " << e.tmpReg << "\n";
-            } else {
-                if (e.tmpReg != dstReg) os_ << "\tmov " << dstReg << ", " << e.tmpReg << "\n";
-            }
-        } else if (e.tmpReg == "x16" || e.tmpReg == "w16") {
-            emitStoreReg(os_, e.tmpReg, e.dstSlot);
-            freeAddrReg(e.tmpReg);
-        } else {
-            temps.push_back({e.tmpReg, e.dstSlot});
+        for (const auto &e : entries) {
+            if (e.isFloat) continue;
+            if (e.tmpReg[0] == 'x') freeAddrReg(e.tmpReg);
+            else if (e.tmpReg[0] == 'w') freeIntReg(e.tmpReg);
         }
-    }
-    for (const auto &t : temps) {
-        emitStoreReg(os_, t.reg, t.dstSlot);
+        entries.clear();
     }
 }
 
