@@ -54,7 +54,7 @@ static void make_deep_clean(PassManager &pm) {
     make_basic_clean(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<RemoveRedundantPhis>());
-    pm.addPass(std::make_unique<DeadCodeDelete>()); // 再来一轮 DCE，清理 CFGSimplify/RemoveRedundantPhis 产生的新死代码
+    make_basic_clean(pm);
 }
 
 // DeadCodeDelete × 4 + CFGSimplify × 4 (aggressive post-unroll cleanup)
