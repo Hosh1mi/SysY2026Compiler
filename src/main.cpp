@@ -35,6 +35,8 @@
 
 // ConstantFold → AlgebraSimplify → DeadCodeDelete
 static void make_basic_clean(PassManager &pm) {
+    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
     pm.addPass(std::make_unique<AlgebraSimplify>());
     pm.addPass(std::make_unique<DeadCodeDelete>());
@@ -159,7 +161,6 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
-        pm.addPass(std::make_unique<SCCP>());                  // 稀疏条件常量传播
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
         pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
@@ -175,14 +176,13 @@ int main(int argc, char **argv) {
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
-        make_basic_clean(pm);
-        pm.addPass(std::make_unique<SCCP>());                  // 稀疏条件常量传播
-
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
+        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis (清理展开产生的冗余代码)
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        make_unroll_clean(pm);                                // DCE+CFG ×4
+        
 
-        pm.addPass(std::make_unique<DeadCodeDelete>());       // 最终 DCE
+        make_basic_clean(pm);                                 // 最后再来一轮基本清理，清理向量化产生的死代码等
+        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理，清理向量化产生的冗余分支等
         // pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（最后一步，方便 codegen）
 	}  
     
