@@ -24,8 +24,14 @@ public:
     bool add_instruction_before_terminator(Instruction* instr);
     bool add_instruction_before_inst(Instruction* new_inst, Instruction* inst);
 
-    void add_pre_basic_block(BasicBlock* bb) { pre_bbs_.push_back(bb); }
-    void add_succ_basic_block(BasicBlock* bb) { succ_bbs_.push_back(bb); }
+    void add_pre_basic_block(BasicBlock* bb) {
+        if (std::find(pre_bbs_.begin(), pre_bbs_.end(), bb) == pre_bbs_.end())
+            pre_bbs_.push_back(bb);
+    }
+    void add_succ_basic_block(BasicBlock* bb) {
+        if (std::find(succ_bbs_.begin(), succ_bbs_.end(), bb) == succ_bbs_.end())
+            succ_bbs_.push_back(bb);
+    }
     void remove_pre_basic_block(BasicBlock* bb) {
         pre_bbs_.erase(std::remove(pre_bbs_.begin(), pre_bbs_.end(), bb), pre_bbs_.end());
     }

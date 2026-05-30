@@ -11,7 +11,8 @@
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
-#include "include/mid/opt/constSubexprEliminate.hpp"
+#include "include/mid/opt/earlyCSE.hpp"
+#include "include/mid/opt/gvn.hpp"
 #include "include/mid/opt/algebraSimplify.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
@@ -126,11 +127,12 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         pm.addPass(std::make_unique<ConstantFold>());         // 常数折叠
         pm.addPass(std::make_unique<AlgebraSimplify>());      // 代数简化
+        pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 死代码消除
 
         pm.addPass(std::make_unique<ConstantFold>());         // 折叠新常量
-        pm.addPass(std::make_unique<CSE>());                  // 公共子表达式消除
+        pm.addPass(std::make_unique<GVN>());                  // 全局值编号
         pm.addPass(std::make_unique<DeadCodeDelete>());       // 清理死代码
 
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
