@@ -979,11 +979,23 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             os_ << "\tcmp " << r1 << ", " << r2 << "\n";
         }
 
-        std::string dstReg  = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        std::string dstReg;
+        // If this Select's only user is a Ret, write directly to w0/x0
+        // to avoid a redundant mov in the Ret emission.
+        bool directRet = false;
+        if (!isFloat(inst->type_) && inst->use_list_.size() == 1) {
+            auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+            if (user) directRet = true;
+        }
+        if (directRet) {
+            dstReg = isPtr(inst->type_) ? "x0" : "w0";
+        } else {
+            dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        }
         std::string trueReg = hasAssignedReg(tv)  ? assignedReg(tv)  : loadInt(tv);
         std::string falseReg= hasAssignedReg(fv)  ? assignedReg(fv)  : loadInt(fv);
         os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << cond << "\n";
-        if (!hasAssignedReg(inst)) storeInt(inst, dstReg);
+        if (!directRet && !hasAssignedReg(inst)) storeInt(inst, dstReg);
         break;
     }
 
@@ -1192,15 +1204,25 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Ret: {
         if (inst->num_ops_ > 0) {
             auto val = inst->get_operand(0);
-            if (isFloat(val->type_)) {
-                std::string r = loadFloat(val);
-                os_ << "\tfmov s0, " << r << "\n";
-            } else if (isPtr(val->type_)) {
-                std::string r = loadAddr(val);
-                os_ << "\tmov x0, " << r << "\n";
-            } else {
-                std::string r = loadInt(val);
-                os_ << "\tmov w0, " << r << "\n";
+            // If val is a non-float Select whose only user is this Ret,
+            // the csel already wrote the result to w0/x0 — skip the mov.
+            bool alreadyInW0 = false;
+            if (!isFloat(val->type_)) {
+                if (auto si = dynamic_cast<SelectInst*>(val)) {
+                    if (si->use_list_.size() == 1) alreadyInW0 = true;
+                }
+            }
+            if (!alreadyInW0) {
+                if (isFloat(val->type_)) {
+                    std::string r = loadFloat(val);
+                    os_ << "\tfmov s0, " << r << "\n";
+                } else if (isPtr(val->type_)) {
+                    std::string r = loadAddr(val);
+                    os_ << "\tmov x0, " << r << "\n";
+                } else {
+                    std::string r = loadInt(val);
+                    os_ << "\tmov w0, " << r << "\n";
+                }
             }
         }
         os_ << "\tb .L" << func_->name_ << "_epilogue\n";
@@ -1478,6 +1500,15 @@ void Arm64FuncContext::allocateRegisters() {
                 bool skipForSelect = false;
                 if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
                     auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                // Skip Select whose only user is a Ret —
+                // the csel will write directly to w0, no register needed.
+                if (!skipForSelect &&
+                    inst->op_id_ == Instruction::Select &&
+                    inst->use_list_.size() == 1 &&
+                    !isFloat(inst->type_)) {
+                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
                     if (user) skipForSelect = true;
                 }
                 if (!skipForSelect) {
