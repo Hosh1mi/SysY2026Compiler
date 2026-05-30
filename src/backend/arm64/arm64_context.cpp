@@ -1424,8 +1424,17 @@ void Arm64FuncContext::allocateRegisters() {
             instIdx[inst] = idx;
 
             if (canAssignRegister(inst)) {
-                defPos[inst] = idx;
-                lastUse[inst] = idx;
+                // Skip ICmp whose only user is a Select —
+                // the Select emits its own cmp, so the ICmp's register is never read.
+                bool skipForSelect = false;
+                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                if (!skipForSelect) {
+                    defPos[inst] = idx;
+                    lastUse[inst] = idx;
+                }
             }
 
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
