@@ -101,6 +101,11 @@ gcc out.s ../lib/libsysy.a -o out
 
 对`performance/`采用批量测试，在`test/`下运行：
 ```bash
+./arm_test.sh
+```
+
+注：如果使用`qemu`交叉编译，在`test/`下运行：
+```bash
 ./run_tests.sh
 ```
 
