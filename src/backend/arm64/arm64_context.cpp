@@ -378,12 +378,11 @@ void Arm64FuncContext::emitPrologue() {
 
 void Arm64FuncContext::emitEpilogue() {
     if (!epilogueBB_) return;
-    os_ << ".L" << func_->name_ << "_epilogue:\n";
 
-    if (!needsFrame_) {
-        os_ << "\tret\n";
-        return;
-    }
+    // When no frame is needed, Ret emits 'ret' directly — no epilogue at all.
+    if (!needsFrame_) return;
+
+    os_ << ".L" << func_->name_ << "_epilogue:\n";
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
@@ -432,7 +431,24 @@ static std::string bbLabel(Function *f, BasicBlock *bb) {
 void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     if (blockSkipped_.count(bb)) return;
 
-    os_ << bbLabel(func_, bb) << ":\n";
+    // Lazily collect branch targets to detect dead entry-block labels.
+    if (branchTargets_.empty() && !func_->basic_blocks_.empty()) {
+        for (auto b : func_->basic_blocks_) {
+            auto term = b->get_terminator();
+            if (!term || !term->is_br()) continue;
+            for (unsigned i = 0; i < term->num_ops_; ++i) {
+                if (auto tgt = dynamic_cast<BasicBlock*>(term->get_operand(i)))
+                    branchTargets_.insert(tgt);
+            }
+        }
+    }
+
+    // Emit block label only if this block is a branch target or not the entry block.
+    // The entry block is reached via the function name, not its label.
+    bool isEntry = (bb == func_->basic_blocks_[0]);
+    if (!isEntry || branchTargets_.count(bb))
+        os_ << bbLabel(func_, bb) << ":\n";
+
     resetRegs();
     neonEmitted_.clear();
     deferredNEONCode_.clear();
