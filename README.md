@@ -38,10 +38,6 @@
     <td></td>
     <td>用正规 InstCombine 替换现有 algebraSimplify</td>
   </tr>
-  <tr>
-    <td></td>
-    <td>将 CSE 拆分为 EarlyCSE 与 GVN pass</td>
-  </tr>
   
   <tr>
     <td><b>Pass 管理</b></td>
@@ -51,10 +47,6 @@
   <tr>
     <td style="vertical-align:top;"><b>Backend</b></td>
     <td>拆分巨型文件</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>实现叶子函数栈帧省略优化</td>
   </tr>
   <tr>
     <td></td>
