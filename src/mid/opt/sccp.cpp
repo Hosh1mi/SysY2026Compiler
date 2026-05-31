@@ -4,7 +4,21 @@
 #include <map>
 #include <queue>
 #include <set>
-#define SCCP_DEBUG
+// #define SCCP_DEBUG
+
+// ── helpers ─────────────────────────────────────────────────────────
+
+static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
+    for (auto *instr : succ->instr_list_) {
+        if (!instr->is_phi()) continue;
+        auto *phi = static_cast<PhiInst *>(instr);
+        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+            if (phi->get_operand(i) == deadBlock)
+                phi->remove_operands(i - 1, i);
+        }
+    }
+}
+
 // ── Lattice value (stores int directly, no allocation) ─────────────
 
 class LatticeValue {
@@ -76,109 +90,128 @@ bool SCCP::runOnFunction(Function *func) {
     // ── Fixpoint propagation ──────────────────────────────────────
     bool changed = true;
     int maxIter = 10;
-    while (changed && maxIter-- > 0) {
-        changed = false;
+    // while (changed && maxIter-- > 0) {
+    //     changed = false;
 
-        // BFS reachable blocks (respects constant branches)
-        std::set<BasicBlock*> reachable;
-        std::queue<BasicBlock*> q;
-        if (!func->basic_blocks_.empty()) {
-            q.push(func->basic_blocks_[0]); reachable.insert(func->basic_blocks_[0]);
-        }
-        while (!q.empty()) {
-            auto *b = q.front(); q.pop();
-            if (b->instr_list_.empty()) continue;
-            auto *t = b->get_terminator();
-            if (!t || !t->is_br()) continue;
-            auto *br = dynamic_cast<BranchInst*>(t);
-            if (br && br->num_ops_ == 3) {
-                auto itL = lattice.find(br->get_operand(0));
-                if (itL != lattice.end() && itL->second.isConstant()) {
-                    auto *taken = static_cast<BasicBlock*>(
-                        br->get_operand(itL->second.constVal() ? 1 : 2));
-                    if (reachable.insert(taken).second) q.push(taken);
-                } else {
-                    for (unsigned i = 1; i <= 2; i++) {
-                        auto *s = static_cast<BasicBlock*>(br->get_operand(i));
-                        if (reachable.insert(s).second) q.push(s);
-                    }
-                }
-            } else if (br && br->num_ops_ == 1) {
-                auto *s = static_cast<BasicBlock*>(br->get_operand(0));
-                if (reachable.insert(s).second) q.push(s);
-            }
-        }
+    //     // BFS reachable blocks (respects constant branches)
+    //     std::set<BasicBlock*> reachable;
+    //     std::queue<BasicBlock*> q;
+    //     if (!func->basic_blocks_.empty()) {
+    //         q.push(func->basic_blocks_[0]); reachable.insert(func->basic_blocks_[0]);
+    //     }
+    //     while (!q.empty()) {
+    //         auto *b = q.front(); q.pop();
+    //         if (b->instr_list_.empty()) continue;
+    //         auto *t = b->get_terminator();
+    //         if (!t || !t->is_br()) continue;
+    //         auto *br = dynamic_cast<BranchInst*>(t);
+    //         if (br && br->num_ops_ == 3) {
+    //             auto itL = lattice.find(br->get_operand(0));
+    //             if (itL != lattice.end() && itL->second.isConstant()) {
+    //                 auto *taken = static_cast<BasicBlock*>(
+    //                     br->get_operand(itL->second.constVal() ? 1 : 2));
+    //                 if (reachable.insert(taken).second) q.push(taken);
+    //             } else {
+    //                 for (unsigned i = 1; i <= 2; i++) {
+    //                     auto *s = static_cast<BasicBlock*>(br->get_operand(i));
+    //                     if (reachable.insert(s).second) q.push(s);
+    //                 }
+    //             }
+    //         } else if (br && br->num_ops_ == 1) {
+    //             auto *s = static_cast<BasicBlock*>(br->get_operand(0));
+    //             if (reachable.insert(s).second) q.push(s);
+    //         }
+    //     }
 
-        for (auto *bb : reachable) {
-            for (auto *inst : bb->instr_list_) {
-                if (inst->is_phi()) {
-                    auto *phi = static_cast<PhiInst*>(inst);
-                    LatticeValue val = LV_UNDEF;
-                    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                        if (!reachable.count(static_cast<BasicBlock*>(phi->get_operand(i+1))))
-                            continue;
-                        auto itL = lattice.find(phi->get_operand(i));
-                        if (itL != lattice.end()) val = meet(val, itL->second);
-                    }
-                    auto &cur = lattice[phi];
-                    if (cur != val) { cur = val; changed = true; }
-                    continue;
-                }
-                if (inst->isTerminator()) continue;
+    //     for (auto *bb : reachable) {
+    //         for (auto *inst : bb->instr_list_) {
+    //             if (inst->is_phi()) {
+    //                 auto *phi = static_cast<PhiInst*>(inst);
+    //                 LatticeValue val = LV_UNDEF;
+    //                 for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    //                     if (!reachable.count(static_cast<BasicBlock*>(phi->get_operand(i+1))))
+    //                         continue;
+    //                     auto itL = lattice.find(phi->get_operand(i));
+    //                     if (itL != lattice.end()) val = meet(val, itL->second);
+    //                 }
+    //                 auto &cur = lattice[phi];
+    //                 if (cur != val) { cur = val; changed = true; }
+    //                 continue;
+    //             }
+    //             if (inst->isTerminator()) continue;
 
-                auto getLat = [&](Value *v) {
-                    if (auto *ci = dynamic_cast<ConstantInt*>(v))
-                        return LatticeValue::constant(ci->value_);
-                    auto it = lattice.find(v);
-                    return it != lattice.end() ? it->second : LV_UNDEF;
-                };
+    //             auto getLat = [&](Value *v) {
+    //                 if (auto *ci = dynamic_cast<ConstantInt*>(v))
+    //                     return LatticeValue::constant(ci->value_);
+    //                 auto it = lattice.find(v);
+    //                 return it != lattice.end() ? it->second : LV_UNDEF;
+    //             };
 
-                LatticeValue result = LV_OVERDEF;
+    //             LatticeValue result = LV_OVERDEF;
 
-                if (inst->is_binary()) {
-                    auto *bin = static_cast<BinaryInst*>(inst);
-                    auto l1 = getLat(bin->get_operand(0));
-                    auto l2 = getLat(bin->get_operand(1));
-                    if (l1.isOverdef() || l2.isOverdef()) goto done;
-                    // Special cases: mul/and by 0, or by -1
-                    if (inst->op_id_ == Instruction::Mul || inst->op_id_ == Instruction::And) {
-                        if ((l1.isConstant() && l1.constVal() == 0) ||
-                            (l2.isConstant() && l2.constVal() == 0))
-                            { result = LatticeValue::constant(0); goto done; }
-                    }
-                    if (l1.isConstant() && l2.isConstant()) {
-                        bool ok;
-                        int r = evalBinOp(inst->op_id_, l1.constVal(), l2.constVal(), ok);
-                        if (ok) result = LatticeValue::constant(r);
-                    }
-                }
-                else if (auto *icmp = dynamic_cast<ICmpInst*>(inst)) {
-                    auto l1 = getLat(icmp->get_operand(0));
-                    auto l2 = getLat(icmp->get_operand(1));
-                    if (l1.isConstant() && l2.isConstant()) {
-                        int a = l1.constVal(), b = l2.constVal();
-                        bool r = false;
-                        switch (icmp->icmp_op_) {
-                        case ICmpInst::ICMP_EQ:  r=(a==b); break;
-                        case ICmpInst::ICMP_NE:  r=(a!=b); break;
-                        case ICmpInst::ICMP_SGT: r=(a>b);  break;
-                        case ICmpInst::ICMP_SGE: r=(a>=b); break;
-                        case ICmpInst::ICMP_SLT: r=(a<b);  break;
-                        case ICmpInst::ICMP_SLE: r=(a<=b); break;
-                        default: break;
-                        }
-                        result = LatticeValue::constant(r ? 1 : 0);
-                    }
-                }
-                // calls/loads/stores/alloca → stay OVERDEF (init above)
+    //             if (inst->is_binary()) {
+    //                 auto *bin = static_cast<BinaryInst*>(inst);
+    //                 auto l1 = getLat(bin->get_operand(0));
+    //                 auto l2 = getLat(bin->get_operand(1));
+    //                 if (l1.isOverdef() || l2.isOverdef()) goto done;
+    //                 // Special cases: mul/and by 0, or by -1
+    //                 if (inst->op_id_ == Instruction::Mul || inst->op_id_ == Instruction::And) {
+    //                     if ((l1.isConstant() && l1.constVal() == 0) ||
+    //                         (l2.isConstant() && l2.constVal() == 0))
+    //                         { result = LatticeValue::constant(0); goto done; }
+    //                 }
+    //                 if (inst->op_id_ == Instruction::Or) {
+    //                     if ((l1.isConstant() && l1.constVal() == -1) ||
+    //                         (l2.isConstant() && l2.constVal() == -1))
+    //                         { result = LatticeValue::constant(-1); goto done; }
+    //                 }
+    //                 if (l1.isConstant() && l2.isConstant()) {
+    //                     bool ok;
+    //                     int r = evalBinOp(inst->op_id_, l1.constVal(), l2.constVal(), ok);
+    //                     if (ok) result = LatticeValue::constant(r);
+    //                 }
+    //             }
+    //             else if (auto *icmp = dynamic_cast<ICmpInst*>(inst)) {
+    //                 auto l1 = getLat(icmp->get_operand(0));
+    //                 auto l2 = getLat(icmp->get_operand(1));
+    //                 if (l1.isConstant() && l2.isConstant()) {
+    //                     int a = l1.constVal(), b = l2.constVal();
+    //                     bool r = false;
+    //                     switch (icmp->icmp_op_) {
+    //                     case ICmpInst::ICMP_EQ:  r=(a==b); break;
+    //                     case ICmpInst::ICMP_NE:  r=(a!=b); break;
+    //                     case ICmpInst::ICMP_SGT: r=(a>b);  break;
+    //                     case ICmpInst::ICMP_SGE: r=(a>=b); break;
+    //                     case ICmpInst::ICMP_SLT: r=(a<b);  break;
+    //                     case ICmpInst::ICMP_SLE: r=(a<=b); break;
+    //                     default: break;
+    //                     }
+    //                     result = LatticeValue::constant(r ? 1 : 0);
+    //                 }
+    //             }
+    //             else if (inst->op_id_ == Instruction::ZExt) {
+    //                 auto l = getLat(inst->get_operand(0));
+    //                 if (l.isConstant()) result = LatticeValue::constant(l.constVal());
+    //             }
+    //             else if (inst->op_id_ == Instruction::Select) {
+    //                 auto cond = getLat(inst->get_operand(0));
+    //                 if (cond.isConstant()) {
+    //                     result = getLat(inst->get_operand(cond.constVal() ? 1 : 2));
+    //                 } else {
+    //                     auto tv = getLat(inst->get_operand(1));
+    //                     auto fv = getLat(inst->get_operand(2));
+    //                     if (tv == fv && tv.isConstant()) result = tv;
+    //                 }
+    //             }
+    //             // calls/loads/stores/alloca → stay OVERDEF (init above)
 
-                done:
-                auto &cur = lattice[inst];
-                if (cur != result) { cur = result; changed = true; }
-            }
-        }
-    }
-
+    //             done:
+    //             auto &cur = lattice[inst];
+    //             if (cur != result) { cur = result; changed = true; }
+    //         }
+    //     }
+    // }
+    // return changed;
     // ── Apply: replace constant instructions ────────────────────
     bool changed2 = false;
     int replaced = 0;
@@ -193,7 +226,7 @@ bool SCCP::runOnFunction(Function *func) {
         replaced++;
     }
 
-    // ── Apply: simplify constant branches ────────────────────────
+    // ── Apply: fold constant branches with proper CFG cleanup ────
     int brFolded = 0;
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
@@ -202,15 +235,29 @@ bool SCCP::runOnFunction(Function *func) {
         Value *cond = br->get_operand(0);
         auto itL = lattice.find(cond);
         if (itL == lattice.end() || !itL->second.isConstant()) continue;
-        auto *taken  = static_cast<BasicBlock*>(br->get_operand(itL->second.constVal() ? 1 : 2));
+
+        auto *trueDest  = static_cast<BasicBlock*>(br->get_operand(1));
+        auto *falseDest = static_cast<BasicBlock*>(br->get_operand(2));
+        auto *taken     = itL->second.constVal() ? trueDest : falseDest;
+        auto *nonTarget = (taken == trueDest) ? falseDest : trueDest;
+
+        // removeBBFromPhi(bb, nonTarget);
+        // bb->remove_succ_basic_block(trueDest);
+        // bb->remove_succ_basic_block(falseDest);
+        // trueDest->remove_pre_basic_block(bb);
+        // falseDest->remove_pre_basic_block(bb);
         bb->delete_instr(br);
         new BranchInst(taken, bb);
         changed2 = true;
         brFolded++;
     }
-    if (replaced > 0 || brFolded > 0)
+
+
+#ifdef SCCP_DEBUG
+    if (replaced > 0 || brFolded > 0 || )
         std::cerr << "[SCCP] " << func->name_ << ": replaced " << replaced
-                  << " insts, folded " << brFolded << " branches\n";
+                  << " insts, folded " << brFolded << " branches, deleted\n";
+#endif
     return changed2;
 }
 
