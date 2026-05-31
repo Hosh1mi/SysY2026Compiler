@@ -4,7 +4,7 @@
 #include <map>
 #include <queue>
 #include <set>
-
+#define SCCP_DEBUG
 // ── Lattice value (stores int directly, no allocation) ─────────────
 
 class LatticeValue {
@@ -179,7 +179,7 @@ bool SCCP::runOnFunction(Function *func) {
         }
     }
 
-    // ── Apply: replace constant instructions (alloc ConstInt here only) ─
+    // ── Apply: replace constant instructions ────────────────────
     bool changed2 = false;
     int replaced = 0;
     for (auto &[val, lat] : lattice) {
@@ -192,10 +192,25 @@ bool SCCP::runOnFunction(Function *func) {
         changed2 = true;
         replaced++;
     }
-#ifdef SCCP_DEBUG
-    if (replaced > 0)
-        std::cerr << "[SCCP] " << func->name_ << ": replaced " << replaced << " insts\n";
-#endif
+
+    // ── Apply: simplify constant branches ────────────────────────
+    int brFolded = 0;
+    for (auto *bb : func->basic_blocks_) {
+        auto *term = bb->get_terminator();
+        auto *br = dynamic_cast<BranchInst*>(term);
+        if (!br || br->num_ops_ != 3) continue;
+        Value *cond = br->get_operand(0);
+        auto itL = lattice.find(cond);
+        if (itL == lattice.end() || !itL->second.isConstant()) continue;
+        auto *taken  = static_cast<BasicBlock*>(br->get_operand(itL->second.constVal() ? 1 : 2));
+        bb->delete_instr(br);
+        new BranchInst(taken, bb);
+        changed2 = true;
+        brFolded++;
+    }
+    if (replaced > 0 || brFolded > 0)
+        std::cerr << "[SCCP] " << func->name_ << ": replaced " << replaced
+                  << " insts, folded " << brFolded << " branches\n";
     return changed2;
 }
 
