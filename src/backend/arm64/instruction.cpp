@@ -72,6 +72,91 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             }
         }
 
+        // Mul + Add/Sub fusion → madd / msub / mneg
+        //
+        //   mul %m, %a, %b   then  add/sub using %m  →  fused madd/msub/mneg
+        //
+        // The graph-coloring allocator may reuse the same physical register
+        // for %a and the Add's other operand (non-overlapping liveness before
+        // fusion).  To avoid clobbering, we load the mul operands and pin
+        // them to scratch registers BEFORE emitting any intervening instructions.
+        if (inst->op_id_ == Instruction::Mul && inst->use_list_.size() == 1) {
+            auto mulIt = it;
+            bool fused = false;
+            auto scan = std::next(it);
+            int skip = 0;
+            for (; scan != instrs.end() && skip < 3; ++scan, ++skip) {
+                Instruction *sInst = *scan;
+                if (sInst->is_phi()) continue;
+                bool usesMul = false;
+                for (unsigned i = 0; i < sInst->num_ops_; ++i)
+                    if (sInst->get_operand(i) == inst) { usesMul = true; break; }
+                if (usesMul && !dynamic_cast<BinaryInst*>(sInst)) break;
+
+                auto addSub = dynamic_cast<BinaryInst*>(sInst);
+                if (addSub) {
+                    Value *op0 = addSub->get_operand(0);
+                    Value *op1 = addSub->get_operand(1);
+                    bool canMAdd = (addSub->op_id_ == Instruction::Add && (op0 == inst || op1 == inst));
+                    bool canMSub = (addSub->op_id_ == Instruction::Sub && op1 == inst);
+                    if (!canMAdd && !canMSub) break; // Add/Sub found but unrelated
+
+                    // --- Fusion confirmed ---
+                    BinaryInst *mulInst = static_cast<BinaryInst*>(inst);
+
+                    // 1. Load mul operands and pin to w8 / w16.
+                    //    w8 is never returned by allocIntReg (pool is w9-w15).
+                    //    w16 is the fallback — we re-mark it after each
+                    //    intervening instruction to prevent re-use.
+                    resetRegs();
+                    std::string rA = loadInt(mulInst->get_operand(0));
+                    std::string rB = loadInt(mulInst->get_operand(1));
+                    os_ << "\tmov w8, " << rA << "\n";
+                    os_ << "\tmov w16, " << rB << "\n";
+
+                    // 2. Emit intervening instructions.  Each calls resetRegs(),
+                    //    so we re-pin w16 in usedIntRegs_ to keep it alive.
+                    for (auto mid = std::next(mulIt); mid != scan; ++mid) {
+                        if ((*mid)->is_phi()) continue;
+                        emitInstruction(*mid);
+                        if (!usedIntRegs_.count(16))
+                            usedIntRegs_.insert(16);
+                    }
+
+                    // 3. Emit fused madd / msub / mneg using pinned operands
+                    {
+                        resetRegs();
+                        std::string rA2 = "w8";
+                        std::string rB2 = "w16";
+                        Value *accOp = (op0 == inst) ? op1 : op0;
+                        std::string rAcc = loadInt(accOp);
+                        std::string rd = allocIntReg();
+                        if (canMAdd) {
+                            os_ << "\tmadd " << rd << ", " << rA2 << ", " << rB2
+                                << ", " << rAcc << "\n";
+                        } else {
+                            Value *minuend = addSub->get_operand(0);
+                            if (auto *ci = dynamic_cast<ConstantInt*>(minuend)) {
+                                if (ci->value_ == 0) {
+                                    os_ << "\tmneg " << rd << ", " << rA2
+                                        << ", " << rB2 << "\n";
+                                    storeInt(addSub, rd);
+                                    it = scan; fused = true; break;
+                                }
+                            }
+                            std::string rMin = loadInt(minuend);
+                            os_ << "\tmsub " << rd << ", " << rA2 << ", " << rB2
+                                << ", " << rMin << "\n";
+                        }
+                        storeInt(addSub, rd);
+                    }
+
+                    it = scan; fused = true; break;
+                }
+            }
+            if (fused) continue;
+        }
+
         emitInstruction(inst);
     }
     // If the deferred code was never flushed (e.g. NEON-matched
