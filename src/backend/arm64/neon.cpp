@@ -1,4 +1,5 @@
-#include "../../include/backend/arm64/arm64_context.hpp"
+#include "../../include/backend/arm64/context.hpp"
+#include "../../include/backend/arm64/helpers.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -11,18 +12,6 @@
 #include <vector>
 
 #define NEON_LOG(msg) if (debugNEON) std::cerr << "[NEON] " << msg << "\n"
-
-static int typeSize(Type *ty) {
-    switch (ty->tid_) {
-    case Type::IntegerTyID: return 4;
-    case Type::FloatTyID:   return 4;
-    case Type::PointerTyID: return 8;
-    case Type::ArrayTyID:
-        return static_cast<ArrayType*>(ty)->num_elements_ *
-               typeSize(static_cast<ArrayType*>(ty)->contained_);
-    default: return 8;
-    }
-}
 
 // ── NEON emit helpers ────────────────────────────────────────────────
 

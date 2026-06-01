@@ -23,9 +23,7 @@ private:
     int getSlot(Value *v);
     bool hasSlot(Value *v) const;
 
-    // graph-coloring register allocation for SSA values
-    void allocateRegisters();
-    bool canAssignRegister(Value *v) const;
+    // graph-coloring register allocation result accessors
     bool hasAssignedReg(Value *v) const;
     std::string assignedReg(Value *v, bool asAddress = false) const;
 

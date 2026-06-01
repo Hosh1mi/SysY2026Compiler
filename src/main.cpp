@@ -28,7 +28,7 @@
 #include "include/mid/opt/sroa.hpp"
 #include "include/mid/opt/unifyExitNodes.hpp"
 
-#include "include/backend/arm64/arm64_codegen.hpp"
+#include "include/backend/arm64/codegen.hpp"
 
 // ── Pipeline helper modules ──────────────────────────────────────────
 // Group common pass sequences for reusable cleanup after transforms.

@@ -1,4 +1,4 @@
-#include "../../include/backend/arm64/arm64_peephole.hpp"
+#include "../../include/backend/arm64/peephole.hpp"
 #include <cctype>
 #include <cstdlib>
 #include <map>

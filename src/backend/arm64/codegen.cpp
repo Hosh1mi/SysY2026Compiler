@@ -1,6 +1,6 @@
-#include "../../include/backend/arm64/arm64_codegen.hpp"
-#include "../../include/backend/arm64/arm64_peephole.hpp"
-#include "../../include/backend/arm64/arm64_context.hpp"
+#include "../../include/backend/arm64/codegen.hpp"
+#include "../../include/backend/arm64/peephole.hpp"
+#include "../../include/backend/arm64/context.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <cstring>
 #include <functional>

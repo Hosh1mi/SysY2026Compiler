@@ -42,14 +42,6 @@
   
   <tr>
     <td style="vertical-align:top;"><b>Backend</b></td>
-    <td>拆分巨型文件</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>去掉arm64前缀</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>完善 NEON 指令支持</td>
   </tr>
   <tr>
@@ -64,10 +56,6 @@
   <tr>
     <td style="vertical-align:top;"><b>问题修复</b></td>
     <td>排查部分测试集上函数内联后寄存器溢出的异常情况</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>修复魔数相关算法的实现错误</td>
   </tr>
   
   <tr>
