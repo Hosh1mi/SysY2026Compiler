@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <queue>
+#include <unordered_map>
 #include <vector>
 
 // 辅助函数：在 succ 的所有 phi 中删除 deadBlock 对应的入边
@@ -263,56 +264,79 @@ static bool isSafeToSpeculate(Instruction *inst) {
     return true;
 }
 
-static bool operandsAvailableInBlock(Instruction *inst, BasicBlock *targetBB) {
-    for (unsigned i = 0; i < inst->num_ops_; i++) {
-        auto *def = dynamic_cast<Instruction*>(inst->get_operand(i));
-        if (!def) continue;
-        if (def->parent_ == inst->parent_) return false;
+// Return all non-phi, non-terminator instructions in b.
+static std::vector<Instruction*> getInstrs(BasicBlock *b) {
+    std::vector<Instruction*> v;
+    for (auto *i : b->instr_list_) {
+        if (i->is_phi()) continue;
+        if (i->isTerminator()) break;
+        v.push_back(i);
+    }
+    return v;
+}
+
+// Clone inst into newBB with operand remapping via vm.
+// Supports BinaryInst, ICmpInst, SelectInst; returns nullptr otherwise.
+static Instruction *cloneWithRemap(
+    Instruction *inst, BasicBlock *newBB,
+    const std::unordered_map<Value*, Value*> &vm)
+{
+    auto remap = [&](Value *v) -> Value* {
+        auto it = vm.find(v);
+        return it != vm.end() ? it->second : v;
+    };
+    if (auto *bin = dynamic_cast<BinaryInst*>(inst))
+        return new BinaryInst(inst->type_, bin->op_id_,
+            remap(bin->get_operand(0)), remap(bin->get_operand(1)), newBB, true);
+    if (auto *cmp = dynamic_cast<ICmpInst*>(inst))
+        return new ICmpInst(cmp->icmp_op_,
+            remap(cmp->get_operand(0)), remap(cmp->get_operand(1)), newBB, true);
+    if (auto *sel = dynamic_cast<SelectInst*>(inst)) {
+        auto *clone = new SelectInst(remap(sel->get_operand(0)),
+            remap(sel->get_operand(1)), remap(sel->get_operand(2)), sel->type_);
+        clone->parent_ = newBB;
+        return clone;
+    }
+    return nullptr;
+}
+
+// Speculatively clone all instructions of interBB into condBB before insertBefore.
+// valMap is updated with original→clone mappings.
+// Returns false if any instruction is unsafe or can't be cloned.
+static bool tryCloneBlock(
+    const std::vector<Instruction*>& instrs,
+    BasicBlock *condBB,
+    Instruction *insertBefore,
+    std::unordered_map<Value*, Value*> &valMap)
+{
+    for (auto *inst : instrs) {
+        if (!isSafeToSpeculate(inst)) return false;
+        for (unsigned i = 0; i < inst->num_ops_; i++) {
+            auto *def = dynamic_cast<Instruction*>(inst->get_operand(i));
+            if (!def) continue;
+            // Operand defined in same block must already have been cloned.
+            if (def->parent_ == inst->parent_ && valMap.count(def) == 0)
+                return false;
+        }
+        auto *clone = cloneWithRemap(inst, condBB, valMap);
+        if (!clone) return false;
+        valMap[inst] = clone;
+        condBB->add_instruction_before_inst(clone, insertBefore);
     }
     return true;
 }
 
-// Clone a speculate-safe instruction.  Only BinaryInst (add/sub/mul/etc.)
-// appears in practice; other types fall through to nullptr (safe skip).
-static Instruction *cloneInstruction(Instruction *inst, BasicBlock *newBB) {
-    if (auto *bin = dynamic_cast<BinaryInst*>(inst))
-        return new BinaryInst(inst->type_, bin->op_id_,
-            bin->get_operand(0), bin->get_operand(1), newBB, true);
-    return nullptr;
-}
-
 // Convert if-else diamond patterns to select instructions.
 //
-// Three patterns are recognised:
-//   A) Both paths have intermediate blocks:
-//        BB_cond: icmp + br → BB_true / BB_false
-//        BB_true:  0-1 inst + br → BB_merge
-//        BB_false: 0-1 inst + br → BB_merge
-//   B) If-then (false path goes directly to merge):
-//        BB_cond: icmp + br → BB_true / BB_merge
-//        BB_true:  0-1 inst + br → BB_merge
-//        BB_false == BB_merge
-//   C) If-else inv. (true path goes directly to merge):
-//        BB_cond: icmp + br → BB_merge / BB_false
-//        BB_true == BB_merge
-//        BB_false: 0-1 inst + br → BB_merge
-// →
-//   BB_cond: select → br BB_merge  (dead blocks cleaned up later)
+// Three patterns, interBB may have 0–N safe-to-speculate instructions:
+//   A) Both paths intermediate:  condBB → trueBB → mergeBB, condBB → falseBB → mergeBB
+//   B) If-then:  condBB → trueBB → mergeBB (=falseBB)
+//   C) If-else:  condBB → falseBB → mergeBB (=trueBB)
+//
+// The phi in mergeBB may have extra predecessors (&&/|| patterns with
+// 3-predecessor phis); handled via in-place phi update in that case.
 bool CFGSimplify::convertDiamondsToSelect(Function *func) {
     bool changed = false;
-
-    // Helper: return the single non-phi, non-terminator instruction in b,
-    // or nullptr if there isn't exactly one.
-    auto getSingle = [](BasicBlock *b) -> Instruction* {
-        Instruction *f = nullptr;
-        for (auto *i : b->instr_list_) {
-            if (i->is_phi()) continue;
-            if (i->isTerminator()) break;
-            if (f) return nullptr;  // more than one → not a simple diamond
-            f = i;
-        }
-        return f;  // may be nullptr (passthrough block)
-    };
 
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
@@ -329,66 +353,50 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         if (trueBB == falseBB) continue;
 
         // ── Determine structure ──
-        auto *trueTerm = trueBB->get_terminator();
+        auto *trueTerm  = trueBB->get_terminator();
         auto *falseTerm = falseBB->get_terminator();
-        bool trueBr = trueTerm && trueTerm->is_br() && trueTerm->num_ops_ == 1;
+        bool trueBr  = trueTerm  && trueTerm->is_br()  && trueTerm->num_ops_  == 1;
         bool falseBr = falseTerm && falseTerm->is_br() && falseTerm->num_ops_ == 1;
 
         enum { PAT_A, PAT_B, PAT_C } pattern;
-        BasicBlock *mergeBB = nullptr;
-        BasicBlock *interTrueBB = nullptr;   // intermediate on true  path (PAT_A, PAT_B)
-        BasicBlock *interFalseBB = nullptr;  // intermediate on false path (PAT_A, PAT_C)
+        BasicBlock *mergeBB      = nullptr;
+        BasicBlock *interTrueBB  = nullptr;
+        BasicBlock *interFalseBB = nullptr;
 
         if (trueBr && falseBr) {
-            // Pattern A: both are intermediate → must converge to same merge
             auto *tt = static_cast<BasicBlock*>(trueTerm->get_operand(0));
             auto *ft = static_cast<BasicBlock*>(falseTerm->get_operand(0));
-            if (tt != ft) continue;
-            if (trueBB->pre_bbs_.size() != 1 || falseBB->pre_bbs_.size() != 1) continue;
-            mergeBB = tt;
-            pattern = PAT_A;
-            interTrueBB = trueBB;
-            interFalseBB = falseBB;
+            if (tt == ft) {
+                // PAT_A: both converge to the same merge
+                if (trueBB->pre_bbs_.size() != 1 || falseBB->pre_bbs_.size() != 1) continue;
+                mergeBB = tt; pattern = PAT_A;
+                interTrueBB = trueBB; interFalseBB = falseBB;
+            } else if (tt == falseBB) {
+                // trueBB → falseBB: trueBB is intermediate, falseBB is merge (PAT_B)
+                if (trueBB->pre_bbs_.size() != 1) continue;
+                mergeBB = falseBB; pattern = PAT_B; interTrueBB = trueBB;
+            } else if (ft == trueBB) {
+                // falseBB → trueBB: falseBB is intermediate, trueBB is merge (PAT_C)
+                if (falseBB->pre_bbs_.size() != 1) continue;
+                mergeBB = trueBB; pattern = PAT_C; interFalseBB = falseBB;
+            } else {
+                continue;
+            }
         } else if (trueBr) {
-            // Pattern B: trueBB intermediate → falseBB is the merge (if-then)
             if (static_cast<BasicBlock*>(trueTerm->get_operand(0)) != falseBB) continue;
             if (trueBB->pre_bbs_.size() != 1) continue;
-            mergeBB = falseBB;
-            pattern = PAT_B;
-            interTrueBB = trueBB;
+            mergeBB = falseBB; pattern = PAT_B; interTrueBB = trueBB;
         } else if (falseBr) {
-            // Pattern C: falseBB intermediate → trueBB is the merge (if-else inv.)
             if (static_cast<BasicBlock*>(falseTerm->get_operand(0)) != trueBB) continue;
             if (falseBB->pre_bbs_.size() != 1) continue;
-            mergeBB = trueBB;
-            pattern = PAT_C;
-            interFalseBB = falseBB;
+            mergeBB = trueBB; pattern = PAT_C; interFalseBB = falseBB;
         } else {
-            continue;  // neither is a simple br → degenerate
-        }
-
-        // ── Get computation instructions from intermediate blocks ──
-        Instruction *trueInst = nullptr;
-        Instruction *falseInst = nullptr;
-        if (interTrueBB) {
-            trueInst = getSingle(interTrueBB);
-            if (trueInst) {
-                if (!isSafeToSpeculate(trueInst)) continue;
-                if (!operandsAvailableInBlock(trueInst, bb)) continue;
-            }
-        }
-        if (interFalseBB) {
-            falseInst = getSingle(interFalseBB);
-            if (falseInst) {
-                if (!isSafeToSpeculate(falseInst)) continue;
-                if (!operandsAvailableInBlock(falseInst, bb)) continue;
-            }
+            continue;
         }
 
         // ── Find phi in mergeBB ──
         PhiInst *phi = nullptr;
-        Value *trueVal = nullptr;   // value for select's true  operand
-        Value *falseVal = nullptr;  // value for select's false operand
+        Value *trueVal = nullptr, *falseVal = nullptr;
 
         for (auto *i : mergeBB->instr_list_) {
             if (!i->is_phi()) break;
@@ -397,99 +405,76 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
             for (unsigned k = 0; k < p->num_ops_; k += 2) {
                 auto *pred = static_cast<BasicBlock*>(p->get_operand(k + 1));
                 Value *val = p->get_operand(k);
-                // Intermediate-block edges
                 if (interTrueBB  && pred == interTrueBB)  vT = val;
                 if (interFalseBB && pred == interFalseBB) vF = val;
-                // Direct edges (condBB → merge)
                 if (pattern == PAT_B && pred == bb) vF = val;
                 if (pattern == PAT_C && pred == bb) vT = val;
             }
-            // If intermediate has an instruction the phi value must match it;
-            // if the block is a pure passthrough any non-null value is ok.
-            bool tOk = (trueInst  && vT == trueInst)  || (interTrueBB  && !trueInst  && vT) || (!interTrueBB  && vT);
-            bool fOk = (falseInst && vF == falseInst) || (interFalseBB && !falseInst && vF) || (!interFalseBB && vF);
-            if (tOk && fOk && vT && vF) {
-                phi = p;
-                trueVal = vT;
-                falseVal = vF;
-                break;
-            }
+            if (!vT || !vF) continue;
+            phi = p; trueVal = vT; falseVal = vF;
+            break;
         }
         if (!phi || !trueVal || !falseVal) continue;
+        if (phi->num_ops_ < 4) continue;
 
-        // Phi must have exactly 2 incoming edges (from the diamond only).
-        if (phi->num_ops_ != 4) continue;
+        // ── Clone intermediate blocks' instructions into condBB ──
+        std::unordered_map<Value*, Value*> valMapT, valMapF;
+        auto trueInstrs  = interTrueBB  ? getInstrs(interTrueBB)  : std::vector<Instruction*>{};
+        auto falseInstrs = interFalseBB ? getInstrs(interFalseBB) : std::vector<Instruction*>{};
 
-        // MergeBB may have non-phi instructions (e.g. after inlining), but they are
-        // still valid after the conversion: the select replaces the phi and is
-        // available in mergeBB because condBB dominates it.
-        // We still verify that any non-phi instructions in mergeBB are safe to
-        // keep — they must not reference the intermediate blocks directly (only
-        // through the replaced phi, which is handled by replace_all_use_with).
+        if (!tryCloneBlock(trueInstrs,  bb, term, valMapT)) continue;
+        if (!tryCloneBlock(falseInstrs, bb, term, valMapF)) continue;
 
-        // ── Clone intermediate instructions into condBB ──
-        Value *trueOperand = trueVal;
-        Value *falseOperand = falseVal;
-        if (trueInst) {
-            auto *clone = cloneInstruction(trueInst, bb);
-            if (!clone) continue;
-            bb->add_instruction_before_inst(clone, term);
-            trueOperand = clone;
-        }
-        if (falseInst) {
-            auto *clone = cloneInstruction(falseInst, bb);
-            if (!clone) continue;
-            bb->add_instruction_before_inst(clone, term);
-            falseOperand = clone;
-        }
+        Value *trueOperand  = valMapT.count(trueVal)  ? valMapT[trueVal]  : trueVal;
+        Value *falseOperand = valMapF.count(falseVal) ? valMapF[falseVal] : falseVal;
 
         // ── Create select ──
         auto *sel = new SelectInst(icmp, trueOperand, falseOperand, trueOperand->type_);
         bb->add_instruction_before_inst(sel, term);
-        phi->replace_all_use_with(sel);
 
-        // ── Replace conditional branch: either sink mergeBB into condBB,
-        //     or create an unconditional jump to mergeBB. ──
+        // ── Update phi ──
+        if (phi->num_ops_ == 4) {
+            // 2-pred diamond: phi can be fully replaced by the select.
+            phi->replace_all_use_with(sel);
+        } else {
+            // Multi-pred phi (&&/|| pattern): update in place.
+            for (auto *ib : {interTrueBB, interFalseBB}) {
+                if (!ib) continue;
+                for (int k = (int)phi->num_ops_ - 1; k >= 0; k -= 2) {
+                    if (phi->get_operand(k) == ib)
+                        phi->remove_operands(k - 1, k);
+                }
+            }
+            if (pattern == PAT_B || pattern == PAT_C) {
+                for (int k = 1; k < (int)phi->num_ops_; k += 2) {
+                    if (phi->get_operand(k) == bb) { phi->set_operand(k - 1, sel); break; }
+                }
+            } else {
+                phi->addIncoming(sel, bb);
+            }
+        }
+
+        // ── Replace branch ──
         bb->delete_instr(term);
-        for (auto *old : bb->succ_bbs_)
-            old->remove_pre_basic_block(bb);
+        for (auto *old : bb->succ_bbs_) old->remove_pre_basic_block(bb);
         bb->succ_bbs_.clear();
-
-        // Remove intermediate blocks from mergeBB's predecessor list so we
-        // can see whether mergeBB becomes a trivial single-predecessor sink.
         for (auto *ib : {interTrueBB, interFalseBB}) {
             if (ib) mergeBB->remove_pre_basic_block(ib);
         }
 
-        // Decide: can we merge mergeBB directly into condBB?
+        // Optionally sink mergeBB into condBB when it was the sole target.
         auto *mt = mergeBB->get_terminator();
         bool sinkMerge = false;
-        if (mt && mt->is_ret() &&
-            mergeBB != getEntryBlock(func) &&
-            mergeBB->pre_bbs_.size() == 0) {  // only the diamond preds existed
-            // All phis must be dead (uses replaced by the select above)
+        if (phi->use_list_.empty() && mt && mt->is_ret() &&
+            mergeBB != getEntryBlock(func) && mergeBB->pre_bbs_.empty()) {
             bool allPhisDead = true;
             for (auto *instr : mergeBB->instr_list_) {
                 if (instr == mt) break;
-                if (!instr->is_phi() || !instr->use_list_.empty()) {
-                    allPhisDead = false;
-                    break;
-                }
+                if (!instr->is_phi() || !instr->use_list_.empty()) { allPhisDead = false; break; }
             }
-            if (allPhisDead) {
-                // Create a new ret in condBB using the select result.
-                // (Don't try to move the old ret — delete_instr clears operands.)
-                new ReturnInst(sel, bb);
-                sinkMerge = true;
-                // mergeBB is now dead (no preds); removeDeadBlocks will
-                // clean it up along with its now-dead phis and ret.
-            }
+            if (allPhisDead) { new ReturnInst(sel, bb); sinkMerge = true; }
         }
-
-        if (!sinkMerge) {
-            bb->succ_bbs_.push_back(mergeBB);
-            new BranchInst(mergeBB, bb);  // also adds bb as mergeBB predecessor
-        }
+        if (!sinkMerge) { bb->succ_bbs_.push_back(mergeBB); new BranchInst(mergeBB, bb); }
 
         changed = true;
     }
