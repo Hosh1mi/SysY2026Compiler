@@ -928,7 +928,40 @@ void LoopVectorize::emitVectorizedLoop(
             }
             if (!hasAll) continue;
 
-            // Step 2: Check if stored values come from a vectorizable binop
+            // Step 2a: Check if stored values are all constants → direct ConstantVector store
+            {
+                bool allConst = true;
+                for (int j = 0; j < vecWidth; j++) {
+                    if (!dynamic_cast<ConstantInt*>(vec[j]->storedVal)) { allConst = false; break; }
+                }
+                if (allConst) {
+                    Type *elemTy = vec[0]->storedVal->type_;
+                    Type *vecTy  = getVecTy(elemTy);
+                    Type *vecPtrTy = getVecPtrTy(elemTy);
+                    std::vector<Constant*> constElems;
+                    for (int j = 0; j < vecWidth; j++)
+                        constElems.push_back(static_cast<ConstantInt*>(vec[j]->storedVal));
+                    auto *constVec = new ConstantVector(static_cast<VectorType*>(vecTy), constElems);
+
+                    auto *firstGep = vec[0]->gep;
+                    std::vector<Value*> idxs;
+                    for (unsigned i = 1; i < firstGep->num_ops_ - 1; i++)
+                        idxs.push_back(firstGep->get_operand(i));
+                    idxs.push_back(vecPhi);
+                    auto *newGep = new GetElementPtrInst(firstGep->get_operand(0), idxs, vecBody);
+                    auto *bc = new Bitcast(Instruction::BitCast, newGep, vecPtrTy, vecBody);
+                    new StoreInst(constVec, bc, vecBody);
+
+                    for (int j = 0; j < vecWidth; j++) {
+                        auto *si = vec[j];
+                        si->store->parent_->remove_instr(si->store);
+                        si->store->remove_use_of_ops();
+                    }
+                    continue;
+                }
+            }
+
+            // Step 2b: Check if stored values come from a vectorizable binop
             auto *rootBinop = dynamic_cast<BinaryInst*>(vec[0]->storedVal);
             if (!rootBinop) continue;
             // Only integer NEON-supported opcodes; skip float
@@ -1149,9 +1182,6 @@ void LoopVectorize::emitVectorizedLoop(
             }
         }
     }
-
-    // Add the backedge for remPhi: the value from origLatch's update instruction
-    remPhi->addIncoming(iv.updateInst, origLatch);
 
     for (auto bb : loop.blocks) {
         auto *term = bb->get_terminator();
