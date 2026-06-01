@@ -153,6 +153,13 @@ public:
         set_operand(0, v1);
         set_operand(1, v2);
     }
+    // no-insert constructor (caller uses add_instruction_before_inst)
+    ICmpInst(ICmpOp op, Value* v1, Value* v2, BasicBlock* bb, bool)
+        : Instruction(bb->parent_->parent_->int1_ty_, Instruction::ICmp, 2), icmp_op_(op) {
+        set_operand(0, v1);
+        set_operand(1, v2);
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
     ICmpOp icmp_op_;
 };

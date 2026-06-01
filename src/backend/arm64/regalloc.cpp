@@ -289,6 +289,18 @@ void Arm64RegAlloc::allocate() {
                 if (canAssignRegister(val)) {
                     lastUse[val] = std::max(lastUse[val], idx);
                 }
+                // Select emits its own cmp using the ICmp's operands, so
+                // extend those operands' live ranges to this Select's position.
+                if (inst->op_id_ == Instruction::Select) {
+                    if (auto *icmp = dynamic_cast<ICmpInst*>(val)) {
+                        for (unsigned j = 0; j < icmp->num_ops_; ++j) {
+                            auto icmpOp = icmp->get_operand(j);
+                            if (canAssignRegister(icmpOp)) {
+                                lastUse[icmpOp] = std::max(lastUse[icmpOp], idx);
+                            }
+                        }
+                    }
+                }
             }
         }
         blockEnd[bb] = idx;
