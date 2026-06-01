@@ -663,11 +663,12 @@ void LoopVectorize::emitVectorizedLoop(
                 patternA = false; break;
             }
         }
-        // Reject SDiv/SRem/FDiv
+        // Reject SDiv/SRem/FDiv and all float binops
         if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
             if (bi->op_id_ == Instruction::SDiv ||
                 bi->op_id_ == Instruction::SRem ||
-                bi->op_id_ == Instruction::FDiv) {
+                bi->op_id_ == Instruction::FDiv ||
+                bi->type_->tid_ == Type::FloatTyID) {
                 patternA = false; break;
             }
         }
@@ -930,13 +931,11 @@ void LoopVectorize::emitVectorizedLoop(
             // Step 2: Check if stored values come from a vectorizable binop
             auto *rootBinop = dynamic_cast<BinaryInst*>(vec[0]->storedVal);
             if (!rootBinop) continue;
-            // Only NEON-supported opcodes; reject SDiv/SRem/FDiv
+            // Only integer NEON-supported opcodes; skip float
+            if (rootBinop->type_->tid_ == Type::FloatTyID) continue;
             if (rootBinop->op_id_ != Instruction::Add &&
                 rootBinop->op_id_ != Instruction::Sub &&
-                rootBinop->op_id_ != Instruction::Mul &&
-                rootBinop->op_id_ != Instruction::FAdd &&
-                rootBinop->op_id_ != Instruction::FSub &&
-                rootBinop->op_id_ != Instruction::FMul) continue;
+                rootBinop->op_id_ != Instruction::Mul) continue;
             // Verify all 4 stores share the same root binop
             bool sameBinop = true;
             for (int j = 1; j < vecWidth; j++) {
