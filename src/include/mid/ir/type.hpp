@@ -14,6 +14,7 @@ public:
         FloatTyID,     // 浮点（float32）
         FunctionTyID,  // 函数类型
         ArrayTyID,     // 数组类型
+        VectorTyID,    // 向量（<4 x i32> / <4 x float>）
         PointerTyID,   // 指针类型
     };
     explicit Type(TypeID tid) : tid_(tid) {}
@@ -35,6 +36,14 @@ public:
     ArrayType(Type* contained, unsigned num_elements) : Type(Type::ArrayTyID), num_elements_(num_elements), contained_(contained) {}
     Type* contained_;         // 元素类型
     unsigned num_elements_;   // 元素个数
+};
+
+// <4 x i32> : num_elements_ = 4, contained_ = i32
+class VectorType : public Type {
+public:
+    VectorType(Type* contained, unsigned num_elements) : Type(Type::VectorTyID), num_elements_(num_elements), contained_(contained) {}
+    Type* contained_;         // 通道元素类型
+    unsigned num_elements_;   // 通道数
 };
 
 // [2 x [3 x i32]]*

@@ -24,6 +24,7 @@ public:
         Select,                                  // select i1 cond, T val1, F val2
         GetElementPtr,                           // 地址计算
         ZExt, FPtoSI, SItoFP, BitCast,           // 类型转换
+        InsertElement,                            // insertelement <4 x i32> %vec, i32 %val, i32 %idx
         ICmp, FCmp, PHI, Call                    // 比较、phi、调用
     };
 
@@ -380,6 +381,18 @@ public:
     Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
     virtual std::string print() override;
     Type* dest_ty_;
+};
+
+// insertelement <4 x i32> %vec, i32 %val, i32 %idx
+class InsertElementInst : public Instruction {
+public:
+    InsertElementInst(Value* vec, Value* val, Value* idx, BasicBlock* bb)
+        : Instruction(vec->type_, Instruction::InsertElement, 3, bb) {
+        set_operand(0, vec);
+        set_operand(1, val);
+        set_operand(2, idx);
+    }
+    virtual std::string print() override;
 };
 
 // phi 节点：%4 = phi i32 [ 1, %bb1 ], [ %6, %bb2 ]

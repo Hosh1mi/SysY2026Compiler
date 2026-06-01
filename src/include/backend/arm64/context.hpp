@@ -35,21 +35,22 @@ private:
     void freeAddrReg(const std::string& reg);
     void freeIntReg(const std::string &reg);
 
-    // NEON register pool + lowering
+    // NEON scratch register pool
     std::string allocNEONReg();
     void freeNEONReg(const std::string &reg);
     void resetNEONRegs();
-    bool tryEmitNEON(BasicBlock *bb);
 
     // load from slot/constant/global to scratch register
     std::string loadInt(Value *v);
     std::string loadFloat(Value *v);
     std::string loadAddr(Value *v);
+    std::string loadVector(Value *v);
 
     // store from register to slot
     void storeInt(Value *v, const std::string &reg);
     void storeFloat(Value *v, const std::string &reg);
     void storeAddr(Value *v, const std::string &reg);
+    void storeVector(Value *v, const std::string &reg);
 
     // emit constant into register
     void emitIntConst(int val, const std::string &reg);
@@ -78,10 +79,8 @@ private:
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
     std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7, v16-v31
-    std::set<Instruction*> neonEmitted_;  // instructions already lowered to NEON
     std::set<BasicBlock*> blockSkipped_;  // blocks handled by csel, don't emit
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
-    std::string deferredNEONCode_;        // NEON asm deferred to emit at correct position
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
 

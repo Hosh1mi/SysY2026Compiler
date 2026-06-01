@@ -10,6 +10,35 @@
 void Arm64FuncContext::resetRegs() {
     usedIntRegs_.clear();
     usedFloatRegs_.clear();
+    usedNEONRegs_.clear();
+}
+
+std::string Arm64FuncContext::allocNEONReg() {
+    for (int r = 0; r <= 7; r++) {
+        if (!usedNEONRegs_.count(r)) {
+            usedNEONRegs_.insert(r);
+            return "v" + std::to_string(r);
+        }
+    }
+    for (int r = 16; r <= 31; r++) {
+        if (!usedNEONRegs_.count(r)) {
+            usedNEONRegs_.insert(r);
+            return "v" + std::to_string(r);
+        }
+    }
+    usedNEONRegs_.insert(0);
+    return "v0";
+}
+
+void Arm64FuncContext::freeNEONReg(const std::string &reg) {
+    if (reg.size() >= 2 && reg[0] == 'v') {
+        int num = std::stoi(reg.substr(1));
+        usedNEONRegs_.erase(num);
+    }
+}
+
+void Arm64FuncContext::resetNEONRegs() {
+    usedNEONRegs_.clear();
 }
 
 void Arm64FuncContext::freeIntReg(const std::string &reg) {
@@ -158,6 +187,68 @@ void Arm64FuncContext::storeAddr(Value *v, const std::string &reg) {
     }
     int off = getSlot(v);
     emitStoreReg(os_, reg, off);
+}
+
+std::string Arm64FuncContext::loadVector(Value *v) {
+    if (auto *cv = dynamic_cast<ConstantVector*>(v)) {
+        // Materialize constant vector directly: mov into each lane.
+        // mov v.s[lane] requires a W register; float constants need fmov first.
+        std::string rd = allocNEONReg();
+        for (size_t i = 0; i < cv->elements_.size(); i++) {
+            Constant *elem = cv->elements_[i];
+            std::string ws;
+            if (isFloat(elem->type_)) {
+                std::string sr = loadFloat(elem);
+                ws = allocIntReg();
+                os_ << "\tfmov " << ws << ", " << sr << "\n";
+            } else {
+                ws = loadInt(elem);
+            }
+            os_ << "\tmov " << rd << ".s[" << i << "], " << ws << "\n";
+        }
+        return rd;
+    }
+    if (hasAssignedReg(v)) return assignedReg(v);
+    std::string r = allocNEONReg();
+    int off = getSlot(v);
+    // ldr qN only supports unsigned offset; use sub+ldr for negative offsets
+    if (off >= 0 && off <= 65520 && off % 16 == 0) {
+        os_ << "\tldr q" << r.substr(1) << ", [x29, #" << off << "]\n";
+    } else {
+        int pos = -off;
+        if (pos <= 4095) {
+            os_ << "\tsub x16, x29, #" << pos << "\n";
+        } else {
+            os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
+            os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tsub x16, x29, x16\n";
+        }
+        os_ << "\tldr q" << r.substr(1) << ", [x16]\n";
+    }
+    return r;
+}
+
+void Arm64FuncContext::storeVector(Value *v, const std::string &reg) {
+    if (hasAssignedReg(v)) {
+        std::string target = assignedReg(v);
+        if (target != reg) os_ << "\tmov " << target << ".16b, " << reg << ".16b\n";
+        return;
+    }
+    int off = getSlot(v);
+    // str qN only supports unsigned offset; use sub+str for negative offsets
+    if (off >= 0 && off <= 65520 && off % 16 == 0) {
+        os_ << "\tstr q" << reg.substr(1) << ", [x29, #" << off << "]\n";
+    } else {
+        int pos = -off;
+        if (pos <= 4095) {
+            os_ << "\tsub x16, x29, #" << pos << "\n";
+        } else {
+            os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
+            os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+            os_ << "\tsub x16, x29, x16\n";
+        }
+        os_ << "\tstr q" << reg.substr(1) << ", [x16]\n";
+    }
 }
 
 // ---- constants ----

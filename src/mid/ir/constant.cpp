@@ -43,6 +43,21 @@ std::string ConstantArray::print() {
     return const_ir;
 }
 
+// 向量常量，如 <i32 0, i32 1, i32 2, i32 3>
+std::string ConstantVector::print() {
+    std::string const_ir;
+    auto *vecTy = static_cast<VectorType*>(this->type_);
+    const_ir += "<";
+    for (size_t i = 0; i < elements_.size(); i++) {
+        if (i > 0) const_ir += ", ";
+        const_ir += vecTy->contained_->print();
+        const_ir += " ";
+        const_ir += elements_[i]->print();
+    }
+    const_ir += ">";
+    return const_ir;
+}
+
 std::string ConstantZero::print() {
     return "zeroinitializer";
 }

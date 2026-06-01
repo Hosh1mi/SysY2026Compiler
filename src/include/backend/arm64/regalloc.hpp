@@ -29,6 +29,7 @@ private:
         int end;
         bool isFloat;
         bool isPtr;
+        bool isNEON;
     };
 
     void colorPool(const std::vector<Interval> &pool,

@@ -30,25 +30,11 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         os_ << bbLabel(func_, bb) << ":\n";
 
     resetRegs();
-    neonEmitted_.clear();
-    deferredNEONCode_.clear();
 
-    tryEmitNEON(bb);
-
-    bool neonEmitted = false;
     auto &instrs = bb->instr_list_;
     for (auto it = instrs.begin(); it != instrs.end(); ++it) {
         auto inst = *it;
         if (inst->is_phi()) continue;
-
-        // Emit deferred NEON code at the position of the first
-        // NEON-lowered instruction.  This places NEON stores after
-        // __aeabi_memclr4 (zeroing) so that the values survive.
-        if (!neonEmitted && !deferredNEONCode_.empty() && neonEmitted_.count(inst)) {
-            os_ << deferredNEONCode_;
-            neonEmitted = true;
-        }
-        if (neonEmitted_.count(inst)) continue;
 
         // Skip ICmp if its only user is a Select (Select emits its own cmp)
         if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
@@ -159,11 +145,6 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
 
         emitInstruction(inst);
     }
-    // If the deferred code was never flushed (e.g. NEON-matched
-    // instructions are the very last in the block), emit now.
-    if (!neonEmitted && !deferredNEONCode_.empty()) {
-        os_ << deferredNEONCode_;
-    }
 }
 
 void Arm64FuncContext::emitInstruction(Instruction *inst) {
@@ -180,6 +161,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Store: {
         auto val = inst->get_operand(0);
         auto ptr = inst->get_operand(1);
+        if (isVector(val->type_)) {
+            std::string addr = loadAddr(ptr);
+            std::string vs = loadVector(val);
+            os_ << "\tst1 {" << vs << ".4s}, [" << addr << "]\n";
+            break;
+        }
         if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
@@ -212,6 +199,13 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     // ---- Load ----
     case Instruction::Load: {
         auto ptr = inst->get_operand(0);
+        if (isVector(inst->type_)) {
+            std::string addr = loadAddr(ptr);
+            std::string vd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            os_ << "\tld1 {" << vd << ".4s}, [" << addr << "]\n";
+            if (!hasAssignedReg(inst)) storeVector(inst, vd);
+            break;
+        }
         if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
@@ -254,6 +248,24 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SDiv: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+
+        // Vector path: Add/Sub/Mul on <4 x i32>
+        if (isVector(inst->type_)) {
+            std::string r1 = loadVector(v1);
+            std::string r2 = loadVector(v2);
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            const char *opcode = nullptr;
+            switch (inst->op_id_) {
+                case Instruction::Add: opcode = "add"; break;
+                case Instruction::Sub: opcode = "sub"; break;
+                case Instruction::Mul: opcode = "mul"; break;
+                default: break;
+            }
+            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            if (!hasAssignedReg(inst)) storeVector(inst, rd);
+            break;
+        }
+
         bool emitted = false;
 
         // =====================================================================
@@ -641,6 +653,24 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::FDiv: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+
+        // Vector path: FAdd/FSub/FMul on <4 x float>
+        if (isVector(inst->type_)) {
+            std::string r1 = loadVector(v1);
+            std::string r2 = loadVector(v2);
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            const char *opcode = nullptr;
+            switch (inst->op_id_) {
+                case Instruction::FAdd: opcode = "fadd"; break;
+                case Instruction::FSub: opcode = "fsub"; break;
+                case Instruction::FMul: opcode = "fmul"; break;
+                default: break;
+            }
+            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            if (!hasAssignedReg(inst)) storeVector(inst, rd);
+            break;
+        }
+
         std::string r1 = loadFloat(v1);
         std::string r2 = loadFloat(v2);
         std::string rd = allocFloatReg();
@@ -654,6 +684,35 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
         os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
         storeFloat(inst, rd);
+        break;
+    }
+
+    // ---- InsertElement ----
+    case Instruction::InsertElement: {
+        auto *vec = inst->get_operand(0);
+        auto *val = inst->get_operand(1);
+        auto *idx = inst->get_operand(2);
+        auto *ci = dynamic_cast<ConstantInt*>(idx);
+        if (!ci) break; // index must be constant
+        int lane = ci->value_;
+        // mov v.s[lane] requires a W register; floats need fmov first
+        std::string ws;
+        if (isFloat(val->type_)) {
+            std::string sr = loadFloat(val);
+            ws = allocIntReg();
+            os_ << "\tfmov " << ws << ", " << sr << "\n";
+        } else {
+            ws = loadInt(val);
+        }
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+        // If base is not a vector (first insert in construction chain),
+        // skip the copy and initialize the vector fresh.
+        if (isVector(vec->type_)) {
+            std::string vs = loadVector(vec);
+            if (rd != vs) os_ << "\tmov " << rd << ".16b, " << vs << ".16b\n";
+        }
+        os_ << "\tmov " << rd << ".s[" << lane << "], " << ws << "\n";
+        if (!hasAssignedReg(inst)) storeVector(inst, rd);
         break;
     }
 

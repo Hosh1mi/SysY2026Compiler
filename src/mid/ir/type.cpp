@@ -40,6 +40,13 @@ std::string Type::print() {
             type_ir += static_cast<ArrayType*>(this)->contained_->print();
             type_ir += "]";
             break;
+        case VectorTyID:
+            type_ir += "<";
+            type_ir += std::to_string(static_cast<VectorType*>(this)->num_elements_);
+            type_ir += " x ";
+            type_ir += static_cast<VectorType*>(this)->contained_->print();
+            type_ir += ">";
+            break;
         default:
             break;
     }

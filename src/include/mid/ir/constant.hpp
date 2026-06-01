@@ -37,6 +37,15 @@ public:
     std::vector<Constant*> const_array;  // 数组元素列表
 };
 
+// 向量常量，如 <4 x i32> <0, 1, 2, 3>
+class ConstantVector : public Constant {
+public:
+    ConstantVector(VectorType* ty, const std::vector<Constant*>& elements)
+        : Constant(ty, ""), elements_(elements) {}
+    virtual std::string print() override;
+    std::vector<Constant*> elements_;
+};
+
 // 零初始化常量，如 zeroinitializer
 class ConstantZero : public Constant {
 public:

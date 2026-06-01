@@ -16,6 +16,9 @@ inline int typeSize(Type *ty) {
     case Type::ArrayTyID:
         return static_cast<ArrayType*>(ty)->num_elements_ *
                typeSize(static_cast<ArrayType*>(ty)->contained_);
+    case Type::VectorTyID:
+        return static_cast<VectorType*>(ty)->num_elements_ *
+               typeSize(static_cast<VectorType*>(ty)->contained_);
     default: return 8;
     }
 }
@@ -25,6 +28,7 @@ inline bool isInt(Type *ty)    { return ty->tid_ == Type::IntegerTyID; }
 inline bool isPtr(Type *ty)    { return ty->tid_ == Type::PointerTyID; }
 inline bool isVoid(Type *ty)   { return ty->tid_ == Type::VoidTyID; }
 inline bool isLabel(Type *ty)  { return ty->tid_ == Type::LabelTyID; }
+inline bool isVector(Type *ty) { return ty->tid_ == Type::VectorTyID; }
 
 inline int align16(int n) { return (n + 15) & ~15; }
 
@@ -38,6 +42,10 @@ inline bool isAllocatableFloatValue(Type *ty) {
 
 inline bool isAllocatablePtrValue(Type *ty) {
     return ty->tid_ == Type::PointerTyID;
+}
+
+inline bool isAllocatableNEONValue(Type *ty) {
+    return ty->tid_ == Type::VectorTyID;
 }
 
 // ── callee-saved register collection ────────────────────────────────────────
@@ -64,6 +72,19 @@ inline std::vector<int> collectAssignedFloatRegs(const std::map<Value*, std::str
         if (!reg.empty() && reg[0] == 's') {
             int r = std::stoi(reg.substr(1));
             // Only callee-saved float registers (s8-s15).
+            if (r >= 8 && r <= 15) regs.insert(r);
+        }
+    }
+    return std::vector<int>(regs.begin(), regs.end());
+}
+
+inline std::vector<int> collectAssignedNEONRegs(const std::map<Value*, std::string> &assignedRegs) {
+    std::set<int> regs;
+    for (const auto &entry : assignedRegs) {
+        const std::string &reg = entry.second;
+        if (!reg.empty() && reg[0] == 'v') {
+            int r = std::stoi(reg.substr(1));
+            // Only callee-saved NEON registers (v8-v15).
             if (r >= 8 && r <= 15) regs.insert(r);
         }
     }
