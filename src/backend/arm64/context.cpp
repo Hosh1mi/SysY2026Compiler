@@ -100,13 +100,19 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
+    // Snapshot frameSize_ after pre-scan but before emitBlock.
+    // Pattern A in LoopVectorize creates new InsertElementInst during
+    // emitBlock which call getSlot() and would increase frameSize_,
+    // causing the epilogue to compute a different frame layout.
+    prologueFrameSize_ = frameSize_;
+
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     // NEON regs are 16 bytes each → 2 × 8-byte slots
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
-    int localSize = align16(frameSize_ + savedRegBytes);
-    int saveOffset = -frameSize_;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes);
+    int saveOffset = -prologueFrameSize_;
 
     // Determine whether the function has any call instructions.
     bool hasCalls = false;
@@ -268,8 +274,8 @@ void Arm64FuncContext::emitEpilogue() {
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
-    int localSize = align16(frameSize_ + savedRegBytes);
-    int restoreOffset = -frameSize_;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes);
+    int restoreOffset = -prologueFrameSize_;
 
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {

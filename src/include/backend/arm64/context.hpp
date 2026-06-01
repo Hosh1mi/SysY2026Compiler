@@ -74,6 +74,7 @@ private:
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)
     int frameSize_ = 0;
+    int prologueFrameSize_ = 0;   // snapshot at prologue start, used by epilogue
     int slotCount_ = 0;
 
     std::set<int> usedIntRegs_;

@@ -657,6 +657,8 @@ void LoopVectorize::emitVectorizedLoop(
     bool patternA = true; // true = pure load-binop-store
     for (auto *origInst : bodyInsts) {
         if (origInst == iv.updateInst || origInst->is_phi() || origInst->is_gep()) continue;
+        // Skip ICmp: it is loop control flow, not a data operation
+        if (dynamic_cast<ICmpInst*>(origInst)) continue;
         // Check if IV appears as a direct operand
         for (unsigned i = 0; i < origInst->num_ops_; i++) {
             if (origInst->get_operand(i) == iv.phi) {
@@ -755,7 +757,7 @@ void LoopVectorize::emitVectorizedLoop(
                 continue;
             }
 
-            // BinaryInst: promote to vector type if operands are vectors
+            // BinaryInst: promote to vector type; splat scalar operands
             if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
                 Value *r0 = nullptr, *r1 = nullptr;
                 auto it0 = vmap.find(bi->get_operand(0));
@@ -765,6 +767,23 @@ void LoopVectorize::emitVectorizedLoop(
                 Type *resTy = bi->type_;
                 if (r0->type_->tid_ == Type::VectorTyID) resTy = r0->type_;
                 else if (r1->type_->tid_ == Type::VectorTyID) resTy = r1->type_;
+                // Splat any scalar operand that is paired with a vector operand
+                if (resTy->tid_ == Type::VectorTyID) {
+                    auto splat = [&](Value *&op) {
+                        if (op->type_->tid_ != Type::VectorTyID) {
+                            Value *result = nullptr;
+                            for (int l = 0; l < vecWidth; l++) {
+                                auto *idx = new ConstantInt(module->int32_ty_, l);
+                                Value *base = result ? result
+                                    : static_cast<Value*>(new ConstantZero(resTy));
+                                result = new InsertElementInst(base, op, idx, vecBody);
+                            }
+                            op = result;
+                        }
+                    };
+                    splat(r0);
+                    splat(r1);
+                }
                 vmap[origInst] = new BinaryInst(resTy, bi->op_id_, r0, r1, vecBody);
                 continue;
             }
