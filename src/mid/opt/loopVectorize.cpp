@@ -783,22 +783,22 @@ void LoopVectorize::emitVectorizedLoop(
         for (int j = 0; j < vecWidth; j++) {
             std::unordered_map<Value*, Value*> vmap;
 
-        if (j == 0) {
-            vmap[iv.phi] = vecPhi;
-        } else {
-            auto *offset = new ConstantInt(module->int32_ty_, j);
-            auto *iv_j   = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                           vecPhi, offset, vecBody);
-            vmap[iv.phi] = iv_j;
+            if (j == 0) {
+                vmap[iv.phi] = vecPhi;
+            } else {
+                auto *offset = new ConstantInt(module->int32_ty_, j);
+                auto *iv_j   = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                            vecPhi, offset, vecBody);
+                vmap[iv.phi] = iv_j;
+            }
+    
+            for (auto *origInst : bodyInsts) {
+                if (origInst == iv.updateInst) continue;
+                auto *newInst = cloneInst(origInst, vecBody, vmap);
+                if (!newInst) continue;
+                vmap[origInst] = newInst;
+            }
         }
-
-        for (auto *origInst : bodyInsts) {
-            if (origInst == iv.updateInst) continue;
-            auto *newInst = cloneInst(origInst, vecBody, vmap);
-            if (!newInst) continue;
-            vmap[origInst] = newInst;
-        }
-    }
     }
 
     // —— VECTOR_IR 后处理：标量展开 → 向量算术 + 向量 store ——
@@ -810,7 +810,7 @@ void LoopVectorize::emitVectorizedLoop(
     //      - IV 相关量 → vecBody 中 insertelement 打包 4 个 offset 版本
     //   4. 创建 vector binop + vector store
     //   5. 删除旧的 scalar binop 和 scalar store
-    {
+    if (!patternA) {
         auto getVecTy = [&](Type *scalarTy) -> Type* {
             return module->get_vector_type(scalarTy, vecWidth);
         };
@@ -1197,26 +1197,7 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
-    bool exitHasPhis = false;
-    for (auto inst : origExit->instr_list_) {
-        if (inst->is_phi()) { exitHasPhis = true; break; }
-    }
-
-    if (!exitHasPhis) {
-        new BranchInst(origExit, afterLoop);
-    } else {
-        for (auto inst : origExit->instr_list_) {
-            if (!inst->is_phi()) break;
-            auto *phi = static_cast<PhiInst*>(inst);
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (loop.blocks.count(pred)) {
-                    Value *val = phi->get_operand(i);
-                }
-            }
-        }
-        new BranchInst(origExit, afterLoop);
-    }
+    new BranchInst(origExit, afterLoop);
 
     // ── Clean up: set function to renumber instructions ──────────
     func->set_instr_name();
