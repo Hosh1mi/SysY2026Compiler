@@ -22,7 +22,6 @@
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
-#include "include/mid/opt/loopInterchange.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
@@ -161,10 +160,6 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<SROA>());                 // 将聚合 alloca 拆分为标量 alloca
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
-
-        pm.addPass(std::make_unique<LoopInterchange>());      // matmul j-k 循环交换（列访问→行访问）
-        pm.addPass(std::make_unique<CFGSimplify>());          // 清理 LoopInterchange 留下的死块
-        pm.addPass(std::make_unique<RemoveRedundantPhis>());
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
