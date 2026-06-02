@@ -287,9 +287,28 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     }
     if (latchBodySize > MAX_LATCH_INSTS) return false;
 
+    // ── Register pressure estimation ─────────────────────────────────────
+    // A 4× unrolled body creates 4 interleaved SSA chains for each header
+    // phi.  When the loop has both an integer accumulator AND ≥2 pointer
+    // phis (from IVSR), the register allocator cannot color all the
+    // live-range-interleaved values → the accumulator spills to the stack
+    // between consecutive madds.  Reduce the unroll factor in this case.
+    int numPtrPhis = 0;
+    int numIntNonIVPhis = 0;
+    for (auto phi : headerPhis) {
+        if (phi == ivPhi) continue;
+        if (phi->type_->tid_ == Type::PointerTyID)
+            numPtrPhis++;
+        else if (phi->type_->tid_ == Type::IntegerTyID)
+            numIntNonIVPhis++;
+    }
+    int effectiveUnrollFactor = UNROLL_FACTOR;  // 4
+    if (numIntNonIVPhis > 0 && numPtrPhis >= 2)
+        effectiveUnrollFactor = 2;
+
     // ── Transformation ────────────────────────────────────────────────────
 
-    int N   = UNROLL_FACTOR;
+    int N   = effectiveUnrollFactor;
     int s   = stride->value_;
     int adj = (N - 1) * s; // bound adjustment for main loop condition
 
