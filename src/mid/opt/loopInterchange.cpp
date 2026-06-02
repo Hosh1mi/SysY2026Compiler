@@ -142,6 +142,19 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     if (!dynamic_cast<GlobalVariable *>(base_ik) && !dynamic_cast<Argument *>(base_ik)) return false;
     if (!dynamic_cast<GlobalVariable *>(base_kj) && !dynamic_cast<Argument *>(base_kj)) return false;
 
+    // 数组内维度上限保护：从 GEP 基址 `[N x [M x i32]]*` 提取 M（j 的上界）
+    auto inner_dim_of = [](Value *base) -> int {
+        auto *ptr = dynamic_cast<PointerType *>(base->type_);
+        if (!ptr) return -1;
+        auto *outer = dynamic_cast<ArrayType *>(ptr->contained_);
+        if (!outer) return -1;
+        auto *inner = dynamic_cast<ArrayType *>(outer->contained_);
+        if (!inner) return -1;
+        return (int)inner->num_elements_;
+    };
+    int d_kj = inner_dim_of(base_kj);
+    if (d_kj < 0 || d_kj > TEMP_BUF_SIZE) return false;
+
     // 6. k_loop 内除了这两个 load 不能有其它 store/call/load
     int load_cnt = 0;
     for (auto *bb : k_loop->blocks) {
@@ -179,6 +192,8 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     }
     Value *base_store = gep_store->get_operand(0);
     if (!dynamic_cast<GlobalVariable *>(base_store) && !dynamic_cast<Argument *>(base_store)) return false;
+    int d_st = inner_dim_of(base_store);
+    if (d_st < 0 || d_st > TEMP_BUF_SIZE) return false;
 
     // 8. j_loop 内（除 k_loop 外）不能有其它 store/call
     for (auto *bb : j_loop->blocks) {
