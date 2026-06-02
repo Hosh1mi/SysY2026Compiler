@@ -39,6 +39,7 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::FPtoSI, "fptosi"},
     {Instruction::SItoFP, "sitofp"},
     {Instruction::BitCast, "bitcast"},
+    {Instruction::InsertElement, "insertelement"},
     {Instruction::ICmp, "icmp"},
     {Instruction::FCmp, "fcmp"},
     {Instruction::PHI, "phi"},
@@ -421,6 +422,26 @@ std::string Bitcast::print() {
     instr_ir += print_as_op(this->get_operand(0), false);
     instr_ir += " to ";
     instr_ir += this->dest_ty_->print();
+    return instr_ir;
+}
+
+std::string InsertElementInst::print() {
+    std::string instr_ir;
+    instr_ir += "%";
+    instr_ir += this->name_;
+    instr_ir += " = ";
+    instr_ir += instr_id2string_[this->op_id_];
+    instr_ir += " ";
+    instr_ir += this->type_->print();
+    instr_ir += " ";
+    if (this->get_operand(0)->type_->tid_ == Type::VectorTyID)
+        instr_ir += print_as_op(this->get_operand(0), false);
+    else
+        instr_ir += "undef";
+    instr_ir += ", ";
+    instr_ir += print_as_op(this->get_operand(1), true);
+    instr_ir += ", ";
+    instr_ir += print_as_op(this->get_operand(2), true);
     return instr_ir;
 }
 

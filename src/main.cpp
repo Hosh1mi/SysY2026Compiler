@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
 
 	char *filename = nullptr;
 	int print_ir = false;
-	int print_asm = false; 
+	int print_asm = false;
 	std::string output = "-";
 	int optLevel = 0;
 
@@ -92,18 +92,18 @@ int main(int argc, char **argv) {
         if (arg == "-S") {
             print_asm = true;
             print_ir = false;
-        } 
+        }
         else if (arg == "-c") {
             print_ir = true;
             print_asm = false;
-        } 
+        }
         else if (arg == "-o") {
             if (i + 1 >= argc) {
                 std::cerr << "-o requires a filename\n";
                 return -1;
             }
             output = argv[++i];
-        } 
+        }
         else if (arg.rfind("-O", 0) == 0) {
             // 支持 -O1 / -O2 / -O 1
             if (arg.size() > 2) {
@@ -115,11 +115,11 @@ int main(int argc, char **argv) {
                     optLevel = 1; // 默认 -O == -O1
                 }
             }
-        } 
+        }
         else if (arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return -1;
-        } 
+        }
         else {
             filename = argv[i];
         }
@@ -178,17 +178,16 @@ int main(int argc, char **argv) {
 
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
+        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis (清理展开产生的冗余代码)
-        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        
+        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
 
-        make_basic_clean(pm);                                 // 最后再来一轮基本清理，清理向量化产生的死代码等
-        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理，清理向量化产生的冗余分支等
-        
-	}  
-    
+        make_basic_clean(pm);                                 // 最后再来一轮基本清理
+        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
+
+	}
+
 	pm.run(m.get());
 
 	std::ofstream fout;

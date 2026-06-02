@@ -347,6 +347,15 @@ static int computeElementStride(GetElementPtrInst *gep, unsigned ivOpIdx) {
 // 主体：对循环中的派生 IV 进行强度削弱
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module) {
+    // Skip loops that already contain vector operations — converting
+    // GEPs to pointer phis in these loops causes register spills because
+    // the new phis compete with vector registers.
+    for (auto bb : loop.blocks) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->type_->tid_ == Type::VectorTyID) return;
+        }
+    }
+
     auto ivs = findBasicIVs(loop);
     if (ivs.empty()) return;
 
@@ -435,7 +444,12 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 addrTy = arrTy->contained_;
             }
             if (elemStride <= 0) elemStride = 1;
-            int effectiveStride = iv.isAdd ? elemStride : -elemStride;
+            // Account for the IV's actual stride (e.g. vector loops advance by VF=4).
+            int ivStrideVal = 1;
+            if (auto *ci = dynamic_cast<ConstantInt*>(iv.stride))
+                ivStrideVal = ci->value_;
+            int effectiveStride = ivStrideVal * elemStride;
+            if (!iv.isAdd) effectiveStride = -effectiveStride;
             builder->set_insert_point(iv.latch);
             auto *incrGEP = builder->create_gep(addrPhi, {new ConstantInt(module->int32_ty_, effectiveStride)});
             iv.latch->remove_instr(incrGEP);

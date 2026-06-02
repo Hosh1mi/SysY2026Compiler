@@ -47,6 +47,14 @@ public:
         return array_map_[{contained, num_elements}];
     }
 
+    // 获取向量类型（缓存避免重复创建）
+    VectorType* get_vector_type(Type* contained, unsigned num_elements) {
+        if (!vector_map_.count({contained, num_elements})) {
+            vector_map_[{contained, num_elements}] = new VectorType(contained, num_elements);
+        }
+        return vector_map_[{contained, num_elements}];
+    }
+
     Function* getMainFunc();
 
     std::vector<GlobalVariable*> global_list_;
@@ -62,4 +70,5 @@ public:
 private:
     std::map<Type*, PointerType*> pointer_map_;
     std::map<std::pair<Type*, int>, ArrayType*> array_map_;
+    std::map<std::pair<Type*, int>, VectorType*> vector_map_;
 };

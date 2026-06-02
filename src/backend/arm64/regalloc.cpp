@@ -32,7 +32,7 @@ bool Arm64RegAlloc::canAssignRegister(Value *v) const {
             return false;
         }
     }
-    return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_) || isAllocatablePtrValue(v->type_);
+    return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_) || isAllocatablePtrValue(v->type_) || isAllocatableNEONValue(v->type_);
 }
 
 void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
@@ -133,6 +133,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         int regNo = colorToReg[kv.second];
         if (isFloat) {
             assignedRegs_[kv.first] = "s" + std::to_string(regNo);
+        } else if (isAllocatableNEONValue(kv.first->type_)) {
+            assignedRegs_[kv.first] = "v" + std::to_string(regNo);
         } else if (isAllocatablePtrValue(kv.first->type_)) {
             assignedRegs_[kv.first] = "x" + std::to_string(regNo);
         } else {
@@ -217,6 +219,7 @@ void Arm64RegAlloc::allocate() {
     // Build color→physical-register mapping
     std::vector<int> intColorToReg;
     std::vector<int> floatColorToReg;
+    std::vector<int> neonColorToReg;
     {
         std::set<int> precoloredIntRegs;
         for (auto &kv : assignedRegs_) {
@@ -245,6 +248,9 @@ void Arm64RegAlloc::allocate() {
             if (!precoloredFloatRegs.count(r))
                 floatColorToReg.push_back(r);
         }
+        // NEON callee-saved registers v8-v15 (8 regs)
+        for (int r = 8; r <= 15; ++r)
+            neonColorToReg.push_back(r);
     }
 
     int idx = 0;
@@ -399,7 +405,8 @@ void Arm64RegAlloc::allocate() {
         if (end >= start) {
             intervals.push_back({v, start, end,
                                  isAllocatableFloatValue(v->type_),
-                                 isAllocatablePtrValue(v->type_)});
+                                 isAllocatablePtrValue(v->type_),
+                                 isAllocatableNEONValue(v->type_)});
         }
     }
 
@@ -500,9 +507,11 @@ void Arm64RegAlloc::allocate() {
     }
 
     // ---- 9. Separate into pools ----
-    std::vector<Interval> intPool, floatPool;
+    std::vector<Interval> intPool, floatPool, neonPool;
     for (auto &iv : intervals) {
-        if (iv.isFloat)
+        if (iv.isNEON)
+            neonPool.push_back(iv);
+        else if (iv.isFloat)
             floatPool.push_back(iv);
         else
             intPool.push_back(iv);
@@ -511,4 +520,5 @@ void Arm64RegAlloc::allocate() {
     // ---- 10. Graph coloring (Chaitin-Briggs) ----
     colorPool(intPool, intColorToReg, false, spillCost, phiAffinity);
     colorPool(floatPool, floatColorToReg, true, spillCost, phiAffinity);
+    colorPool(neonPool, neonColorToReg, false, spillCost, phiAffinity);
 }

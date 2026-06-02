@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <functional>
 #include <cassert>
+#include <cstdio>
 
 // =====================================================================
 // Vectorization
@@ -27,6 +28,11 @@
 // =====================================================================
 
 static const int VECTORIZE_FACTOR = 4;   // process 4 elements per iteration
+
+// Environment variable to enable new vector IR path (instead of scalar unrolling).
+// When enabled, simple load-binop-store loops emit <4 x i32>/<4 x float> IR.
+// When disabled (default), scalar unrolling + backend pattern matching is used.
+static const bool useVectorIR = true;
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
@@ -247,15 +253,16 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
         int stride = 0;
         bool isAdd = updateInst->is_add();
 
-        // pattern: phi + stride  or  stride + phi
+        // pattern: phi + stride  or  stride + phi  (or  sub phi, |stride|)
         if (op0 == phi && dynamic_cast<ConstantInt*>(op1)) {
             stride = static_cast<ConstantInt*>(op1)->value_;
+            if (!isAdd) stride = -stride; // sub phi, c  means stride = -c
         } else if (isAdd && op1 == phi && dynamic_cast<ConstantInt*>(op0)) {
             stride = static_cast<ConstantInt*>(op0)->value_;
         }
 
-        // We only support positive unit stride for now
-        if (stride != 1) continue;
+        // Only unit stride ±1 is supported
+        if (stride != 1 && stride != -1) continue;
 
         iv.phi         = phi;
         iv.initVal     = initVal;
@@ -291,7 +298,7 @@ bool LoopVectorize::analyzeStrideAccesses(
 
                 // Check if the pointer is a GEP with IV as the last index
                 auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
-                if (!gep) return false; // can't handle non-GEP loads
+                if (!gep) continue; // skip non-GEP loads (e.g. pointer-phi loads from IVSR)
 
                 // The last index should be the IV (or IV + constant offset)
                 unsigned lastIdx = gep->num_ops_ - 1;
@@ -331,7 +338,7 @@ bool LoopVectorize::analyzeStrideAccesses(
                 Value *ptr = inst->get_operand(1);
 
                 auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
-                if (!gep) return false;
+                if (!gep) continue; // skip non-GEP stores (e.g. pointer-phi stores from IVSR)
 
                 unsigned lastIdx = gep->num_ops_ - 1;
                 Value *idxVal = gep->get_operand(lastIdx);
@@ -384,8 +391,10 @@ static bool isVectorizableInstruction(Instruction *inst,
     if (inst->is_call()) return false;  // calls cannot be vectorized
     if (inst->is_alloca()) return false;
 
-    // Binary/unary/cmp operations are vectorizable
-    if (inst->is_binary()) return true;
+    // Binary/unary/cmp operations are vectorizable.
+    // Note: is_binary() only covers Add/Sub/Mul/Div/Rem — we also need
+    // Shl/LShr/AShr/And/Or/Xor, which are BinaryInst subclasses.
+    if (inst->is_binary() || dynamic_cast<BinaryInst*>(inst)) return true;
     if (inst->is_cmp() || inst->is_fcmp()) return true;
     if (dynamic_cast<UnaryInst*>(inst)) return true;
     if (dynamic_cast<ZextInst*>(inst)) return true;
@@ -408,46 +417,96 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
 
     // Requirements:
     // 1. Loop must have a preheader
-    if (!loop.preheader) return false;
+    if (!loop.preheader) { return false; }
 
     // 2. Loop must have a unique exit
-    if (!loop.exitBB) return false;
+    if (!loop.exitBB) { return false; }
 
     // 3. Loop should be small (single block or simple 2-block: header+latch)
-    if (loop.blocks.size() > 2) return false;
+    if (loop.blocks.size() > 2) { /* no log — too many outer loops */ return false; }
 
     // 4. Find induction variable (unit stride, constant stride = 1)
     InductionVar iv;
-    if (!findInductionVar(loop, iv)) return false;
+    if (!findInductionVar(loop, iv)) { return false; }
 
-    // 5. Reject loops with non-IV phis (accumulators, addresses) —
-    //    vectorization of loop-carried values is not yet implemented
+    // 5. Check for non-IV phis (accumulators, pointer phis from LICM, etc.).
+    //    Pointer phis are handled by gep(phi, j) in headerNonIVPhis.
+    //    Integer phis with a constant-offset update (add/sub phi, c) are
+    //    handled by add(phi, j).  Accumulator phis ("sum += product") are
+    //    rejected — they need cross-copy chaining which isn't implemented.
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
-        if (inst != iv.phi) return false;
+        if (inst == iv.phi) continue;
+        auto *phi = static_cast<PhiInst*>(inst);
+        if (phi->type_->tid_ == Type::PointerTyID) continue; // pointer phi: OK
+        // Integer non-IV phi: check whether it's a constant-offset pattern
+        //   e.g.  %idx = phi [0], [add %idx, 1]
+        // or an accumulator:
+        //   e.g.  %sum = phi [0], [add %sum, %product]
+        Value *latchVal = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (loop.blocks.count(static_cast<BasicBlock*>(phi->get_operand(i + 1)))) {
+                latchVal = phi->get_operand(i); break;
+            }
+        }
+        if (!latchVal) { return false; }
+        auto *update = dynamic_cast<Instruction*>(latchVal);
+        if (!update || (!update->is_add() && !update->is_sub())) { return false; }
+        // Must be add/sub phi, constant  (not add phi, variable)
+        Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
+        bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
+                       (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
+        if (!isConst) { return false; }
     }
 
     // 6. Find memory accesses with unit stride
     std::vector<MemAccess> loads, stores;
-    if (!analyzeStrideAccesses(loop, iv, loads, stores)) return false;
+    if (!analyzeStrideAccesses(loop, iv, loads, stores)) {
+        return false;
+    }
 
     // 6. Check that all instructions in the loop are vectorizable
     for (auto bb : loop.blocks) {
         for (auto inst : bb->instr_list_) {
-            if (!isVectorizableInstruction(inst, loop.blocks))
+            if (!isVectorizableInstruction(inst, loop.blocks)) {
                 return false;
+            }
         }
     }
 
     // 7. Count total memory accesses - very small loops may not benefit
     //    from vectorization
-    if (loads.empty() && stores.empty()) return false;
+    if (loads.empty() && stores.empty()) {
+        return false;
+    }
 
     // 8. Find the trip count bound from the comparison instruction
     //    We need to know the loop bound to determine if strip-mining is viable
     //    For now, we'll emit both vectorized loop and remainder loop
 
-    // All checks passed - proceed to vectorize
+    // 9. Reject loops where a store feeds from SDiv/SRem/FDiv.
+    //    VECTOR_IR cannot pack these (only handles Add/Sub/Mul),
+    //    so scalar unrolling would leave 4 copies with high register
+    //    pressure — worse than the original scalar loop.
+    {
+        std::vector<Instruction*> bodyInsts;
+        for (auto bb : loop.blocks)
+            for (auto inst : bb->instr_list_)
+                if (!inst->isTerminator() && !inst->is_phi())
+                    bodyInsts.push_back(inst);
+        for (auto *inst : bodyInsts) {
+            if (!inst->is_store()) continue;
+            Value *val = inst->get_operand(0);
+            // Walk back one level to find the root binop
+            if (auto *bi = dynamic_cast<BinaryInst*>(val)) {
+                if (bi->op_id_ == Instruction::SDiv ||
+                    bi->op_id_ == Instruction::SRem) {
+                    return false;
+                }
+            }
+        }
+    }
+
     emitVectorizedLoop(loop, iv, loads, stores, VECTORIZE_FACTOR, func, func->parent_);
     return true;
 }
@@ -586,19 +645,22 @@ void LoopVectorize::emitVectorizedLoop(
     vecHeader->add_instruction_front(vecPhi);
     vecPhi->addIncoming(iv.initVal, preheader);
 
-    // Compute bound - VF for the vectorized loop's upper bound check
-    //   if vec_phi <= bound - VF, continue vectorized loop
-    //   else go to remainder loop
+    // Compute the vectorized loop's upper bound check.
+    //   stride > 0: if vec_phi < bound - VF, continue; else go to remainder
+    //   stride < 0: if vec_phi > bound + VF, continue; else go to remainder
     int adj = vecWidth;  // VF
+    bool negStride = (iv.stride < 0);
     Value *boundMain;
     if (auto *cb = dynamic_cast<ConstantInt*>(bound)) {
-        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - adj);
+        boundMain = new ConstantInt(module->int32_ty_,
+                                     negStride ? cb->value_ + adj : cb->value_ - adj);
     } else {
         auto *adjConst = new ConstantInt(module->int32_ty_, adj);
-        auto *subInst  = new BinaryInst(module->int32_ty_, Instruction::Sub,
+        Instruction::OpID op = negStride ? Instruction::Add : Instruction::Sub;
+        auto *adjInst  = new BinaryInst(module->int32_ty_, op,
                                          bound, adjConst, preheader, false);
-        preheader->add_instruction_before_terminator(subInst);
-        boundMain = subInst;
+        preheader->add_instruction_before_terminator(adjInst);
+        boundMain = adjInst;
     }
 
     // Create the comparison: vec_phi < boundMain (or the appropriate op)
@@ -637,39 +699,553 @@ void LoopVectorize::emitVectorizedLoop(
     }
 
     // Create the increment value for the next iteration
-    // vec_next = vecPhi + VF
-    auto *vecStride = new ConstantInt(module->int32_ty_, vecWidth);
+    // vec_next = vecPhi + (stride>0 ? VF : -VF)
+    int step = negStride ? -vecWidth : vecWidth;
+    auto *vecStride = new ConstantInt(module->int32_ty_, step);
     auto *vecNext   = new BinaryInst(module->int32_ty_, Instruction::Add,
                                       vecPhi, vecStride, vecBody);
     vecPhi->addIncoming(vecNext, vecBody);
 
-    // Generate VF copies
-    for (int j = 0; j < vecWidth; j++) {
-        // Build the value map for copy j
-        // IV -> vecPhi + j
-        std::unordered_map<Value*, Value*> vmap;
+    // —— 向量体生成 ——
+    // 模式 A (纯 load-binop-store)：全向量化（vector load → vector binop → vector store）
+    // 模式 B (IV 参与运算)：标量展开 + insertelement 打包 + vector store
+    //
+    // 判断：如果所有非 GEP/load/store 指令的操作数都不直接依赖 IV，
+    //       则可以用模式 A 全向量化。
+    // 但如果有非 IV phi（pointer phi、累加器等），模式 A 无法处理，
+    // 必须走模式 B 让 headerNonIVPhis 映射来正确 remap 这些 phi。
+    bool patternA = true;
+    for (auto inst : origHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        if (inst != iv.phi) { patternA = false; break; }
+    }
+    // Non-GEP loads/stores (pointer-phi based) cannot be handled by
+    // pattern A — force pattern B so headerNonIVPhis mapping is used.
+    if (patternA) {
+        for (auto *origInst : bodyInsts) {
+            if (origInst->is_load()) {
+                if (!dynamic_cast<GetElementPtrInst*>(origInst->get_operand(0)))
+                    { patternA = false; break; }
+            } else if (origInst->is_store()) {
+                if (!dynamic_cast<GetElementPtrInst*>(origInst->get_operand(1)))
+                    { patternA = false; break; }
+            }
+        }
+    }
+    for (auto *origInst : bodyInsts) {
+        if (origInst == iv.updateInst || origInst->is_phi() || origInst->is_gep()) continue;
+        // Skip ICmp: it is loop control flow, not a data operation
+        if (dynamic_cast<ICmpInst*>(origInst)) continue;
+        // Check if IV appears as a direct operand
+        for (unsigned i = 0; i < origInst->num_ops_; i++) {
+            if (origInst->get_operand(i) == iv.phi) {
+                patternA = false; break;
+            }
+        }
+        // Reject SDiv/SRem/FDiv and all float binops.
+        // These also prevent VECTOR_IR packing, so scalar unrolling
+        // would only increase register pressure without benefit.
+        if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
+            if (bi->op_id_ == Instruction::SDiv ||
+                bi->op_id_ == Instruction::SRem ||
+                bi->op_id_ == Instruction::FDiv ||
+                bi->type_->tid_ == Type::FloatTyID) {
+                patternA = false; break;
+            }
+        }
+        // Reject non-load/store ops that aren't binary
+        if (!origInst->is_load() && !origInst->is_store() &&
+            !dynamic_cast<BinaryInst*>(origInst) &&
+            !dynamic_cast<UnaryInst*>(origInst)) {
+            patternA = false; break;
+        }
+    }
 
-        // Map the IV phi -> vecPhi + j
-        if (j == 0) {
-            vmap[iv.phi] = vecPhi;
-        } else {
-            auto *offset = new ConstantInt(module->int32_ty_, j);
-            auto *iv_j   = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                           vecPhi, offset, vecBody);
-            vmap[iv.phi] = iv_j;
+    // Helpers shared by both pattern A and pattern B.
+    auto getVecTy = [&](Type *scalarTy) -> Type* {
+        return module->get_vector_type(scalarTy, vecWidth);
+    };
+    auto getVecPtrTy = [&](Type *scalarTy) -> Type* {
+        return module->get_pointer_type(getVecTy(scalarTy));
+    };
+    auto emitSplat = [&](Value *scalar, BasicBlock *bb) -> Value* {
+        Type *vecTy = getVecTy(scalar->type_);
+        Value *result = nullptr;
+        bool hasTerm = bb->get_terminator() != nullptr;
+        for (int j = 0; j < vecWidth; j++) {
+            auto *idxConst = new ConstantInt(module->int32_ty_, j);
+            Value *base = result ? result : scalar;
+            auto *ins = new InsertElementInst(base, scalar, idxConst, bb);
+            if (j == 0) ins->type_ = vecTy;
+            if (hasTerm) {
+                bb->remove_instr(ins);
+                bb->add_instruction_before_terminator(ins);
+            }
+            result = ins;
+        }
+        return result;
+    };
+
+    if (patternA) {
+        // ── 模式 A: 全向量化 IR ──
+
+        std::unordered_map<Value*, Value*> vmap;
+        std::unordered_map<Instruction*, Value*> bcMap; // GEP -> bitcast
+        vmap[iv.phi] = vecPhi;
+
+        for (auto *origInst : bodyInsts) {
+            if (origInst == iv.updateInst) continue;
+            if (origInst->is_phi()) continue;
+
+            // GEP: create new GEP + bitcast if feeds memory
+            if (auto *gep = dynamic_cast<GetElementPtrInst*>(origInst)) {
+                std::vector<Value*> idxs;
+                for (unsigned i = 1; i < gep->num_ops_; i++) {
+                    Value *idx = gep->get_operand(i);
+                    auto it = vmap.find(idx);
+                    idxs.push_back(it != vmap.end() ? it->second : idx);
+                }
+                // For negative stride, the last index (IV) needs adjustment:
+                // vecPhi points to the LAST element of the VF-element block,
+                // but the vector store writes forward.  Shift it back by VF-1.
+                if (negStride && !idxs.empty()) {
+                    Value *lastIdx = idxs.back();
+                    if (lastIdx == vecPhi) {
+                        auto *adjC = new ConstantInt(module->int32_ty_, vecWidth - 1);
+                        auto *adjIdx = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                                       lastIdx, adjC, vecBody);
+                        idxs.back() = adjIdx;
+                    }
+                }
+                auto *newGep = new GetElementPtrInst(
+                    gep->get_operand(0), idxs, vecBody);
+                vmap[origInst] = newGep;
+                bool feedsMem = false;
+                for (auto &use : origInst->use_list_) {
+                    if (auto *ui = dynamic_cast<Instruction*>(use.val_))
+                        if (ui->is_load() || ui->is_store()) feedsMem = true;
+                }
+                if (feedsMem) {
+                    Type *elemTy = static_cast<PointerType*>(gep->type_)->contained_;
+                    auto *bc = new Bitcast(Instruction::BitCast, newGep,
+                                           getVecPtrTy(elemTy), vecBody);
+                    bcMap[origInst] = bc;
+                }
+                continue;
+            }
+
+            // Load: vector load from bitcast
+            if (auto *load = dynamic_cast<LoadInst*>(origInst)) {
+                auto *origPtr = dynamic_cast<Instruction*>(load->get_operand(0));
+                auto bcIt = origPtr ? bcMap.find(origPtr) : bcMap.end();
+                if (bcIt != bcMap.end()) {
+                    vmap[origInst] = new LoadInst(bcIt->second, vecBody);
+                } else {
+                    auto ptrIt = vmap.find(load->get_operand(0));
+                    vmap[origInst] = new LoadInst(
+                        (ptrIt != vmap.end()) ? ptrIt->second : load->get_operand(0), vecBody);
+                }
+                continue;
+            }
+
+            // Store: vector store if value is vector
+            if (auto *store = dynamic_cast<StoreInst*>(origInst)) {
+                Value *origVal = store->get_operand(0);
+                Value *origPtr = store->get_operand(1);
+                auto valIt = vmap.find(origVal);
+                Value *newVal = (valIt != vmap.end()) ? valIt->second : origVal;
+                auto *ptrInst = dynamic_cast<Instruction*>(origPtr);
+                auto bcIt = ptrInst ? bcMap.find(ptrInst) : bcMap.end();
+                Value *newPtr = nullptr;
+                if (bcIt != bcMap.end()) {
+                    if (newVal->type_->tid_ == Type::VectorTyID) {
+                        newPtr = bcIt->second;
+                    } else {
+                        // Scalar value on a vector-gep: splat once in
+                        // preheader, reuse every iteration.
+                        newVal = emitSplat(newVal, preheader);
+                        newPtr = bcIt->second;
+                    }
+                } else {
+                    auto ptrIt = vmap.find(origPtr);
+                    newPtr = (ptrIt != vmap.end()) ? ptrIt->second : origPtr;
+                }
+                if (newVal && newPtr) new StoreInst(newVal, newPtr, vecBody);
+                continue;
+            }
+
+            // BinaryInst: promote to vector type; splat scalar operands
+            if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
+                Value *r0 = nullptr, *r1 = nullptr;
+                auto it0 = vmap.find(bi->get_operand(0));
+                auto it1 = vmap.find(bi->get_operand(1));
+                r0 = (it0 != vmap.end()) ? it0->second : bi->get_operand(0);
+                r1 = (it1 != vmap.end()) ? it1->second : bi->get_operand(1);
+                Type *resTy = bi->type_;
+                if (r0->type_->tid_ == Type::VectorTyID) resTy = r0->type_;
+                else if (r1->type_->tid_ == Type::VectorTyID) resTy = r1->type_;
+                // Splat any scalar operand that is paired with a vector operand
+                if (resTy->tid_ == Type::VectorTyID) {
+                    auto splat = [&](Value *&op) {
+                        if (op->type_->tid_ != Type::VectorTyID) {
+                            Value *result = nullptr;
+                            for (int l = 0; l < vecWidth; l++) {
+                                auto *idx = new ConstantInt(module->int32_ty_, l);
+                                Value *base = result ? result
+                                    : static_cast<Value*>(new ConstantZero(resTy));
+                                result = new InsertElementInst(base, op, idx, vecBody);
+                            }
+                            op = result;
+                        }
+                    };
+                    splat(r0);
+                    splat(r1);
+                }
+                vmap[origInst] = new BinaryInst(resTy, bi->op_id_, r0, r1, vecBody);
+                continue;
+            }
+
+            // Other: clone as scalar
+            auto remap = [&](Value *v) -> Value* {
+                auto it = vmap.find(v);
+                return it != vmap.end() ? it->second : v;
+            };
+            if (auto *ui = dynamic_cast<UnaryInst*>(origInst))
+                vmap[origInst] = new UnaryInst(ui->type_, ui->op_id_,
+                                                remap(ui->get_operand(0)), vecBody);
+        }
+    } else {
+        // ── 标量展开（模式 B 或未开启 VECTOR_IR）──
+        // Pre-collect non-IV phis from the loop header so cloned
+        // instructions (stores, etc.) can remap them correctly.
+        // Without this, all j>0 clones would reference the original
+        // phi and write to the same address, losing 3/4 of stores.
+        std::vector<PhiInst*> headerNonIVPhis;
+        for (auto inst : origHeader->instr_list_) {
+            if (!inst->is_phi()) break;
+            if (inst != iv.phi)
+                headerNonIVPhis.push_back(static_cast<PhiInst*>(inst));
         }
 
-        // For each non-phi instruction in the body, create a clone
-        // with the remapped operands
-        for (auto *origInst : bodyInsts) {
-            // Skip the IV update instruction (it's handled by the stride)
-            if (origInst == iv.updateInst) continue;
+        for (int j = 0; j < vecWidth; j++) {
+            std::unordered_map<Value*, Value*> vmap;
 
-            // Skip GEP instructions that are only used by the updateInst
-            // (we'll create fresh GEPs)
-            auto *newInst = cloneInst(origInst, vecBody, vmap);
-            if (!newInst) continue;
-            vmap[origInst] = newInst;
+            if (j == 0) {
+                vmap[iv.phi] = vecPhi;
+            } else {
+                auto *offset = new ConstantInt(module->int32_ty_, j);
+                auto *iv_j   = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                            vecPhi, offset, vecBody);
+                vmap[iv.phi] = iv_j;
+            }
+
+            // Map non-IV header phis:
+            //   offset 0 → gep(phi, 0) for pointers (so VECTOR_IR can
+            //     collect the store; gep 0 is a no-op), original phi for ints;
+            //   offset j>0 → gep(phi, j) for pointers, add(phi, j) for ints
+            for (auto *phi : headerNonIVPhis) {
+                auto *offConst = new ConstantInt(module->int32_ty_, j);
+                if (phi->type_->tid_ == Type::PointerTyID) {
+                    vmap[phi] = new GetElementPtrInst(phi, {offConst}, vecBody);
+                } else if (j == 0) {
+                    vmap[phi] = phi;
+                } else {
+                    vmap[phi] = new BinaryInst(phi->type_, Instruction::Add,
+                                               phi, offConst, vecBody);
+                }
+            }
+    
+            for (auto *origInst : bodyInsts) {
+                if (origInst == iv.updateInst) continue;
+                auto *newInst = cloneInst(origInst, vecBody, vmap);
+                if (!newInst) continue;
+                vmap[origInst] = newInst;
+            }
+        }
+    }
+
+    // —— VECTOR_IR 后处理：标量展开 → 向量算术 + 向量 store ——
+    // 策略：
+    //   1. 收集 store，按 GEP base 分成 4-offset 组
+    //   2. 对每组，追踪 stored value 的来源 binop
+    //   3. 将 binop 的两个操作数分别 pack 成向量
+    //      - 循环不变量 → preheader 中 splat
+    //      - IV 相关量 → vecBody 中 insertelement 打包 4 个 offset 版本
+    //   4. 创建 vector binop + vector store
+    //   5. 删除旧的 scalar binop 和 scalar store
+    if (!patternA) {
+
+        // Helper: pack 4 scalar values (at offsets 0..3) into a vector in vecBody
+        auto emitPack4 = [&](Value *vals[4], BasicBlock *bb) -> Value* {
+            Type *vecTy = getVecTy(vals[0]->type_);
+            Value *result = nullptr;
+            for (int j = 0; j < vecWidth; j++) {
+                auto *idxConst = new ConstantInt(module->int32_ty_, j);
+                Value *base = result ? result : vals[j];
+                auto *ins = new InsertElementInst(base, vals[j], idxConst, bb);
+                if (j == 0) ins->type_ = vecTy;
+                result = ins;
+            }
+            return result;
+        };
+
+        // Step 1: Collect stores, grouped by GEP base key.
+        // Also handle pointer-phi stores (e.g. store to %ptr_phi),
+        // which represent offset 0 but have no GEP-typed pointer.
+        struct StoreInfo {
+            StoreInst *store;
+            Value *storedVal;
+            GetElementPtrInst *gep; // may be null for pointer-phi stores
+            int offset;
+        };
+        std::vector<StoreInfo> storeInfos;
+        for (auto inst : vecBody->instr_list_) {
+            if (auto *si = dynamic_cast<StoreInst*>(inst)) {
+                Value *ptr = si->get_operand(1);
+                if (auto *gep = dynamic_cast<GetElementPtrInst*>(ptr)) {
+                    unsigned lastIdx = gep->num_ops_ - 1;
+                    Value *lastIdxVal = gep->get_operand(lastIdx);
+                    int offset = -1;
+                    if (lastIdxVal == vecPhi) offset = 0;
+                    else if (auto *addInst = dynamic_cast<BinaryInst*>(lastIdxVal)) {
+                        if (addInst->is_add()) {
+                            Value *a0 = addInst->get_operand(0);
+                            Value *a1 = addInst->get_operand(1);
+                            if (a0 == vecPhi && dynamic_cast<ConstantInt*>(a1))
+                                offset = static_cast<ConstantInt*>(a1)->value_;
+                            else if (a1 == vecPhi && dynamic_cast<ConstantInt*>(a0))
+                                offset = static_cast<ConstantInt*>(a0)->value_;
+                        }
+                    } else if (auto *ci = dynamic_cast<ConstantInt*>(lastIdxVal)) {
+                        // gep ptr, constant — e.g. from LICM pointer-phi remapping
+                        offset = ci->value_;
+                    }
+                    if (offset >= 0)
+                        storeInfos.push_back({si, si->get_operand(0), gep, offset});
+                } else if (auto *phi = dynamic_cast<PhiInst*>(ptr)) {
+                    // Pointer-phi store: represents offset 0.
+                    // Record with nullptr gep; the group will borrow a real
+                    // GEP from a sibling store for vector-GEP construction.
+                    if (phi->parent_ == vecHeader)
+                        storeInfos.push_back({si, si->get_operand(0), nullptr, 0});
+                }
+            }
+        }
+
+        auto baseKey = [](GetElementPtrInst *gep) -> std::string {
+            std::string key;
+            for (unsigned i = 0; i < gep->num_ops_ - 1; i++)
+                key += gep->get_operand(i)->name_ + "|";
+            return key;
+        };
+        // For pointer-phi stores (gep == nullptr), derive the group key
+        // from the phi's initial value, which is always a GEP like
+        //   gep @C, 0, k, 0  →  baseKey = "@C|0|k|"
+        auto phiBaseKey = [&](PhiInst *phi) -> std::string {
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) == preheader) {
+                    if (auto *gi = dynamic_cast<GetElementPtrInst*>(phi->get_operand(i)))
+                        return baseKey(gi);
+                }
+            }
+            return "__no_preheader__";
+        };
+        std::map<std::string, std::vector<StoreInfo*>> groups;
+        for (auto &si : storeInfos) {
+            if (si.gep) {
+                groups[baseKey(si.gep)].push_back(&si);
+            } else {
+                // Pointer-phi store: derive key from the phi's initial gep
+                auto *phi = static_cast<PhiInst*>(si.store->get_operand(1));
+                groups[phiBaseKey(phi)].push_back(&si);
+            }
+        }
+
+        // Cache for splatted invariants: scalar Value* → vector Value*
+        std::unordered_map<Value*, Value*> splatCache;
+        // Cache for vector IV phi: once created, shared across all store groups
+        Value *vecIVPhi = nullptr;
+        Value *vecIVInc  = nullptr; // <4,4,4,4> increment vector in preheader
+        bool vecIVPhiNeedsIncoming = false; // true once phiNext is created
+
+        // Helper: detect if opScalar[0..3] is the IV step pattern: j, j+1, j+2, j+3
+        auto isIVStep = [&](Value *opScalar[4]) -> bool {
+            if (opScalar[0] != vecPhi) return false;
+            for (int j = 1; j < vecWidth; j++) {
+                auto *addInst = dynamic_cast<BinaryInst*>(opScalar[j]);
+                if (!addInst || !addInst->is_add()) return false;
+                Value *a0 = addInst->get_operand(0), *a1 = addInst->get_operand(1);
+                auto *ci = dynamic_cast<ConstantInt*>(a0 == vecPhi ? a1 : (a1 == vecPhi ? a0 : nullptr));
+                if (!ci || ci->value_ != j) return false;
+            }
+            return true;
+        };
+
+        for (auto &kv : groups) {
+            auto &vec = kv.second;
+            if (vec.size() < (size_t)vecWidth) continue;
+            std::sort(vec.begin(), vec.end(), [](StoreInfo *a, StoreInfo *b) {
+                return a->offset < b->offset;
+            });
+            bool hasAll = true;
+            for (int j = 0; j < vecWidth; j++) {
+                bool foundJ = false;
+                for (auto *si : vec) if (si->offset == j) { foundJ = true; break; }
+                if (!foundJ) { hasAll = false; break; }
+            }
+            if (!hasAll) continue;
+
+            // Step 2a: Check if stored values are all constants → direct ConstantVector store
+            {
+                bool allConst = true;
+                for (int j = 0; j < vecWidth; j++) {
+                    if (!dynamic_cast<ConstantInt*>(vec[j]->storedVal)) { allConst = false; break; }
+                }
+                if (allConst) {
+                    Type *elemTy = vec[0]->storedVal->type_;
+                    Type *vecTy  = getVecTy(elemTy);
+                    Type *vecPtrTy = getVecPtrTy(elemTy);
+
+                    // Splat the constant ONCE in the preheader instead of
+                    // materializing a ConstantVector in the vecBody every
+                    // iteration (which emits N×VF "mov v.s[lane]" per iter).
+                    Value *splatVal = emitSplat(vec[0]->storedVal, preheader);
+
+                    // vec[0] may be a pointer-phi store (gep == nullptr);
+                    // borrow a real GEP from any sibling in the group.
+                    auto *firstGep = vec[0]->gep;
+                    if (!firstGep) {
+                        for (int jj = 1; jj < vecWidth; jj++)
+                            if (vec[jj]->gep) { firstGep = vec[jj]->gep; break; }
+                    }
+                    if (!firstGep) continue; // should not happen
+                    std::vector<Value*> idxs;
+                    for (unsigned i = 1; i < firstGep->num_ops_ - 1; i++)
+                        idxs.push_back(firstGep->get_operand(i));
+                    idxs.push_back(vecPhi);
+                    auto *newGep = new GetElementPtrInst(firstGep->get_operand(0), idxs, vecBody);
+                    auto *bc = new Bitcast(Instruction::BitCast, newGep, vecPtrTy, vecBody);
+                    new StoreInst(splatVal, bc, vecBody);
+
+                    for (int j = 0; j < vecWidth; j++) {
+                        auto *si = vec[j];
+                        si->store->parent_->remove_instr(si->store);
+                        si->store->remove_use_of_ops();
+                    }
+                    continue;
+                }
+            }
+
+            // Step 2b: Check if stored values come from a vectorizable binop
+            auto *rootBinop = dynamic_cast<BinaryInst*>(vec[0]->storedVal);
+            if (!rootBinop) continue;
+            // Only integer NEON-supported opcodes; skip float
+            if (rootBinop->type_->tid_ == Type::FloatTyID) continue;
+            if (rootBinop->op_id_ != Instruction::Add &&
+                rootBinop->op_id_ != Instruction::Sub &&
+                rootBinop->op_id_ != Instruction::Mul) continue;
+            // Verify all 4 stores share the same root binop
+            bool sameBinop = true;
+            for (int j = 1; j < vecWidth; j++) {
+                auto *bi = dynamic_cast<BinaryInst*>(vec[j]->storedVal);
+                if (!bi || bi->op_id_ != rootBinop->op_id_) { sameBinop = false; break; }
+            }
+            if (!sameBinop) continue;
+
+
+            // Step 3: For each operand of the root binop, pack into vector
+            Type *vecTy  = getVecTy(rootBinop->type_);
+            Type *vecPtrTy = getVecPtrTy(rootBinop->type_);
+            Value *vecOp[2] = {nullptr, nullptr};
+
+            for (int opIdx = 0; opIdx < 2; opIdx++) {
+                Value *opScalar[4];
+                for (int j = 0; j < vecWidth; j++) {
+                    auto *bi = static_cast<BinaryInst*>(vec[j]->storedVal);
+                    opScalar[j] = bi->get_operand(opIdx);
+                }
+                // Check if loop-invariant (all 4 are the same Value*)
+                bool invariant = true;
+                for (int j = 1; j < vecWidth; j++)
+                    if (opScalar[j] != opScalar[0]) { invariant = false; break; }
+
+                if (invariant) {
+                    // Splat in preheader (cache for reuse across groups)
+                    auto &entry = splatCache[opScalar[0]];
+                    if (!entry)
+                        entry = emitSplat(opScalar[0], preheader);
+                    vecOp[opIdx] = entry;
+                } else if (isIVStep(opScalar)) {
+                    // IV step pattern: {j, j+1, j+2, j+3}
+                    // Use a vector phi to maintain this across iterations,
+                    // eliminating 4× insertelement per iteration.
+                    if (!vecIVPhi) {
+                        auto *ivVecTy = static_cast<VectorType*>(getVecTy(vecPhi->type_));
+                        // Constant step vector <0,1,2,3>
+                        std::vector<Constant*> stepElems;
+                        for (int j = 0; j < vecWidth; j++)
+                            stepElems.push_back(new ConstantInt(module->int32_ty_, j));
+                        auto *stepVec = new ConstantVector(ivVecTy, stepElems);
+                        // Constant increment vector <4,4,4,4>
+                        std::vector<Constant*> incElems;
+                        for (int j = 0; j < vecWidth; j++)
+                            incElems.push_back(new ConstantInt(module->int32_ty_, vecWidth));
+                        vecIVInc = new ConstantVector(ivVecTy, incElems);
+                        // Create vector phi in vecHeader
+                        auto *phi = PhiInst::create_phi(ivVecTy, vecHeader);
+                        vecHeader->add_instruction_front(phi);
+                        phi->addIncoming(stepVec, preheader);
+                        vecIVPhi = phi;
+                    }
+                    // In vecBody: advance the phi once (shared across all groups)
+                    if (!vecIVPhiNeedsIncoming) {
+                        auto *phiNext = new BinaryInst(getVecTy(vecPhi->type_),
+                            Instruction::Add, vecIVPhi, vecIVInc, vecBody);
+                        static_cast<PhiInst*>(vecIVPhi)->addIncoming(phiNext, vecBody);
+                        vecIVPhiNeedsIncoming = true;
+                    }
+                    vecOp[opIdx] = vecIVPhi;
+                } else {
+                    // Pack the 4 offset versions in vecBody (generic fallback)
+                    vecOp[opIdx] = emitPack4(opScalar, vecBody);
+                }
+            }
+
+            // Step 4: Create vector binop
+            auto *vecBinop = new BinaryInst(vecTy, rootBinop->op_id_,
+                                             vecOp[0], vecOp[1], vecBody);
+
+            // Step 5: GEP + bitcast + vector store
+            auto *firstGep = vec[0]->gep;
+            if (!firstGep) {
+                for (int jj = 1; jj < vecWidth; jj++)
+                    if (vec[jj]->gep) { firstGep = vec[jj]->gep; break; }
+            }
+            if (!firstGep) continue;
+            std::vector<Value*> idxs;
+            for (unsigned i = 1; i < firstGep->num_ops_ - 1; i++)
+                idxs.push_back(firstGep->get_operand(i));
+            idxs.push_back(vecPhi);
+            auto *newGep = new GetElementPtrInst(firstGep->get_operand(0), idxs, vecBody);
+            auto *bc = new Bitcast(Instruction::BitCast, newGep, vecPtrTy, vecBody);
+            new StoreInst(vecBinop, bc, vecBody);
+
+            // Step 6: Remove old scalar stores and binops.
+            // Do NOT remove the GEPs — they may still be used by loads
+            // (e.g. C[i][j] += A[i][k]*B[k][j] where C pointer is
+            // shared between load and store). DCE will clean them up.
+            for (int j = 0; j < vecWidth; j++) {
+                auto *si = vec[j];
+                // Remove the scalar store
+                si->store->parent_->remove_instr(si->store);
+                si->store->remove_use_of_ops();
+                // Remove the scalar binop that fed this store
+                auto *scalarBinop = static_cast<BinaryInst*>(si->storedVal);
+                if (scalarBinop && scalarBinop->parent_) {
+                    scalarBinop->parent_->remove_instr(scalarBinop);
+                    scalarBinop->remove_use_of_ops();
+                }
+            }
         }
     }
 
@@ -787,9 +1363,6 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
-    // Add the backedge for remPhi: the value from origLatch's update instruction
-    remPhi->addIncoming(iv.updateInst, origLatch);
-
     for (auto bb : loop.blocks) {
         auto *term = bb->get_terminator();
         for (unsigned i = 0; i < term->num_ops_; i++) {
@@ -804,26 +1377,7 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
-    bool exitHasPhis = false;
-    for (auto inst : origExit->instr_list_) {
-        if (inst->is_phi()) { exitHasPhis = true; break; }
-    }
-
-    if (!exitHasPhis) {
-        new BranchInst(origExit, afterLoop);
-    } else {
-        for (auto inst : origExit->instr_list_) {
-            if (!inst->is_phi()) break;
-            auto *phi = static_cast<PhiInst*>(inst);
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (loop.blocks.count(pred)) {
-                    Value *val = phi->get_operand(i);
-                }
-            }
-        }
-        new BranchInst(origExit, afterLoop);
-    }
+    new BranchInst(origExit, afterLoop);
 
     // ── Clean up: set function to renumber instructions ──────────
     func->set_instr_name();
@@ -859,3 +1413,4 @@ void LoopVectorize::runOnFunction(Function *func) {
 
     func->set_instr_name();
 }
+

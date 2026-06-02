@@ -49,6 +49,38 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             const auto &cp = copies[idx];
             Value *val = cp.src;
 
+            // Vector phi: the phi destination is always in a colored register,
+            // but the source may be a ConstantVector (no register) or in a
+            // stack slot. Materialize into a scratch reg and copy to phi.
+            if (isVector(val->type_)) {
+                if (cp.phi && hasAssignedReg(cp.phi)) {
+                    std::string dstReg = assignedReg(cp.phi);
+                    std::string srcReg;
+                    if (hasAssignedReg(val)) {
+                        srcReg = assignedReg(val);
+                    } else if (dynamic_cast<Constant*>(val)) {
+                        srcReg = loadVector(val);
+                    } else {
+                        srcReg = allocNEONReg();
+                        int off = getSlot(val);
+                        // Load 16 bytes from stack: use sub+ldr for negative off
+                        if (off >= 0 && off <= 65520 && off % 16 == 0)
+                            os_ << "\tldr q" << srcReg.substr(1) << ", [x29, #" << off << "]\n";
+                        else {
+                            int pos = -off;
+                            if (pos <= 4095) os_ << "\tsub x16, x29, #" << pos << "\n";
+                            else { os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
+                                   os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
+                                   os_ << "\tsub x16, x29, x16\n"; }
+                            os_ << "\tldr q" << srcReg.substr(1) << ", [x16]\n";
+                        }
+                    }
+                    if (srcReg != dstReg)
+                        os_ << "\tmov " << dstReg << ".16b, " << srcReg << ".16b\n";
+                }
+                continue;
+            }
+
             if (hasAssignedReg(val) && cp.phi && hasAssignedReg(cp.phi)) {
                 bool asPtr = isPtr(val->type_);
                 if (assignedReg(val, asPtr) == assignedReg(cp.phi, asPtr))

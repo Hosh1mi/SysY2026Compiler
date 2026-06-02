@@ -100,11 +100,19 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
+    // Snapshot frameSize_ after pre-scan but before emitBlock.
+    // Pattern A in LoopVectorize creates new InsertElementInst during
+    // emitBlock which call getSlot() and would increase frameSize_,
+    // causing the epilogue to compute a different frame layout.
+    prologueFrameSize_ = frameSize_;
+
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
-    int localSize = align16(frameSize_ + savedRegBytes);
-    int saveOffset = -frameSize_;
+    auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
+    // NEON regs are 16 bytes each → 2 × 8-byte slots
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes);
+    int saveOffset = -prologueFrameSize_;
 
     // Determine whether the function has any call instructions.
     bool hasCalls = false;
@@ -147,6 +155,25 @@ void Arm64FuncContext::emitPrologue() {
         } else {
             saveOffset -= 8;
             emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+        }
+    }
+    // Save callee-saved NEON registers (v8-v15), 16 bytes each.
+    // str qN only supports unsigned offset; use sub+str for negative offsets.
+    for (size_t i = 0; i < savedNEONRegs.size(); i++) {
+        saveOffset -= 16;
+        int r = savedNEONRegs[i];
+        if (saveOffset >= 0) {
+            os_ << "\tstr q" << r << ", [x29, #" << saveOffset << "]\n";
+        } else {
+            int absOff = -saveOffset;
+            if (absOff <= 4095)
+                os_ << "\tsub x16, x29, #" << absOff << "\n";
+            else {
+                os_ << "\tmovz x16, #" << (absOff & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tsub x16, x29, x16\n";
+            }
+            os_ << "\tstr q" << r << ", [x16]\n";
         }
     }
 
@@ -245,9 +272,10 @@ void Arm64FuncContext::emitEpilogue() {
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
-    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size()) * 8;
-    int localSize = align16(frameSize_ + savedRegBytes);
-    int restoreOffset = -frameSize_;
+    auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes);
+    int restoreOffset = -prologueFrameSize_;
 
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {
@@ -267,6 +295,25 @@ void Arm64FuncContext::emitEpilogue() {
         } else {
             restoreOffset -= 8;
             emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+        }
+    }
+    // Restore callee-saved NEON registers (v8-v15).
+    // ldr qN only supports unsigned offset; use sub+ldr for negative offsets.
+    for (size_t i = 0; i < savedNEONRegs.size(); i++) {
+        restoreOffset -= 16;
+        int r = savedNEONRegs[i];
+        if (restoreOffset >= 0) {
+            os_ << "\tldr q" << r << ", [x29, #" << restoreOffset << "]\n";
+        } else {
+            int absOff = -restoreOffset;
+            if (absOff <= 4095)
+                os_ << "\tsub x16, x29, #" << absOff << "\n";
+            else {
+                os_ << "\tmovz x16, #" << (absOff & 0xFFFF) << "\n";
+                os_ << "\tmovk x16, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
+                os_ << "\tsub x16, x29, x16\n";
+            }
+            os_ << "\tldr q" << r << ", [x16]\n";
         }
     }
 
@@ -309,9 +356,13 @@ int Arm64FuncContext::getSlot(Value *v) {
     int size;
     if (auto alloca = dynamic_cast<AllocaInst*>(v)) {
         size = typeSize(alloca->alloca_ty_);
+    } else if (isVector(v->type_)) {
+        size = 16; // 128-bit vector value
     } else {
         size = 8; // keep SSA/temp slots naturally aligned
     }
+    // Align to slot size to prevent any overlap
+    frameSize_ = align16(frameSize_);
 
     frameSize_ += size;
     int offset = -frameSize_;
