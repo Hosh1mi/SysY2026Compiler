@@ -35,7 +35,8 @@ private:
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::map<Value*, double> &spillCost,
-                   const std::map<Value*, std::set<Value*>> &phiAffinity);
+                   const std::map<Value*, std::set<Value*>> &phiAffinity,
+                   const std::map<Value*, int> *maxColor = nullptr);
 
     Function *func_;
     std::map<Value*, std::string> assignedRegs_;
