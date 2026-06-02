@@ -747,9 +747,25 @@ void LoopVectorize::emitVectorizedLoop(
                 auto *ptrInst = dynamic_cast<Instruction*>(origPtr);
                 auto bcIt = ptrInst ? bcMap.find(ptrInst) : bcMap.end();
                 Value *newPtr = nullptr;
-                if (bcIt != bcMap.end() && newVal->type_->tid_ == Type::VectorTyID)
-                    newPtr = bcIt->second;
-                else {
+                if (bcIt != bcMap.end()) {
+                    if (newVal->type_->tid_ == Type::VectorTyID) {
+                        newPtr = bcIt->second;
+                    } else {
+                        // Scalar value on a vector-gep: splat into vector
+                        // so the store covers all VF elements.  Without this,
+                        // a scalar store + VF stride skips 3/4 of elements.
+                        Type *vecTy = getVecTy(newVal->type_);
+                        Value *result = nullptr;
+                        for (int l = 0; l < vecWidth; l++) {
+                            auto *idx = new ConstantInt(module->int32_ty_, l);
+                            Value *base = result ? result
+                                : static_cast<Value*>(new ConstantZero(vecTy));
+                            result = new InsertElementInst(base, newVal, idx, vecBody);
+                        }
+                        newVal = result;
+                        newPtr = bcIt->second;
+                    }
+                } else {
                     auto ptrIt = vmap.find(origPtr);
                     newPtr = (ptrIt != vmap.end()) ? ptrIt->second : origPtr;
                 }
@@ -799,6 +815,17 @@ void LoopVectorize::emitVectorizedLoop(
         }
     } else {
         // ── 标量展开（模式 B 或未开启 VECTOR_IR）──
+        // Pre-collect non-IV phis from the loop header so cloned
+        // instructions (stores, etc.) can remap them correctly.
+        // Without this, all j>0 clones would reference the original
+        // phi and write to the same address, losing 3/4 of stores.
+        std::vector<PhiInst*> headerNonIVPhis;
+        for (auto inst : origHeader->instr_list_) {
+            if (!inst->is_phi()) break;
+            if (inst != iv.phi)
+                headerNonIVPhis.push_back(static_cast<PhiInst*>(inst));
+        }
+
         for (int j = 0; j < vecWidth; j++) {
             std::unordered_map<Value*, Value*> vmap;
 
@@ -809,6 +836,22 @@ void LoopVectorize::emitVectorizedLoop(
                 auto *iv_j   = new BinaryInst(module->int32_ty_, Instruction::Add,
                                             vecPhi, offset, vecBody);
                 vmap[iv.phi] = iv_j;
+            }
+
+            // Map non-IV header phis:
+            //   offset 0 → gep(phi, 0) for pointers (so VECTOR_IR can
+            //     collect the store; gep 0 is a no-op), original phi for ints;
+            //   offset j>0 → gep(phi, j) for pointers, add(phi, j) for ints
+            for (auto *phi : headerNonIVPhis) {
+                auto *offConst = new ConstantInt(module->int32_ty_, j);
+                if (phi->type_->tid_ == Type::PointerTyID) {
+                    vmap[phi] = new GetElementPtrInst(phi, {offConst}, vecBody);
+                } else if (j == 0) {
+                    vmap[phi] = phi;
+                } else {
+                    vmap[phi] = new BinaryInst(phi->type_, Instruction::Add,
+                                               phi, offConst, vecBody);
+                }
             }
     
             for (auto *origInst : bodyInsts) {
@@ -896,6 +939,9 @@ void LoopVectorize::emitVectorizedLoop(
                             else if (a1 == vecPhi && dynamic_cast<ConstantInt*>(a0))
                                 offset = static_cast<ConstantInt*>(a0)->value_;
                         }
+                    } else if (auto *ci = dynamic_cast<ConstantInt*>(lastIdxVal)) {
+                        // gep ptr, constant — e.g. from LICM pointer-phi remapping
+                        offset = ci->value_;
                     }
                     if (offset >= 0)
                         storeInfos.push_back({si, si->get_operand(0), gep, offset});
