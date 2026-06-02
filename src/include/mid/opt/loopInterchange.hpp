@@ -13,6 +13,7 @@
 #include "../analysis/dependenceAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
+#include <map>
 
 class LoopInterchange : public Pass {
 public:
@@ -25,17 +26,17 @@ private:
     // 输出关键内部值供变换使用。返回 false 表示当前嵌套不匹配。
     struct MatmulInfo {
         Loop              *i_loop, *j_loop, *k_loop;
-        PhiInst           *sum_phi;            // 累加器 phi
-        BinaryInst        *sum_add;            // sum_next = add(sum_phi, product)
-        BinaryInst        *prod_mul;           // product = mul(load, load)
-        LoadInst          *load_ik;            // load X[i][k]
-        LoadInst          *load_kj;            // load Y[k][j]
+        PhiInst           *sum_phi;
+        BinaryInst        *sum_add;
+        BinaryInst        *prod_mul;
+        LoadInst          *load_ik, *load_kj;
         GetElementPtrInst *gep_ik, *gep_kj;
         Value             *base_ik, *base_kj;
-        StoreInst         *store_inst;         // store sum -> D[i][j]（在 k_loop.exit 中）
+        StoreInst         *store_inst;
         GetElementPtrInst *gep_store;
         Value             *base_store;
-        Value             *bound;              // 三层共用的 trip count
+        Value             *bound;              // 运行时 trip count
+        int                inner_dim;          // 从 GEP 类型推出的数组内维度（j 上界）
     };
 
     bool detectMatmul(Loop *k_loop, LoopInfo &LI, AffineAnalysis &AA,
@@ -44,6 +45,6 @@ private:
                               DependenceAnalysis &DA);
     bool apply(const MatmulInfo &info, Module *module);
 
-    GlobalVariable *getOrCreateTempBuffer(Module *module);
-    GlobalVariable *temp_buf_ = nullptr;
+    GlobalVariable *getOrCreateTempBuffer(Module *module, int size);
+    std::map<int, GlobalVariable *> temp_buf_;   // size → 全局 buffer
 };

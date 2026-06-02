@@ -5,8 +5,6 @@
 
 #include <algorithm>
 
-static constexpr int TEMP_BUF_SIZE = 1024;
-
 // ── 入口 ──────────────────────────────────────────────────────────────────
 
 void LoopInterchange::execute(Module *module) {
@@ -35,21 +33,24 @@ void LoopInterchange::runOnFunction(Function *func) {
     }
 }
 
-// ── 全局 temp[1024] ───────────────────────────────────────────────────────
+// ── 按数组维度按需创建 temp buffer ────────────────────────────────────────
+// 每个 size 一份全局 `@__mm_tmp_<size>`，重复匹配相同 size 时复用。
 
-GlobalVariable *LoopInterchange::getOrCreateTempBuffer(Module *module) {
-    if (temp_buf_) return temp_buf_;
+GlobalVariable *LoopInterchange::getOrCreateTempBuffer(Module *module, int size) {
+    auto it = temp_buf_.find(size);
+    if (it != temp_buf_.end()) return it->second;
+    std::string name = "__mm_tmp_" + std::to_string(size);
     for (auto *gv : module->global_list_) {
-        if (gv->name_ == "__mm_tmp") {
-            temp_buf_ = gv;
-            return temp_buf_;
+        if (gv->name_ == name) {
+            temp_buf_[size] = gv;
+            return gv;
         }
     }
     auto *i32 = module->int32_ty_;
-    auto *arr = module->get_array_type(i32, TEMP_BUF_SIZE);
-    temp_buf_ = new GlobalVariable("__mm_tmp", module, arr, false,
-                                   new ConstantZero(arr));
-    return temp_buf_;
+    auto *arr = module->get_array_type(i32, size);
+    auto *gv  = new GlobalVariable(name, module, arr, false, new ConstantZero(arr));
+    temp_buf_[size] = gv;
+    return gv;
 }
 
 // ── 检测：基于 LoopInfo + AffineAnalysis ──────────────────────────────────
@@ -142,7 +143,7 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     if (!dynamic_cast<GlobalVariable *>(base_ik) && !dynamic_cast<Argument *>(base_ik)) return false;
     if (!dynamic_cast<GlobalVariable *>(base_kj) && !dynamic_cast<Argument *>(base_kj)) return false;
 
-    // 数组内维度上限保护：从 GEP 基址 `[N x [M x i32]]*` 提取 M（j 的上界）
+    // 从 GEP 基址 `[N x [M x i32]]*` 提取 M（j 的上界，也是 temp buffer 需要的大小）
     auto inner_dim_of = [](Value *base) -> int {
         auto *ptr = dynamic_cast<PointerType *>(base->type_);
         if (!ptr) return -1;
@@ -153,7 +154,7 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
         return (int)inner->num_elements_;
     };
     int d_kj = inner_dim_of(base_kj);
-    if (d_kj < 0 || d_kj > TEMP_BUF_SIZE) return false;
+    if (d_kj <= 0) return false;
 
     // 6. k_loop 内除了这两个 load 不能有其它 store/call/load
     int load_cnt = 0;
@@ -193,7 +194,7 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     Value *base_store = gep_store->get_operand(0);
     if (!dynamic_cast<GlobalVariable *>(base_store) && !dynamic_cast<Argument *>(base_store)) return false;
     int d_st = inner_dim_of(base_store);
-    if (d_st < 0 || d_st > TEMP_BUF_SIZE) return false;
+    if (d_st <= 0 || d_st != d_kj) return false;   // 写回数组的内维必须和读入数组一致
 
     // 8. j_loop 内（除 k_loop 外）不能有其它 store/call
     for (auto *bb : j_loop->blocks) {
@@ -220,6 +221,7 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     out.gep_store  = gep_store;
     out.base_store = base_store;
     out.bound      = bound;
+    out.inner_dim  = d_kj;
     return true;
 }
 
@@ -250,7 +252,7 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     BasicBlock *j_exit_old  = info.j_loop->singleExit();
     if (!j_preheader || !j_exit_old) return false;
 
-    auto *tmp_buf = getOrCreateTempBuffer(module);
+    auto *tmp_buf = getOrCreateTempBuffer(module, info.inner_dim);
 
     auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 1000); };
     auto newBB = [&](const std::string &tag) {
