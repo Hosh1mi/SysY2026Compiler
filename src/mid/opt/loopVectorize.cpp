@@ -252,15 +252,16 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
         int stride = 0;
         bool isAdd = updateInst->is_add();
 
-        // pattern: phi + stride  or  stride + phi
+        // pattern: phi + stride  or  stride + phi  (or  sub phi, |stride|)
         if (op0 == phi && dynamic_cast<ConstantInt*>(op1)) {
             stride = static_cast<ConstantInt*>(op1)->value_;
+            if (!isAdd) stride = -stride; // sub phi, c  means stride = -c
         } else if (isAdd && op1 == phi && dynamic_cast<ConstantInt*>(op0)) {
             stride = static_cast<ConstantInt*>(op0)->value_;
         }
 
-        // We only support positive unit stride for now
-        if (stride != 1) continue;
+        // Only unit stride ±1 is supported
+        if (stride != 1 && stride != -1) continue;
 
         iv.phi         = phi;
         iv.initVal     = initVal;
@@ -591,19 +592,22 @@ void LoopVectorize::emitVectorizedLoop(
     vecHeader->add_instruction_front(vecPhi);
     vecPhi->addIncoming(iv.initVal, preheader);
 
-    // Compute bound - VF for the vectorized loop's upper bound check
-    //   if vec_phi <= bound - VF, continue vectorized loop
-    //   else go to remainder loop
+    // Compute the vectorized loop's upper bound check.
+    //   stride > 0: if vec_phi < bound - VF, continue; else go to remainder
+    //   stride < 0: if vec_phi > bound + VF, continue; else go to remainder
     int adj = vecWidth;  // VF
+    bool negStride = (iv.stride < 0);
     Value *boundMain;
     if (auto *cb = dynamic_cast<ConstantInt*>(bound)) {
-        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - adj);
+        boundMain = new ConstantInt(module->int32_ty_,
+                                     negStride ? cb->value_ + adj : cb->value_ - adj);
     } else {
         auto *adjConst = new ConstantInt(module->int32_ty_, adj);
-        auto *subInst  = new BinaryInst(module->int32_ty_, Instruction::Sub,
+        Instruction::OpID op = negStride ? Instruction::Add : Instruction::Sub;
+        auto *adjInst  = new BinaryInst(module->int32_ty_, op,
                                          bound, adjConst, preheader, false);
-        preheader->add_instruction_before_terminator(subInst);
-        boundMain = subInst;
+        preheader->add_instruction_before_terminator(adjInst);
+        boundMain = adjInst;
     }
 
     // Create the comparison: vec_phi < boundMain (or the appropriate op)
@@ -642,8 +646,9 @@ void LoopVectorize::emitVectorizedLoop(
     }
 
     // Create the increment value for the next iteration
-    // vec_next = vecPhi + VF
-    auto *vecStride = new ConstantInt(module->int32_ty_, vecWidth);
+    // vec_next = vecPhi + (stride>0 ? VF : -VF)
+    int step = negStride ? -vecWidth : vecWidth;
+    auto *vecStride = new ConstantInt(module->int32_ty_, step);
     auto *vecNext   = new BinaryInst(module->int32_ty_, Instruction::Add,
                                       vecPhi, vecStride, vecBody);
     vecPhi->addIncoming(vecNext, vecBody);
@@ -706,6 +711,18 @@ void LoopVectorize::emitVectorizedLoop(
                     Value *idx = gep->get_operand(i);
                     auto it = vmap.find(idx);
                     idxs.push_back(it != vmap.end() ? it->second : idx);
+                }
+                // For negative stride, the last index (IV) needs adjustment:
+                // vecPhi points to the LAST element of the VF-element block,
+                // but the vector store writes forward.  Shift it back by VF-1.
+                if (negStride && !idxs.empty()) {
+                    Value *lastIdx = idxs.back();
+                    if (lastIdx == vecPhi) {
+                        auto *adjC = new ConstantInt(module->int32_ty_, vecWidth - 1);
+                        auto *adjIdx = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                                       lastIdx, adjC, vecBody);
+                        idxs.back() = adjIdx;
+                    }
                 }
                 auto *newGep = new GetElementPtrInst(
                     gep->get_operand(0), idxs, vecBody);
