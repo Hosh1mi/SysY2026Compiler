@@ -646,9 +646,11 @@ void LoopVectorize::emitVectorizedLoop(
     vecPhi->addIncoming(iv.initVal, preheader);
 
     // Compute the vectorized loop's upper bound check.
-    //   stride > 0: if vec_phi < bound - VF, continue; else go to remainder
-    //   stride < 0: if vec_phi > bound + VF, continue; else go to remainder
-    int adj = vecWidth;  // VF
+    // We process VF elements {i, i+1, ..., i+VF-1} per iteration.
+    // For SLT i < bound: the last element must satisfy i+VF-1 < bound,
+    //   i.e. i < bound - (VF-1).  VF is one too conservative.
+    // For SLE / SGT / SGE the same (VF-1) adjustment applies.
+    int adj = vecWidth - 1;  // VF - 1
     bool negStride = (iv.stride < 0);
     Value *boundMain;
     if (auto *cb = dynamic_cast<ConstantInt*>(bound)) {
