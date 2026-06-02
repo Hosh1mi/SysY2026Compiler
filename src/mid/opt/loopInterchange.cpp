@@ -98,8 +98,16 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
         else if (src == k_loop->singleLatch()) sum_latch = sum_phi->get_operand(i);
     }
     if (!sum_init || !sum_latch) return false;
-    auto *ci_init = dynamic_cast<ConstantInt *>(sum_init);
-    if (!ci_init || ci_init->value_ != 0) return false;
+    // sum_init 必须在 j-loop 外可见（即定义块不在 j_loop.blocks 内，或为常量/全局/参数）
+    auto availableOutsideJLoop = [&](Value *v) -> bool {
+        if (dynamic_cast<Constant *>(v))       return true;
+        if (dynamic_cast<GlobalVariable *>(v)) return true;
+        if (dynamic_cast<Argument *>(v))       return true;
+        auto *inst = dynamic_cast<Instruction *>(v);
+        if (!inst) return true;
+        return !j_loop->blocks.count(inst->parent_);
+    };
+    if (!availableOutsideJLoop(sum_init)) return false;
 
     auto *add = dynamic_cast<BinaryInst *>(sum_latch);
     if (!add || !add->is_add()) return false;
@@ -225,6 +233,7 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     out.base_store = base_store;
     out.k_bound    = k_bound;
     out.j_bound    = j_bound;
+    out.sum_init   = sum_init;
     out.inner_dim  = d_kj;
     return true;
 }
@@ -288,7 +297,7 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     new BranchInst(clr_cmp, clr_b, nk_h, clr_h);
 
     auto *clr_gep = new GetElementPtrInst(tmp_buf, {const0, clr_jc}, clr_b);
-    new StoreInst(const0, clr_gep, clr_b);
+    new StoreInst(info.sum_init, clr_gep, clr_b);   // 初值用 sum_init（支持非零累加初值）
     new BranchInst(clr_l, clr_b);
 
     auto *clr_inc = new BinaryInst(i32, Instruction::Add, clr_jc, const1, clr_l);

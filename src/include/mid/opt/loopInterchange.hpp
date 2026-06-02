@@ -38,6 +38,7 @@ private:
         Value             *base_store;
         Value             *k_bound;            // 内层 k 的运行时上界
         Value             *j_bound;            // 中层 j 的运行时上界
+        Value             *sum_init;           // sum 在 k_preheader 入值（loop-invariant in j-loop）
         int                inner_dim;          // 写回数组的内维（决定 temp buffer 大小，要 >= j_bound）
     };
 
