@@ -23,7 +23,7 @@ public:
 
 class Function : public Value {
 public:
-    Function(FunctionType* ty, const std::string& name, Module* parent) : Value(ty, name), parent_(parent), seq_cnt_(0) {
+    Function(FunctionType* ty, const std::string& name, Module* parent) : Value(ty, name), parent_(parent), seq_cnt_(0), gep_cnt_(0) {
         parent->add_function(this);
         size_t num_args = ty->args_.size();
         use_ret_cnt = 0;
@@ -44,6 +44,7 @@ public:
     std::vector<Argument*> arguments_;
     Module* parent_;
     unsigned seq_cnt_;                        // 命名序号计数器
+    unsigned gep_cnt_;                        // GEP 独立命名计数器
     std::vector<std::set<Value*>> vreg_set_; // 虚拟寄存器集合（优化用）
     int use_ret_cnt;                          // 返回值的实际使用次数
 };

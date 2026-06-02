@@ -95,7 +95,6 @@ private:
     std::vector<PhiCopy> phiCopies_;
 
     BasicBlock *epilogueBB_ = nullptr;
-    int memclrCounter_ = 0;
     int edgeCounter_ = 0;
     bool needsFrame_ = true;  // false when localSize==0 (no stack, no callee-saved regs)
     std::set<BasicBlock*> branchTargets_;  // blocks referenced by branch instructions

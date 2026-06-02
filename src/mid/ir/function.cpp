@@ -6,16 +6,13 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <string>
 
 Function::~Function() {}
 
 // define/declare <ret_ty> @<name>(<args>) { <body> }
 std::string Function::print() {
-    if (this->name_ == "llvm.memset.p0.i32") {
-        std::string func_ir = "declare void @llvm.memset.p0.i32(i32*, i8, i32, i1)";
-        return func_ir;
-    }
     set_instr_name();  // 先统一命名，保证输出一致
     std::string func_ir;
     if (this->is_declaration())
@@ -85,9 +82,23 @@ BasicBlock* Function::getRetBB() {
     return nullptr;
 }
 
-// 统一为所有匿名 Value（参数/BB/指令）分配 IR 名称，便于输出
+// 统一为所有匿名 Value（参数/BB/指令）分配 IR 名称，便于输出。
+// 对于已有名称的值，检查冲突并添加后缀以保证唯一性。
 void Function::set_instr_name() {
     std::map<Value*, int> seq;
+    std::set<std::string> used_names;
+
+    auto uniquify = [&](std::string &name) {
+        if (used_names.count(name)) {
+            std::string base = name;
+            int suffix = 1;
+            do {
+                name = base + "." + std::to_string(suffix++);
+            } while (used_names.count(name));
+        }
+        used_names.insert(name);
+    };
+
     for (auto arg : this->arguments_) {
         if (!seq.count(arg)) {
             auto seq_num = seq.size() + seq_cnt_;
@@ -95,6 +106,7 @@ void Function::set_instr_name() {
                 arg->name_ = "arg_" + std::to_string(seq_num);
                 seq.insert({arg, seq_num});
             }
+            uniquify(arg->name_);
         }
     }
     for (auto bb : basic_blocks_) {
@@ -104,14 +116,24 @@ void Function::set_instr_name() {
                 bb->name_ = "label_" + std::to_string(seq_num);
                 seq.insert({bb, seq_num});
             }
+            uniquify(bb->name_);
         }
         for (auto instr : bb->instr_list_) {
             if (instr->type_->tid_ != Type::VoidTyID && !seq.count(instr)) {
                 auto seq_num = seq.size() + seq_cnt_;
                 if (instr->name_ == "") {
-                    instr->name_ = "v" + std::to_string(seq_num);
+                    if (instr->is_gep()) {
+                        if (gep_cnt_ == 0)
+                            instr->name_ = "arrayidx";
+                        else
+                            instr->name_ = "arrayidx" + std::to_string(gep_cnt_);
+                        gep_cnt_++;
+                    } else {
+                        instr->name_ = "v" + std::to_string(seq_num);
+                    }
                     seq.insert({instr, seq_num});
                 }
+                uniquify(instr->name_);
             }
         }
     }
