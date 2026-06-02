@@ -884,19 +884,12 @@ void LoopVectorize::emitVectorizedLoop(
                 Type *resTy = bi->type_;
                 if (r0->type_->tid_ == Type::VectorTyID) resTy = r0->type_;
                 else if (r1->type_->tid_ == Type::VectorTyID) resTy = r1->type_;
-                // Splat any scalar operand that is paired with a vector operand
+                // Splat any scalar operand that is paired with a vector operand.
+                // Emit in preheader so the splat runs once, not every iteration.
                 if (resTy->tid_ == Type::VectorTyID) {
                     auto splat = [&](Value *&op) {
-                        if (op->type_->tid_ != Type::VectorTyID) {
-                            Value *result = nullptr;
-                            for (int l = 0; l < vecWidth; l++) {
-                                auto *idx = new ConstantInt(module->int32_ty_, l);
-                                Value *base = result ? result
-                                    : static_cast<Value*>(new ConstantZero(resTy));
-                                result = new InsertElementInst(base, op, idx, vecBody);
-                            }
-                            op = result;
-                        }
+                        if (op->type_->tid_ != Type::VectorTyID)
+                            op = emitSplat(op, preheader);
                     };
                     splat(r0);
                     splat(r1);
@@ -1239,9 +1232,12 @@ void LoopVectorize::emitVectorizedLoop(
                 // Remove the scalar store
                 si->store->parent_->remove_instr(si->store);
                 si->store->remove_use_of_ops();
-                // Remove the scalar binop that fed this store
+                // Remove the scalar binop that fed this store, but only if
+                // no other instruction still uses it (e.g. another store
+                // or a condition branch). Otherwise leave it for DCE.
                 auto *scalarBinop = static_cast<BinaryInst*>(si->storedVal);
-                if (scalarBinop && scalarBinop->parent_) {
+                if (scalarBinop && scalarBinop->parent_ &&
+                    scalarBinop->use_list_.empty()) {
                     scalarBinop->parent_->remove_instr(scalarBinop);
                     scalarBinop->remove_use_of_ops();
                 }
