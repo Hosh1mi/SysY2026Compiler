@@ -19,9 +19,12 @@ test/performance/
 .vscode/
 .idea/
 CLAUDE.md
+AGENTS.md
 *.pdf
 *.Identifier
 .claude/
+.codex/
+.agents/
 test/result.txt
 test/results/
 *.txt

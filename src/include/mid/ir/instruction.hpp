@@ -68,12 +68,7 @@ public:
             operands_[i]->remove_use(use_pos_[i]);
         }
         for (int i = index2 + 1; i < operands_.size(); i++) {
-            for (auto& use : operands_[i]->use_list_) {
-                if (use.val_ == this) {
-                    use.arg_no_ -= index2 - index1 + 1;
-                    break;
-                }
-            }
+            use_pos_[i]->arg_no_ -= index2 - index1 + 1;
         }
         operands_.erase(operands_.begin() + index1, operands_.begin() + index2 + 1);
         use_pos_.erase(use_pos_.begin() + index1, use_pos_.begin() + index2 + 1);
