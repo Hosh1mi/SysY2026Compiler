@@ -1293,9 +1293,15 @@ void LoopVectorize::emitVectorizedLoop(
     // Also add the remPhi -> remHeader mapping
     // For the IV phi, the incoming from vecHeader should be remPhi
     // This is because remPhi takes the value of vecPhi when entering remHeader
+    //
+    // For non-IV integer phis with constant-offset updates, the incoming
+    // value must also account for the VF iterations already processed by
+    // the vectorized loop body (otherwise they'd restart from their
+    // original initVal in the remainder loop).
     for (auto inst : origHeader->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst*>(inst);
+
         if (phi == iv.phi) {
             // Find the vecHeader incoming and replace it
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -1306,6 +1312,49 @@ void LoopVectorize::emitVectorizedLoop(
                     phi->operands_[i]    = remPhi;
                     phi->use_pos_[i]     = remPhi->add_use(phi, i);
                     break;
+                }
+            }
+        } else if (phi->type_->tid_ == Type::IntegerTyID) {
+            // Non-IV integer phi: adjust initVal by VF × per-iteration stride
+            Value *latchVal = nullptr;
+            for (unsigned j = 0; j < phi->num_ops_; j += 2) {
+                if (loop.blocks.count(
+                        static_cast<BasicBlock*>(phi->get_operand(j + 1)))) {
+                    latchVal = phi->get_operand(j); break;
+                }
+            }
+            if (auto *update = dynamic_cast<Instruction*>(latchVal)) {
+                if (update->is_add() || update->is_sub()) {
+                    Value *op0 = update->get_operand(0);
+                    Value *op1 = update->get_operand(1);
+                    int offset = 0;
+                    if (op0 == phi && dynamic_cast<ConstantInt*>(op1))
+                        offset = static_cast<ConstantInt*>(op1)->value_;
+                    else if (update->is_add() && op1 == phi &&
+                             dynamic_cast<ConstantInt*>(op0))
+                        offset = static_cast<ConstantInt*>(op0)->value_;
+                    if (!update->is_add()) offset = -offset;
+
+                    if (offset != 0) {
+                        for (unsigned j = 0; j < phi->num_ops_; j += 2) {
+                            if (phi->get_operand(j + 1) == remHeader) {
+                                Value *oldVal = phi->get_operand(j);
+                                auto *initCI =
+                                    dynamic_cast<ConstantInt*>(oldVal);
+                                if (initCI) {
+                                    int newVal =
+                                        initCI->value_ + vecWidth * offset;
+                                    oldVal->remove_use(phi->use_pos_[j]);
+                                    auto *newCI = new ConstantInt(
+                                        module->int32_ty_, newVal);
+                                    phi->operands_[j] = newCI;
+                                    phi->use_pos_[j] =
+                                        newCI->add_use(phi, j);
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }
