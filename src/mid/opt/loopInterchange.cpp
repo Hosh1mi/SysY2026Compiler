@@ -20,6 +20,7 @@ void LoopInterchange::runOnFunction(Function *func) {
 
     AffineAnalysis     AA(LI);
     DependenceAnalysis DA(LI, AA);
+    CostModel          CM(AA);
 
     // 枚举所有 loop 当 innermost(k)：分析→合法→有益→变换。
     // 一次只处理一组，因为变换会改 CFG；如需再扫描则下一轮 invocation。
@@ -28,7 +29,7 @@ void LoopInterchange::runOnFunction(Function *func) {
         if (!k_loop->children.empty()) continue;          // 必须是最内
         MatmulInfo info{};
         if (!detectMatmul(k_loop, LI, AA, info)) continue;
-        if (!isLegalAndProfitable(info, DA)) continue;
+        if (!isLegalAndProfitable(info, DA, CM)) continue;
         if (apply(info, func->parent_)) return;
     }
 }
@@ -231,16 +232,24 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
 // ── 合法 + 有益 ──────────────────────────────────────────────────────────
 
 bool LoopInterchange::isLegalAndProfitable(const MatmulInfo &info,
-                                           DependenceAnalysis &DA) {
+                                           DependenceAnalysis &DA,
+                                           CostModel &CM) {
     // 合法性：load_kj（列访问）和 store（写回）之间在 j-k 上不能形成反向依赖。
-    // 我们简化判断：j-k 两层之间没有跨循环的真依赖（仅有 reduction，scalar expansion 后消除）。
+    // 简化判断：j-k 两层之间没有跨循环的真依赖（仅有 reduction，scalar expansion 后消除）。
     std::vector<Instruction *> accesses = {info.load_ik, info.load_kj, info.store_inst};
     if (!DA.isInterchangeLegal(info.j_loop, info.k_loop, accesses)) return false;
 
-    // 收益：load_kj 的内层 IV 系数（在 k_loop 中）对应 row 还是 col：
-    // 当前内层 IV = k_phi，gep_kj 形如 A[k][j]，在 k 上 stride = 数组 inner_dim（列访问，坏）
-    // 交换后内层变 j_phi，stride = 1（行访问，好）→ 收益正向，直接判定有益
-    return true;
+    // 收益：用 CostModel 比较 swap 前后内层总 stride
+    //   before：内层是 k_phi，所有访存对 k 的字节 stride 之和
+    //   after：内层是 j_phi（swap 后），所有访存对 j 的字节 stride 之和
+    PhiInst *k_phi = info.k_loop->canonicalIV;
+    PhiInst *j_phi = info.j_loop->canonicalIV;
+    std::vector<GetElementPtrInst *> geps = {info.gep_ik, info.gep_kj, info.gep_store};
+
+    long before = CM.totalStride(geps, k_phi);
+    long after  = CM.totalStride(geps, j_phi);
+    if (before < 0 || after < 0) return false;   // 静态算不出来，保守跳过
+    return after < before;                       // 严格收益才变换
 }
 
 // ── 变换（沿用旧版 CFG 构造逻辑）─────────────────────────────────────────

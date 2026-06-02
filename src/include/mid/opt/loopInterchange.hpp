@@ -10,6 +10,7 @@
 //        for i: clear → for k_new: for j_inner: temp[j]+=c*A[k][j] → store back
 
 #include "../analysis/affineAnalysis.hpp"
+#include "../analysis/costModel.hpp"
 #include "../analysis/dependenceAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
@@ -43,7 +44,8 @@ private:
     bool detectMatmul(Loop *k_loop, LoopInfo &LI, AffineAnalysis &AA,
                       MatmulInfo &out);
     bool isLegalAndProfitable(const MatmulInfo &info,
-                              DependenceAnalysis &DA);
+                              DependenceAnalysis &DA,
+                              CostModel &CM);
     bool apply(const MatmulInfo &info, Module *module);
 
     GlobalVariable *getOrCreateTempBuffer(Module *module, int size);
