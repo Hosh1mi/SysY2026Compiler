@@ -181,7 +181,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis (清理展开产生的冗余代码)
+        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
 
         make_basic_clean(pm);                                 // 最后再来一轮基本清理
         make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理

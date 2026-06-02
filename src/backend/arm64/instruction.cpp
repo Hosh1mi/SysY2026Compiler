@@ -66,7 +66,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         // for %a and the Add's other operand (non-overlapping liveness before
         // fusion).  To avoid clobbering, we load the mul operands and pin
         // them to scratch registers BEFORE emitting any intervening instructions.
-        if (inst->op_id_ == Instruction::Mul && inst->use_list_.size() == 1) {
+        if (inst->op_id_ == Instruction::Mul && inst->use_list_.size() == 1 && !isVector(inst->type_)) {
             auto mulIt = it;
             bool fused = false;
             auto scan = std::next(it);
@@ -626,6 +626,24 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::AShr: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+
+        // Vector path
+        if (isVector(inst->type_)) {
+            std::string r1 = loadVector(v1);
+            std::string r2 = loadVector(v2);
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            const char *opcode = nullptr;
+            switch (inst->op_id_) {
+                case Instruction::Shl:  opcode = "sshl"; break;
+                case Instruction::AShr: opcode = "sshr"; break;
+                case Instruction::LShr: opcode = "ushr"; break;
+                default: break;
+            }
+            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            if (!hasAssignedReg(inst)) storeVector(inst, rd);
+            break;
+        }
+
         std::string r1 = loadInt(v1);
         std::string rd = allocIntReg();
 

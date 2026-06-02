@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <functional>
 #include <cassert>
+#include <cstdio>
 
 // =====================================================================
 // Vectorization
@@ -297,7 +298,7 @@ bool LoopVectorize::analyzeStrideAccesses(
 
                 // Check if the pointer is a GEP with IV as the last index
                 auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
-                if (!gep) return false; // can't handle non-GEP loads
+                if (!gep) continue; // skip non-GEP loads (e.g. pointer-phi loads from IVSR)
 
                 // The last index should be the IV (or IV + constant offset)
                 unsigned lastIdx = gep->num_ops_ - 1;
@@ -337,7 +338,7 @@ bool LoopVectorize::analyzeStrideAccesses(
                 Value *ptr = inst->get_operand(1);
 
                 auto *gep = dynamic_cast<GetElementPtrInst*>(ptr);
-                if (!gep) return false;
+                if (!gep) continue; // skip non-GEP stores (e.g. pointer-phi stores from IVSR)
 
                 unsigned lastIdx = gep->num_ops_ - 1;
                 Value *idxVal = gep->get_operand(lastIdx);
@@ -390,8 +391,10 @@ static bool isVectorizableInstruction(Instruction *inst,
     if (inst->is_call()) return false;  // calls cannot be vectorized
     if (inst->is_alloca()) return false;
 
-    // Binary/unary/cmp operations are vectorizable
-    if (inst->is_binary()) return true;
+    // Binary/unary/cmp operations are vectorizable.
+    // Note: is_binary() only covers Add/Sub/Mul/Div/Rem — we also need
+    // Shl/LShr/AShr/And/Or/Xor, which are BinaryInst subclasses.
+    if (inst->is_binary() || dynamic_cast<BinaryInst*>(inst)) return true;
     if (inst->is_cmp() || inst->is_fcmp()) return true;
     if (dynamic_cast<UnaryInst*>(inst)) return true;
     if (dynamic_cast<ZextInst*>(inst)) return true;
@@ -414,17 +417,17 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
 
     // Requirements:
     // 1. Loop must have a preheader
-    if (!loop.preheader) return false;
+    if (!loop.preheader) { return false; }
 
     // 2. Loop must have a unique exit
-    if (!loop.exitBB) return false;
+    if (!loop.exitBB) { return false; }
 
     // 3. Loop should be small (single block or simple 2-block: header+latch)
-    if (loop.blocks.size() > 2) return false;
+    if (loop.blocks.size() > 2) { /* no log — too many outer loops */ return false; }
 
     // 4. Find induction variable (unit stride, constant stride = 1)
     InductionVar iv;
-    if (!findInductionVar(loop, iv)) return false;
+    if (!findInductionVar(loop, iv)) { return false; }
 
     // 5. Check for non-IV phis (accumulators, pointer phis from LICM, etc.).
     //    Pointer phis are handled by gep(phi, j) in headerNonIVPhis.
@@ -446,37 +449,64 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
                 latchVal = phi->get_operand(i); break;
             }
         }
-        if (!latchVal) return false;
+        if (!latchVal) { return false; }
         auto *update = dynamic_cast<Instruction*>(latchVal);
-        if (!update || (!update->is_add() && !update->is_sub())) return false;
+        if (!update || (!update->is_add() && !update->is_sub())) { return false; }
         // Must be add/sub phi, constant  (not add phi, variable)
         Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
         bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
                        (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
-        if (!isConst) return false; // accumulator — not yet supported
+        if (!isConst) { return false; }
     }
 
     // 6. Find memory accesses with unit stride
     std::vector<MemAccess> loads, stores;
-    if (!analyzeStrideAccesses(loop, iv, loads, stores)) return false;
+    if (!analyzeStrideAccesses(loop, iv, loads, stores)) {
+        return false;
+    }
 
     // 6. Check that all instructions in the loop are vectorizable
     for (auto bb : loop.blocks) {
         for (auto inst : bb->instr_list_) {
-            if (!isVectorizableInstruction(inst, loop.blocks))
+            if (!isVectorizableInstruction(inst, loop.blocks)) {
                 return false;
+            }
         }
     }
 
     // 7. Count total memory accesses - very small loops may not benefit
     //    from vectorization
-    if (loads.empty() && stores.empty()) return false;
+    if (loads.empty() && stores.empty()) {
+        return false;
+    }
 
     // 8. Find the trip count bound from the comparison instruction
     //    We need to know the loop bound to determine if strip-mining is viable
     //    For now, we'll emit both vectorized loop and remainder loop
 
-    // All checks passed - proceed to vectorize
+    // 9. Reject loops where a store feeds from SDiv/SRem/FDiv.
+    //    VECTOR_IR cannot pack these (only handles Add/Sub/Mul),
+    //    so scalar unrolling would leave 4 copies with high register
+    //    pressure — worse than the original scalar loop.
+    {
+        std::vector<Instruction*> bodyInsts;
+        for (auto bb : loop.blocks)
+            for (auto inst : bb->instr_list_)
+                if (!inst->isTerminator() && !inst->is_phi())
+                    bodyInsts.push_back(inst);
+        for (auto *inst : bodyInsts) {
+            if (!inst->is_store()) continue;
+            Value *val = inst->get_operand(0);
+            // Walk back one level to find the root binop
+            if (auto *bi = dynamic_cast<BinaryInst*>(val)) {
+                if (bi->op_id_ == Instruction::SDiv ||
+                    bi->op_id_ == Instruction::SRem) {
+                    return false;
+                }
+            }
+        }
+    }
+
     emitVectorizedLoop(loop, iv, loads, stores, VECTORIZE_FACTOR, func, func->parent_);
     return true;
 }
@@ -689,6 +719,19 @@ void LoopVectorize::emitVectorizedLoop(
         if (!inst->is_phi()) break;
         if (inst != iv.phi) { patternA = false; break; }
     }
+    // Non-GEP loads/stores (pointer-phi based) cannot be handled by
+    // pattern A — force pattern B so headerNonIVPhis mapping is used.
+    if (patternA) {
+        for (auto *origInst : bodyInsts) {
+            if (origInst->is_load()) {
+                if (!dynamic_cast<GetElementPtrInst*>(origInst->get_operand(0)))
+                    { patternA = false; break; }
+            } else if (origInst->is_store()) {
+                if (!dynamic_cast<GetElementPtrInst*>(origInst->get_operand(1)))
+                    { patternA = false; break; }
+            }
+        }
+    }
     for (auto *origInst : bodyInsts) {
         if (origInst == iv.updateInst || origInst->is_phi() || origInst->is_gep()) continue;
         // Skip ICmp: it is loop control flow, not a data operation
@@ -699,7 +742,9 @@ void LoopVectorize::emitVectorizedLoop(
                 patternA = false; break;
             }
         }
-        // Reject SDiv/SRem/FDiv and all float binops
+        // Reject SDiv/SRem/FDiv and all float binops.
+        // These also prevent VECTOR_IR packing, so scalar unrolling
+        // would only increase register pressure without benefit.
         if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
             if (bi->op_id_ == Instruction::SDiv ||
                 bi->op_id_ == Instruction::SRem ||
@@ -716,14 +761,33 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
+    // Helpers shared by both pattern A and pattern B.
+    auto getVecTy = [&](Type *scalarTy) -> Type* {
+        return module->get_vector_type(scalarTy, vecWidth);
+    };
+    auto getVecPtrTy = [&](Type *scalarTy) -> Type* {
+        return module->get_pointer_type(getVecTy(scalarTy));
+    };
+    auto emitSplat = [&](Value *scalar, BasicBlock *bb) -> Value* {
+        Type *vecTy = getVecTy(scalar->type_);
+        Value *result = nullptr;
+        bool hasTerm = bb->get_terminator() != nullptr;
+        for (int j = 0; j < vecWidth; j++) {
+            auto *idxConst = new ConstantInt(module->int32_ty_, j);
+            Value *base = result ? result : scalar;
+            auto *ins = new InsertElementInst(base, scalar, idxConst, bb);
+            if (j == 0) ins->type_ = vecTy;
+            if (hasTerm) {
+                bb->remove_instr(ins);
+                bb->add_instruction_before_terminator(ins);
+            }
+            result = ins;
+        }
+        return result;
+    };
+
     if (patternA) {
         // ── 模式 A: 全向量化 IR ──
-        auto getVecTy = [&](Type *scalarTy) -> Type* {
-            return module->get_vector_type(scalarTy, vecWidth);
-        };
-        auto getVecPtrTy = [&](Type *scalarTy) -> Type* {
-            return module->get_pointer_type(getVecTy(scalarTy));
-        };
 
         std::unordered_map<Value*, Value*> vmap;
         std::unordered_map<Instruction*, Value*> bcMap; // GEP -> bitcast
@@ -797,18 +861,9 @@ void LoopVectorize::emitVectorizedLoop(
                     if (newVal->type_->tid_ == Type::VectorTyID) {
                         newPtr = bcIt->second;
                     } else {
-                        // Scalar value on a vector-gep: splat into vector
-                        // so the store covers all VF elements.  Without this,
-                        // a scalar store + VF stride skips 3/4 of elements.
-                        Type *vecTy = getVecTy(newVal->type_);
-                        Value *result = nullptr;
-                        for (int l = 0; l < vecWidth; l++) {
-                            auto *idx = new ConstantInt(module->int32_ty_, l);
-                            Value *base = result ? result
-                                : static_cast<Value*>(new ConstantZero(vecTy));
-                            result = new InsertElementInst(base, newVal, idx, vecBody);
-                        }
-                        newVal = result;
+                        // Scalar value on a vector-gep: splat once in
+                        // preheader, reuse every iteration.
+                        newVal = emitSplat(newVal, preheader);
                         newPtr = bcIt->second;
                     }
                 } else {
@@ -919,32 +974,6 @@ void LoopVectorize::emitVectorizedLoop(
     //   4. 创建 vector binop + vector store
     //   5. 删除旧的 scalar binop 和 scalar store
     if (!patternA) {
-        auto getVecTy = [&](Type *scalarTy) -> Type* {
-            return module->get_vector_type(scalarTy, vecWidth);
-        };
-        auto getVecPtrTy = [&](Type *scalarTy) -> Type* {
-            return module->get_pointer_type(getVecTy(scalarTy));
-        };
-
-        // Helper: splat a scalar into <VF x scalar> in a given block.
-        // For blocks that already have a terminator (preheader), insert before it.
-        auto emitSplat = [&](Value *scalar, BasicBlock *bb) -> Value* {
-            Type *vecTy = getVecTy(scalar->type_);
-            Value *result = nullptr;
-            bool hasTerm = bb->get_terminator() != nullptr;
-            for (int j = 0; j < vecWidth; j++) {
-                auto *idxConst = new ConstantInt(module->int32_ty_, j);
-                Value *base = result ? result : scalar;
-                auto *ins = new InsertElementInst(base, scalar, idxConst, bb);
-                if (j == 0) ins->type_ = vecTy;
-                if (hasTerm) {
-                    bb->remove_instr(ins);
-                    bb->add_instruction_before_terminator(ins);
-                }
-                result = ins;
-            }
-            return result;
-        };
 
         // Helper: pack 4 scalar values (at offsets 0..3) into a vector in vecBody
         auto emitPack4 = [&](Value *vals[4], BasicBlock *bb) -> Value* {
@@ -1076,10 +1105,11 @@ void LoopVectorize::emitVectorizedLoop(
                     Type *elemTy = vec[0]->storedVal->type_;
                     Type *vecTy  = getVecTy(elemTy);
                     Type *vecPtrTy = getVecPtrTy(elemTy);
-                    std::vector<Constant*> constElems;
-                    for (int j = 0; j < vecWidth; j++)
-                        constElems.push_back(static_cast<ConstantInt*>(vec[j]->storedVal));
-                    auto *constVec = new ConstantVector(static_cast<VectorType*>(vecTy), constElems);
+
+                    // Splat the constant ONCE in the preheader instead of
+                    // materializing a ConstantVector in the vecBody every
+                    // iteration (which emits N×VF "mov v.s[lane]" per iter).
+                    Value *splatVal = emitSplat(vec[0]->storedVal, preheader);
 
                     // vec[0] may be a pointer-phi store (gep == nullptr);
                     // borrow a real GEP from any sibling in the group.
@@ -1095,7 +1125,7 @@ void LoopVectorize::emitVectorizedLoop(
                     idxs.push_back(vecPhi);
                     auto *newGep = new GetElementPtrInst(firstGep->get_operand(0), idxs, vecBody);
                     auto *bc = new Bitcast(Instruction::BitCast, newGep, vecPtrTy, vecBody);
-                    new StoreInst(constVec, bc, vecBody);
+                    new StoreInst(splatVal, bc, vecBody);
 
                     for (int j = 0; j < vecWidth; j++) {
                         auto *si = vec[j];
