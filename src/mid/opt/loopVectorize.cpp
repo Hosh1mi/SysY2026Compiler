@@ -426,11 +426,34 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
     InductionVar iv;
     if (!findInductionVar(loop, iv)) return false;
 
-    // 5. Reject loops with non-IV phis (accumulators, addresses) —
-    //    vectorization of loop-carried values is not yet implemented
+    // 5. Check for non-IV phis (accumulators, pointer phis from LICM, etc.).
+    //    Pointer phis are handled by gep(phi, j) in headerNonIVPhis.
+    //    Integer phis with a constant-offset update (add/sub phi, c) are
+    //    handled by add(phi, j).  Accumulator phis ("sum += product") are
+    //    rejected — they need cross-copy chaining which isn't implemented.
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
-        if (inst != iv.phi) return false;
+        if (inst == iv.phi) continue;
+        auto *phi = static_cast<PhiInst*>(inst);
+        if (phi->type_->tid_ == Type::PointerTyID) continue; // pointer phi: OK
+        // Integer non-IV phi: check whether it's a constant-offset pattern
+        //   e.g.  %idx = phi [0], [add %idx, 1]
+        // or an accumulator:
+        //   e.g.  %sum = phi [0], [add %sum, %product]
+        Value *latchVal = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (loop.blocks.count(static_cast<BasicBlock*>(phi->get_operand(i + 1)))) {
+                latchVal = phi->get_operand(i); break;
+            }
+        }
+        if (!latchVal) return false;
+        auto *update = dynamic_cast<Instruction*>(latchVal);
+        if (!update || (!update->is_add() && !update->is_sub())) return false;
+        // Must be add/sub phi, constant  (not add phi, variable)
+        Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
+        bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
+                       (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
+        if (!isConst) return false; // accumulator — not yet supported
     }
 
     // 6. Find memory accesses with unit stride
@@ -659,7 +682,13 @@ void LoopVectorize::emitVectorizedLoop(
     //
     // 判断：如果所有非 GEP/load/store 指令的操作数都不直接依赖 IV，
     //       则可以用模式 A 全向量化。
-    bool patternA = true; // true = pure load-binop-store
+    // 但如果有非 IV phi（pointer phi、累加器等），模式 A 无法处理，
+    // 必须走模式 B 让 headerNonIVPhis 映射来正确 remap 这些 phi。
+    bool patternA = true;
+    for (auto inst : origHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        if (inst != iv.phi) { patternA = false; break; }
+    }
     for (auto *origInst : bodyInsts) {
         if (origInst == iv.updateInst || origInst->is_phi() || origInst->is_gep()) continue;
         // Skip ICmp: it is loop control flow, not a data operation
