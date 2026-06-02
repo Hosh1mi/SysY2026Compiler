@@ -4,7 +4,7 @@
 #include <queue>
 
 static const int UNROLL_FACTOR   = 4;
-static const int MAX_LATCH_INSTS = 6; // skip unrolling if body is too large
+static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
 
 // ── CFG / Dominator helpers (mirrors LICM) ────────────────────────────────
 
@@ -187,23 +187,35 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     }
     if (headerPhis.empty()) return false;
 
-    // Find IV: integer phi whose latch-incoming value is phi + ConstantInt stride > 0
+    // Find IV: integer phi whose latch-incoming value is
+    //   phi + ConstantInt stride (stride > 0)   — forward loop, or
+    //   phi - ConstantInt stride (stride > 0)   — reverse loop
     PhiInst *    ivPhi    = nullptr;
-    ConstantInt *stride   = nullptr;
+    ConstantInt *stride   = nullptr;  // > 0 for add, < 0 for sub
     Instruction *ivUpdate = nullptr;
 
     for (auto phi : headerPhis) {
         if (phi->type_->tid_ != Type::IntegerTyID) continue;
 
         for (auto inst : latch->instr_list_) {
-            if (!inst->is_add()) continue;
+            if (!inst->is_add() && !inst->is_sub()) continue;
             Value *op0 = inst->get_operand(0);
             Value *op1 = inst->get_operand(1);
-            auto *c0 = dynamic_cast<ConstantInt *>(op0);
-            auto *c1 = dynamic_cast<ConstantInt *>(op1);
-            ConstantInt *c   = c1 ? c1 : c0;
-            Value *      base = c1 ? op0 : op1;
-            if (!c || c->value_ <= 0 || base != phi) continue;
+
+            if (inst->is_add()) {
+                // add phi, c  or  add c, phi
+                auto *c0 = dynamic_cast<ConstantInt *>(op0);
+                auto *c1 = dynamic_cast<ConstantInt *>(op1);
+                ConstantInt *c   = c1 ? c1 : c0;
+                Value *      base = c1 ? op0 : op1;
+                if (!c || c->value_ <= 0 || base != phi) continue;
+                stride = c;
+            } else {
+                // sub phi, c   (reverse loop: stride = -c)
+                auto *c1 = dynamic_cast<ConstantInt *>(op1);
+                if (!c1 || c1->value_ <= 0 || op0 != phi) continue;
+                stride = new ConstantInt(phi->type_, -c1->value_);
+            }
 
             // Verify this instruction feeds back into the phi
             bool feedsBack = false;
@@ -213,7 +225,6 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
             if (!feedsBack) continue;
 
             ivPhi    = phi;
-            stride   = c;
             ivUpdate = inst;
             break;
         }
