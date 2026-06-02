@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <functional>
 
 Function::~Function() {}
 
