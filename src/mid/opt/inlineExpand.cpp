@@ -21,7 +21,6 @@ void InlineExpand::execute(Module *module) {
         }
     }
 
-
     while (!worklist.empty()) {
         CallInst *call = worklist.back();
         worklist.pop_back();

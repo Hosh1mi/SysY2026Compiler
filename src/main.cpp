@@ -7,7 +7,6 @@
 #include "include/mid/ir/irGen.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
-#include "include/mid/opt/arraySimplify.hpp"
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
@@ -20,12 +19,10 @@
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
-#include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
-#include "include/mid/opt/sroa.hpp"
 #include "include/mid/opt/unifyExitNodes.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
@@ -42,18 +39,16 @@ static void make_basic_clean(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
 }
 
-// DeadCodeDelete → CFGSimplify → RemoveRedundantPhis
+// DeadCodeDelete → CFGSimplify (trivial phi cleanup is inside DCE's fixed-point loop)
 static void make_cfg_clean(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
     pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addPass(std::make_unique<RemoveRedundantPhis>());
 }
 
-// ConstantFold → AlgebraSimplify → DeadCodeDelete → CFGSimplify → RemoveRedundantPhis
+// make_basic_clean + CFGSimplify + make_basic_clean (trivial phi cleanup is inside DCE)
 static void make_deep_clean(PassManager &pm) {
     make_basic_clean(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addPass(std::make_unique<RemoveRedundantPhis>());
     make_basic_clean(pm);
 }
 
@@ -130,11 +125,6 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    // // Set default to asm for now
-    // if (!print_ir && !print_asm) {
-    //     print_asm = true;
-    // }
-
     yyin = fopen(filename, "r");
     if (!yyin) {
         std::cerr << "Failed to open input file: " << filename << "\n";
@@ -154,11 +144,8 @@ int main(int argc, char **argv) {
     // TODO：设计合适的Pass Pipeline
 	PassManager pm;
 	if(optLevel >= 1){
-        pm.addPass(std::make_unique<DimArrayArgSimplify>());  // 清理数组参数
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
-        pm.addPass(std::make_unique<SROA>());                 // 将聚合 alloca 拆分为标量 alloca
-        pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
-        pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
+        pm.addPass(std::make_unique<Mem2Reg>());              // SROA 拆分聚合 alloca + 构造 SSA
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
@@ -171,7 +158,7 @@ int main(int argc, char **argv) {
         make_basic_clean(pm);
 
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
+        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
         pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
@@ -181,7 +168,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
+        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
         make_basic_clean(pm);                                 // 最后再来一轮基本清理
         make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理

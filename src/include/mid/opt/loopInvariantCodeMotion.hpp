@@ -19,10 +19,6 @@ private:
     void runOnFunction(Function *func);
     void eliminateSinglePredPhis(Function *func);
     void eliminateTrivialHeaderPhis(const Loop &loop);
-    std::vector<BasicBlock*> computeRPO(Function *func);
-    void computeDominators(const std::vector<BasicBlock*>& rpo);
-    BasicBlock *intersect(BasicBlock *a, BasicBlock *b);
-    bool dominates(BasicBlock *a, BasicBlock *b);
 
     std::vector<Loop> findLoops(Function *func);
     BasicBlock *getPreheader(const Loop &loop);
@@ -34,6 +30,5 @@ private:
     static bool doesAnyCallWriteToBase(const Loop &loop, Value *base);
     bool runOnLoop(const Loop &loop);
 
-    std::map<BasicBlock*, BasicBlock*> idom_;
-    std::map<BasicBlock*, int> rpoIdx_;
+    DominatorInfo *domInfo_ = nullptr;
 };

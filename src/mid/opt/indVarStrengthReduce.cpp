@@ -9,80 +9,12 @@ void IndVarStrengthReduce::execute(Module *module) {
 }
 
 void IndVarStrengthReduce::runOnFunction(Function *func) {
-    dom.clear();
-    idom.clear();
-    computeDominators(func);
+    domInfo_ = &func->getDominatorInfo();
     auto loops = findLoops(func);
 
     Module *module = func->parent_;
     for (auto &loop : loops) {
         processLoop(loop, func, module);
-    }
-}
-
-// -----------------------------------------------------------------------
-// 支配树计算
-// -----------------------------------------------------------------------
-void IndVarStrengthReduce::computeDominators(Function *func) {
-    auto entryBB = func->basic_blocks_.front();
-
-    std::set<BasicBlock *> allBlocks;
-    for (auto bb : func->basic_blocks_) allBlocks.insert(bb);
-
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBB)
-            dom[bb] = {entryBB};
-        else
-            dom[bb] = allBlocks;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : func->basic_blocks_) {
-            if (bb == entryBB) continue;
-            std::set<BasicBlock *> newDom = allBlocks;
-            bool first = true;
-            for (auto pred : bb->pre_bbs_) {
-                if (first) {
-                    newDom = dom[pred];
-                    first = false;
-                } else {
-                    std::set<BasicBlock *> temp;
-                    std::set_intersection(newDom.begin(), newDom.end(),
-                                         dom[pred].begin(), dom[pred].end(),
-                                         std::inserter(temp, temp.begin()));
-                    newDom = temp;
-                }
-            }
-            newDom.insert(bb);
-            if (newDom != dom[bb]) {
-                dom[bb] = newDom;
-                changed = true;
-            }
-        }
-    }
-
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBB) {
-            idom[bb] = nullptr;
-            continue;
-        }
-        for (auto d : dom[bb]) {
-            if (d == bb) continue;
-            bool isIdom = true;
-            for (auto other : dom[bb]) {
-                if (other == bb || other == d) continue;
-                if (dom[d].count(other)) {
-                    isIdom = false;
-                    break;
-                }
-            }
-            if (isIdom) {
-                idom[bb] = d;
-                break;
-            }
-        }
     }
 }
 
@@ -94,7 +26,7 @@ std::vector<IndVarStrengthReduce::Loop> IndVarStrengthReduce::findLoops(Function
 
     for (auto bb : func->basic_blocks_) {
         for (auto succ : bb->succ_bbs_) {
-            if (!dom[bb].count(succ)) continue;
+            if (!domInfo_->dominates(succ, bb)) continue;
             if (bb == succ) continue;
 
             Loop loop;

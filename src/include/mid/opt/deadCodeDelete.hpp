@@ -31,4 +31,7 @@ private:
     bool removeDeadInstructions(Function *func);
 
     void replacePhiUsesOfBlock(BasicBlock *old_bb, BasicBlock *new_bb);
+
+    // 消除平凡 phi：所有非自引用操作数指向同一个值
+    bool eliminateTrivialPhis(Function *func);
 };

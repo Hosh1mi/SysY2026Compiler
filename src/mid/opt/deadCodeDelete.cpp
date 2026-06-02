@@ -17,6 +17,7 @@ void DeadCodeDelete::execute(Module *module) {
             changed |= removeDeadInstructions(func);
             // changed |= aggressiveDCE(func);
             changed |= simplifyCFG(func);
+            changed |= eliminateTrivialPhis(func);
         } while (changed);
     }
 }
@@ -287,6 +288,60 @@ void DeadCodeDelete::replacePhiUsesOfBlock(BasicBlock *old_bb, BasicBlock *new_b
             }
         }
     }
+}
+
+// ------------------------------------------------------------
+// 消除平凡 phi：所有非自引用操作数指向同一个值
+bool DeadCodeDelete::eliminateTrivialPhis(Function *func) {
+    std::set<PhiInst *> worklist;
+    for (auto bb : func->basic_blocks_) {
+        for (auto &inst : bb->instr_list_) {
+            if (inst->is_phi())
+                worklist.insert(static_cast<PhiInst *>(inst));
+        }
+    }
+
+    bool changed = false;
+    while (!worklist.empty()) {
+        auto it = worklist.begin();
+        auto phi = *it;
+        worklist.erase(it);
+
+        if (phi->parent_ == nullptr) continue;  // already deleted
+
+        // Collect phi users for potential re-evaluation
+        std::vector<PhiInst *> phiUsers;
+        for (auto use : phi->use_list_) {
+            auto *user = dynamic_cast<PhiInst *>(use.val_);
+            if (user && user->parent_ != nullptr)
+                phiUsers.push_back(user);
+        }
+
+        // Check if all non-self operands are the same value
+        Value *common = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            Value *v = phi->get_operand(i);
+            if (v == phi) continue;  // skip self-reference
+            if (common == nullptr) {
+                common = v;
+            } else if (common != v) {
+                common = nullptr;
+                break;
+            }
+        }
+
+        if (common != nullptr) {
+            phi->replace_all_use_with(common);
+            phi->parent_->delete_instr(phi);
+            changed = true;
+            // Re-check phi users — they may have become trivial
+            for (auto *user : phiUsers) {
+                if (user->parent_ != nullptr)
+                    worklist.insert(user);
+            }
+        }
+    }
+    return changed;
 }
 
 // ------------------------------------------------------------
