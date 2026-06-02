@@ -75,6 +75,16 @@ __attribute((destructor)) void after_main(){
   }
   fprintf(stderr,"TOTAL: %dH-%dM-%dS-%dus\n",_sysy_h[0],_sysy_m[0],_sysy_s[0],_sysy_us[0]);
 }  
+/* profiling helpers */
+void redirect_stdin(void) {
+    freopen("/tmp/mmc-1.in", "r", stdin);
+}
+
+void debug_progress(int seg) {
+    fprintf(stderr, "[profile] seg%d\n", seg);
+    fflush(stderr);
+}
+
 void _sysy_starttime(int lineno){
   _sysy_l1[_sysy_idx] = lineno;
   gettimeofday(&_sysy_start,NULL);
