@@ -54,23 +54,25 @@ void RemoveRedundantPhis::runOnFunction(Function *func) {
         }
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        // 复制一份，避免在遍历中修改导致迭代器失效
-        auto current = std::vector<PhiInst *>(worklist.begin(), worklist.end());
-        worklist.clear();
-        for (auto phi : current) {
-            // phi 可能已被之前的替换删除
-            if (phi->parent_ == nullptr) continue;
-            if (eliminateTrivialPhi(phi)) {
-                changed = true;
-                // 如果被替换的 phi 是 common，其他 phi 可能因此变为平凡，
-                // 但它们不会自动进入工作列表，在下一次外部循环时会被重新发现
-                // 这里为了加速，暂不手动添加依赖 phi
-            } else {
-                // 仍非平凡，保留在集合中供下次检查
-                worklist.insert(phi);
+    while (!worklist.empty()) {
+        auto it = worklist.begin();
+        auto phi = *it;
+        worklist.erase(it);
+
+        // phi 可能已被之前的替换删除
+        if (phi->parent_ == nullptr) continue;
+
+        std::vector<PhiInst *> phiUsers;
+        for (auto use : phi->use_list_) {
+            auto *user = dynamic_cast<PhiInst *>(use.val_);
+            if (user && user->parent_ != nullptr)
+                phiUsers.push_back(user);
+        }
+
+        if (eliminateTrivialPhi(phi)) {
+            for (auto *user : phiUsers) {
+                if (user->parent_ != nullptr)
+                    worklist.insert(user);
             }
         }
     }

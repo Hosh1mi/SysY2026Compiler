@@ -216,30 +216,30 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             std::string base = allocAddrReg();
             os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
             if (isFloat(inst->type_)) {
-                std::string r = allocFloatReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
                 os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
                 storeFloat(inst, r);
             } else if (isPtr(inst->type_)) {
-                std::string r = allocAddrReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst, true) : allocAddrReg();
                 os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
                 storeAddr(inst, r);
             } else {
-                std::string r = allocIntReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                 os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
                 storeInt(inst, r);
             }
         } else {
             std::string addr = loadAddr(ptr);
             if (isFloat(inst->type_)) {
-                std::string r = allocFloatReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
                 os_ << "\tldr " << r << ", [" << addr << "]\n";
                 storeFloat(inst, r);
             } else if (isPtr(inst->type_)) {
-                std::string r = allocAddrReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst, true) : allocAddrReg();
                 os_ << "\tldr " << r << ", [" << addr << "]\n";
                 storeAddr(inst, r);
             } else {
-                std::string r = allocIntReg();
+                std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                 os_ << "\tldr " << r << ", [" << addr << "]\n";
                 storeInt(inst, r);
             }
@@ -1104,4 +1104,3 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 }
-
