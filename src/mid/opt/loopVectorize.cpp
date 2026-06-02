@@ -960,11 +960,13 @@ void LoopVectorize::emitVectorizedLoop(
             return result;
         };
 
-        // Step 1: Collect stores, grouped by GEP base key
+        // Step 1: Collect stores, grouped by GEP base key.
+        // Also handle pointer-phi stores (e.g. store to %ptr_phi),
+        // which represent offset 0 but have no GEP-typed pointer.
         struct StoreInfo {
             StoreInst *store;
             Value *storedVal;
-            GetElementPtrInst *gep;
+            GetElementPtrInst *gep; // may be null for pointer-phi stores
             int offset;
         };
         std::vector<StoreInfo> storeInfos;
@@ -991,6 +993,12 @@ void LoopVectorize::emitVectorizedLoop(
                     }
                     if (offset >= 0)
                         storeInfos.push_back({si, si->get_operand(0), gep, offset});
+                } else if (auto *phi = dynamic_cast<PhiInst*>(ptr)) {
+                    // Pointer-phi store: represents offset 0.
+                    // Record with nullptr gep; the group will borrow a real
+                    // GEP from a sibling store for vector-GEP construction.
+                    if (phi->parent_ == vecHeader)
+                        storeInfos.push_back({si, si->get_operand(0), nullptr, 0});
                 }
             }
         }
@@ -1001,9 +1009,28 @@ void LoopVectorize::emitVectorizedLoop(
                 key += gep->get_operand(i)->name_ + "|";
             return key;
         };
+        // For pointer-phi stores (gep == nullptr), derive the group key
+        // from the phi's initial value, which is always a GEP like
+        //   gep @C, 0, k, 0  →  baseKey = "@C|0|k|"
+        auto phiBaseKey = [&](PhiInst *phi) -> std::string {
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) == preheader) {
+                    if (auto *gi = dynamic_cast<GetElementPtrInst*>(phi->get_operand(i)))
+                        return baseKey(gi);
+                }
+            }
+            return "__no_preheader__";
+        };
         std::map<std::string, std::vector<StoreInfo*>> groups;
-        for (auto &si : storeInfos)
-            groups[baseKey(si.gep)].push_back(&si);
+        for (auto &si : storeInfos) {
+            if (si.gep) {
+                groups[baseKey(si.gep)].push_back(&si);
+            } else {
+                // Pointer-phi store: derive key from the phi's initial gep
+                auto *phi = static_cast<PhiInst*>(si.store->get_operand(1));
+                groups[phiBaseKey(phi)].push_back(&si);
+            }
+        }
 
         // Cache for splatted invariants: scalar Value* → vector Value*
         std::unordered_map<Value*, Value*> splatCache;
@@ -1054,7 +1081,14 @@ void LoopVectorize::emitVectorizedLoop(
                         constElems.push_back(static_cast<ConstantInt*>(vec[j]->storedVal));
                     auto *constVec = new ConstantVector(static_cast<VectorType*>(vecTy), constElems);
 
+                    // vec[0] may be a pointer-phi store (gep == nullptr);
+                    // borrow a real GEP from any sibling in the group.
                     auto *firstGep = vec[0]->gep;
+                    if (!firstGep) {
+                        for (int jj = 1; jj < vecWidth; jj++)
+                            if (vec[jj]->gep) { firstGep = vec[jj]->gep; break; }
+                    }
+                    if (!firstGep) continue; // should not happen
                     std::vector<Value*> idxs;
                     for (unsigned i = 1; i < firstGep->num_ops_ - 1; i++)
                         idxs.push_back(firstGep->get_operand(i));
@@ -1153,6 +1187,11 @@ void LoopVectorize::emitVectorizedLoop(
 
             // Step 5: GEP + bitcast + vector store
             auto *firstGep = vec[0]->gep;
+            if (!firstGep) {
+                for (int jj = 1; jj < vecWidth; jj++)
+                    if (vec[jj]->gep) { firstGep = vec[jj]->gep; break; }
+            }
+            if (!firstGep) continue;
             std::vector<Value*> idxs;
             for (unsigned i = 1; i < firstGep->num_ops_ - 1; i++)
                 idxs.push_back(firstGep->get_operand(i));
