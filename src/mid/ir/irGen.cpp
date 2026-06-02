@@ -571,8 +571,15 @@ void GenIR::visit(SelectStmtAST &ast) {
         }
     }
 
-    builder->BB_ = nextIf;
-    has_br = false;
+    // 如果两个分支都已终止且 nextIf 是独立块（有 else），则 nextIf 不可达
+    if (ast.elseStmt != nullptr &&
+        trueBB->get_terminator() && falseBB->get_terminator()) {
+        currentFunction->remove_bb(nextIf);
+        has_br = true;
+    } else {
+        builder->BB_ = nextIf;
+        has_br = false;
+    }
     // 还原trueBB和falseBB
     trueBB = tempTrue;
     falseBB = tempFalse;
