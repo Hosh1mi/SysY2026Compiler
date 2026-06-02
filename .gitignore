@@ -27,3 +27,4 @@ test/results/
 *.txt
 remind.txt
 test/result.txt
+*.md

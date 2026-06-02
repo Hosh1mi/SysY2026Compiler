@@ -282,6 +282,14 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     int s   = stride->value_;
     int adj = (N - 1) * s; // bound adjustment for main loop condition
 
+    // Guard against integer underflow: if the loop bound is smaller than the
+    // adjustment, bound - adj would go negative and wrap to a huge unsigned
+    // value (e.g. 0xFFFFFFFF for -1), making the main loop condition always
+    // true → infinite loop with out-of-bounds memory access.
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        if (cb->value_ < adj) return false;
+    }
+
     // Helper: get the preheader-incoming value of a phi
     auto getInitVal = [&](PhiInst *phi) -> Value * {
         for (unsigned i = 0; i < phi->num_ops_; i += 2)
