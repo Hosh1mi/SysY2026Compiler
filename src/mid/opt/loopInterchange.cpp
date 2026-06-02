@@ -65,11 +65,13 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     if (!k_loop->hasCanonicalIV() || !j_loop->hasCanonicalIV() || !i_loop->hasCanonicalIV())
         return false;
 
-    PhiInst *k_phi = k_loop->canonicalIV;
-    PhiInst *j_phi = j_loop->canonicalIV;
-    PhiInst *i_phi = i_loop->canonicalIV;
-    Value   *bound = k_loop->tripCount;
-    if (bound != j_loop->tripCount || bound != i_loop->tripCount) return false;
+    PhiInst *k_phi   = k_loop->canonicalIV;
+    PhiInst *j_phi   = j_loop->canonicalIV;
+    PhiInst *i_phi   = i_loop->canonicalIV;
+    Value   *k_bound = k_loop->tripCount;
+    Value   *j_bound = j_loop->tripCount;
+    // 三层 bound 各自独立——支持长方形 matmul M×N × N×P
+    // i_loop.tripCount 在新 CFG 里不参与，留给 i-loop 自身
 
     // 2. k_loop 必须有 preheader + 单 latch
     if (!k_loop->preheader || !k_loop->singleLatch() || !k_loop->singleExit()) return false;
@@ -220,7 +222,8 @@ bool LoopInterchange::detectMatmul(Loop *k_loop, LoopInfo &LI,
     out.store_inst = store_inst;
     out.gep_store  = gep_store;
     out.base_store = base_store;
-    out.bound      = bound;
+    out.k_bound    = k_bound;
+    out.j_bound    = j_bound;
     out.inner_dim  = d_kj;
     return true;
 }
@@ -243,10 +246,11 @@ bool LoopInterchange::isLegalAndProfitable(const MatmulInfo &info,
 // ── 变换（沿用旧版 CFG 构造逻辑）─────────────────────────────────────────
 
 bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
-    Function *func   = info.i_loop->header->parent_;
-    auto     *i32    = module->int32_ty_;
-    Value    *bound  = info.bound;
-    PhiInst  *i_phi  = info.i_loop->canonicalIV;
+    Function *func    = info.i_loop->header->parent_;
+    auto     *i32     = module->int32_ty_;
+    Value    *j_bound = info.j_bound;
+    Value    *k_bound = info.k_bound;
+    PhiInst  *i_phi   = info.i_loop->canonicalIV;
 
     BasicBlock *j_preheader = info.j_loop->preheader;
     BasicBlock *j_exit_old  = info.j_loop->singleExit();
@@ -267,11 +271,11 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     auto *const0 = new ConstantInt(i32, 0);
     auto *const1 = new ConstantInt(i32, 1);
 
-    // ── clear loop: for(jc=0;jc<bound;jc++) tmp[jc]=0 ──
+    // ── clear loop: for(jc=0;jc<j_bound;jc++) tmp[jc]=0 ──
     PhiInst *clr_jc = PhiInst::create_phi(i32, clr_h);
     clr_jc->add_phi_pair_operand(const0, j_preheader);
     clr_h->add_instruction_front(clr_jc);
-    auto *clr_cmp = new ICmpInst(ICmpInst::ICMP_SLT, clr_jc, bound, clr_h);
+    auto *clr_cmp = new ICmpInst(ICmpInst::ICMP_SLT, clr_jc, j_bound, clr_h);
     new BranchInst(clr_cmp, clr_b, nk_h, clr_h);
 
     auto *clr_gep = new GetElementPtrInst(tmp_buf, {const0, clr_jc}, clr_b);
@@ -282,11 +286,11 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     clr_jc->add_phi_pair_operand(clr_inc, clr_l);
     new BranchInst(clr_h, clr_l);
 
-    // ── new k loop: for(nk=0;nk<bound;nk++) ──
+    // ── new k loop: for(nk=0;nk<k_bound;nk++) ──
     PhiInst *nk_iv = PhiInst::create_phi(i32, nk_h);
     nk_iv->add_phi_pair_operand(const0, clr_h);
     nk_h->add_instruction_front(nk_iv);
-    auto *nk_cmp = new ICmpInst(ICmpInst::ICMP_SLT, nk_iv, bound, nk_h);
+    auto *nk_cmp = new ICmpInst(ICmpInst::ICMP_SLT, nk_iv, k_bound, nk_h);
     new BranchInst(nk_cmp, nk_b, st_h, nk_h);
 
     // c_ik = X[i][nk]
@@ -294,11 +298,11 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     auto *c_ik  = new LoadInst(gep_c, nk_b);
     new BranchInst(nj_h, nk_b);
 
-    // ── new inner j loop: for(nj=0;nj<bound;nj++) tmp[nj] += c_ik * A[nk][nj] ──
+    // ── new inner j loop: for(nj=0;nj<j_bound;nj++) tmp[nj] += c_ik * A[nk][nj] ──
     PhiInst *nj_iv = PhiInst::create_phi(i32, nj_h);
     nj_iv->add_phi_pair_operand(const0, nk_b);
     nj_h->add_instruction_front(nj_iv);
-    auto *nj_cmp = new ICmpInst(ICmpInst::ICMP_SLT, nj_iv, bound, nj_h);
+    auto *nj_cmp = new ICmpInst(ICmpInst::ICMP_SLT, nj_iv, j_bound, nj_h);
     new BranchInst(nj_cmp, nj_b, nk_l, nj_h);
 
     auto *acc_gep = new GetElementPtrInst(tmp_buf, {const0, nj_iv}, nj_b);
@@ -318,11 +322,11 @@ bool LoopInterchange::apply(const MatmulInfo &info, Module *module) {
     nk_iv->add_phi_pair_operand(nk_inc, nk_l);
     new BranchInst(nk_h, nk_l);
 
-    // ── store-back loop: for(sj=0;sj<bound;sj++) D[i][sj] = tmp[sj] ──
+    // ── store-back loop: for(sj=0;sj<j_bound;sj++) D[i][sj] = tmp[sj] ──
     PhiInst *st_iv = PhiInst::create_phi(i32, st_h);
     st_iv->add_phi_pair_operand(const0, nk_h);
     st_h->add_instruction_front(st_iv);
-    auto *st_cmp = new ICmpInst(ICmpInst::ICMP_SLT, st_iv, bound, st_h);
+    auto *st_cmp = new ICmpInst(ICmpInst::ICMP_SLT, st_iv, j_bound, st_h);
     new BranchInst(st_cmp, st_b, j_exit_old, st_h);
 
     auto *st_ld_gep  = new GetElementPtrInst(tmp_buf, {const0, st_iv}, st_b);

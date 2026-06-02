@@ -35,8 +35,9 @@ private:
         StoreInst         *store_inst;
         GetElementPtrInst *gep_store;
         Value             *base_store;
-        Value             *bound;              // 运行时 trip count
-        int                inner_dim;          // 从 GEP 类型推出的数组内维度（j 上界）
+        Value             *k_bound;            // 内层 k 的运行时上界
+        Value             *j_bound;            // 中层 j 的运行时上界
+        int                inner_dim;          // 写回数组的内维（决定 temp buffer 大小，要 >= j_bound）
     };
 
     bool detectMatmul(Loop *k_loop, LoopInfo &LI, AffineAnalysis &AA,
