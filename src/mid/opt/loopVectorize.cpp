@@ -646,9 +646,11 @@ void LoopVectorize::emitVectorizedLoop(
     vecPhi->addIncoming(iv.initVal, preheader);
 
     // Compute the vectorized loop's upper bound check.
-    //   stride > 0: if vec_phi < bound - VF, continue; else go to remainder
-    //   stride < 0: if vec_phi > bound + VF, continue; else go to remainder
-    int adj = vecWidth;  // VF
+    // We process VF elements {i, i+1, ..., i+VF-1} per iteration.
+    // For SLT i < bound: the last element must satisfy i+VF-1 < bound,
+    //   i.e. i < bound - (VF-1).  VF is one too conservative.
+    // For SLE / SGT / SGE the same (VF-1) adjustment applies.
+    int adj = vecWidth - 1;  // VF - 1
     bool negStride = (iv.stride < 0);
     Value *boundMain;
     if (auto *cb = dynamic_cast<ConstantInt*>(bound)) {
@@ -884,19 +886,12 @@ void LoopVectorize::emitVectorizedLoop(
                 Type *resTy = bi->type_;
                 if (r0->type_->tid_ == Type::VectorTyID) resTy = r0->type_;
                 else if (r1->type_->tid_ == Type::VectorTyID) resTy = r1->type_;
-                // Splat any scalar operand that is paired with a vector operand
+                // Splat any scalar operand that is paired with a vector operand.
+                // Emit in preheader so the splat runs once, not every iteration.
                 if (resTy->tid_ == Type::VectorTyID) {
                     auto splat = [&](Value *&op) {
-                        if (op->type_->tid_ != Type::VectorTyID) {
-                            Value *result = nullptr;
-                            for (int l = 0; l < vecWidth; l++) {
-                                auto *idx = new ConstantInt(module->int32_ty_, l);
-                                Value *base = result ? result
-                                    : static_cast<Value*>(new ConstantZero(resTy));
-                                result = new InsertElementInst(base, op, idx, vecBody);
-                            }
-                            op = result;
-                        }
+                        if (op->type_->tid_ != Type::VectorTyID)
+                            op = emitSplat(op, preheader);
                     };
                     splat(r0);
                     splat(r1);
@@ -1239,9 +1234,12 @@ void LoopVectorize::emitVectorizedLoop(
                 // Remove the scalar store
                 si->store->parent_->remove_instr(si->store);
                 si->store->remove_use_of_ops();
-                // Remove the scalar binop that fed this store
+                // Remove the scalar binop that fed this store, but only if
+                // no other instruction still uses it (e.g. another store
+                // or a condition branch). Otherwise leave it for DCE.
                 auto *scalarBinop = static_cast<BinaryInst*>(si->storedVal);
-                if (scalarBinop && scalarBinop->parent_) {
+                if (scalarBinop && scalarBinop->parent_ &&
+                    scalarBinop->use_list_.empty()) {
                     scalarBinop->parent_->remove_instr(scalarBinop);
                     scalarBinop->remove_use_of_ops();
                 }
@@ -1297,9 +1295,15 @@ void LoopVectorize::emitVectorizedLoop(
     // Also add the remPhi -> remHeader mapping
     // For the IV phi, the incoming from vecHeader should be remPhi
     // This is because remPhi takes the value of vecPhi when entering remHeader
+    //
+    // For non-IV integer phis with constant-offset updates, the incoming
+    // value must also account for the VF iterations already processed by
+    // the vectorized loop body (otherwise they'd restart from their
+    // original initVal in the remainder loop).
     for (auto inst : origHeader->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst*>(inst);
+
         if (phi == iv.phi) {
             // Find the vecHeader incoming and replace it
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -1310,6 +1314,49 @@ void LoopVectorize::emitVectorizedLoop(
                     phi->operands_[i]    = remPhi;
                     phi->use_pos_[i]     = remPhi->add_use(phi, i);
                     break;
+                }
+            }
+        } else if (phi->type_->tid_ == Type::IntegerTyID) {
+            // Non-IV integer phi: adjust initVal by VF × per-iteration stride
+            Value *latchVal = nullptr;
+            for (unsigned j = 0; j < phi->num_ops_; j += 2) {
+                if (loop.blocks.count(
+                        static_cast<BasicBlock*>(phi->get_operand(j + 1)))) {
+                    latchVal = phi->get_operand(j); break;
+                }
+            }
+            if (auto *update = dynamic_cast<Instruction*>(latchVal)) {
+                if (update->is_add() || update->is_sub()) {
+                    Value *op0 = update->get_operand(0);
+                    Value *op1 = update->get_operand(1);
+                    int offset = 0;
+                    if (op0 == phi && dynamic_cast<ConstantInt*>(op1))
+                        offset = static_cast<ConstantInt*>(op1)->value_;
+                    else if (update->is_add() && op1 == phi &&
+                             dynamic_cast<ConstantInt*>(op0))
+                        offset = static_cast<ConstantInt*>(op0)->value_;
+                    if (!update->is_add()) offset = -offset;
+
+                    if (offset != 0) {
+                        for (unsigned j = 0; j < phi->num_ops_; j += 2) {
+                            if (phi->get_operand(j + 1) == remHeader) {
+                                Value *oldVal = phi->get_operand(j);
+                                auto *initCI =
+                                    dynamic_cast<ConstantInt*>(oldVal);
+                                if (initCI) {
+                                    int newVal =
+                                        initCI->value_ + vecWidth * offset;
+                                    oldVal->remove_use(phi->use_pos_[j]);
+                                    auto *newCI = new ConstantInt(
+                                        module->int32_ty_, newVal);
+                                    phi->operands_[j] = newCI;
+                                    phi->use_pos_[j] =
+                                        newCI->add_use(phi, j);
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         }

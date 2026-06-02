@@ -387,6 +387,8 @@ void LICM::runOnFunction(Function *func) {
         return a.blocks.size() < b.blocks.size();
     });
 
-    for (auto &loop : loops)
+    for (auto &loop : loops) {
         runOnLoop(loop);
+        eliminateTrivialHeaderPhis(loop);
+    }
 }
