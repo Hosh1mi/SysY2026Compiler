@@ -14,23 +14,30 @@ void LoopInterchange::execute(Module *module) {
 }
 
 void LoopInterchange::runOnFunction(Function *func) {
-    LoopInfo LI;
-    LI.analyze(func);
-    if (LI.allLoops().empty()) return;
+    // 一次成功变换会改 CFG，需重建 LoopInfo/AffineAnalysis/Dependence/Cost
+    // 以便发现同一函数内的下一个 matmul。无变换时退出。
+    for (int iter = 0; iter < 32; iter++) {
+        LoopInfo LI;
+        LI.analyze(func);
+        if (LI.allLoops().empty()) return;
 
-    AffineAnalysis     AA(LI);
-    DependenceAnalysis DA(LI, AA);
-    CostModel          CM(AA);
+        AffineAnalysis     AA(LI);
+        DependenceAnalysis DA(LI, AA);
+        CostModel          CM(AA);
 
-    // 枚举所有 loop 当 innermost(k)：分析→合法→有益→变换。
-    // 一次只处理一组，因为变换会改 CFG；如需再扫描则下一轮 invocation。
-    for (auto &k_loop_ptr : LI.allLoops()) {
-        Loop *k_loop = k_loop_ptr.get();
-        if (!k_loop->children.empty()) continue;          // 必须是最内
-        MatmulInfo info{};
-        if (!detectMatmul(k_loop, LI, AA, info)) continue;
-        if (!isLegalAndProfitable(info, DA, CM)) continue;
-        if (apply(info, func->parent_)) return;
+        bool changed = false;
+        for (auto &k_loop_ptr : LI.allLoops()) {
+            Loop *k_loop = k_loop_ptr.get();
+            if (!k_loop->children.empty()) continue;      // 必须是最内
+            MatmulInfo info{};
+            if (!detectMatmul(k_loop, LI, AA, info)) continue;
+            if (!isLegalAndProfitable(info, DA, CM)) continue;
+            if (apply(info, func->parent_)) {
+                changed = true;
+                break;                                    // CFG 已变，重新分析
+            }
+        }
+        if (!changed) return;
     }
 }
 
