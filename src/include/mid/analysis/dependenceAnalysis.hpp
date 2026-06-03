@@ -7,10 +7,11 @@
 //      direction[i] 描述：从 acc1 的迭代点到 acc2 的迭代点，第 i 层 IV 的相对方向
 //   3. 不能精确证明无依赖时保守返回 *（任意方向）
 //
-// 简化做法（适合本项目的方阵 matmul + 现有用例）：
-//   - 只支持每层每个 GEP index 是一个 IV 的纯线性形式 c0 + c1·iv
-//   - 用 GCD test：若两访问索引差 = 0 在循环范围内无整数解 → 无依赖
-//   - 否则按系数符号给方向（含保守 *）
+// 当前实现：
+//   - 索引必须可仿射化为 c0 + Σ c_iv·iv
+//   - GCD test：每维 diff = c_const + Σ c_iv·iv，若 gcd(c_iv) 不整除 c_const
+//     则整对无依赖（包含 "纯常数非零" 这条特例）
+//   - 方向判定保留为粗粒度（含 ANY 的保守模式），尚未实现 Banerjee bounds
 
 #include "affineAnalysis.hpp"
 #include "loopInfo.hpp"

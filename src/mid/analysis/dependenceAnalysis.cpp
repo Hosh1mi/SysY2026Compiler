@@ -4,7 +4,15 @@
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
+
+// 整数 gcd（取绝对值，gcd(0, x) = |x|）
+static long gcdAbs(long a, long b) {
+    a = std::abs(a); b = std::abs(b);
+    while (b) { long t = a % b; a = b; b = t; }
+    return a;
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -96,15 +104,21 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
         diffs.push_back(a - b);
     }
 
-    // 任何一个维度的 diff 是非零常数 → 不会重合 → 独立
-    bool any_constant_nonzero = false;
+    // GCD test（包含 "纯常数非零" 这条特例）：
+    //   每维 diff = c_const + Σ c_iv · iv 要有整数解 iv ∈ ℤ，必须 gcd(c_iv) | c_const。
+    //   有任何一维 gcd 不整除 c_const → 无解 → 整对独立。
+    //   gcd = 0 表示所有系数为 0；此时只看 c_const 是否非零。
+    bool gcd_proves_independent = false;
     for (auto &d : diffs) {
-        if (d.isConstant() && d.constant != 0) {
-            any_constant_nonzero = true;
-            break;
+        long g = 0;
+        for (auto &kv : d.coeffs) g = gcdAbs(g, (long)kv.second);
+        if (g == 0) {
+            if (d.constant != 0) { gcd_proves_independent = true; break; }
+        } else {
+            if (d.constant % g != 0) { gcd_proves_independent = true; break; }
         }
     }
-    if (any_constant_nonzero) {
+    if (gcd_proves_independent) {
         r.provably_independent = true;
         return r;
     }
