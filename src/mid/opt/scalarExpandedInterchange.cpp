@@ -4,6 +4,7 @@
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
+#include <set>
 #include <unordered_map>
 
 // ── 入口 ──────────────────────────────────────────────────────────────────
@@ -42,38 +43,29 @@ void ScalarExpandedInterchange::runOnFunction(Function *func) {
     }
 }
 
-// ── 按数组维度按需创建 temp buffer ────────────────────────────────────────
-// 每个 size 一份全局 `@__mm_tmp_<size>`，重复匹配相同 size 时复用。
+// ── 每次创建独立的 temp buffer ────────────────────────────────────────
+// 多 reduction 场景下每个 reduction 都需要独立 buffer，故不按 size 缓存。
+// 名字带递增 idx 保证唯一。
 
-GlobalVariable *ScalarExpandedInterchange::getOrCreateTempBuffer(Module *module, int size) {
-    auto it = temp_buf_.find(size);
-    if (it != temp_buf_.end()) return it->second;
-    std::string name = "__mm_tmp_" + std::to_string(size);
-    for (auto *gv : module->global_list_) {
-        if (gv->name_ == name) {
-            temp_buf_[size] = gv;
-            return gv;
-        }
-    }
+GlobalVariable *ScalarExpandedInterchange::createTempBuffer(Module *module, int size) {
+    std::string name = "__mm_tmp_" + std::to_string(tmp_counter_++) + "_" + std::to_string(size);
     auto *i32 = module->int32_ty_;
     auto *arr = module->get_array_type(i32, size);
-    auto *gv  = new GlobalVariable(name, module, arr, false, new ConstantZero(arr));
-    temp_buf_[size] = gv;
-    return gv;
+    return new GlobalVariable(name, module, arr, false, new ConstantZero(arr));
 }
 
-// ── 检测：基于 LoopInfo + AffineAnalysis ──────────────────────────────────
+// ── 检测：基于 LoopInfo + AffineAnalysis，支持 N 个 reduction phi ────────
 //
-// 通用要求（不写死层数）：
+// 通用要求（不写死层数 / reduction 个数 / 输出形态）：
 //   - L (= 候选 innermost) 有 canonicalIV，preheader、singleLatch、singleExit
 //   - L.parent = P 存在且有 canonicalIV
-//   - L.header 恰好 2 个 phi：L.IV + sum_phi
-//   - sum_init 在 P-loop 外可见
-//   - L body 全部访存是 load；GEP 4 操作数；base loop-invariant；
+//   - L.header 有 N+1 个 phi：L.IV + N 个 reduction phi（N ≥ 1）
+//   - 每个 reduction 的 init 在 P-loop 外可见
+//   - L body 全部访存是 load；GEP 仿射、base loop-invariant；
 //     索引中出现的 IV 只能是 L 的祖先链上的 canonicalIV（任意层）
-//   - L.singleExit 单 store: sum_phi → gep[base, 0, …, P.IV]，
-//     即"最后一维"由 P.IV 索引，其余维必须不依赖 P.IV/L.IV
-//   - P body 除 L 外没有别的 store/call
+//   - L.singleExit 恰好 N 条 store，与 N 个 reduction phi 一一对应：
+//     sum_phi_i → gep[base_i, 0, …, P.IV]
+//   - P body 除 reduction store 外没有别的 store/call
 
 bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInfo &LI,
                                                                  AffineAnalysis &AA,
@@ -89,30 +81,6 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
 
     if (!L->preheader || !L->singleLatch() || !L->singleExit()) return false;
 
-    // header 必须恰好 2 个 phi：L_iv + sum_phi
-    PhiInst *sum_phi = nullptr;
-    int      phi_cnt = 0;
-    for (auto *inst : L->header->instr_list_) {
-        if (!inst->is_phi()) break;
-        phi_cnt++;
-        auto *p = static_cast<PhiInst *>(inst);
-        if (p != L_iv) {
-            if (sum_phi) return false;
-            sum_phi = p;
-        }
-    }
-    if (phi_cnt != 2 || !sum_phi) return false;
-    if (sum_phi->type_->tid_ != Type::IntegerTyID) return false;
-    if (sum_phi->num_ops_ != 4) return false;
-
-    Value *sum_init = nullptr, *sum_latch = nullptr;
-    for (unsigned i = 0; i < sum_phi->num_ops_; i += 2) {
-        auto *src = static_cast<BasicBlock *>(sum_phi->get_operand(i + 1));
-        if (src == L->preheader)         sum_init  = sum_phi->get_operand(i);
-        else if (src == L->singleLatch()) sum_latch = sum_phi->get_operand(i);
-    }
-    if (!sum_init || !sum_latch) return false;
-
     auto availableOutsideP = [&](Value *v) -> bool {
         if (dynamic_cast<Constant *>(v))       return true;
         if (dynamic_cast<GlobalVariable *>(v)) return true;
@@ -121,9 +89,7 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
         if (!inst) return true;
         return !P->blocks.count(inst->parent_);
     };
-    if (!availableOutsideP(sum_init)) return false;
 
-    // 判断 v 是否是 L 的某层祖先（含 L 自身）的 canonicalIV
     auto isAncestorIV = [&](PhiInst *p) -> bool {
         for (Loop *anc = L; anc; anc = anc->parent) {
             if (anc->canonicalIV == p) return true;
@@ -142,6 +108,28 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
         }
         return last;
     };
+
+    // header phi 扫描：收集所有非 L.IV 的 reduction phi
+    std::vector<ReductionInfo> reductions;
+    for (auto *inst : L->header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *p = static_cast<PhiInst *>(inst);
+        if (p == L_iv) continue;
+        if (p->type_->tid_ != Type::IntegerTyID) return false;
+        if (p->num_ops_ != 4) return false;
+
+        ReductionInfo r{};
+        r.sum_phi = p;
+        for (unsigned i = 0; i < p->num_ops_; i += 2) {
+            auto *src = static_cast<BasicBlock *>(p->get_operand(i + 1));
+            if (src == L->preheader)         r.sum_init  = p->get_operand(i);
+            else if (src == L->singleLatch()) r.sum_latch = p->get_operand(i);
+        }
+        if (!r.sum_init || !r.sum_latch) return false;
+        if (!availableOutsideP(r.sum_init)) return false;
+        reductions.push_back(r);
+    }
+    if (reductions.empty()) return false;
 
     // L body：禁止 store/call；GEP 索引必须仿射于祖先 IV 链；base loop-invariant
     std::vector<GetElementPtrInst *> body_geps;
@@ -166,26 +154,34 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
         }
     }
 
-    // L.singleExit 单 store: sum_phi → gep[base, 0, …, P.IV]
-    BasicBlock *L_exit     = L->singleExit();
-    StoreInst  *store_inst = nullptr;
+    // L.singleExit：收集所有 store，逐一配对到 reduction phi
+    BasicBlock *L_exit = L->singleExit();
+    std::vector<StoreInst *> exit_stores;
     for (auto *inst : L_exit->instr_list_) {
-        if (inst->is_store()) {
-            if (store_inst) return false;
-            store_inst = static_cast<StoreInst *>(inst);
-        }
-        if (inst->is_call()) return false;
+        if (inst->is_store()) exit_stores.push_back(static_cast<StoreInst *>(inst));
+        if (inst->is_call())  return false;
     }
-    if (!store_inst) return false;
-    if (store_inst->get_operand(0) != sum_phi) return false;
+    if (exit_stores.size() != reductions.size()) return false;
 
-    auto *gep_store = dynamic_cast<GetElementPtrInst *>(store_inst->get_operand(1));
-    if (!gep_store || gep_store->num_ops_ < 2) return false;
-    {
-        // 首索引应为 0（消耗外层聚合）
+    std::vector<bool> matched(reductions.size(), false);
+    for (auto *s : exit_stores) {
+        Value *stored = s->get_operand(0);
+        int    mi     = -1;
+        for (size_t i = 0; i < reductions.size(); i++) {
+            if (!matched[i] && reductions[i].sum_phi == stored) { mi = (int)i; break; }
+        }
+        if (mi < 0) return false;
+        matched[mi] = true;
+
+        auto &r = reductions[mi];
+        r.store_inst = s;
+
+        auto *gep_store = dynamic_cast<GetElementPtrInst *>(s->get_operand(1));
+        if (!gep_store || gep_store->num_ops_ < 2) return false;
+        // 首索引为 0
         AffineExpr e0 = AA.analyze(gep_store->get_operand(1));
         if (!e0.isZero()) return false;
-        // 末索引必须恰好是 P.IV（系数 1，常数 0）
+        // 末索引恰好为 P.IV
         unsigned last = gep_store->num_ops_ - 1;
         AffineExpr eL = AA.analyze(gep_store->get_operand(last));
         if (!eL.valid || eL.constant != 0 || eL.coeffs.size() != 1 || eL.coeffOf(P_iv) != 1)
@@ -197,34 +193,36 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
             if (em.coeffOf(P_iv) != 0) return false;
             if (em.coeffOf(L_iv) != 0) return false;
         }
+        r.gep_store  = gep_store;
+        r.base_store = gep_store->get_operand(0);
+        if (!dynamic_cast<GlobalVariable *>(r.base_store) && !dynamic_cast<Argument *>(r.base_store))
+            return false;
+        r.inner_dim = inner_dim_of(r.base_store);
+        if (r.inner_dim <= 0) return false;
     }
-    Value *base_store = gep_store->get_operand(0);
-    if (!dynamic_cast<GlobalVariable *>(base_store) && !dynamic_cast<Argument *>(base_store))
-        return false;
-    int d_st = inner_dim_of(base_store);
-    if (d_st <= 0) return false;
 
-    // P body 除 L 外没有别的 store/call
+    // P body 除 reduction store 外没有别的 store/call
     for (auto *bb : P->blocks) {
         if (L->blocks.count(bb)) continue;
         for (auto *inst : bb->instr_list_) {
-            if (inst->is_store() && inst != store_inst) return false;
+            if (inst->is_store()) {
+                auto *s = static_cast<StoreInst *>(inst);
+                bool is_red = false;
+                for (auto &r : reductions) {
+                    if (r.store_inst == s) { is_red = true; break; }
+                }
+                if (!is_red) return false;
+            }
             if (inst->is_call()) return false;
         }
     }
 
     out.inner_loop   = L;
     out.parent_loop  = P;
-    out.sum_phi      = sum_phi;
-    out.sum_init     = sum_init;
-    out.sum_latch    = sum_latch;
     out.body_geps    = std::move(body_geps);
-    out.store_inst   = store_inst;
-    out.gep_store    = gep_store;
-    out.base_store   = base_store;
+    out.reductions   = std::move(reductions);
     out.inner_bound  = L_bound;
     out.parent_bound = P_bound;
-    out.inner_dim    = d_st;
     return true;
 }
 
@@ -233,21 +231,21 @@ bool ScalarExpandedInterchange::detectScalarExpandableReduction(Loop *L, LoopInf
 bool ScalarExpandedInterchange::isLegalAndProfitable(const ReductionNestInfo &info,
                                                       DependenceAnalysis &DA,
                                                       CostModel &CM) {
-    // 合法性：P↔L 两层间没有跨循环的真依赖（仅 reduction，scalar expansion 后消除）。
+    // 合法性：P↔L 两层间没有跨循环的真依赖（reduction 通过 scalar expansion 消除）
     std::vector<Instruction *> accesses;
     for (auto *bb : info.inner_loop->blocks) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_load()) accesses.push_back(inst);
         }
     }
-    accesses.push_back(info.store_inst);
+    for (auto &r : info.reductions) accesses.push_back(r.store_inst);
     if (!DA.isInterchangeLegal(info.parent_loop, info.inner_loop, accesses)) return false;
 
     // 收益：CostModel 比较 swap 前后所有 GEP 对当前内层 IV 的 byte-stride 之和
     PhiInst *L_iv = info.inner_loop->canonicalIV;
     PhiInst *P_iv = info.parent_loop->canonicalIV;
     std::vector<GetElementPtrInst *> geps = info.body_geps;
-    geps.push_back(info.gep_store);
+    for (auto &r : info.reductions) geps.push_back(r.gep_store);
 
     long before = CM.totalStride(geps, L_iv);
     long after  = CM.totalStride(geps, P_iv);
@@ -320,7 +318,6 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     Value    *L_bound    = info.inner_bound;
     PhiInst  *P_iv_o     = P->canonicalIV;
     PhiInst  *L_iv_o     = L->canonicalIV;
-    PhiInst  *sum_phi    = info.sum_phi;
 
     BasicBlock *P_preheader = P->preheader;
     BasicBlock *P_exit_old  = P->singleExit();
@@ -328,7 +325,12 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     BasicBlock *L_latch_o   = L->singleLatch();
     if (!P_preheader || !P_exit_old || !L_header_o || !L_latch_o) return false;
 
-    auto *tmp_buf = getOrCreateTempBuffer(module, info.inner_dim);
+    // 每个 reduction 一份独立 tmp buffer
+    std::vector<GlobalVariable *> tmp_bufs;
+    tmp_bufs.reserve(info.reductions.size());
+    for (auto &r : info.reductions) {
+        tmp_bufs.push_back(createTempBuffer(module, r.inner_dim));
+    }
 
     auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 1000); };
     auto newBB = [&](const std::string &tag) {
@@ -343,15 +345,17 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     auto *const0 = new ConstantInt(i32, 0);
     auto *const1 = new ConstantInt(i32, 1);
 
-    // ── clear loop: for(jc=0; jc<P_bound; jc++) tmp[jc] = sum_init ──
+    // ── clear loop: for(jc=0; jc<P_bound; jc++) tmp_i[jc] = sum_init_i  (∀i) ──
     PhiInst *clr_jc = PhiInst::create_phi(i32, clr_h);
     clr_jc->add_phi_pair_operand(const0, P_preheader);
     clr_h->add_instruction_front(clr_jc);
     auto *clr_cmp = new ICmpInst(ICmpInst::ICMP_SLT, clr_jc, P_bound, clr_h);
     new BranchInst(clr_cmp, clr_b, nk_h, clr_h);
 
-    auto *clr_gep = new GetElementPtrInst(tmp_buf, {const0, clr_jc}, clr_b);
-    new StoreInst(info.sum_init, clr_gep, clr_b);
+    for (size_t i = 0; i < info.reductions.size(); i++) {
+        auto *gep = new GetElementPtrInst(tmp_bufs[i], {const0, clr_jc}, clr_b);
+        new StoreInst(info.reductions[i].sum_init, gep, clr_b);
+    }
     new BranchInst(clr_l, clr_b);
 
     auto *clr_inc = new BinaryInst(i32, Instruction::Add, clr_jc, const1, clr_l);
@@ -372,8 +376,7 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     nj_h->add_instruction_front(nj_iv);
     auto *nj_cmp = new ICmpInst(ICmpInst::ICMP_SLT, nj_iv, P_bound, nj_h);
 
-    // ── 通用 body clone：把 L.blocks - {L.header} 复制到 nj_inner 体内 ──
-    // body 入口 = L.header 在 loop 内的那条分支目标
+    // ── body clone：L.blocks - {L.header} 复制到 nj_inner 体内 ──
     BasicBlock *body_entry_o = nullptr;
     {
         auto *term = L_header_o->get_terminator();
@@ -397,23 +400,29 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     }
     BasicBlock *body_entry_n = bbMap[body_entry_o];
 
-    // ValMap：L.IV/P.IV 替换；其余外层 IV 走 remapVal 默认 identity（不在 vm 即原值）
     ValMap vm;
     vm[L_iv_o] = nk_iv;
     vm[P_iv_o] = nj_iv;
 
-    // sum_load 在 body 入口最前面（早于任何使用 sum_phi 的指令）
-    auto *sum_load_gep = new GetElementPtrInst(tmp_buf, {const0, nj_iv}, body_entry_n);
-    auto *sum_load     = new LoadInst(sum_load_gep, body_entry_n);
-    vm[sum_phi] = sum_load;
+    // 在 body_entry_n 起始处为每个 reduction 插入 sum_load
+    // 插入顺序决定指令顺序：所有 reduction 的 load 排在最前
+    for (size_t i = 0; i < info.reductions.size(); i++) {
+        auto *gep      = new GetElementPtrInst(tmp_bufs[i], {const0, nj_iv}, body_entry_n);
+        auto *sum_load = new LoadInst(gep, body_entry_n);
+        vm[info.reductions[i].sum_phi] = sum_load;
+    }
 
-    // phi 空壳（除 sum_phi）
+    // 收集所有 reduction phi 集合，用于 phi 克隆时跳过
+    std::set<PhiInst *> red_phis;
+    for (auto &r : info.reductions) red_phis.insert(r.sum_phi);
+
+    // phi 空壳（跳过 reduction phi）
     for (auto *bb : orig_bbs) {
         BasicBlock *nb = bbMap[bb];
         for (auto *inst : bb->instr_list_) {
             if (!inst->is_phi()) break;
             auto *p = static_cast<PhiInst *>(inst);
-            if (p == sum_phi) continue;
+            if (red_phis.count(p)) continue;
             auto *np = PhiInst::create_phi(p->type_, nb);
             nb->add_instruction_front(np);
             vm[p] = np;
@@ -431,7 +440,6 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
         }
     }
 
-    // 填 phi 操作数
     auto mapBBOrLatch = [&](BasicBlock *src) -> BasicBlock * {
         if (src == L_header_o) return nj_l;             // 回边目标
         auto it = bbMap.find(src);
@@ -441,7 +449,7 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
         for (auto *inst : bb->instr_list_) {
             if (!inst->is_phi()) break;
             auto *p = static_cast<PhiInst *>(inst);
-            if (p == sum_phi) continue;
+            if (red_phis.count(p)) continue;
             auto *np = static_cast<PhiInst *>(vm[p]);
             for (unsigned i = 0; i < p->num_ops_; i += 2) {
                 Value      *v   = p->get_operand(i);
@@ -452,12 +460,14 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
         }
     }
 
-    // emit clone BB terminator；latch 的 clone 先 store tmp[nj_iv]
+    // emit clone BB terminator；latch 的 clone 先写回所有 reduction
     for (auto *bb : orig_bbs) {
         BasicBlock *nb = bbMap[bb];
         if (bb == L_latch_o) {
-            auto *st_gep = new GetElementPtrInst(tmp_buf, {const0, nj_iv}, nb);
-            new StoreInst(remapVal(info.sum_latch, vm), st_gep, nb);
+            for (size_t i = 0; i < info.reductions.size(); i++) {
+                auto *gep = new GetElementPtrInst(tmp_bufs[i], {const0, nj_iv}, nb);
+                new StoreInst(remapVal(info.reductions[i].sum_latch, vm), gep, nb);
+            }
         }
         auto *term = bb->get_terminator();
         auto *br   = dynamic_cast<BranchInst *>(term);
@@ -484,26 +494,28 @@ bool ScalarExpandedInterchange::apply(const ReductionNestInfo &info, Module *mod
     nk_iv->add_phi_pair_operand(nk_inc, nk_l);
     new BranchInst(nk_h, nk_l);
 
-    // ── store-back loop: D[…, sj] = tmp[sj] ──
-    // 用原 gep_store 的索引结构构造目标 GEP，最后一维替换为 st_iv，
-    // 其余外层索引（i, j …）保持原值（它们由 remapVal 默认 identity 处理）。
+    // ── store-back loop: 每次迭代写回所有 reduction 的最终值 ──
     PhiInst *st_iv = PhiInst::create_phi(i32, st_h);
     st_iv->add_phi_pair_operand(const0, nk_h);
     st_h->add_instruction_front(st_iv);
     auto *st_cmp = new ICmpInst(ICmpInst::ICMP_SLT, st_iv, P_bound, st_h);
     new BranchInst(st_cmp, st_b, P_exit_old, st_h);
 
-    auto *st_ld_gep = new GetElementPtrInst(tmp_buf, {const0, st_iv}, st_b);
-    auto *st_ld_val = new LoadInst(st_ld_gep, st_b);
+    for (size_t i = 0; i < info.reductions.size(); i++) {
+        auto *orig_gep  = info.reductions[i].gep_store;
+        auto *st_ld_gep = new GetElementPtrInst(tmp_bufs[i], {const0, st_iv}, st_b);
+        auto *st_ld_val = new LoadInst(st_ld_gep, st_b);
 
-    std::vector<Value *> st_dst_idxs;
-    unsigned gs_last = info.gep_store->num_ops_ - 1;
-    for (unsigned m = 1; m < info.gep_store->num_ops_; m++) {
-        st_dst_idxs.push_back(m == gs_last ? (Value *)st_iv
-                                            : info.gep_store->get_operand(m));
+        std::vector<Value *> st_dst_idxs;
+        unsigned gs_last = orig_gep->num_ops_ - 1;
+        for (unsigned m = 1; m < orig_gep->num_ops_; m++) {
+            st_dst_idxs.push_back(m == gs_last ? (Value *)st_iv
+                                                : orig_gep->get_operand(m));
+        }
+        auto *st_dst_gep = new GetElementPtrInst(info.reductions[i].base_store,
+                                                  st_dst_idxs, st_b);
+        new StoreInst(st_ld_val, st_dst_gep, st_b);
     }
-    auto *st_dst_gep = new GetElementPtrInst(info.base_store, st_dst_idxs, st_b);
-    new StoreInst(st_ld_val, st_dst_gep, st_b);
     new BranchInst(st_l, st_b);
 
     auto *st_inc = new BinaryInst(i32, Instruction::Add, st_iv, const1, st_l);
