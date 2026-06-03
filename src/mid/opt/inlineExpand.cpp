@@ -187,10 +187,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
             } else if (auto *br = dynamic_cast<BranchInst*>(inst)) {
                 if (br->num_ops_ == 3 && knownConst.count(br->get_operand(0))) {
                     foldBenefit += weighInstruction(br);
-                    // Dead-block sweep: blocks reachable ONLY through untaken path
                     Value *condVal = br->get_operand(0);
-                    // We know cond is constant but not which value; conservatively
-                    // compute dead blocks for BOTH paths and take the minimum.
                     BasicBlock *takenBB = static_cast<BasicBlock*>(br->get_operand(1));
                     BasicBlock *untakenBB = static_cast<BasicBlock*>(br->get_operand(2));
 
