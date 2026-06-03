@@ -147,32 +147,32 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
         pm.addPass(std::make_unique<Mem2Reg>());              // SROA 拆分聚合 alloca + 构造 SSA
 
-        // pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
-        // pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
-        // pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
-        // make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
+        pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
+        pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
+        pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
+        make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
         
-        // pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
-        // make_basic_clean(pm);
+        pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
+        make_basic_clean(pm);
 
         pm.addPass(std::make_unique<GVN>());                  // 全局值编号
-        // make_basic_clean(pm);
+        make_basic_clean(pm);
 
-        // pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        // make_deep_clean(pm);                                  // basic + CFGSimplify + basic
+        pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
+        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
-        // pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
-        // pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
+        pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
+        pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
 
-        // // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
-        // pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
-        // pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
-        // pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        // make_deep_clean(pm);                                  // basic + CFGSimplify + basic
+        // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
+        pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
+        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
+        pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
+        pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
+        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
-        // make_basic_clean(pm);                                 // 最后再来一轮基本清理
-        // make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
+        make_basic_clean(pm);                                 // 最后再来一轮基本清理
+        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
 
 	}
 
