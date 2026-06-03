@@ -546,6 +546,7 @@ void GenIR::visit(SelectStmtAST &ast) {
     BasicBlock* nextIf; // if语句后的基本块
     if (ast.elseStmt == nullptr) nextIf = falseBB;
     else nextIf = new BasicBlock(module.get(), "label_if_end_" + to_string(id++), currentFunction);
+    bool nextIfReachable = false;
     ast.cond->accept(*this);
     //检查是否是i1，不是则进行比较
     if (recentVal->type_ == INT32_T) {
@@ -560,6 +561,7 @@ void GenIR::visit(SelectStmtAST &ast) {
     ast.ifStmt->accept(*this);
     if (!builder->BB_->get_terminator()) {
         builder->create_br(nextIf);
+        nextIfReachable = true;
     }
 
     if (ast.elseStmt != nullptr) { // 开始构建falseBB
@@ -568,6 +570,7 @@ void GenIR::visit(SelectStmtAST &ast) {
         ast.elseStmt->accept(*this);
         if (!builder->BB_->get_terminator()) {
             builder->create_br(nextIf);
+            nextIfReachable = true;
         }
     }
 
@@ -581,7 +584,7 @@ void GenIR::visit(SelectStmtAST &ast) {
     };
 
     // 如果两个分支都提前终止（没有 br nextIf）且 nextIf 是独立块，则 nextIf 不可达
-    if (ast.elseStmt != nullptr &&
+    if (ast.elseStmt != nullptr && !nextIfReachable &&
         !branchesTo(trueBB, nextIf) && !branchesTo(falseBB, nextIf)) {
         currentFunction->remove_bb(nextIf);
         has_br = true;
