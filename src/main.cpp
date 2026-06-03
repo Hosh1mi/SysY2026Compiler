@@ -21,6 +21,8 @@
 #include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
+#include "include/mid/opt/loopRepFold.hpp"
+#include "include/mid/opt/scalarExpandedInterchange.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
@@ -160,6 +162,8 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
 
+        pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
+
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
@@ -180,6 +184,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
+        pm.addPass(std::make_unique<LoopRepFold>());          // 循环重复折叠（消除外层计数循环）
         pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
         make_deep_clean(pm);                                  // basic + CFGSimplify + RemoveRedundantPhis
 

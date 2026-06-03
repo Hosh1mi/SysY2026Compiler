@@ -188,6 +188,16 @@ public:
         scope.push("memclr", memclr);
         scope.push("memset", memset);
         scope.push("llvm_memset", llvm_memset);
+
+        output_type = new FunctionType(TyVoid, {});
+        auto redirect_stdin_fn = new Function(output_type, "redirect_stdin", module.get());
+        scope.push("redirect_stdin", redirect_stdin_fn);
+
+        std::vector<Type *>().swap(output_params);
+        output_params.push_back(TyInt32);
+        output_type = new FunctionType(TyVoid, output_params);
+        auto debug_progress_fn = new Function(output_type, "debug_progress", module.get());
+        scope.push("debug_progress", debug_progress_fn);
     }
     std::unique_ptr<Module> getModule() {
         return std::move(module);
