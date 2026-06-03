@@ -1363,11 +1363,16 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
+    // Collect loop blocks that actually branch to origExit (their successor edges
+    // are rewired to afterLoop below; phis in origExit need their incoming BBs
+    // updated from those blocks → afterLoop, otherwise SSA breaks).
+    std::set<BasicBlock*> rewiredFromLoop;
     for (auto bb : loop.blocks) {
         auto *term = bb->get_terminator();
         for (unsigned i = 0; i < term->num_ops_; i++) {
             auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
             if (succ && succ == origExit) {
+                rewiredFromLoop.insert(bb);
                 term->get_operand(i)->remove_use(term->use_pos_[i]);
                 term->operands_[i] = afterLoop;
                 term->use_pos_[i]  = afterLoop->add_use(term, i);
@@ -1378,6 +1383,21 @@ void LoopVectorize::emitVectorizedLoop(
     }
 
     new BranchInst(origExit, afterLoop);
+
+    // Patch phis in origExit: any incoming BB that was a rewired loop block
+    // is now reached via afterLoop, so the phi must reference afterLoop.
+    for (auto inst : origExit->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst*>(inst);
+        for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+            auto *src = dynamic_cast<BasicBlock*>(phi->get_operand(i));
+            if (src && rewiredFromLoop.count(src)) {
+                phi->get_operand(i)->remove_use(phi->use_pos_[i]);
+                phi->operands_[i] = afterLoop;
+                phi->use_pos_[i]  = afterLoop->add_use(phi, i);
+            }
+        }
+    }
 
     // ── Clean up: set function to renumber instructions ──────────
     func->set_instr_name();
