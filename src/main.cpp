@@ -147,10 +147,11 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
         pm.addPass(std::make_unique<Mem2Reg>());              // SROA 拆分聚合 alloca + 构造 SSA
 
+        pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
-        pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
+        
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
         make_basic_clean(pm);
 

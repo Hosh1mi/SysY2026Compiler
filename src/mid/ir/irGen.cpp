@@ -571,9 +571,18 @@ void GenIR::visit(SelectStmtAST &ast) {
         }
     }
 
-    // 如果两个分支都已终止且 nextIf 是独立块（有 else），则 nextIf 不可达
+    // 检查 bb 的分支指令是否跳转到 target
+    auto branchesTo = [](BasicBlock *bb, BasicBlock *target) -> bool {
+        auto *term = bb->get_terminator();
+        if (!term) return false;
+        for (unsigned i = 0; i < term->num_ops_; i++)
+            if (term->get_operand(i) == target) return true;
+        return false;
+    };
+
+    // 如果两个分支都提前终止（没有 br nextIf）且 nextIf 是独立块，则 nextIf 不可达
     if (ast.elseStmt != nullptr &&
-        trueBB->get_terminator() && falseBB->get_terminator()) {
+        !branchesTo(trueBB, nextIf) && !branchesTo(falseBB, nextIf)) {
         currentFunction->remove_bb(nextIf);
         has_br = true;
     } else {
