@@ -22,7 +22,7 @@
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
-#include "include/mid/opt/loopInterchange.hpp"
+#include "include/mid/opt/scalarExpandedInterchange.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<Mem2Reg>());              // 构造 SSA
         pm.addPass(std::make_unique<RemoveRedundantPhis>());  // 清理 trivial phi
 
-        pm.addPass(std::make_unique<LoopInterchange>());      // 基于依赖分析的 j-k 循环交换 + 标量提升
+        pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
 
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
