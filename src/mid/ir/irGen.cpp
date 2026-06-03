@@ -181,11 +181,43 @@ void GenIR::visit(DefAST &ast) {
             return; //无初始化变量数组无需再做处理
         }
         Value* i32P = builder->create_bitcast(arrayAlloc, INT32PTR_T);
-        // 逐元素清零（按 i32 写零，float 的 +0.0f 也是全零位模式）
         int elemCnt = totalByte / 4;
-        for (int i = 0; i < elemCnt; i++) {
-            auto gep = builder->create_gep(i32P, {CONST_INT(i)});
+
+        // 对于大数组，使用 IR 循环逐元素清零，避免生成百万级指令导致编译超时
+        // （19 维 [2][2]...[2] 有 2^19 = 524288 个元素）
+        if (elemCnt > 256) {
+            auto zeroCondBB = new BasicBlock(module.get(), "label_zero_cond_" + to_string(id++), currentFunction);
+            auto zeroBodyBB = new BasicBlock(module.get(), "label_zero_body_" + to_string(id++), currentFunction);
+            auto zeroEndBB  = new BasicBlock(module.get(), "label_zero_end_" + to_string(id++), currentFunction);
+
+            // 在 entry 块中分配循环计数器并初始化
+            auto idxAlloca = builder->create_alloca(INT32_T);
+            builder->create_store(CONST_INT(0), idxAlloca);
+            builder->create_br(zeroCondBB);
+
+            // 循环条件块：idx < elemCnt ?
+            builder->BB_ = zeroCondBB;
+            auto idxLoad = builder->create_load(idxAlloca);
+            auto cond = builder->create_icmp_lt(idxLoad, CONST_INT(elemCnt));
+            builder->create_cond_br(cond, zeroBodyBB, zeroEndBB);
+
+            // 循环体块：i32P[idx] = 0; idx = idx + 1;
+            builder->BB_ = zeroBodyBB;
+            auto idxLoad2 = builder->create_load(idxAlloca);
+            auto gep = builder->create_gep(i32P, {idxLoad2});
             builder->create_store(CONST_INT(0), gep);
+            auto idxLoad3 = builder->create_load(idxAlloca);
+            auto idxInc = builder->create_iadd(idxLoad3, CONST_INT(1));
+            builder->create_store(idxInc, idxAlloca);
+            builder->create_br(zeroCondBB);
+
+            // 清零完成，继续在 zeroEndBB 中初始化
+            builder->BB_ = zeroEndBB;
+        } else {
+            for (int i = 0; i < elemCnt; i++) {
+                auto gep = builder->create_gep(i32P, {CONST_INT(i)});
+                builder->create_store(CONST_INT(0), gep);
+            }
         }
         //数组初始化时，成员exp一定是空，若initValList也是空，即是大括号，已经置零了直接返回
         if (ast.initVal->initValList.empty()) return;
