@@ -4,76 +4,11 @@
 #include <map>
 #include <set>
 
-// ---------- dominator tree computation ----------
-static std::map<BasicBlock*, BasicBlock*> compute_dominators(Function *func) {
-    std::vector<BasicBlock*> all_bb(func->basic_blocks_.begin(), func->basic_blocks_.end());
-    if (all_bb.empty()) return {};
-
-    BasicBlock *entry = all_bb.front();
-    std::set<BasicBlock*> all_set(all_bb.begin(), all_bb.end());
-
-    std::map<BasicBlock*, std::set<BasicBlock*>> dom;
-    dom[entry] = {entry};
-    for (auto *bb : all_bb) {
-        if (bb != entry) dom[bb] = all_set;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto *bb : all_bb) {
-            if (bb == entry) continue;
-            std::set<BasicBlock*> new_dom = all_set;
-            for (auto *pred : bb->pre_bbs_) {
-                std::set<BasicBlock*> temp;
-                std::set_intersection(new_dom.begin(), new_dom.end(),
-                                      dom[pred].begin(), dom[pred].end(),
-                                      std::inserter(temp, temp.begin()));
-                new_dom = std::move(temp);
-            }
-            new_dom.insert(bb);
-            if (new_dom != dom[bb]) {
-                dom[bb] = std::move(new_dom);
-                changed = true;
-            }
-        }
-    }
-
-    // Compute idom: pick the node in dom[B]\{B} with the largest dom set
-    std::map<BasicBlock*, BasicBlock*> idom;
-    for (auto *bb : all_bb) {
-        if (bb == entry) continue;
-        const auto &ds = dom[bb];
-        BasicBlock *best = nullptr;
-        size_t best_sz = 0;
-        for (auto *d : ds) {
-            if (d == bb) continue;
-            size_t sz = dom[d].size();
-            if (sz > best_sz) {
-                best_sz = sz;
-                best = d;
-            }
-        }
-        if (best) idom[bb] = best;
-    }
-    return idom;
-}
-
-static std::map<BasicBlock*, std::vector<BasicBlock*>>
-build_dom_children(const std::map<BasicBlock*, BasicBlock*> &idom) {
-    std::map<BasicBlock*, std::vector<BasicBlock*>> children;
-    for (auto &kv : idom) {
-        children[kv.second].push_back(kv.first);
-    }
-    return children;
-}
-
 // ---------- GVN: dominator-tree-based global value numbering ----------
 static void gvn_on_function(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    auto idom = compute_dominators(func);
-    auto dom_children = build_dom_children(idom);
+    auto &dom_children = func->getDominatorInfo().domChildren;
     BasicBlock *entry = func->basic_blocks_.front();
 
     std::unordered_map<Value*, Value*> vn_map;

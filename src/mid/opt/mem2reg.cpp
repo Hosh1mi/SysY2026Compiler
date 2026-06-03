@@ -14,96 +14,7 @@ void Mem2Reg::execute(Module *module) {
 }
 
 // -----------------------------------------------------------------------
-// 支配树计算
-// -----------------------------------------------------------------------
-void Mem2Reg::computeDominators(Function *func) {
-    std::set<BasicBlock *> allBlocks;
-    for (auto bb : func->basic_blocks_) allBlocks.insert(bb);
-
-    // 初始化
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBlock)
-            dom[bb] = {entryBlock};
-        else
-            dom[bb] = allBlocks;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : func->basic_blocks_) {
-            if (bb == entryBlock) continue;
-            std::set<BasicBlock *> newDom = allBlocks;   // 初始为全集
-            bool first = true;
-            for (auto pred : bb->pre_bbs_) {
-                if (first) {
-                    newDom = dom[pred];
-                    first = false;
-                } else {
-                    std::set<BasicBlock *> temp;
-                    std::set_intersection(newDom.begin(), newDom.end(),
-                                          dom[pred].begin(), dom[pred].end(),
-                                          std::inserter(temp, temp.begin()));
-                    newDom = temp;
-                }
-            }
-            newDom.insert(bb);
-            if (newDom != dom[bb]) {
-                dom[bb] = newDom;
-                changed = true;
-            }
-        }
-    }
-
-    // 计算 idom
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBlock) {
-            idom[bb] = nullptr;
-            continue;
-        }
-        // 在 dom[bb] 中找到严格支配 bb 且不被任何其他严格支配块支配的块
-        for (auto d : dom[bb]) {
-            if (d == bb) continue;
-            bool isIdom = true;
-            for (auto other : dom[bb]) {
-                if (other == bb || other == d) continue;
-                // 若 other 也严格支配 d，则 d 不是立即支配者
-                if (dom[d].count(other)) {
-                    isIdom = false;
-                    break;
-                }
-            }
-            if (isIdom) {
-                idom[bb] = d;
-                break;
-            }
-        }
-    }
-}
-
-void Mem2Reg::computeDominanceFrontiers() {
-    for (auto &p : idom) domFront[p.first] = {};
-    for (auto &kv : idom) {
-        BasicBlock *b = kv.first;
-        for (auto pred : b->pre_bbs_) {
-            BasicBlock *runner = pred;
-            while (runner != idom[b]) {
-                domFront[runner].insert(b);
-                runner = idom[runner];
-            }
-        }
-    }
-}
-
-void Mem2Reg::computeDomTreeChildren() {
-    for (auto &kv : idom) {
-        if (kv.second)
-            domChildren[kv.second].push_back(kv.first);
-    }
-}
-
-// -----------------------------------------------------------------------
-// 指令支配关系（同块比较顺序，跨块用 dom 集合）
+// 指令支配关系（同块比较顺序，跨块用支配树）
 // -----------------------------------------------------------------------
 bool Mem2Reg::iADomB(Instruction *ia, Instruction *ib) {
     BasicBlock *bbA = ia->parent_;
@@ -118,7 +29,7 @@ bool Mem2Reg::iADomB(Instruction *ia, Instruction *ib) {
         return false;
     }
     // 跨基本块：bbA 支配 bbB
-    return dom[bbB].count(bbA) != 0;
+    return domInfo_->dominates(bbA, bbB);
 }
 
 // -----------------------------------------------------------------------
@@ -279,13 +190,16 @@ void Mem2Reg::insertPhiNodes(AllocaInfo &info) {
     while (!workQ.empty()) {
         BasicBlock *b = workQ.front(); workQ.pop();
         // 迭代支配边界
-        for (auto f : domFront[b]) {
-            if (visited.count(f)) continue;
-            visited.insert(f);
-            if (info.liveInBlocks.count(f))
-                phiSet.insert(f);
-            if (!defSet.count(f))
-                workQ.push(f);
+        auto it = domInfo_->domFront.find(b);
+        if (it != domInfo_->domFront.end()) {
+            for (auto f : it->second) {
+                if (visited.count(f)) continue;
+                visited.insert(f);
+                if (info.liveInBlocks.count(f))
+                    phiSet.insert(f);
+                if (!defSet.count(f))
+                    workQ.push(f);
+            }
         }
     }
     info.phiBlocks = phiSet;
@@ -365,8 +279,11 @@ void Mem2Reg::rename() {
         }
 
         // 4. 递归支配树子节点
-        for (auto child : domChildren[bb]) {
-            renameBlock(child);
+        auto it = domInfo_->domChildren.find(bb);
+        if (it != domInfo_->domChildren.end()) {
+            for (auto child : it->second) {
+                renameBlock(child);
+            }
         }
 
         // 5. 恢复栈
@@ -385,6 +302,117 @@ void Mem2Reg::rename() {
 }
 
 // -----------------------------------------------------------------------
+// SROA 预处理：将聚合 alloca [N x T] 拆分为标量 alloca T
+// -----------------------------------------------------------------------
+
+void Mem2Reg::runSROA() {
+    // 不在遍历 basic_blocks 时直接修改，避免迭代器失效
+    std::vector<AllocaInst *> candidates;
+    for (auto bb : currentFunc->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->op_id_ != Instruction::Alloca) continue;
+            auto alloca = static_cast<AllocaInst *>(inst);
+            // 只对聚合类型（数组）alloca 做 SROA，标量 alloca 交给 mem2reg
+            if (alloca->alloca_ty_->tid_ == Type::ArrayTyID) {
+                if (isSROACandidate(alloca))
+                    candidates.push_back(alloca);
+            }
+        }
+    }
+    for (auto alloca : candidates)
+        rewriteAlloca(alloca);
+}
+
+bool Mem2Reg::isSROACandidate(AllocaInst *alloca) {
+    for (auto &use : alloca->use_list_) {
+        auto user = dynamic_cast<Instruction *>(use.val_);
+        if (!user) return false;
+
+        // 只接受 GEP 作为 alloca 的直接使用者
+        if (user->op_id_ != Instruction::GetElementPtr)
+            return false;
+
+        auto gep = static_cast<GetElementPtrInst *>(user);
+
+        // 检查 GEP 的结果类型是否为标量指针
+        assert(gep->type_->tid_ == Type::PointerTyID);
+        Type *resultTy = static_cast<PointerType *>(gep->type_)->contained_;
+        if (!isScalarType(resultTy))
+            return false;
+
+        // 检查所有索引是否为编译期常量
+        std::vector<int> indices;
+        if (!getConstantIndices(gep, indices))
+            return false;
+
+        // 检查 GEP 的每个使用者是否为 Load 或 Store
+        for (auto &gepUse : gep->use_list_) {
+            auto gepUser = dynamic_cast<Instruction *>(gepUse.val_);
+            if (!gepUser) return false;
+            if (gepUser->op_id_ != Instruction::Load &&
+                gepUser->op_id_ != Instruction::Store)
+                return false;
+        }
+    }
+    return true;
+}
+
+void Mem2Reg::rewriteAlloca(AllocaInst *alloca) {
+    BasicBlock *entryBB = currentFunc->basic_blocks_.front();
+
+    // 索引元组 → 新标量 alloca 的映射
+    std::map<std::vector<int>, AllocaInst *> newAllocas;
+
+    // 复制 use_list 以避免在遍历中修改时迭代器失效
+    auto allocaUses = alloca->use_list_;
+    for (auto &use : allocaUses) {
+        auto gep = static_cast<GetElementPtrInst *>(use.val_);
+
+        // 提取常量下标元组
+        std::vector<int> indices;
+        bool ok = getConstantIndices(gep, indices);
+        assert(ok && "indices should be constant (checked in isSROACandidate)");
+        (void)ok;
+
+        // 若该下标元组尚未分配标量 alloca，则创建
+        if (newAllocas.find(indices) == newAllocas.end()) {
+            Type *scalarTy =
+                static_cast<PointerType *>(gep->type_)->contained_;
+            auto newAlloca = new AllocaInst(scalarTy, entryBB, true);
+            entryBB->add_instruction_front(newAlloca);
+            newAllocas[indices] = newAlloca;
+        }
+
+        AllocaInst *scalarAlloca = newAllocas[indices];
+
+        auto gepUses = gep->use_list_;
+        for (auto &gepUse : gepUses) {
+            auto gepUser = dynamic_cast<Instruction *>(gepUse.val_);
+            int argNo = gepUse.arg_no_;
+            gepUser->set_operand(argNo, scalarAlloca);
+        }
+        toDelete.insert(gep);
+    }
+    toDelete.insert(alloca);
+}
+
+bool Mem2Reg::getConstantIndices(GetElementPtrInst *gep,
+                                  std::vector<int> &indices) {
+    // GEP 操作数布局：[0]=base_ptr, [1]=首层解引用(0), [2]=第一维下标, ...
+    // 提取 operand[2], operand[4], ... 即所有实际维度下标
+    for (unsigned i = 2; i < gep->num_ops_; i += 2) {
+        auto idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
+        if (!idx) return false;
+        indices.push_back(static_cast<int>(idx->value_));
+    }
+    return true;
+}
+
+bool Mem2Reg::isScalarType(Type *ty) {
+    return ty->tid_ == Type::IntegerTyID || ty->tid_ == Type::FloatTyID;
+}
+
+// -----------------------------------------------------------------------
 // 入口
 // -----------------------------------------------------------------------
 void Mem2Reg::runOnFunction(Function *func) {
@@ -393,17 +421,14 @@ void Mem2Reg::runOnFunction(Function *func) {
     if (entryBlock->pre_bbs_.size() != 0) return; // 入口块不应有前驱
 
     // 清理旧数据
-    dom.clear();
-    idom.clear();
-    domFront.clear();
-    domChildren.clear();
     toDelete.clear();
     phiToAlloca.clear();
 
-    // 支配信息
-    computeDominators(func);
-    computeDominanceFrontiers();
-    computeDomTreeChildren();
+    // Phase 1: SROA — 拆分聚合 alloca → 标量 alloca
+    runSROA();
+
+    // Phase 2: Mem2Reg — 标量 alloca 提升为 SSA 寄存器
+    domInfo_ = &func->getDominatorInfo();
 
     // 收集 alloca
     analyseAlloca();
@@ -422,7 +447,7 @@ void Mem2Reg::runOnFunction(Function *func) {
     // 全局重命名
     rename();
 
-    // 物理删除标记的指令
+    // 物理删除标记的指令（SROA 的 GEP/旧 alloca + mem2reg 的 load/store/alloca）
     for (auto inst : toDelete) {
         if (inst->parent_ == nullptr) continue;
         inst->parent_->delete_instr(inst);

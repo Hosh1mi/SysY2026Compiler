@@ -44,77 +44,6 @@ void LoopVectorize::execute(Module *module) {
 }
 
 // =====================================================================
-// 支配树计算
-// =====================================================================
-
-void LoopVectorize::computeDominators(Function *func) {
-    dom_.clear();
-    idom_.clear();
-
-    auto *entryBB = func->basic_blocks_.front();
-
-    // Collect all blocks
-    std::set<BasicBlock*> allBlocks;
-    for (auto bb : func->basic_blocks_) allBlocks.insert(bb);
-
-    // Initialise
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBB)
-            dom_[bb] = {entryBB};
-        else
-            dom_[bb] = allBlocks;
-    }
-
-    // Iterative data-flow
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : func->basic_blocks_) {
-            if (bb == entryBB) continue;
-            std::set<BasicBlock*> newDom = allBlocks;
-            bool first = true;
-            for (auto pred : bb->pre_bbs_) {
-                if (first) {
-                    newDom = dom_[pred];
-                    first = false;
-                } else {
-                    std::set<BasicBlock*> temp;
-                    std::set_intersection(newDom.begin(), newDom.end(),
-                                          dom_[pred].begin(), dom_[pred].end(),
-                                          std::inserter(temp, temp.begin()));
-                    newDom = temp;
-                }
-            }
-            newDom.insert(bb);
-            if (newDom != dom_[bb]) {
-                dom_[bb] = newDom;
-                changed = true;
-            }
-        }
-    }
-
-    // Compute immediate dominator
-    for (auto bb : func->basic_blocks_) {
-        if (bb == entryBB) {
-            idom_[bb] = nullptr;
-            continue;
-        }
-        for (auto d : dom_[bb]) {
-            if (d == bb) continue;
-            bool isIdom = true;
-            for (auto other : dom_[bb]) {
-                if (other == bb || other == d) continue;
-                if (dom_[d].count(other)) { isIdom = false; break; }
-            }
-            if (isIdom) {
-                idom_[bb] = d;
-                break;
-            }
-        }
-    }
-}
-
-// =====================================================================
 // 循环检测
 // =====================================================================
 
@@ -124,7 +53,7 @@ std::vector<LoopVectorize::Loop> LoopVectorize::findLoops(Function *func) {
     for (auto bb : func->basic_blocks_) {
         for (auto succ : bb->succ_bbs_) {
             // back edge: bb -> succ  and  succ dominates bb
-            if (!dom_[bb].count(succ)) continue;
+            if (!domInfo_->dominates(succ, bb)) continue;
             if (bb == succ) continue; // skip self-loop for now
 
             Loop loop;
@@ -1457,7 +1386,7 @@ void LoopVectorize::emitVectorizedLoop(
 void LoopVectorize::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    computeDominators(func);
+    domInfo_ = &func->getDominatorInfo();
     auto loops = findLoops(func);
 
     bool changed = true;
@@ -1470,8 +1399,9 @@ void LoopVectorize::runOnFunction(Function *func) {
         for (auto &loop : loops) {
             if (tryVectorize(loop, func, func->parent_)) {
                 changed = true;
-                // Need to recompute dominators and loops after transformation
-                computeDominators(func);
+                // 变换修改了 CFG，失效并重新计算支配信息
+                func->invalidateDominatorInfo();
+                domInfo_ = &func->getDominatorInfo();
                 loops = findLoops(func);
                 break; // restart iteration
             }

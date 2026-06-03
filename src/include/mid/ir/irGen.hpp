@@ -143,28 +143,6 @@ public:
         output_type = new FunctionType(TyVoid, output_params);
         auto sysy_stop_time = new Function(output_type, "_sysy_stoptime", module.get());
 
-        std::vector<Type *>().swap(output_params);
-        output_params.push_back(TyInt32Ptr);
-        output_params.push_back(TyInt32Ptr);
-        output_params.push_back(TyInt32);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto memcpy = new Function(output_type, "__aeabi_memcpy4", module.get());
-
-        std::vector<Type *>().swap(output_params);
-        output_params.push_back(TyInt32Ptr);
-        output_params.push_back(TyInt32);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto memclr = new Function(output_type, "__aeabi_memclr4", module.get());
-
-        std::vector<Type *>().swap(output_params);
-        output_params.push_back(TyInt32);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto memset = new Function(output_type, "__aeabi_memset4", module.get());
-
-        std::vector<Type *>().swap(output_params);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto llvm_memset = new Function(output_type, "llvm.memset.p0.i32", module.get());
-
         // output_params.clear();
         // output_params.push_back(TyInt32);
         // output_type = new FunctionType(TyInt32, output_params);
@@ -184,20 +162,6 @@ public:
         scope.push("putfarray", put_float_array);
         scope.push("_sysy_starttime", sysy_start_time);
         scope.push("_sysy_stoptime", sysy_stop_time);
-        scope.push("memcpy", memcpy);
-        scope.push("memclr", memclr);
-        scope.push("memset", memset);
-        scope.push("llvm_memset", llvm_memset);
-
-        output_type = new FunctionType(TyVoid, {});
-        auto redirect_stdin_fn = new Function(output_type, "redirect_stdin", module.get());
-        scope.push("redirect_stdin", redirect_stdin_fn);
-
-        std::vector<Type *>().swap(output_params);
-        output_params.push_back(TyInt32);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto debug_progress_fn = new Function(output_type, "debug_progress", module.get());
-        scope.push("debug_progress", debug_progress_fn);
     }
     std::unique_ptr<Module> getModule() {
         return std::move(module);

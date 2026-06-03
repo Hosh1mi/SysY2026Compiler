@@ -6,71 +6,15 @@
 static const int UNROLL_FACTOR   = 4;
 static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
 
-// ── CFG / Dominator helpers (mirrors LICM) ────────────────────────────────
-
-std::vector<BasicBlock *> LoopUnroll::computeRPO(Function *func) {
-    std::vector<BasicBlock *> postorder;
-    std::set<BasicBlock *> visited;
-    std::function<void(BasicBlock *)> dfs = [&](BasicBlock *bb) {
-        visited.insert(bb);
-        for (auto succ : bb->succ_bbs_)
-            if (!visited.count(succ)) dfs(succ);
-        postorder.push_back(bb);
-    };
-    if (!func->basic_blocks_.empty())
-        dfs(func->basic_blocks_[0]);
-    std::reverse(postorder.begin(), postorder.end());
-    return postorder;
-}
-
-void LoopUnroll::computeDominators(const std::vector<BasicBlock *> &rpo) {
-    idom_.clear();
-    rpoIdx_.clear();
-    if (rpo.empty()) return;
-    BasicBlock *entry = rpo[0];
-    for (int i = 0; i < (int)rpo.size(); i++)
-        rpoIdx_[rpo[i]] = i;
-    idom_[entry] = entry;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : rpo) {
-            if (bb == entry) continue;
-            BasicBlock *new_idom = nullptr;
-            for (auto pred : bb->pre_bbs_) {
-                if (!idom_.count(pred)) continue;
-                new_idom = new_idom ? intersect(pred, new_idom) : pred;
-            }
-            if (new_idom && idom_[bb] != new_idom) {
-                idom_[bb] = new_idom;
-                changed = true;
-            }
-        }
-    }
-}
-
-BasicBlock *LoopUnroll::intersect(BasicBlock *a, BasicBlock *b) {
-    while (a != b) {
-        while (rpoIdx_[a] > rpoIdx_[b]) a = idom_[a];
-        while (rpoIdx_[b] > rpoIdx_[a]) b = idom_[b];
-    }
-    return a;
-}
-
-bool LoopUnroll::dominates(BasicBlock *a, BasicBlock *b) {
-    while (b != idom_[b]) {
-        if (b == a) return true;
-        b = idom_[b];
-    }
-    return b == a;
-}
+// ── Loop detection ─────────────────────────────────────────────────────────
 
 std::vector<LoopUnroll::Loop> LoopUnroll::findLoops(Function *func) {
     std::vector<Loop> loops;
+    auto &idom = domInfo_->idom;
     for (auto bb : func->basic_blocks_) {
         for (auto succ : bb->succ_bbs_) {
-            if (!idom_.count(succ)) continue;
-            if (!dominates(succ, bb)) continue;
+            if (!idom.count(succ)) continue;
+            if (!domInfo_->dominates(succ, bb)) continue;
             Loop loop;
             loop.header = succ;
             loop.latch  = bb;
@@ -453,8 +397,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
 void LoopUnroll::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    auto rpo = computeRPO(func);
-    computeDominators(rpo);
+    domInfo_ = &func->getDominatorInfo();
     auto loops = findLoops(func);
 
     // Innermost first

@@ -1031,51 +1031,6 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         unsigned numArgs = call->num_ops_ - 1;
         auto callee = static_cast<Function*>(call->get_operand(numArgs));
     
-        // ---- 内联 __aeabi_memclr4 ----
-        if (callee->name_ == "__aeabi_memclr4") {
-            auto ptr = call->get_operand(0);
-            auto sizeVal = call->get_operand(1);
-            std::string addr = loadAddr(ptr);
-    
-            bool useLoop = true;
-            if (auto sizeConst = dynamic_cast<ConstantInt*>(sizeVal)) {
-                int bytes = sizeConst->value_;
-                constexpr int MAX_UNROLL_BYTES = 256;
-                if (bytes <= MAX_UNROLL_BYTES) {
-                    int off;
-                    for (off = 0; off + 8 <= bytes; off += 8) {
-                        if (off == 0)
-                            os_ << "\tstp wzr, wzr, [" << addr << "]\n";
-                        else
-                            os_ << "\tstp wzr, wzr, [" << addr << ", #" << off << "]\n";
-                    }
-                    if (off < bytes) {
-                        if (off == 0)
-                            os_ << "\tstr wzr, [" << addr << "]\n";
-                        else
-                            os_ << "\tstr wzr, [" << addr << ", #" << off << "]\n";
-                    }
-                    useLoop = false;
-                }
-            }
-            if (useLoop) {
-                // use member variable instead of static (thread-safe)
-                std::string sizeReg = loadInt(sizeVal);
-                std::string zeroReg = allocIntReg();
-                std::string loop = ".L" + func_->name_ + "_memclr_" + std::to_string(memclrCounter_++);
-                std::string done = loop + "_done";
-                os_ << "\tmov " << zeroReg << ", wzr\n";
-                os_ << loop << ":\n";
-                os_ << "\tcmp " << sizeReg << ", #0\n";
-                os_ << "\tble " << done << "\n";
-                os_ << "\tstr " << zeroReg << ", [" << addr << "], #4\n";
-                os_ << "\tsub " << sizeReg << ", " << sizeReg << ", #4\n";
-                os_ << "\tb " << loop << "\n";
-                os_ << done << ":\n";
-            }
-            break;
-        }
-    
         // 计算参数分配信息
         int intArg = 0, floatArg = 0;
         int stackArgsCount = 0;

@@ -22,13 +22,8 @@ private:
     Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
                            const std::unordered_map<Value *, Value *> &vmap);
 
-    std::vector<BasicBlock *> computeRPO(Function *func);
-    void computeDominators(const std::vector<BasicBlock *> &rpo);
-    BasicBlock *intersect(BasicBlock *a, BasicBlock *b);
-    bool dominates(BasicBlock *a, BasicBlock *b);
     std::vector<Loop> findLoops(Function *func);
     BasicBlock *getPreheader(const Loop &loop);
 
-    std::map<BasicBlock *, BasicBlock *> idom_;
-    std::map<BasicBlock *, int> rpoIdx_;
+    DominatorInfo *domInfo_ = nullptr;
 };

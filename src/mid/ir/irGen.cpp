@@ -138,6 +138,7 @@ void GenIR::visit(DefAST &ast) {
             else { //无初始化变量
                 AllocaInst *varAlloca;
                 varAlloca = builder->create_alloca(curType);
+                varAlloca->name_ = varName;
                 scope.push(varName, varAlloca);
             }
         } else { //有初始化
@@ -148,6 +149,7 @@ void GenIR::visit(DefAST &ast) {
             } else {
                 AllocaInst *varAlloca;
                 varAlloca = builder->create_alloca(curType);
+                varAlloca->name_ = varName;
                 scope.push(varName, varAlloca);
                 builder->create_store(recentVal, varAlloca);
             }
@@ -172,14 +174,51 @@ void GenIR::visit(DefAST &ast) {
             else arrayTy = module->get_array_type(arrayTy, dimensions[i]);
         }
         auto arrayAlloc = builder->create_alloca(arrayTy);
+        arrayAlloc->name_ = varName;
         scope.push(varName, arrayAlloc);
         if (ast.initVal == nullptr) { //无初始化
             if (isConst) cout << "no initVal when define const!" << endl;   //无初始化局部常量报错
             return; //无初始化变量数组无需再做处理
         }
         Value* i32P = builder->create_bitcast(arrayAlloc, INT32PTR_T);
-        auto memclr = scope.find("memclr");
-        builder->create_call(memclr, {i32P, CONST_INT(totalByte)}); //全部清零，但float可以清零吗
+        int elemCnt = totalByte / 4;
+
+        // 对于大数组，使用 IR 循环逐元素清零，避免生成百万级指令导致编译超时
+        // （19 维 [2][2]...[2] 有 2^19 = 524288 个元素）
+        if (elemCnt > 256) {
+            auto zeroCondBB = new BasicBlock(module.get(), "label_zero_cond_" + to_string(id++), currentFunction);
+            auto zeroBodyBB = new BasicBlock(module.get(), "label_zero_body_" + to_string(id++), currentFunction);
+            auto zeroEndBB  = new BasicBlock(module.get(), "label_zero_end_" + to_string(id++), currentFunction);
+
+            // 在 entry 块中分配循环计数器并初始化
+            auto idxAlloca = builder->create_alloca(INT32_T);
+            builder->create_store(CONST_INT(0), idxAlloca);
+            builder->create_br(zeroCondBB);
+
+            // 循环条件块：idx < elemCnt ?
+            builder->BB_ = zeroCondBB;
+            auto idxLoad = builder->create_load(idxAlloca);
+            auto cond = builder->create_icmp_lt(idxLoad, CONST_INT(elemCnt));
+            builder->create_cond_br(cond, zeroBodyBB, zeroEndBB);
+
+            // 循环体块：i32P[idx] = 0; idx = idx + 1;
+            builder->BB_ = zeroBodyBB;
+            auto idxLoad2 = builder->create_load(idxAlloca);
+            auto gep = builder->create_gep(i32P, {idxLoad2});
+            builder->create_store(CONST_INT(0), gep);
+            auto idxLoad3 = builder->create_load(idxAlloca);
+            auto idxInc = builder->create_iadd(idxLoad3, CONST_INT(1));
+            builder->create_store(idxInc, idxAlloca);
+            builder->create_br(zeroCondBB);
+
+            // 清零完成，继续在 zeroEndBB 中初始化
+            builder->BB_ = zeroEndBB;
+        } else {
+            for (int i = 0; i < elemCnt; i++) {
+                auto gep = builder->create_gep(i32P, {CONST_INT(i)});
+                builder->create_store(CONST_INT(0), gep);
+            }
+        }
         //数组初始化时，成员exp一定是空，若initValList也是空，即是大括号，已经置零了直接返回
         if (ast.initVal->initValList.empty()) return;
         vector<Value*> idxs(dimensions.size() + 1);
@@ -336,10 +375,16 @@ void GenIR::visit(FuncDefAST &ast) {
 
     auto bb = new BasicBlock(module.get(), "label_entry", func);
     builder->BB_ = bb;
+    // 第一遍：alloca，全部放到 entry 块顶部
     for (int i = 0; i < (int)(paramNames.size()); i++) {
-        auto alloc = builder->create_alloca(params[i]); //分配形参空间
-        builder->create_store(args[i], alloc);          // store 形参
-        scope.push(paramNames[i], alloc);         //加入作用域
+        auto alloc = builder->create_alloca(params[i]);
+        alloc->name_ = paramNames[i];
+        scope.push(paramNames[i], alloc);
+    }
+    // 第二遍：store，放在 alloca 之后
+    for (int i = 0; i < (int)(paramNames.size()); i++) {
+        auto alloc = scope.find(paramNames[i]);
+        builder->create_store(args[i], alloc);
     }
     //创建统一return分支
     retBB = new BasicBlock(module.get(), "label_ret", func);
@@ -349,6 +394,7 @@ void GenIR::visit(FuncDefAST &ast) {
         builder->create_void_ret();
     } else {
         retAlloca = builder->create_alloca(retType); // 在内存中分配返回值的位置
+        retAlloca->name_ = "retval";
         builder->BB_ = retBB;
         auto retLoad = builder->create_load(retAlloca);
         builder->create_ret(retLoad);
@@ -361,6 +407,51 @@ void GenIR::visit(FuncDefAST &ast) {
     //处理没有return的空块
     if (!builder->BB_->get_terminator())
         builder->create_br(retBB);
+
+    // 如果retBB只有一个前驱且该前驱无条件跳转到retBB，则合并两个块
+    if (retBB->pre_bbs_.size() == 1) {
+        BasicBlock *pred = retBB->pre_bbs_[0];
+        auto *term = pred->get_terminator();
+        if (auto *br = dynamic_cast<BranchInst*>(term)) {
+            if (br->num_ops_ == 1 && br->get_operand(0) == retBB) {
+                // 移除无条件分支
+                pred->delete_instr(br);
+                // 收集retBB的指令，移到pred（alloca移到开头，其余保持顺序）
+                std::vector<Instruction*> insts(retBB->instr_list_.begin(), retBB->instr_list_.end());
+                for (auto *inst : insts) {
+                    retBB->remove_instr(inst);
+                    if (inst->is_alloca())
+                        pred->add_instruction_front(inst);
+                    else
+                        pred->add_instruction(inst);
+                }
+                // 移除retBB（同时清理CFG边）
+                func->remove_bb(retBB);
+
+                // 合并后，将store->retAlloca再load回来的冗余转发掉
+                // 例如 store %v1, %retval ; %v2 = load %retval  → 直接用 %v1 替换 %v2
+                if (retAlloca) {
+                    for (auto *inst : insts) {
+                        if (inst->is_load() && inst->get_operand(0) == retAlloca) {
+                            // 在pred中向前查找最近的对retAlloca的store
+                            Value *storedVal = nullptr;
+                            for (auto rit = pred->instr_list_.rbegin(); rit != pred->instr_list_.rend(); ++rit) {
+                                if (*rit == inst) continue;
+                                if ((*rit)->is_store() && (*rit)->get_operand(1) == retAlloca) {
+                                    storedVal = (*rit)->get_operand(0);
+                                    break;
+                                }
+                            }
+                            if (storedVal) {
+                                inst->replace_all_use_with(storedVal);
+                                pred->delete_instr(inst);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 void GenIR::visit(FuncFParamAST &ast) {
@@ -475,7 +566,6 @@ void GenIR::visit(ReturnStmtAST &ast) {
         recentVal = builder->create_br(retBB);
     }
     has_br = true;
-    //builder->BB_ = new BasicBlock(module.get(), to_string(id++), currentFunction); //return语句后必是新块
 }
 
 void GenIR::visit(SelectStmtAST &ast) {
@@ -483,11 +573,12 @@ void GenIR::visit(SelectStmtAST &ast) {
     auto tempTrue = trueBB;
     auto tempFalse = falseBB;
 
-    trueBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
-    falseBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
+    trueBB = new BasicBlock(module.get(), "label_if_then_" + to_string(id++), currentFunction);
+    falseBB = new BasicBlock(module.get(), "label_if_else_" + to_string(id++), currentFunction);
     BasicBlock* nextIf; // if语句后的基本块
     if (ast.elseStmt == nullptr) nextIf = falseBB;
-    else nextIf = new BasicBlock(module.get(), to_string(id++), currentFunction);
+    else nextIf = new BasicBlock(module.get(), "label_if_end_" + to_string(id++), currentFunction);
+    bool nextIfReachable = false;
     ast.cond->accept(*this);
     //检查是否是i1，不是则进行比较
     if (recentVal->type_ == INT32_T) {
@@ -502,6 +593,7 @@ void GenIR::visit(SelectStmtAST &ast) {
     ast.ifStmt->accept(*this);
     if (!builder->BB_->get_terminator()) {
         builder->create_br(nextIf);
+        nextIfReachable = true;
     }
 
     if (ast.elseStmt != nullptr) { // 开始构建falseBB
@@ -510,11 +602,28 @@ void GenIR::visit(SelectStmtAST &ast) {
         ast.elseStmt->accept(*this);
         if (!builder->BB_->get_terminator()) {
             builder->create_br(nextIf);
+            nextIfReachable = true;
         }
     }
 
-    builder->BB_ = nextIf;
-    has_br = false;
+    // 检查 bb 的分支指令是否跳转到 target
+    auto branchesTo = [](BasicBlock *bb, BasicBlock *target) -> bool {
+        auto *term = bb->get_terminator();
+        if (!term) return false;
+        for (unsigned i = 0; i < term->num_ops_; i++)
+            if (term->get_operand(i) == target) return true;
+        return false;
+    };
+
+    // 如果两个分支都提前终止（没有 br nextIf）且 nextIf 是独立块，则 nextIf 不可达
+    if (ast.elseStmt != nullptr && !nextIfReachable &&
+        !branchesTo(trueBB, nextIf) && !branchesTo(falseBB, nextIf)) {
+        currentFunction->remove_bb(nextIf);
+        has_br = true;
+    } else {
+        builder->BB_ = nextIf;
+        has_br = false;
+    }
     // 还原trueBB和falseBB
     trueBB = tempTrue;
     falseBB = tempFalse;
@@ -527,9 +636,9 @@ void GenIR::visit(IterationStmtAST &ast) {
     auto tempCond = whileCondBB;
     auto tempWhileFalseBB = whileFalseBB; //break只跳while的false，而不跳全局false
 
-    whileCondBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
-    trueBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
-    falseBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
+    whileCondBB = new BasicBlock(module.get(), "label_while_cond_" + to_string(id++), currentFunction);
+    trueBB = new BasicBlock(module.get(), "label_while_body_" + to_string(id++), currentFunction);
+    falseBB = new BasicBlock(module.get(), "label_while_end_" + to_string(id++), currentFunction);
     whileFalseBB = falseBB;
 
     builder->create_br(whileCondBB);
@@ -976,7 +1085,7 @@ void GenIR::visit(LAndExpAST &ast) {
         return;
     }
     auto tempTrue = trueBB; //防止嵌套and导致原trueBB丢失。用于生成短路模块
-    trueBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
+    trueBB = new BasicBlock(module.get(), "label_and_" + to_string(id++), currentFunction);
     ast.lAndExp->accept(*this);
 
     if (recentVal->type_ == INT32_T) {
@@ -998,7 +1107,7 @@ void GenIR::visit(LOrExpAST &ast) {
         return;
     }
     auto tempFalse = falseBB; //防止嵌套and导致原trueBB丢失。用于生成短路模块
-    falseBB = new BasicBlock(module.get(), to_string(id++), currentFunction);
+    falseBB = new BasicBlock(module.get(), "label_or_" + to_string(id++), currentFunction);
     ast.lOrExp->accept(*this);
     if (recentVal->type_ == INT32_T) {
         recentVal = builder->create_icmp_ne(recentVal, CONST_INT(0));

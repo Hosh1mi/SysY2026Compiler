@@ -233,7 +233,6 @@ std::string SelectInst::print() {
 }
 
 // %v = call i32 @func(i32 %a, i32 %b)
-// __aeabi_memclr4 特殊处理为 llvm.memset.p0.i32
 std::string CallInst::print() {
     std::string instr_ir;
     if (!(this->type_->tid_ == Type::VoidTyID)) {
@@ -248,18 +247,6 @@ std::string CallInst::print() {
 
     instr_ir += " ";
     assert(dynamic_cast<Function*>(this->get_operand(numops - 1)) && "Wrong call operand function");
-    if (dynamic_cast<Function*>(this->get_operand(numops - 1))->name_ == "__aeabi_memclr4") {
-        instr_ir += "@llvm.memset.p0.i32(";
-        instr_ir += this->get_operand(0)->type_->print();
-        instr_ir += " ";
-        instr_ir += print_as_op(this->get_operand(0), false);
-        instr_ir += ", i8 0, ";
-        instr_ir += this->get_operand(1)->type_->print();
-        instr_ir += " ";
-        instr_ir += print_as_op(this->get_operand(1), false);
-        instr_ir += ", i1 false)";
-        return instr_ir;
-    }
 
     instr_ir += print_as_op(this->get_operand(numops - 1), false);
     instr_ir += "(";

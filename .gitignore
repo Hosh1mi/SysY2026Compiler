@@ -31,3 +31,4 @@ test/results/
 remind.txt
 test/result.txt
 *.md
+/test/re

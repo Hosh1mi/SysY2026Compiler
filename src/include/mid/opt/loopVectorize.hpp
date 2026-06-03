@@ -41,9 +41,6 @@ private:
     // ── Per-function driver ────────────────────────────────────────────
     void runOnFunction(Function *func);
 
-    // ── Dominator tree ─────────────────────────────────────────────────
-    void computeDominators(Function *func);
-
     // ── Loop detection ─────────────────────────────────────────────────
     std::vector<Loop> findLoops(Function *func);
 
@@ -64,6 +61,5 @@ private:
                             Function *func, Module *module);
 
     // ── Dominator state ────────────────────────────────────────────────
-    std::map<BasicBlock*, std::set<BasicBlock*>> dom_;
-    std::map<BasicBlock*, BasicBlock*>            idom_;
+    DominatorInfo *domInfo_ = nullptr;
 };

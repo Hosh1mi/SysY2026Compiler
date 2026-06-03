@@ -14,13 +14,6 @@ private:
     void runOnFunction(Function *func);
 
     // -------------------------------------------------------
-    // 支配分析
-    // -------------------------------------------------------
-    void computeDominators(Function *func);
-    void computeDominanceFrontiers();
-    void computeDomTreeChildren();
-
-    // -------------------------------------------------------
     // 提升核心
     // -------------------------------------------------------
     void analyseAlloca();
@@ -41,6 +34,9 @@ private:
     BasicBlock *entryBlock = nullptr;
     Module *curModule = nullptr;
 
+    // 共享支配树（来自 Function）
+    DominatorInfo *domInfo_ = nullptr;
+
     // alloca 信息
     struct BlockInfo {
         std::vector<LoadInst *> loads;
@@ -57,21 +53,24 @@ private:
     };
     std::vector<AllocaInfo> allocas;
 
-    // 支配树
-    std::map<BasicBlock *, std::set<BasicBlock *>> dom;          // dom[bb] = 支配 bb 的块集合
-    std::map<BasicBlock *, BasicBlock *> idom;                  // 立即支配者
-    std::map<BasicBlock *, std::set<BasicBlock *>> domFront;    // 支配边界
-    std::map<BasicBlock *, std::vector<BasicBlock *>> domChildren; // 支配树子节点
-
     // 新插入的 phi 与 alloca 的映射
     std::map<PhiInst *, AllocaInst *> phiToAlloca;
 
     // 待删除指令
     std::set<Instruction *> toDelete;
 
+    // -------------------------------------------------------
+    // SROA 预处理：将聚合 alloca 拆分为标量 alloca
+    // -------------------------------------------------------
+    void runSROA();
+    bool isSROACandidate(AllocaInst *alloca);
+    void rewriteAlloca(AllocaInst *alloca);
+    bool getConstantIndices(GetElementPtrInst *gep, std::vector<int> &indices);
+    static bool isScalarType(Type *ty);
+
     bool removeUnusedAlloca(AllocaInfo &info);
     bool rewriteSingleStoreAlloca(AllocaInfo &info);
     bool promoteSingleBlockAlloca(AllocaInfo &info);
     void insertPhiNodes(AllocaInfo &info);
-    
+
 };

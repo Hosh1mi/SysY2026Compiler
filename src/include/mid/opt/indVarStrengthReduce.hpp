@@ -28,10 +28,8 @@ private:
         Instruction *updateInst; // the add/sub instruction
     };
 
-    // dominator computation
-    std::map<BasicBlock *, std::set<BasicBlock *>> dom;
-    std::map<BasicBlock *, BasicBlock *> idom;
-    void computeDominators(Function *func);
+    // dominator info (from Function)
+    DominatorInfo *domInfo_ = nullptr;
 
     // loop detection
     std::vector<Loop> findLoops(Function *func);
