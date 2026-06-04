@@ -50,6 +50,34 @@ Value* visitAdd(BinaryInst *inst) {
         }
     }
 
+    // 5. Fold  x + (x << k)  →  mul x, 2^k+1
+    //    Canonical form for the backend: a single mul lets the backend
+    //    emit one fused  add x, x, lsl #k  on AArch64.
+    {
+        auto *xi = dynamic_cast<Instruction*>(x);
+        auto *yi = dynamic_cast<Instruction*>(y);
+        if (xi && xi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(xi->get_operand(1));
+            if (amt && xi->get_operand(0) == y) {
+                // (x << k) + x
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    y, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
+            }
+        }
+        if (yi && yi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(yi->get_operand(1));
+            if (amt && yi->get_operand(0) == x) {
+                // x + (x << k)
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    x, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
+            }
+        }
+    }
+
     return nullptr;
 }
 
@@ -109,6 +137,20 @@ Value* visitSub(BinaryInst *inst) {
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
+            }
+        }
+    }
+
+    // 6. Fold  (x << k) - x  →  mul x, 2^k-1
+    {
+        auto *xi = dynamic_cast<Instruction*>(x);
+        if (xi && xi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(xi->get_operand(1));
+            if (amt && xi->get_operand(0) == y) {
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    y, make_const_int(ty, (1 << amt->value_) - 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
             }
         }
     }

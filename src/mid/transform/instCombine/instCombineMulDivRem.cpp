@@ -66,8 +66,44 @@ Value* visitMul(BinaryInst *inst) {
 
     if (!cy) return nullptr;
 
-    // 6. Strength reduction: mul x, 2^k  →  shl x, k
-    //    1-to-1 replace, universally beneficial regardless of target.
+    // 6. Fold  mul x, 2^k  whose sole user is  add/sub  with the same x.
+    //    add x, (mul x, 2^k)   →  mul x, 2^k + 1
+    //    sub (mul x, 2^k), x   →  mul x, 2^k - 1
+    //    Done *before* mul→shl so the backend sees a single mul and can
+    //    emit one fused instruction (e.g. add w0, w0, w0, lsl #k).
+    if (isPowerOfTwo(cy->value_) && cy->value_ > 1 &&
+        inst->use_list_.size() == 1) {
+        auto *user = dynamic_cast<Instruction*>((*inst->use_list_.begin()).val_);
+        if (user) {
+            if (user->op_id_ == Instruction::Add) {
+                Value *op0 = user->get_operand(0);
+                Value *op1 = user->get_operand(1);
+                if ((op0 == x && op1 == inst) || (op0 == inst && op1 == x)) {
+                    auto *new_mul = new BinaryInst(ty, Instruction::Mul,
+                        x, make_const_int(ty, cy->value_ + 1), bb, true);
+                    bb->add_instruction_before_inst(new_mul, user);
+                    user->replace_all_use_with(new_mul);
+                    user->parent_->delete_instr(user);
+                    bb->delete_instr(inst);
+                    return nullptr;  // inst already deleted above
+                }
+            } else if (user->op_id_ == Instruction::Sub) {
+                // sub (mul x, 2^k), x
+                if (user->get_operand(0) == inst && user->get_operand(1) == x) {
+                    auto *new_mul = new BinaryInst(ty, Instruction::Mul,
+                        x, make_const_int(ty, cy->value_ - 1), bb, true);
+                    bb->add_instruction_before_inst(new_mul, user);
+                    user->replace_all_use_with(new_mul);
+                    user->parent_->delete_instr(user);
+                    bb->delete_instr(inst);
+                    return nullptr;
+                }
+            }
+        }
+    }
+
+    // 7. Strength reduction: mul x, 2^k  →  shl x, k
+    //    Only reached when no add/sub fusion fired (rule 6).
     if (isPowerOfTwo(cy->value_) && cy->value_ > 1) {
         int shift = log2Int(cy->value_);
         auto *shl = new BinaryInst(ty, Instruction::Shl, x,
@@ -75,11 +111,6 @@ Value* visitMul(BinaryInst *inst) {
         bb->add_instruction_before_inst(shl, inst);
         return shl;
     }
-
-    // Non-power-of-two constant multipliers are left as mul.
-    // AArch64 can fuse shift+add/sub for many patterns (e.g.
-    // x*3 → add x, x, x, lsl #1).  Decomposing in IR would
-    // prevent the backend from recognising those fused forms.
 
     return nullptr;
 }
@@ -125,13 +156,16 @@ Value* visitSDiv(BinaryInst *inst) {
     }
 
     // 5. sdiv x, 2^k  →  ashr x, k
-    //    Correct when x ≥ 0 
+    //    Exact when x ≥ 0 (no sign issue) or x is a multiple of 2^k
+    //    (no remainder to lose — ashr matches sdiv even for negative x).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
-        auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
-            make_const_int(ty, k), bb, true);
-        bb->add_instruction_before_inst(ashr, inst);
-        return ashr;
+        if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+            auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
+                            make_const_int(ty, k), bb, true);
+            bb->add_instruction_before_inst(ashr, inst);
+            return ashr;
+        }
     }
 
     return nullptr;
@@ -170,13 +204,38 @@ Value* visitSRem(BinaryInst *inst) {
     }
 
     // 4. srem x, 2^k  →  and x, 2^k-1
-    //    Replaces an expensive srem (4-20c) with a single and (1c).
-    //    Correct when x ≥ 0. 
+    //
+    // (a) When the sole user is  icmp eq/ne …, 0  the transform is always
+    //     safe: we only care about zero / non-zero, and  (x & mask) == 0
+    //     iff  srem(x, 2^k) == 0  for all x (positive or negative).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
-        auto *andInst = new BinaryInst(ty, Instruction::And,
-            x, make_const_int(ty, cy->value_ - 1), bb, true);
-        bb->add_instruction_before_inst(andInst, inst);
-        return andInst;
+        if (inst->use_list_.size() == 1) {
+            auto *cmp = dynamic_cast<ICmpInst*>((*inst->use_list_.begin()).val_);
+            if (cmp && cmp->op_id_ == Instruction::ICmp &&
+                (cmp->icmp_op_ == ICmpInst::ICMP_EQ ||
+                 cmp->icmp_op_ == ICmpInst::ICMP_NE)) {
+                auto *c0 = dynamic_cast<ConstantInt*>(cmp->get_operand(0));
+                auto *c1 = dynamic_cast<ConstantInt*>(cmp->get_operand(1));
+                bool cmp_with_zero = (c0 && c0->value_ == 0) || (c1 && c1->value_ == 0);
+                if (cmp_with_zero) {
+                    auto *andInst = new BinaryInst(ty, Instruction::And,
+                        x, make_const_int(ty, cy->value_ - 1), bb, true);
+                    bb->add_instruction_before_inst(andInst, inst);
+                    return andInst;
+                }
+            }
+        }
+    }
+    // (b) No icmp-zero pattern, but still safe if we can prove x ≥ 0
+    //     or x is an exact multiple of 2^k.
+    if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
+        int k = log2Int(cy->value_);
+        if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+            auto *andInst = new BinaryInst(ty, Instruction::And,
+                x, make_const_int(ty, cy->value_ - 1), bb, true);
+            bb->add_instruction_before_inst(andInst, inst);
+            return andInst;
+        }
     }
 
     return nullptr;

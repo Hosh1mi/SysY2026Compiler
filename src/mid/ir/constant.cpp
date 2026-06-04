@@ -6,7 +6,26 @@
 #include <sstream>
 #include <string>
 
-// i32 常量或 i1 常量
+// ── Recursively check whether a Constant represents zero ──────────────
+
+static bool isZeroConstant(Constant *c) {
+    if (dynamic_cast<ConstantZero*>(c)) return true;
+    if (auto *ci = dynamic_cast<ConstantInt*>(c))  return ci->value_ == 0;
+    if (auto *cf = dynamic_cast<ConstantFloat*>(c)) return cf->value_ == 0.0f;
+    if (auto *ca = dynamic_cast<ConstantArray*>(c)) {
+        for (auto *elem : ca->const_array)
+            if (!isZeroConstant(elem)) return false;
+        return true;
+    }
+    if (auto *cv = dynamic_cast<ConstantVector*>(c)) {
+        for (auto *elem : cv->elements_)
+            if (!isZeroConstant(elem)) return false;
+        return true;
+    }
+    return false;
+}
+
+// ── Individual constant printing ──────────────────────────────────────
 std::string ConstantInt::print() {
     std::string const_ir;
     if (this->type_->tid_ == Type::IntegerTyID && static_cast<IntegerType*>(this->type_)->num_bits_ == 1) {
@@ -28,6 +47,13 @@ std::string ConstantFloat::print() {
 
 // 数组常量，如 [2 x i32] [i32 1, i32 2]
 std::string ConstantArray::print() {
+    // All-zero array → zeroinitializer
+    bool allZero = true;
+    for (auto *elem : const_array) {
+        if (!isZeroConstant(elem)) { allZero = false; break; }
+    }
+    if (allZero) return "zeroinitializer";
+
     std::string const_ir;
     const_ir += "[";
     const_ir += static_cast<ArrayType*>(this->type_)->contained_->print();
@@ -45,6 +71,13 @@ std::string ConstantArray::print() {
 
 // 向量常量，如 <i32 0, i32 1, i32 2, i32 3>
 std::string ConstantVector::print() {
+    // All-zero vector → zeroinitializer
+    bool allZero = true;
+    for (auto *elem : elements_) {
+        if (!isZeroConstant(elem)) { allZero = false; break; }
+    }
+    if (allZero) return "zeroinitializer";
+
     std::string const_ir;
     auto *vecTy = static_cast<VectorType*>(this->type_);
     const_ir += "<";
