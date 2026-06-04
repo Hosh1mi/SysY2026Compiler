@@ -28,8 +28,16 @@ inline ConstantFloat* make_const_float(Type* ty, float v) {
 // ── Per-opcode visit functions ────────────────────────────────────────
 // Each returns a replacement Value*, or nullptr if no simplification.
 
+// AddSub
 Value* visitAdd(BinaryInst *inst);
 Value* visitSub(BinaryInst *inst);
 Value* visitFAdd(BinaryInst *inst);
 Value* visitFSub(BinaryInst *inst);
 Value* visitFNeg(UnaryInst *inst);
+
+// MulDivRem
+Value* visitMul(BinaryInst *inst);
+Value* visitSDiv(BinaryInst *inst);
+Value* visitSRem(BinaryInst *inst);
+Value* visitFMul(BinaryInst *inst);
+Value* visitFDiv(BinaryInst *inst);

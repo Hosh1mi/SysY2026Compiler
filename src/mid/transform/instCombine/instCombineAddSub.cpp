@@ -1,3 +1,4 @@
+// NOTE: If bugs are met, delete fneg
 #include "instCombineInternal.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════

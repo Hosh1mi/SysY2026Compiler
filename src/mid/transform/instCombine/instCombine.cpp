@@ -32,6 +32,7 @@ void InstCombine::runOnFunction(Function *func) {
         Value *replacement = nullptr;
 
         switch (inst->op_id_) {
+        // AddSub
         case Instruction::Add:
             replacement = visitAdd(static_cast<BinaryInst*>(inst));
             break;
@@ -46,6 +47,22 @@ void InstCombine::runOnFunction(Function *func) {
             break;
         case Instruction::FNeg:
             replacement = visitFNeg(static_cast<UnaryInst*>(inst));
+            break;
+        // MulDivRem
+        case Instruction::Mul:
+            replacement = visitMul(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::SDiv:
+            replacement = visitSDiv(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::SRem:
+            replacement = visitSRem(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::FMul:
+            replacement = visitFMul(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::FDiv:
+            replacement = visitFDiv(static_cast<BinaryInst*>(inst));
             break;
         default:
             break;
