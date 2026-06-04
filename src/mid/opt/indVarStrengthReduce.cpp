@@ -1,4 +1,7 @@
 #include "../../include/mid/opt/indVarStrengthReduce.hpp"
+#include <cstdlib>
+#include <iostream>
+#include <limits>
 #include <stack>
 
 void IndVarStrengthReduce::execute(Module *module) {
@@ -10,11 +13,15 @@ void IndVarStrengthReduce::execute(Module *module) {
 
 void IndVarStrengthReduce::runOnFunction(Function *func) {
     domInfo_ = &func->getDominatorInfo();
+    LoopInfo LI;
+    LI.analyze(func);
+    ScalarEvolution SE(LI);
+
     auto loops = findLoops(func);
 
     Module *module = func->parent_;
     for (auto &loop : loops) {
-        processLoop(loop, func, module);
+        processLoop(loop, func, module, SE);
     }
 }
 
@@ -275,10 +282,262 @@ static int computeElementStride(GetElementPtrInst *gep, unsigned ivOpIdx) {
     return stride > 0 ? stride : 1;
 }
 
+static bool fitsInt(long long value) {
+    return value >= std::numeric_limits<int>::min() &&
+           value <= std::numeric_limits<int>::max();
+}
+
+static bool isI32(Value *value) {
+    auto *intTy = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
+    return intTy && intTy->num_bits_ == 32;
+}
+
+static bool isI32SCEV(const SCEV *s) {
+    auto *intTy = s ? dynamic_cast<IntegerType *>(s->type()) : nullptr;
+    return intTy && intTy->num_bits_ == 32;
+}
+
+static bool isIVSRSCEVDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_IVSR_SCEV") != nullptr;
+    return enabled;
+}
+
+static void debugLinearizedGEP(Function *func, BasicBlock *loopHeader,
+                               GetElementPtrInst *gep, const SCEVGEPInfo &info,
+                               int coeff) {
+    if (!isIVSRSCEVDebugEnabled()) return;
+
+    std::cerr << "[IVSR:SCEV] function=" << (func ? func->name_ : "<null>")
+              << " loop_header=" << (loopHeader ? loopHeader->name_ : "<null>")
+              << " gep=%" << gep->name_
+              << " coeff=" << coeff
+              << " offset=" << (info.elementOffset ? info.elementOffset->print() : "<null>")
+              << " shape=[";
+    for (size_t i = 0; i < info.shape.size(); i++) {
+        if (i) std::cerr << ",";
+        std::cerr << info.shape[i];
+    }
+    std::cerr << "]\n";
+}
+
+bool IndVarStrengthReduce::isSCEVLoopInvariant(const SCEV *s, const Loop &loop,
+                                               ScalarEvolution &SE) {
+    (void)SE;
+    if (!s) return false;
+
+    switch (s->kind()) {
+    case SCEVKind::Constant:
+        return true;
+    case SCEVKind::CouldNotCompute:
+        return false;
+    case SCEVKind::Unknown: {
+        auto *unknown = static_cast<const SCEVUnknown *>(s);
+        return isLoopInvariant(unknown->value(), loop.blocks);
+    }
+    case SCEVKind::AddExpr:
+    case SCEVKind::MulExpr: {
+        auto *nary = static_cast<const SCEVNAryExpr *>(s);
+        for (auto *op : nary->operands()) {
+            if (!isSCEVLoopInvariant(op, loop, SE)) return false;
+        }
+        return true;
+    }
+    case SCEVKind::AddRecExpr: {
+        auto *addrec = static_cast<const SCEVAddRecExpr *>(s);
+        if (addrec->loop() && addrec->loop()->header &&
+            loop.blocks.count(addrec->loop()->header))
+            return false;
+        return isSCEVLoopInvariant(addrec->start(), loop, SE) &&
+               isSCEVLoopInvariant(addrec->step(), loop, SE);
+    }
+    }
+    return false;
+}
+
+IndVarStrengthReduce::LinearIVExpr
+IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
+                                         const Loop &loop, ScalarEvolution &SE) {
+    LinearIVExpr invalid;
+    if (!s || !isI32SCEV(s)) return invalid;
+
+    if (auto *c = dynamic_cast<const SCEVConstant *>(s)) {
+        if (!fitsInt(c->value())) return invalid;
+        LinearIVExpr result;
+        result.valid = true;
+        result.constOffset = c->value();
+        return result;
+    }
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s)) {
+        LinearIVExpr result;
+        if (unknown->value() == iv.phi) {
+            result.valid = true;
+            result.coeff = 1;
+            return result;
+        }
+        if (!isSCEVLoopInvariant(s, loop, SE)) return invalid;
+        result.valid = true;
+        result.offset = s;
+        return result;
+    }
+
+    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(s)) {
+        LinearIVExpr result;
+        if (addrec->phi() == iv.phi) {
+            result.valid = true;
+            result.coeff = 1;
+            return result;
+        }
+        if (!isSCEVLoopInvariant(s, loop, SE)) return invalid;
+        result.valid = true;
+        result.offset = s;
+        return result;
+    }
+
+    if (s->kind() == SCEVKind::CouldNotCompute)
+        return invalid;
+
+    if (isSCEVLoopInvariant(s, loop, SE)) {
+        LinearIVExpr result;
+        result.valid = true;
+        result.offset = s;
+        return result;
+    }
+
+    if (auto *add = dynamic_cast<const SCEVAddExpr *>(s)) {
+        LinearIVExpr result;
+        result.valid = true;
+
+        for (auto *op : add->operands()) {
+            LinearIVExpr term = linearizeSCEVForIV(op, iv, loop, SE);
+            if (!term.valid) return invalid;
+
+            long long coeff = static_cast<long long>(result.coeff) + term.coeff;
+            if (!fitsInt(coeff)) return invalid;
+            result.coeff = static_cast<int>(coeff);
+
+            result.constOffset += term.constOffset;
+            if (!fitsInt(result.constOffset)) return invalid;
+
+            if (term.offset) {
+                if (result.offset) return invalid;
+                result.offset = term.offset;
+            }
+        }
+        return result;
+    }
+
+    if (auto *mul = dynamic_cast<const SCEVMulExpr *>(s)) {
+        bool sawIVTerm = false;
+        LinearIVExpr ivTerm;
+        long long multiplier = 1;
+
+        for (auto *op : mul->operands()) {
+            LinearIVExpr term = linearizeSCEVForIV(op, iv, loop, SE);
+            if (!term.valid) return invalid;
+
+            if (term.coeff == 0) {
+                if (term.offset) return invalid;
+                multiplier *= term.constOffset;
+                if (!fitsInt(multiplier)) return invalid;
+                continue;
+            }
+
+            if (sawIVTerm || term.offset) return invalid;
+            sawIVTerm = true;
+            ivTerm = term;
+        }
+
+        if (!sawIVTerm) return invalid;
+
+        long long coeff = static_cast<long long>(ivTerm.coeff) * multiplier;
+        long long constOffset = ivTerm.constOffset * multiplier;
+        if (!fitsInt(coeff) || !fitsInt(constOffset)) return invalid;
+
+        LinearIVExpr result;
+        result.valid = true;
+        result.coeff = static_cast<int>(coeff);
+        result.constOffset = constOffset;
+        return result;
+    }
+
+    return invalid;
+}
+
+Value *IndVarStrengthReduce::materializeOffsetInPreheader(const LinearIVExpr &expr,
+                                                          BasicBlock *preheader,
+                                                          const Loop &loop,
+                                                          IRStmtBuilder *builder,
+                                                          Module *module) {
+    if (!fitsInt(expr.constOffset)) return nullptr;
+
+    Value *offsetVal = nullptr;
+    long long constOffset = expr.constOffset;
+
+    if (expr.offset) {
+        if (auto *c = dynamic_cast<const SCEVConstant *>(expr.offset)) {
+            constOffset += c->value();
+            if (!fitsInt(constOffset)) return nullptr;
+        } else if (auto *unknown = dynamic_cast<const SCEVUnknown *>(expr.offset)) {
+            offsetVal = unknown->value();
+            if (!isI32(offsetVal) || !isLoopInvariant(offsetVal, loop.blocks))
+                return nullptr;
+        } else if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(expr.offset)) {
+            offsetVal = addrec->phi();
+            if (!isI32(offsetVal) || !isLoopInvariant(offsetVal, loop.blocks))
+                return nullptr;
+        } else {
+            return nullptr;
+        }
+    }
+
+    if (!offsetVal)
+        return new ConstantInt(module->int32_ty_, static_cast<int>(constOffset));
+
+    if (auto *ci = dynamic_cast<ConstantInt *>(offsetVal)) {
+        long long folded = static_cast<long long>(ci->value_) + constOffset;
+        if (!fitsInt(folded)) return nullptr;
+        return new ConstantInt(module->int32_ty_, static_cast<int>(folded));
+    }
+
+    if (constOffset == 0)
+        return offsetVal;
+
+    builder->set_insert_point(preheader);
+    auto *add = builder->create_iadd(offsetVal,
+                                     new ConstantInt(module->int32_ty_,
+                                                     static_cast<int>(constOffset)));
+    preheader->remove_instr(add);
+    preheader->add_instruction_before_terminator(add);
+    return add;
+}
+
+bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &expr,
+                                                           const Loop &loop) {
+    if (!fitsInt(expr.constOffset)) return false;
+    if (!expr.offset) return true;
+
+    if (auto *c = dynamic_cast<const SCEVConstant *>(expr.offset))
+        return fitsInt(expr.constOffset + c->value());
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(expr.offset)) {
+        Value *value = unknown->value();
+        return isI32(value) && isLoopInvariant(value, loop.blocks);
+    }
+
+    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(expr.offset)) {
+        Value *value = addrec->phi();
+        return isI32(value) && isLoopInvariant(value, loop.blocks);
+    }
+
+    return false;
+}
+
 // -----------------------------------------------------------------------
 // 主体：对循环中的派生 IV 进行强度削弱
 // -----------------------------------------------------------------------
-void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module) {
+void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
+                                       ScalarEvolution &SE) {
     // Skip loops that already contain vector operations — converting
     // GEPs to pointer phis in these loops causes register spills because
     // the new phis compete with vector registers.
@@ -295,9 +554,15 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     auto *builder = new IRStmtBuilder(preheader, module);
 
     for (auto &iv : ivs) {
+        auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
+        if (!initCI) continue;
+
         struct GEPCandidate {
             GetElementPtrInst *gep;
             unsigned ivOpIdx;
+            int coeff;
+            std::vector<LinearIVExpr> indexExprs;
+            bool useLinearizedGEP;
         };
         std::vector<GEPCandidate> candidates;
 
@@ -306,28 +571,93 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
 
-                unsigned ivOpIdx = 0;
-                bool found = false;
-                for (unsigned i = 1; i < gep->num_ops_; i++) {
-                    std::set<Value *> vis;
-                    if (resolvesTo(gep->get_operand(i), iv.phi, vis)) {
-                        ivOpIdx = i;
-                        found = true;
-                        break;
+                auto initExprCanMaterialize = [&](LinearIVExpr expr) -> bool {
+                    if (expr.coeff != 0) {
+                        long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                        if (!fitsInt(ivStart)) return false;
+                        expr.coeff = 0;
+                        expr.constOffset += ivStart;
+                        if (!fitsInt(expr.constOffset)) return false;
+                    }
+                    return canMaterializeOffsetInPreheader(expr, loop);
+                };
+
+                auto *gepPtrTy = dynamic_cast<PointerType *>(gep->type_);
+                bool gepYieldsArray =
+                    gepPtrTy && gepPtrTy->contained_->tid_ == Type::ArrayTyID;
+                SCEVGEPInfo gepInfo = gepYieldsArray ? SCEVGEPInfo{} : SE.getLinearizedGEP(gep);
+                if (gepInfo.valid) {
+                    LinearIVExpr flatExpr =
+                        linearizeSCEVForIV(gepInfo.elementOffset, iv, loop, SE);
+                    if (flatExpr.valid && flatExpr.coeff != 0) {
+                        bool ok = true;
+                        std::vector<LinearIVExpr> indexExprs;
+                        indexExprs.reserve(gep->num_ops_ - 1);
+
+                        for (unsigned i = 1; i < gep->num_ops_; i++) {
+                            Value *idx = gep->get_operand(i);
+                            if (!isI32(idx)) {
+                                ok = false;
+                                break;
+                            }
+
+                            LinearIVExpr expr =
+                                linearizeSCEVForIV(SE.getSCEV(idx), iv, loop, SE);
+                            if (!expr.valid || !initExprCanMaterialize(expr)) {
+                                ok = false;
+                                break;
+                            }
+                            indexExprs.push_back(expr);
+                        }
+
+                        if (ok) {
+                            debugLinearizedGEP(func, loop.header, gep, gepInfo,
+                                               flatExpr.coeff);
+                            candidates.push_back(
+                                {gep, 0, flatExpr.coeff, indexExprs, true});
+                            continue;
+                        }
                     }
                 }
-                if (!found) continue;
+
+                unsigned ivOpIdx = 0;
+                int ivDependentIndexes = 0;
+                int coeff = 0;
+                std::vector<LinearIVExpr> indexExprs;
+                indexExprs.reserve(gep->num_ops_ - 1);
+
+                for (unsigned i = 1; i < gep->num_ops_; i++) {
+                    Value *idx = gep->get_operand(i);
+                    if (!isI32(idx)) {
+                        ivDependentIndexes = 2;
+                        break;
+                    }
+
+                    LinearIVExpr expr = linearizeSCEVForIV(SE.getSCEV(idx), iv, loop, SE);
+                    if (!expr.valid) {
+                        ivDependentIndexes = 2;
+                        break;
+                    }
+
+                    if (expr.coeff != 0) {
+                        ivDependentIndexes++;
+                        ivOpIdx = i;
+                        coeff = expr.coeff;
+                    }
+                    indexExprs.push_back(expr);
+                }
+
+                if (ivDependentIndexes != 1) continue;
 
                 bool ok = true;
-                for (unsigned i = 1; i < gep->num_ops_; i++) {
-                    if (i == ivOpIdx) continue; 
-                    if (!isLoopInvariant(gep->get_operand(i), loop.blocks)) {
+                for (auto expr : indexExprs) {
+                    if (!initExprCanMaterialize(expr)) {
                         ok = false;
                         break;
                     }
                 }
                 if (!ok) continue;
-        candidates.push_back({gep, ivOpIdx});
+                candidates.push_back({gep, ivOpIdx, coeff, indexExprs, false});
             }
         }
 
@@ -336,22 +666,50 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             auto *gep = c.gep;
             if (!gep->parent_) continue;
 
+            int elemStride = 1;
+            if (!c.useLinearizedGEP) {
+                elemStride = computeElementStride(gep, c.ivOpIdx);
+                Type *addrTy = static_cast<PointerType*>(gep->type_)->contained_;
+                while (auto *arrTy = dynamic_cast<ArrayType*>(addrTy)) {
+                    elemStride /= arrTy->num_elements_;
+                    addrTy = arrTy->contained_;
+                }
+                if (elemStride <= 0) elemStride = 1;
+            }
+
+            int ivStrideVal = 1;
+            if (auto *ci = dynamic_cast<ConstantInt*>(iv.stride))
+                ivStrideVal = ci->value_;
+            long long effectiveStride64 = static_cast<long long>(ivStrideVal) *
+                                          elemStride * c.coeff;
+            if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
+            if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
+            int effectiveStride = static_cast<int>(effectiveStride64);
+
             std::vector<Value *> initIndices;
             bool failed = false;
             for (unsigned i = 1; i < gep->num_ops_; i++) {
-                Value *idx = gep->get_operand(i);
-                if (i == c.ivOpIdx) {
-                    initIndices.push_back(iv.initVal);
-                } else {
-                    // 被保留的索引必须在 preheader 中可用：若是 phi 则取其 preheader 入边值
-                    auto entryVis = std::set<Value *>{};
-                    Value *entryVal = getEntryValue(idx, loop.blocks, entryVis);
-                    if(!entryVal) {
+                LinearIVExpr expr = c.indexExprs[i - 1];
+                if (expr.coeff != 0) {
+                    long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                    if (!fitsInt(ivStart)) {
                         failed = true;
                         break;
                     }
-                    initIndices.push_back(entryVal);
+                    expr.coeff = 0;
+                    expr.constOffset += ivStart;
+                    if (!fitsInt(expr.constOffset)) {
+                        failed = true;
+                        break;
+                    }
                 }
+
+                Value *idxVal = materializeOffsetInPreheader(expr, preheader, loop, builder, module);
+                if (!idxVal) {
+                    failed = true;
+                    break;
+                }
+                initIndices.push_back(idxVal);
             }
             if (failed) continue;
             // 在 preheader 中创建初始 GEP（先构造后移入，保证位置在 br 之前）
@@ -368,20 +726,6 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             addrPhi->addIncoming(initGEP, preheader);
 
             // 在 latch 中创建步进指令（在 br 之前）
-            int elemStride = computeElementStride(gep, c.ivOpIdx);
-            // 将标量步长归一化到 addrPhi 所指类型的元素单位
-            Type *addrTy = static_cast<PointerType*>(addrPhi->type_)->contained_;
-            while (auto *arrTy = dynamic_cast<ArrayType*>(addrTy)) {
-                elemStride /= arrTy->num_elements_;
-                addrTy = arrTy->contained_;
-            }
-            if (elemStride <= 0) elemStride = 1;
-            // Account for the IV's actual stride (e.g. vector loops advance by VF=4).
-            int ivStrideVal = 1;
-            if (auto *ci = dynamic_cast<ConstantInt*>(iv.stride))
-                ivStrideVal = ci->value_;
-            int effectiveStride = ivStrideVal * elemStride;
-            if (!iv.isAdd) effectiveStride = -effectiveStride;
             builder->set_insert_point(iv.latch);
             auto *incrGEP = builder->create_gep(addrPhi, {new ConstantInt(module->int32_ty_, effectiveStride)});
             iv.latch->remove_instr(incrGEP);

@@ -14,7 +14,9 @@
 // "GEP 的第 i 个 index 等价于 a·iv₁ + b·iv₂ + c"，从而判断访存方向。
 
 #include "loopInfo.hpp"
+#include "scalarEvolution.hpp"
 #include <map>
+#include <set>
 
 class AffineExpr {
 public:
@@ -60,17 +62,17 @@ public:
 
 class AffineAnalysis {
 public:
-    explicit AffineAnalysis(const LoopInfo &LI) : LI_(&LI) {}
+    explicit AffineAnalysis(const LoopInfo &LI) : LI_(&LI), SE_(LI) {}
 
     // 主入口：返回 v 的仿射表示；若无法表达则 valid=false
     AffineExpr analyze(Value *v);
 
-    void clearCache() { cache_.clear(); }
+    void clearCache() { cache_.clear(); SE_.clear(); }
 
 private:
-    AffineExpr analyzeImpl(Value *v);
+    AffineExpr fromSCEV(const SCEV *s);
 
     const LoopInfo                  *LI_;
+    ScalarEvolution                  SE_;
     std::map<Value *, AffineExpr>    cache_;
-    std::set<Value *>                visiting_;   // 防止 phi 循环死递归
 };

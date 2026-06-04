@@ -1,4 +1,5 @@
 #pragma once
+#include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 #include <map>
@@ -23,12 +24,14 @@ private:
     std::vector<Loop> findLoops(Function *func);
     BasicBlock *getPreheader(const Loop &loop);
     bool isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
-                     const std::set<Instruction*>& toHoist, const Loop *loop = nullptr);
+                     const std::set<Instruction*>& toHoist, const Loop *loop = nullptr,
+                     ScalarEvolution *SE = nullptr, ::Loop *analysisLoop = nullptr);
     bool isSafeToHoist(Instruction *inst, const Loop &loop,
                        const std::set<Instruction*>& toHoist, bool loopHasCalls);
     bool hasStoreToSameBase(const Loop &loop, Value *base);
     static bool doesAnyCallWriteToBase(const Loop &loop, Value *base);
-    bool runOnLoop(const Loop &loop);
+    bool runOnLoop(const Loop &loop, ScalarEvolution *SE = nullptr,
+                   ::Loop *analysisLoop = nullptr);
 
     DominatorInfo *domInfo_ = nullptr;
 };

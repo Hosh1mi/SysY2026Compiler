@@ -1,7 +1,10 @@
 #include "../../include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
+#include <iostream>
+#include <map>
 #include <queue>
 
 void LICM::execute(Module *module) {
@@ -59,16 +62,62 @@ BasicBlock *LICM::getPreheader(const Loop &loop) {
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
 
+static bool isLICMSCEVDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_LICM_SCEV") != nullptr;
+    return enabled;
+}
+
+static void debugSCEVInvariant(Value *val, BasicBlock *loopHeader, const SCEV *s) {
+    if (!isLICMSCEVDebugEnabled()) return;
+
+    std::cerr << "[LICM:SCEV] loop_header="
+              << (loopHeader ? loopHeader->name_ : "<null>")
+              << " value=";
+    if (auto *inst = dynamic_cast<Instruction *>(val)) {
+        std::cerr << "%" << inst->name_;
+    } else if (auto *global = dynamic_cast<GlobalVariable *>(val)) {
+        std::cerr << "@" << global->name_;
+    } else if (val) {
+        std::cerr << (val->name_.empty() ? "<anon>" : val->name_);
+    } else {
+        std::cerr << "<null>";
+    }
+    std::cerr << " scev=" << (s ? s->print() : "<null>") << "\n";
+}
+
 bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
-                        const std::set<Instruction*>& toHoist, const Loop */*loop*/) {
-    if (dynamic_cast<Constant*>(val))       return true;
-    if (dynamic_cast<GlobalVariable*>(val)) return true;
-    if (dynamic_cast<Argument*>(val))       return true;
+                        const std::set<Instruction*>& toHoist, const Loop *loop,
+                        ScalarEvolution *SE, ::Loop *analysisLoop) {
+    bool available = false;
+    if (dynamic_cast<Constant*>(val) ||
+        dynamic_cast<GlobalVariable*>(val) ||
+        dynamic_cast<Argument*>(val)) {
+        available = true;
+    }
 
     auto inst = dynamic_cast<Instruction*>(val);
-    if (!inst) return true;
-    if (toHoist.count(inst)) return true;
-    return !loopBlocks.count(inst->parent_);
+    if (!available) {
+        if (!inst) {
+            available = true;
+        } else if (toHoist.count(inst)) {
+            available = true;
+        } else {
+            available = !loopBlocks.count(inst->parent_);
+        }
+    }
+
+    if (!available)
+        return false;
+
+    if (SE && analysisLoop) {
+        const SCEV *s = SE->getSCEV(val);
+        if (s && s->kind() != SCEVKind::CouldNotCompute &&
+            SE->isLoopInvariant(s, analysisLoop)) {
+            debugSCEVInvariant(val, loop ? loop->header : nullptr, s);
+        }
+    }
+
+    return true;
 }
 
 static Value *getBase(Value *ptr) {
@@ -132,7 +181,7 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
-bool LICM::runOnLoop(const Loop &loop) {
+bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop) {
     BasicBlock *preheader = getPreheader(loop);
     if (!preheader) return false;
 
@@ -217,7 +266,8 @@ bool LICM::runOnLoop(const Loop &loop) {
 
                 bool allInvariant = true;
                 for (unsigned i = 0; i < inst->num_ops_; i++) {
-                    if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist, &loop)) {
+                    if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist,
+                                     &loop, SE, analysisLoop)) {
                         allInvariant = false;
                         break;
                     }
@@ -323,7 +373,19 @@ void LICM::runOnFunction(Function *func) {
     });
 
     for (auto &loop : loops) {
-        runOnLoop(loop);
+        LoopInfo LI;
+        LI.analyze(func);
+        ScalarEvolution SE(LI);
+
+        ::Loop *analysisLoop = nullptr;
+        for (auto &ownedLoop : LI.allLoops()) {
+            if (ownedLoop->header == loop.header) {
+                analysisLoop = ownedLoop.get();
+                break;
+            }
+        }
+
+        runOnLoop(loop, &SE, analysisLoop);
         eliminateTrivialHeaderPhis(loop);
     }
 }

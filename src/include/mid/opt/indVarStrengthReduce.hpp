@@ -1,5 +1,6 @@
 #pragma once
 #include "pass.hpp"
+#include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
 #include <map>
 #include <set>
@@ -28,6 +29,13 @@ private:
         Instruction *updateInst; // the add/sub instruction
     };
 
+    struct LinearIVExpr {
+        bool valid = false;
+        int coeff = 0;
+        long long constOffset = 0;
+        const SCEV *offset = nullptr; // one materializable loop-invariant non-constant term
+    };
+
     // dominator info (from Function)
     DominatorInfo *domInfo_ = nullptr;
 
@@ -43,6 +51,14 @@ private:
     // ensure preheader exists, return it
     BasicBlock *ensurePreheader(Loop &loop, Function *func, Module *module);
 
+    bool isSCEVLoopInvariant(const SCEV *s, const Loop &loop, ScalarEvolution &SE);
+    LinearIVExpr linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
+                                    const Loop &loop, ScalarEvolution &SE);
+    bool canMaterializeOffsetInPreheader(const LinearIVExpr &expr, const Loop &loop);
+    Value *materializeOffsetInPreheader(const LinearIVExpr &expr, BasicBlock *preheader,
+                                        const Loop &loop, IRStmtBuilder *builder,
+                                        Module *module);
+
     // main strength reduction routine
-    void processLoop(Loop &loop, Function *func, Module *module);
+    void processLoop(Loop &loop, Function *func, Module *module, ScalarEvolution &SE);
 };

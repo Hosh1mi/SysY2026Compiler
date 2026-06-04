@@ -60,60 +60,69 @@ std::string AffineExpr::print() const {
 // ── AffineAnalysis ─────────────────────────────────────────────────────────
 
 AffineExpr AffineAnalysis::analyze(Value *v) {
-    visiting_.clear();
-    return analyzeImpl(v);
-}
-
-AffineExpr AffineAnalysis::analyzeImpl(Value *v) {
     if (!v) return AffineExpr::makeInvalid();
 
     auto it = cache_.find(v);
     if (it != cache_.end()) return it->second;
 
-    if (!visiting_.insert(v).second) {
-        // 出现循环引用，无法静态展开
+    AffineExpr result = fromSCEV(SE_.getSCEV(v));
+    cache_[v] = result;
+    return result;
+}
+
+AffineExpr AffineAnalysis::fromSCEV(const SCEV *s) {
+    if (!s) return AffineExpr::makeInvalid();
+
+    switch (s->kind()) {
+    case SCEVKind::Constant: {
+        auto *c = static_cast<const SCEVConstant*>(s);
+        return AffineExpr::makeConstant(static_cast<int>(c->value()));
+    }
+    case SCEVKind::AddExpr: {
+        auto *add = static_cast<const SCEVAddExpr*>(s);
+        AffineExpr result = AffineExpr::makeConstant(0);
+        for (auto *op : add->operands())
+            result = result + fromSCEV(op);
+        return result;
+    }
+    case SCEVKind::MulExpr: {
+        auto *mul = static_cast<const SCEVMulExpr*>(s);
+        long long coeff = 1;
+        const SCEV *nonConst = nullptr;
+
+        for (auto *op : mul->operands()) {
+            if (auto *c = dynamic_cast<const SCEVConstant*>(op)) {
+                coeff *= c->value();
+            } else {
+                if (nonConst) return AffineExpr::makeInvalid();
+                nonConst = op;
+            }
+        }
+
+        if (!nonConst)
+            return AffineExpr::makeConstant(static_cast<int>(coeff));
+
+        AffineExpr inner = fromSCEV(nonConst);
+        if (!inner.valid) return AffineExpr::makeInvalid();
+        return inner * static_cast<int>(coeff);
+    }
+    case SCEVKind::AddRecExpr: {
+        auto *addrec = static_cast<const SCEVAddRecExpr*>(s);
+        Loop *loop = addrec->loop();
+        if (!loop || !loop->canonicalIV) return AffineExpr::makeInvalid();
+        if (addrec->phi() != loop->canonicalIV) return AffineExpr::makeInvalid();
+
+        AffineExpr start = fromSCEV(addrec->start());
+        AffineExpr step = fromSCEV(addrec->step());
+        if (!start.valid || !step.valid || !step.isConstant())
+            return AffineExpr::makeInvalid();
+
+        return start + (AffineExpr::makeIV(loop->canonicalIV) * step.constant);
+    }
+    case SCEVKind::Unknown:
+    case SCEVKind::CouldNotCompute:
         return AffineExpr::makeInvalid();
     }
 
-    AffineExpr result = AffineExpr::makeInvalid();
-
-    // 1. 常量
-    if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
-        result = AffineExpr::makeConstant(ci->value_);
-    }
-    // 2. 规范 IV（必须是某个 loop 的 canonical IV）
-    else if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        Loop *loop = LI_->getLoopFor(phi->parent_);
-        // 沿嵌套树向上找是不是哪一层 loop 的 canonical IV
-        bool is_iv = false;
-        for (Loop *cur = loop; cur; cur = cur->parent) {
-            if (cur->canonicalIV == phi) {
-                is_iv = true;
-                break;
-            }
-        }
-        if (is_iv) result = AffineExpr::makeIV(phi);
-    }
-    // 3. 二元运算
-    else if (auto *bin = dynamic_cast<BinaryInst *>(v)) {
-        Value *a = bin->get_operand(0);
-        Value *b = bin->get_operand(1);
-        if (bin->is_add()) {
-            result = analyzeImpl(a) + analyzeImpl(b);
-        } else if (bin->op_id_ == Instruction::Sub) {
-            result = analyzeImpl(a) - analyzeImpl(b);
-        } else if (bin->is_mul()) {
-            // 必须一侧是常量
-            auto *ca = dynamic_cast<ConstantInt *>(a);
-            auto *cb = dynamic_cast<ConstantInt *>(b);
-            if (ca)      result = analyzeImpl(b) * ca->value_;
-            else if (cb) result = analyzeImpl(a) * cb->value_;
-            // 两个 IV 相乘 → 非线性 → invalid
-        }
-    }
-    // 4. 其它（load / call / gep 等）→ invalid
-
-    visiting_.erase(v);
-    cache_[v] = result;
-    return result;
+    return AffineExpr::makeInvalid();
 }

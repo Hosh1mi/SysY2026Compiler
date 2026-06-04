@@ -32,3 +32,4 @@ remind.txt
 test/result.txt
 *.md
 /test/re
+*.png
