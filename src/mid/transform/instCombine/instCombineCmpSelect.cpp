@@ -4,7 +4,7 @@
 // Helper: swap predicate when moving a constant from LHS to RHS
 // ═══════════════════════════════════════════════════════════════════════
 
-static ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
+ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
     switch (op) {
         case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_EQ;   // symmetric
         case ICmpInst::ICMP_NE:  return ICmpInst::ICMP_NE;   // symmetric
@@ -83,7 +83,8 @@ Value* visitICmp(ICmpInst *inst) {
         }
     }
 
-    return nullptr;
+    // 4. Fold add/sub with constant into the comparison
+    return foldICmpAddSub(inst);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

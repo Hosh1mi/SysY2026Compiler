@@ -78,6 +78,21 @@ Value* visitAdd(BinaryInst *inst) {
         }
     }
 
+    // 6. add x, C  →  or x, C   when  x & C == 0  (no carry possible)
+    //    If x has k trailing zeros and C fits in k bits, addition is just bitwise OR.
+    if (cy && cy->value_ > 0) {
+        // k = ⌈log₂(C+1)⌉ — the number of bits needed to represent C
+        int k = 1;
+        while ((1 << k) <= cy->value_) k++;
+        // C < 2^k, so all set bits of C are in positions 0..k-1.
+        // If x is a multiple of 2^k, its low k bits are zero → x & C == 0.
+        if (isKnownMultipleOf(x, k, bb)) {
+            auto *or_inst = new BinaryInst(ty, Instruction::Or, x, y, bb, true);
+            bb->add_instruction_before_inst(or_inst, inst);
+            return or_inst;
+        }
+    }
+
     return nullptr;
 }
 

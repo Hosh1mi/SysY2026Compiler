@@ -163,3 +163,5 @@ Value* visitXor(BinaryInst *inst);
 // CmpSelect
 Value* visitICmp(ICmpInst *inst);
 Value* visitSelect(SelectInst *inst);
+ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op);
+Value* foldICmpAddSub(ICmpInst *inst);
