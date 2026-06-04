@@ -172,6 +172,16 @@ std::string UnaryInst::print() {
             assert(this->type_->tid_ == Type::FloatTyID);
             instr_ir += " to float";
             break;
+        case Instruction::FNeg:
+            // fneg float %x  (no "to" suffix; result type == operand type)
+            break;
+        case Instruction::BitCast:
+            assert(this->type_->tid_ == Type::IntegerTyID ||
+                   this->type_->tid_ == Type::FloatTyID ||
+                   this->type_->tid_ == Type::PointerTyID);
+            instr_ir += " to ";
+            instr_ir += this->type_->print();
+            break;
         default:
             assert(0 && "UnaryInst opID invalid!");
             break;

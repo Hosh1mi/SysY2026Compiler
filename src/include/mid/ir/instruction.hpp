@@ -133,6 +133,11 @@ public:
 class UnaryInst : public Instruction {
 public:
     UnaryInst(Type* ty, OpID op, Value* val, BasicBlock* bb) : Instruction(ty, op, 1, bb) { set_operand(0, val); }
+    // no-insert variant (caller uses add_instruction_before_inst / add_instruction_after_inst)
+    UnaryInst(Type* ty, OpID op, Value* val, BasicBlock* bb, bool) : Instruction(ty, op, 1) {
+        set_operand(0, val);
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
 };
 

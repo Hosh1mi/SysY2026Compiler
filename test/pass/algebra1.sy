@@ -1,0 +1,66 @@
+// 整型加法测试
+int test_add_int(int x) {
+    // 1. 常量折叠: 1 + 2 -> 3
+    int a = 1 + 2;
+    // 2. 规范化: 常数移到右侧（由优化器自动调整，无需显式验证）
+    // 3. 消零: x + 0 -> x
+    int b = x + 0;
+    // 4. 结合: (x + 1) + 2 -> x + 3
+    int c = (x + 1) + 2;
+    // 返回总和，确保所有计算被保留
+    return a + b + c;
+}
+
+// 整型减法测试
+int test_sub_int(int x, int y) {
+    // 1. 常量折叠: 5 - 3 -> 2
+    int a = 5 - 3;
+    // 2. 消零: x - 0 -> x
+    int b = x - 0;
+    // 3. 自消: x - x -> 0
+    int c = x - x;
+    // 4. 结合1: (x + 1) - 2 -> x - 1
+    int d = (x + 1) - 2;
+    // 5. 结合2: (x - 1) - 2 -> x - 3
+    int e = (x - 1) - 2;
+    // 返回结果总和
+    return a + b + c + d + e;
+}
+
+// 浮点加法测试
+float test_fadd_float(float x, float y) {
+    // 1. 常量折叠: 1.0 + 2.0 -> 3.0
+    float a = 1.0 + 2.0;
+    // 2. 规范化: 常数移到右侧（优化器自动处理）
+    // 3. 消零: x + 0.0 -> x
+    float b = x + 0.0;
+    // 4. 取反合并: (-x) + (-y) -> -(x + y)
+    float c = (-x) + (-y);
+    return a + b + c;
+}
+
+// 浮点减法测试
+float test_fsub_float(float x, float y) {
+    // 1. 常量折叠: 3.0 - 1.0 -> 2.0
+    float a = 3.0 - 1.0;
+    // 2. 消零: x - 0.0 -> x
+    float b = x - 0.0;
+    // 3. 自消: x - x -> 0.0
+    float c = x - x;
+    // 4. 取反消除: x - (-y) -> x + y
+    float d = x - (-y);
+    // 5. 零减: 0.0 - x -> -x
+    float e = 0.0 - x;
+    return a + b + c + d + e;
+}
+
+// 浮点取反测试
+float test_fneg_float(float x, float y) {
+    // 1. 常量折叠: -1.0 -> -1.0 (直接常量)
+    float a = -1.0;
+    // 2. 双重取反: -(-x) -> x
+    float b = -(-x);
+    // 3. 取反减法: -(x - y) -> y - x
+    float c = -(x - y);
+    return a + b + c;
+}

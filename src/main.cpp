@@ -12,7 +12,7 @@
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
 #include "include/mid/opt/gvn.hpp"
-#include "include/mid/opt/algebraSimplify.hpp"
+#include "include/mid/opt/instCombine.hpp"
 #include "include/mid/opt/sccp.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
@@ -33,12 +33,12 @@
 // ── Pipeline helper modules ──────────────────────────────────────────
 // Group common pass sequences for reusable cleanup after transforms.
 
-// ConstantFold → AlgebraSimplify → DeadCodeDelete
+// ConstantFold → InstCombine → DeadCodeDelete
 static void make_basic_clean(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
     pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
-    pm.addPass(std::make_unique<AlgebraSimplify>());
+    pm.addPass(std::make_unique<InstCombine>());
     pm.addPass(std::make_unique<DeadCodeDelete>());
 }
 
@@ -150,35 +150,39 @@ int main(int argc, char **argv) {
 	    pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
 		pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
-        pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
+          
+        // pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
 
-        pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
-        pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
-        make_basic_clean(pm);                                 // ConstantFold + AlgebraSimplify + DCE
+        // pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
+        // pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
+        // make_basic_clean(pm);                                 // ConstantFold + InstCombine + DCE
 
-        pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
-        make_basic_clean(pm);
+        // pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
+        // make_basic_clean(pm);
 
-        // pm.addPass(std::make_unique<GVN>());                  // 全局值编号
-        make_basic_clean(pm);
+        // // pm.addPass(std::make_unique<GVN>());                  // 全局值编号
+        // make_basic_clean(pm);
 
-        pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
+        // pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
+        // make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
-        pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
-        pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
+        // pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
+        // pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
 
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
-        pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
-        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
-        pm.addPass(std::make_unique<LoopRepFold>());          // 循环重复折叠（消除外层计数循环）
-        pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
+        // pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
+        // pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
+        // pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
+        // pm.addPass(std::make_unique<LoopRepFold>());          // 循环重复折叠（消除外层计数循环）
+        // pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
+        // make_deep_clean(pm);                                  // basic + CFGSimplify + basic
 
-        make_basic_clean(pm);                                 // 最后再来一轮基本清理
-        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
+        // make_basic_clean(pm);                                 // 最后再来一轮基本清理
+        // make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
 
+	}
+	if(optLevel >= 2){
+	    pm.addPass(std::make_unique<InstCombine>());  
 	}
 
 	pm.run(m.get());
