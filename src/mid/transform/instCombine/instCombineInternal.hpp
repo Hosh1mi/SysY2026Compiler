@@ -159,3 +159,7 @@ Value* visitAShr(BinaryInst *inst);
 Value* visitAnd(BinaryInst *inst);
 Value* visitOr(BinaryInst *inst);
 Value* visitXor(BinaryInst *inst);
+
+// CmpSelect
+Value* visitICmp(ICmpInst *inst);
+Value* visitSelect(SelectInst *inst);

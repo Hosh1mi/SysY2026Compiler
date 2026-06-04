@@ -84,6 +84,13 @@ void InstCombine::runOnFunction(Function *func) {
         case Instruction::Xor:
             replacement = visitXor(static_cast<BinaryInst*>(inst));
             break;
+        // CmpSelect
+        case Instruction::ICmp:
+            replacement = visitICmp(static_cast<ICmpInst*>(inst));
+            break;
+        case Instruction::Select:
+            replacement = visitSelect(static_cast<SelectInst*>(inst));
+            break;
         default:
             break;
         }
