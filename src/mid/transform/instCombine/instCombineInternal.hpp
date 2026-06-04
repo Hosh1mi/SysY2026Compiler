@@ -149,3 +149,13 @@ Value* visitSDiv(BinaryInst *inst);
 Value* visitSRem(BinaryInst *inst);
 Value* visitFMul(BinaryInst *inst);
 Value* visitFDiv(BinaryInst *inst);
+
+// Shifts
+Value* visitShl(BinaryInst *inst);
+Value* visitLShr(BinaryInst *inst);
+Value* visitAShr(BinaryInst *inst);
+
+// Bitwise
+Value* visitAnd(BinaryInst *inst);
+Value* visitOr(BinaryInst *inst);
+Value* visitXor(BinaryInst *inst);

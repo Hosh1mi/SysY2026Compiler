@@ -64,6 +64,26 @@ void InstCombine::runOnFunction(Function *func) {
         case Instruction::FDiv:
             replacement = visitFDiv(static_cast<BinaryInst*>(inst));
             break;
+        // Shifts
+        case Instruction::Shl:
+            replacement = visitShl(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::LShr:
+            replacement = visitLShr(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::AShr:
+            replacement = visitAShr(static_cast<BinaryInst*>(inst));
+            break;
+        // Bitwise
+        case Instruction::And:
+            replacement = visitAnd(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::Or:
+            replacement = visitOr(static_cast<BinaryInst*>(inst));
+            break;
+        case Instruction::Xor:
+            replacement = visitXor(static_cast<BinaryInst*>(inst));
+            break;
         default:
             break;
         }
