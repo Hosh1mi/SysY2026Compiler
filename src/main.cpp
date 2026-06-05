@@ -169,7 +169,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
 
-        pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist (TODO: fix loop detection)
+        pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱

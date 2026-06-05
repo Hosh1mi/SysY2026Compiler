@@ -33,3 +33,4 @@ test/result.txt
 *.md
 /test/re
 *.png
+*.elf

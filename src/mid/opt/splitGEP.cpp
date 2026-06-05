@@ -2,8 +2,14 @@
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
+
+static bool isSplitGEPDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_SPLIT_GEP") != nullptr;
+    return enabled;
+}
 
 void SplitGEP::execute(Module *module) {
     for (auto *f : module->function_list_) {
@@ -42,27 +48,19 @@ std::vector<SplitGEP::Loop> SplitGEP::findLoops(Function *func) {
             loop.header = target;
             loop.latch  = bb;
 
-            // Collect body blocks: all blocks reachable from header going
-            // forward (avoiding the back-edge) that are not the header.
-            std::vector<BasicBlock*> worklist = {target};
-            std::set<BasicBlock*> visited = {target};
+            // Collect the natural loop by walking predecessors from the latch
+            // back to the header.
+            std::vector<BasicBlock*> worklist = {bb};
+            std::set<BasicBlock*> visited = {target, bb};
             while (!worklist.empty()) {
                 auto *cur = worklist.back(); worklist.pop_back();
-                if (cur->instr_list_.empty() || cur == target) continue;
-                auto *t = cur->get_terminator();
-                if (!t || !t->is_br()) continue;
-                for (unsigned i = 0; i < t->num_ops_; i++) {
-                    auto *succ = static_cast<BasicBlock*>(t->get_operand(i));
-                    if (succ == target) continue; // back-edge to header → exit
-                    if (visited.insert(succ).second)
-                        worklist.push_back(succ);
+                for (auto *pred : cur->pre_bbs_) {
+                    if (visited.insert(pred).second)
+                        worklist.push_back(pred);
                 }
             }
-            // Remove the header itself from body
-            visited.erase(target);
             loop.blocks = visited;
-            if (!loop.blocks.empty())
-                loops.push_back(loop);
+            loops.push_back(loop);
         }
     }
     return loops;
@@ -139,6 +137,12 @@ bool SplitGEP::isVariant(Value *v, const std::set<BasicBlock*> &loopBlocks,
 bool SplitGEP::runOnLoop(const Loop &loop) {
     bool changed = false;
 
+    // ScalarExpandedInterchange emits se_* loops with address shapes that its
+    // later consumers assume stay intact. Splitting those GEPs can expose
+    // non-equivalent pointer recurrences after vectorization/IVSR.
+    if (loop.header && loop.header->name_.rfind("se_", 0) == 0)
+        return false;
+
     for (auto *bb : loop.blocks) {
         std::vector<Instruction*> insts(bb->instr_list_.begin(),
                                         bb->instr_list_.end());
@@ -172,19 +176,38 @@ bool SplitGEP::runOnLoop(const Loop &loop) {
                 continue;
             }
 
-            // Build variant suffix GEP: use the prefix as the new base,
-            // keep only the variant indices (operands splitIdx+1 .. numIndices)
-            std::vector<Value*> variantIdxs;
+            auto *prefixPtrTy = dynamic_cast<PointerType*>(prefixGEP->type_);
+            if (!prefixPtrTy || prefixPtrTy->contained_->tid_ != Type::ArrayTyID) {
+                bb->delete_instr(prefixGEP);
+                continue;
+            }
+
+            // Build variant suffix GEP with normal GEP semantics. Since the
+            // prefix result still points to an aggregate object, the suffix
+            // must start with 0 before continuing with the remaining indices.
+            std::vector<Value*> suffixIdxs;
+            suffixIdxs.push_back(new ConstantInt(bb->parent_->parent_->int32_ty_, 0));
             for (unsigned i = splitIdx + 1; i <= numIndices; i++)
-                variantIdxs.push_back(gep->get_operand(i));
-            auto *suffixGEP = GetElementPtrInst::create_split_suffix_gep(
-                prefixGEP, variantIdxs, bb, true);
+                suffixIdxs.push_back(gep->get_operand(i));
+            auto *suffixGEP = new GetElementPtrInst(prefixGEP, suffixIdxs, bb, true);
             inserted = bb->add_instruction_before_inst(suffixGEP, inst);
             if (!inserted) {
                 bb->delete_instr(prefixGEP);
                 suffixGEP->remove_use_of_ops();
                 delete suffixGEP;
                 continue;
+            }
+
+            if (isSplitGEPDebugEnabled()) {
+                std::cerr << "[SplitGEP] function=" << bb->parent_->name_
+                          << " loop_header=" << loop.header->name_
+                          << " bb=" << bb->name_
+                          << " gep=%" << gep->name_
+                          << " splitIdx=" << splitIdx
+                          << " numIndices=" << numIndices
+                          << " prefix=%" << prefixGEP->name_
+                          << " suffix=%" << suffixGEP->name_
+                          << "\n";
             }
 
             // Replace original GEP with suffix GEP
