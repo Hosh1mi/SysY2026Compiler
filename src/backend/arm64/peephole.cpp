@@ -922,6 +922,29 @@ static bool trySxtwCSE(std::vector<ParsedLine> &lines) {
     return changed;
 }
 
+// Rule 11: eliminate redundant adrp to the same symbol.
+//   adrp xN, sym  ... (no write to xN) ...  adrp xN, sym  →  delete second
+static bool tryRedundantAdrp(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "adrp" || l0.operands.size() < 2) return false;
+    std::string reg = l0.operands[0];
+    std::string sym = l0.operands[1];
+
+    auto w = instructionWindow(lines, idx + 1, 20);
+    for (size_t wi : w) {
+        auto &li = lines[wi];
+        if (isCallBarrier(li.mnemonic)) return false; // call clobbers caller-saved xN
+        if (lineWritesReg(li, reg)) return false;     // reg overwritten
+        if (li.mnemonic == "adrp" && li.operands.size() >= 2 &&
+            li.operands[0] == reg && li.operands[1] == sym) {
+            li.raw.clear();
+            li.kind = LineKind::Empty;
+            return true;
+        }
+    }
+    return false;
+}
+
 // ── Main optimization loop ──────────────────────────────────────────
 
 std::string peepholeOptimize(const std::string &asmText) {
@@ -950,6 +973,8 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (tryStoreLoadForwardX17(lines, i)){ changed = true; break; }
 			if (tryMergeStores(lines, i))        { changed = true; break; }
 			if (tryMergeLoads(lines, i))         { changed = true; break; }
+			if (tryRedundantAdrp(lines, i))     { changed = true; break; }
+
 		}
 
 		if (!changed) return current;

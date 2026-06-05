@@ -426,18 +426,51 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         // 通用路径（Add / Sub / Mul 无法优化，或 SDiv 非常量 / 非 2^k 除数）
         // =====================================================================
         if (!emitted) {
-            std::string r1 = loadInt(v1);
-            std::string r2 = loadInt(v2);
-            std::string rd = allocIntReg();
             const char* opcode = nullptr;
-            switch (inst->op_id_) {
-                case Instruction::Add:  opcode = "add";  break;
-                case Instruction::Sub:  opcode = "sub";  break;
-                case Instruction::Mul:  opcode = "mul";  break;
-                case Instruction::SDiv: opcode = "sdiv"; break;
-                default: break;
+            bool usedImm = false;
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+
+            // Try immediate forms for Add/Sub before loading both operands
+            if (inst->op_id_ == Instruction::Add) {
+                opcode = "add";
+                if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
+                        std::string r1 = loadInt(v1);
+                        os_ << "\tadd " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                        usedImm = true;
+                    }
+                }
+                if (!usedImm && dynamic_cast<ConstantInt*>(v1)) {
+                    auto ci = static_cast<ConstantInt*>(v1);
+                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
+                        std::string r2 = loadInt(v2);
+                        os_ << "\tadd " << rd << ", " << r2 << ", #" << ci->value_ << "\n";
+                        usedImm = true;
+                    }
+                }
+            } else if (inst->op_id_ == Instruction::Sub) {
+                opcode = "sub";
+                if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
+                        std::string r1 = loadInt(v1);
+                        os_ << "\tsub " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                        usedImm = true;
+                    }
+                }
             }
-            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+
+            if (!usedImm) {
+                std::string r1 = loadInt(v1);
+                std::string r2 = loadInt(v2);
+                switch (inst->op_id_) {
+                    case Instruction::Add:  opcode = "add";  break;
+                    case Instruction::Sub:  opcode = "sub";  break;
+                    case Instruction::Mul:  opcode = "mul";  break;
+                    case Instruction::SDiv: opcode = "sdiv"; break;
+                    default: break;
+                }
+                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+            }
             storeInt(inst, rd);
         }
         break;
@@ -541,7 +574,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         std::string r1 = loadInt(v1);
-        std::string rd = allocIntReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
 
         const char *opcode;
         if (inst->op_id_ == Instruction::And)      opcode = "and";
@@ -620,7 +653,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
 
         std::string r1 = loadInt(v1);
-        std::string rd = allocIntReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
 
         const char *opcode;
         if (inst->op_id_ == Instruction::Shl)      opcode = "lsl";
@@ -628,10 +661,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         else                                        opcode = "asr";
 
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-            // 立即数移位：lsl wd, w1, #shift
             os_ << "\t" << opcode << " " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
         } else {
-            // 寄存器移位：lsl wd, w1, w2
             std::string r2 = loadInt(v2);
             os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
         }
@@ -666,7 +697,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         std::string r1 = loadFloat(v1);
         std::string r2 = loadFloat(v2);
-        std::string rd = allocFloatReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
         const char *opcode = nullptr;
         switch (inst->op_id_) {
         case Instruction::FAdd: opcode = "fadd"; break;
@@ -870,7 +901,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::ZExt: {
         auto val = inst->get_operand(0);
         std::string r = loadInt(val);
-        std::string rd = allocIntReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
         os_ << "\tand " << rd << ", " << r << ", #1\n";
         storeInt(inst, rd);
         break;
@@ -880,7 +911,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::FPtoSI: {
         auto val = inst->get_operand(0);
         std::string r = loadFloat(val);
-        std::string rd = allocIntReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
         os_ << "\tfcvtzs " << rd << ", " << r << "\n";
         storeInt(inst, rd);
         break;
@@ -890,7 +921,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SItoFP: {
         auto val = inst->get_operand(0);
         std::string r = loadInt(val);
-        std::string rd = allocFloatReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
         os_ << "\tscvtf " << rd << ", " << r << "\n";
         storeFloat(inst, rd);
         break;
@@ -1100,7 +1131,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::FNeg: {
         auto val = inst->get_operand(0);
         std::string r = loadFloat(val);
-        std::string rd = allocFloatReg();
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
         os_ << "\tfneg " << rd << ", " << r << "\n";
         storeFloat(inst, rd);
         break;
