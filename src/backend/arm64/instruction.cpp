@@ -277,18 +277,6 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
                 if (d == 0) {
                     // 除以 0：让 sdiv 产生实现定义结果，fall-through
-                } else if (d == 1) {
-                    // ÷1：identity
-                    std::string r = loadInt(v1);
-                    storeInt(inst, r);
-                    emitted = true;
-                } else if (d == -1) {
-                    // ÷(-1)：negate
-                    std::string r  = loadInt(v1);
-                    std::string rd = allocIntReg();
-                    os_ << "\tneg " << rd << ", " << r << "\n";
-                    storeInt(inst, rd);
-                    emitted = true;
                 } else {
                     // 安全计算绝对值——INT32_MIN 的 -d 会溢出，特判排除
                     // 若 d == INT32_MIN，abs_d = 0，后续条件不成立，自动 fall-through
@@ -364,20 +352,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (ci) {
                 int32_t factor = ci->value_;
 
-                if (factor == 0) {
-                    // × 0
-                    std::string rd = allocIntReg();
-                    os_ << "\tmov " << rd << ", #0\n";
-                    storeInt(inst, rd);
-                    emitted = true;
-
-                } else if (factor == 1) {
-                    // × 1：identity
-                    std::string r = loadInt(var);
-                    storeInt(inst, r);
-                    emitted = true;
-
-                } else if (factor == -1) {
+                if (factor == -1) {
                     // × -1：negate
                     std::string r  = loadInt(var);
                     std::string rd = allocIntReg();
@@ -477,7 +452,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             int32_t divisor = ci->value_;
             if (divisor == 0) { /* Fallback */ }
             // ---- 除数为 1，余数恒为 0 ----
-            else if (divisor == 1 || divisor == -1) {
+            else if (divisor == -1) {
                 std::string rd = allocIntReg();
                 os_ << "\tmov " << rd << ", wzr\n";
                 storeInt(inst, rd);

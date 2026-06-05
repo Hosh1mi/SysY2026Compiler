@@ -1,3 +1,4 @@
+// NOTE: If bugs are met, delete fneg
 #include "instCombineInternal.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -46,6 +47,49 @@ Value* visitAdd(BinaryInst *inst) {
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
+        }
+    }
+
+    // 5. Fold  x + (x << k)  →  mul x, 2^k+1
+    //    Canonical form for the backend: a single mul lets the backend
+    //    emit one fused  add x, x, lsl #k  on AArch64.
+    {
+        auto *xi = dynamic_cast<Instruction*>(x);
+        auto *yi = dynamic_cast<Instruction*>(y);
+        if (xi && xi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(xi->get_operand(1));
+            if (amt && xi->get_operand(0) == y) {
+                // (x << k) + x
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    y, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
+            }
+        }
+        if (yi && yi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(yi->get_operand(1));
+            if (amt && yi->get_operand(0) == x) {
+                // x + (x << k)
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    x, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
+            }
+        }
+    }
+
+    // 6. add x, C  →  or x, C   when  x & C == 0  (no carry possible)
+    //    If x has k trailing zeros and C fits in k bits, addition is just bitwise OR.
+    if (cy && cy->value_ > 0) {
+        // k = ⌈log₂(C+1)⌉ — the number of bits needed to represent C
+        int k = 1;
+        while ((1 << k) <= cy->value_) k++;
+        // C < 2^k, so all set bits of C are in positions 0..k-1.
+        // If x is a multiple of 2^k, its low k bits are zero → x & C == 0.
+        if (isKnownMultipleOf(x, k, bb)) {
+            auto *or_inst = new BinaryInst(ty, Instruction::Or, x, y, bb, true);
+            bb->add_instruction_before_inst(or_inst, inst);
+            return or_inst;
         }
     }
 
@@ -108,6 +152,20 @@ Value* visitSub(BinaryInst *inst) {
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
+            }
+        }
+    }
+
+    // 6. Fold  (x << k) - x  →  mul x, 2^k-1
+    {
+        auto *xi = dynamic_cast<Instruction*>(x);
+        if (xi && xi->op_id_ == Instruction::Shl) {
+            auto *amt = as_const_int(xi->get_operand(1));
+            if (amt && xi->get_operand(0) == y) {
+                auto *mul = new BinaryInst(ty, Instruction::Mul,
+                    y, make_const_int(ty, (1 << amt->value_) - 1), bb, true);
+                bb->add_instruction_before_inst(mul, inst);
+                return mul;
             }
         }
     }

@@ -355,6 +355,10 @@ public:
 class ZextInst : public Instruction {
 public:
     ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
+    ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb, bool) : Instruction(ty, op, 1), dest_ty_(ty) {
+        set_operand(0, val);
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
     Type* dest_ty_;
 };
