@@ -165,10 +165,9 @@ int main(int argc, char **argv) {
 		pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
         pm.addPass(std::make_unique<InstCombine>());
-        pm.addPass(std::make_unique<CFGSimplify>());
-        pm.addPass(std::make_unique<DeadCodeDelete>());
+        // pm.addPass(std::make_unique<CFGSimplify>());
+        // pm.addPass(std::make_unique<DeadCodeDelete>());
         pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
-        pm.addPass(std::make_unique<CFGSimplify>());
         pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         make_basic_clean(pm);                                 // ConstantFold + InstCombine + DCE

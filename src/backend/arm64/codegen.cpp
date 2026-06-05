@@ -16,126 +16,122 @@
 #endif
 
 void Arm64CodeGen::generate() {
-    os_ << "\t.text\n\n";
-
-    // 1. 全局变量（单线程，顺序输出）
+    // 1. 分类全局变量
+    std::vector<GlobalVariable*> rodata, data, bss;
     for (auto gv : m_->global_list_) {
-        emitGlobal(gv);
+        if (gv->is_const_) {
+            rodata.push_back(gv);
+        } else if (gv->init_val_ && !dynamic_cast<ConstantZero*>(gv->init_val_)) {
+            data.push_back(gv);
+        } else {
+            bss.push_back(gv);
+        }
     }
 
-    // 2. 外部函数声明（单线程）
+    // 2. 外部函数声明
     for (auto f : m_->function_list_) {
         if (f->is_declaration()) {
             emitExtern(f);
         }
     }
 
-    os_ << "\n\t.text\n\n";
-
-    // 3. 收集需要生成代码的函数（非声明）
+    // 3. 收集非声明函数
     std::vector<Function*> funcs;
     for (auto f : m_->function_list_) {
         if (!f->is_declaration()) {
             funcs.push_back(f);
         }
     }
-    if (funcs.empty()) return;
 
-    // 4. 提前为所有指令命名（避免多线程静态计数器竞争）
-    for (auto f : funcs) {
-        f->set_instr_name();
-    }
-
-    // 5. 计算可用线程数（排除隔离核心2、3）
-    unsigned numThreads = std::thread::hardware_concurrency();
-    if (numThreads == 0) numThreads = 1;
-    // 4核CPU，扣除核心2、3后最多可用2个线程
-    if (numThreads <= 2) numThreads = 1;
-    else numThreads = numThreads - 2;  // 对于4核=2线程
-    // std::cout << "Using " << numThreads << " threads for code generation.\n";
-
-    // 6. 将函数均匀分配给各线程（轮转分配）
-    std::vector<std::vector<Function*>> partitions(numThreads);
-    for (size_t i = 0; i < funcs.size(); ++i) {
-        partitions[i % numThreads].push_back(funcs[i]);
-    }
-
-    // 7. 存储每个函数生成结果的字符串（按原始顺序）
+    // 4. 并行生成函数代码
     std::vector<std::string> results(funcs.size());
-    std::vector<std::thread> threads;
+    if (!funcs.empty()) {
+        for (auto f : funcs) {
+            f->set_instr_name();
+        }
 
-    for (unsigned t = 0; t < numThreads; ++t) {
-        threads.emplace_back([this, &partitions, &results, &funcs, t, numThreads]() {
-            // 设置CPU亲和性：只允许编译器线程运行在非隔离核心（核心0,1）
+        unsigned numThreads = std::thread::hardware_concurrency();
+        if (numThreads == 0) numThreads = 1;
+        if (numThreads <= 2) numThreads = 1;
+        else numThreads = numThreads - 2;
+
+        std::vector<std::vector<Function*>> partitions(numThreads);
+        for (size_t i = 0; i < funcs.size(); ++i) {
+            partitions[i % numThreads].push_back(funcs[i]);
+        }
+
+        std::vector<std::thread> threads;
+        for (unsigned t = 0; t < numThreads; ++t) {
+            threads.emplace_back([this, &partitions, &results, &funcs, t]() {
 #ifdef __linux__
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            int numCores = sysconf(_SC_NPROCESSORS_ONLN);
-            for (int i = 0; i < numCores; ++i) {
-                if (i != 2 && i != 3) {   // 排除隔离核心
-                    CPU_SET(i, &cpuset);
+                cpu_set_t cpuset;
+                CPU_ZERO(&cpuset);
+                int numCores = sysconf(_SC_NPROCESSORS_ONLN);
+                for (int i = 0; i < numCores; ++i) {
+                    if (i != 2 && i != 3) {
+                        CPU_SET(i, &cpuset);
+                    }
                 }
-            }
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+                pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 #endif
-
-            // 为该线程分配的每个函数生成汇编
-            for (auto f : partitions[t]) {
-                std::ostringstream local_os;
-                Arm64FuncContext ctx(f, local_os);
-                ctx.generate();
-
-                // 找到该函数在原始funcs中的位置，存入results对应索引
-                auto it = std::find(funcs.begin(), funcs.end(), f);
-                size_t idx = it - funcs.begin();
-                results[idx] = no_peephole_ ? local_os.str() : peepholeOptimize(local_os.str());
-            }
-        });
+                for (auto f : partitions[t]) {
+                    std::ostringstream local_os;
+                    Arm64FuncContext ctx(f, local_os);
+                    ctx.generate();
+                    auto it = std::find(funcs.begin(), funcs.end(), f);
+                    size_t idx = it - funcs.begin();
+                    results[idx] = no_peephole_ ? local_os.str() : peepholeOptimize(local_os.str());
+                }
+            });
+        }
+        for (auto &th : threads) {
+            th.join();
+        }
     }
 
-    // 8. 等待所有线程完成
-    for (auto &th : threads) {
-        th.join();
+    // 5. 输出 .text + 函数代码
+    if (!funcs.empty()) {
+        os_ << "\t.text\n";
+        for (const auto &str : results) {
+            os_ << str;
+        }
     }
 
-    // 9. 按原始函数顺序输出结果
-    for (const auto &str : results) {
-        os_ << str;
-    }
+    // 6. 输出数据段：.data -> .bss -> .section .rodata
+    auto emitGroup = [&](const char* sec, const std::vector<GlobalVariable*>& gvs) {
+        if (gvs.empty()) return;
+        os_ << sec << "\n";
+        for (auto gv : gvs) {
+            emitGlobal(gv);
+        }
+    };
+    emitGroup("\t.data",            data);
+    emitGroup("\t.bss",             bss);
+    emitGroup("\t.section .rodata", rodata);
 }
 
 void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
     auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
-
-    if (gv->is_const_) {
-        os_ << "\t.section .rodata\n";
-    } else if (gv->init_val_ && !dynamic_cast<ConstantZero*>(gv->init_val_)) {
-        os_ << "\t.data\n";
-    } else {
-        os_ << "\t.bss\n";
-    }
 
     os_ << "\t.global " << gv->name_ << "\n";
     os_ << "\t.p2align 2\n";
     os_ << gv->name_ << ":\n";
 
     if (auto cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
-        int size = 4; // default i32/float
+        int size = 4;
         Type *ty = pointee;
         if (ty->tid_ == Type::ArrayTyID) {
-            // Total elements
             int totalElements = 1;
             Type *cur = ty;
             while (auto arrTy = dynamic_cast<ArrayType*>(cur)) {
                 totalElements *= arrTy->num_elements_;
                 cur = arrTy->contained_;
             }
-            // Element size
-            int elemSize = 4; 
+            int elemSize = 4;
             if (cur->tid_ == Type::IntegerTyID) {
                 elemSize = static_cast<IntegerType*>(cur)->num_bits_ / 8;
             } else if (cur->tid_ == Type::FloatTyID) {
-                elemSize = 4; // float set to 4 bytes
+                elemSize = 4;
             }
             size = totalElements * elemSize;
         }
@@ -148,7 +144,6 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
         std::memcpy(&bits, &val, sizeof(bits));
         os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
     } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
-        // Check if all elements are zero — use .zero for compactness
         std::function<bool(Constant*)> allZero = [&](Constant *elem) -> bool {
             if (auto eci = dynamic_cast<ConstantInt*>(elem))
                 return eci->value_ == 0;
