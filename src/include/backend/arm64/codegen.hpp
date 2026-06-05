@@ -7,6 +7,8 @@ public:
     Arm64CodeGen(Module *m, std::ostream &os) : m_(m), os_(os) {}
     void generate();
 
+    void setNoPeephole(bool v) { no_peephole_ = v; }
+
 private:
     void emitGlobal(GlobalVariable *gv);
     void emitFunction(Function *f);
@@ -14,4 +16,5 @@ private:
 
     Module *m_;
     std::ostream &os_;
+    bool no_peephole_ = false;
 };

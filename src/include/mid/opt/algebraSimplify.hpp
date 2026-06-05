@@ -5,6 +5,7 @@
 class AlgebraSimplify : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "AlgebraSimplify"; }
 
 private:
     void runOnFunction(Function *func);

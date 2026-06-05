@@ -83,6 +83,9 @@ int main(int argc, char **argv) {
 	int print_asm = false;
 	std::string output = "-";
 	int optLevel = 0;
+	bool flag_dump_ir      = false;
+	bool flag_verify_ir    = false;
+	bool flag_no_peephole  = false;
 
 	for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -113,6 +116,15 @@ int main(int argc, char **argv) {
                     optLevel = 1; // 默认 -O == -O1
                 }
             }
+        }
+        else if (arg == "--dump-ir") {
+            flag_dump_ir = true;
+        }
+        else if (arg == "--verify-ir") {
+            flag_verify_ir = true;
+        }
+        else if (arg == "--fno-peephole") {
+            flag_no_peephole = true;
         }
         else if (arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
@@ -146,6 +158,8 @@ int main(int argc, char **argv) {
 
     // TODO：设计合适的Pass Pipeline
     PassManager pm;
+    pm.setDumpIR(flag_dump_ir);
+    pm.setVerifyIR(flag_verify_ir);
 	if(optLevel >= 1){
 	    pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
 		pm.addPass(std::make_unique<Mem2Reg>());
@@ -201,6 +215,7 @@ int main(int argc, char **argv) {
 	/* backend */
 	if (print_asm) {
 		Arm64CodeGen codegen(m.get(), *out);
+			codegen.setNoPeephole(flag_no_peephole);
 		codegen.generate();
 	}else if (print_ir) {
 		*out << m->print();

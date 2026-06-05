@@ -83,6 +83,21 @@ mkdir build && cd build && cmake .. && make -j4
 gcc out.s ../lib/libsysy.a -o out
 ```
 
+调试选项:
+
+TODO: 用参数选择pass
+
+| Flag | 作用 |
+|------|------|
+| `-O0` / `-O1` / `-O2` | 优化等级（`-O2`仅用于调试） |
+| `--dump-ir` | 每个 pass 前后 dump IR |
+| `--verify-ir` | 每个 pass 后校验 IR 完整性（TODO:目前无作用） |
+| `--fno-peephole` | 禁用 peephole 汇编后优化 |
+
+Pass 基类 (`pass.hpp`) 提供 `name()` 纯虚函数，每个 pass 需返回类名（如 `"Mem2Reg"`），供 dump/verify 使用。
+
+注:`--dump-ir`为stderr实现，输出极长，使用`2>`重定向到文件里查看
+
 对`performance/`采用批量测试，在`test/`下运行：
 ```bash
 ./arm_test.sh

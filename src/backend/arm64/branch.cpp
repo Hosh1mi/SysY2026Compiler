@@ -250,6 +250,22 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     // value before the csel reads it.  (Calls are already rejected above.)
     emitInstruction(trueInst);
 
+    // Emit the false instruction inline as well.
+    // Both trueInst and falseInst must be computed before the csel because
+    // the original CFG branches to them, but csel bypasses both blocks.
+    // Also, the regalloc may give them the same register (their live ranges
+    // don't overlap in the original CFG), so we must save trueInst's result
+    // before falseInst potentially clobbers it.
+    std::string trueSaveReg;
+    std::string trueAssigned = hasAssignedReg(trueInst) ? assignedReg(trueInst) : "";
+    if (falseInst && hasAssignedReg(falseInst) &&
+        assignedReg(falseInst) == trueAssigned && !trueAssigned.empty()) {
+        trueSaveReg = allocIntReg();
+        os_ << "\tmov " << trueSaveReg << ", " << trueAssigned << "\n";
+    }
+    if (falseInst)
+        emitInstruction(falseInst);
+
     // Emit cmp to set flags for csel.
     auto *v1 = icmp->get_operand(0);
     auto *v2 = icmp->get_operand(1);
@@ -270,9 +286,14 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     };
     emitCmp();
 
-    // Write csel result directly to the phi's assigned register
+    // Write csel result directly to the phi's assigned register.
+    // For Pattern A, trueInst was already emitted; if we saved its result
+    // (to avoid clobbering by falseInst), use the saved register.
     std::string dstReg   = hasAssignedReg(phi)       ? assignedReg(phi)       : allocIntReg();
-    std::string trueReg  = hasAssignedReg(trueInst)  ? assignedReg(trueInst)  : loadInt(trueInst);
+    std::string trueReg  = !trueSaveReg.empty()      ? trueSaveReg
+                         : hasAssignedReg(trueInst)  ? assignedReg(trueInst)  : loadInt(trueInst);
+    // For Pattern A, falseInst was emitted above; its value is now in its assigned reg or slot.
+    // For Pattern B, falsePhiVal comes from the cond block (already live).
     std::string falseReg = hasAssignedReg(falsePhiVal)? assignedReg(falsePhiVal): loadInt(falsePhiVal);
     os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << cond << "\n";
     if (!hasAssignedReg(phi)) storeInt(phi, dstReg);

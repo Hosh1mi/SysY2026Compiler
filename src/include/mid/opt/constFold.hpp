@@ -5,6 +5,7 @@
 class ConstantFold : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "ConstantFold"; }
 
 private:
     // 对单个函数执行一遍折叠，返回是否有改动
