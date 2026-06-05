@@ -256,6 +256,108 @@ static std::vector<size_t> instructionWindow(const std::vector<ParsedLine> &line
 // ── RULE implementations ────────────────────────────────────────────
 // Each returns true if it made a change.
 
+// Helper: true for w9-w15 / x9-x15, caller-saved scratch registers.
+static bool isScratchReg(const std::string &r) {
+    if (r.size() < 2) return false;
+    if (r[0] != 'w' && r[0] != 'x') return false;
+    int num = std::atoi(r.c_str() + 1);
+    return num >= 9 && num <= 15;
+}
+
+// Rule 0a: swap-mov elimination
+//   mov rA, rB  +  mov rB, rA  →  keep first, delete second
+//   After `mov rA, rB`, rA = old_B.  `mov rB, rA` then sets rB = old_B,
+//   which rB already held — the second instruction is a no-op.
+static bool trySwapMov(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "mov") return false;
+    if (l0.operands.size() < 2) return false;
+
+    std::string rA = l0.operands[0];
+    std::string rB = l0.operands[1];
+    if (rA == rB) return false;
+    if (rB.empty() || rB[0] == '#') return false;  // rB must be a register
+    if (!regClass(rA) || !regClass(rB)) return false;
+
+    auto w = instructionWindow(lines, idx + 1, 1);
+    if (w.empty()) return false;
+    auto &l1 = lines[w[0]];
+
+    if (l1.mnemonic != "mov" || l1.operands.size() < 2) return false;
+    if (l1.operands[0] != rB || l1.operands[1] != rA) return false;
+
+    l1.raw.clear();
+    l1.kind = LineKind::Empty;
+    return true;
+}
+
+// Rule 0b: immediate fold
+//   movz wT, #N  +  add/sub wM, wS, wT  +  mov wD, wM  →  add/sub wD, wS, #N
+//   Also handles commutative add: movz wT, #N + add wM, wT, wS + mov wD, wM
+//   Requires N in [0,4095], wT and wM are scratch registers (w9-w15).
+static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "movz") return false;
+    if (l0.operands.size() < 2) return false;
+
+    std::string wT = l0.operands[0];
+    if (!isScratchReg(wT)) return false;
+    char cls = regClass(wT);
+    if (cls != 'w' && cls != 'x') return false;
+
+    const std::string &immStr = l0.operands[1];
+    if (immStr.empty() || immStr[0] != '#') return false;
+    int N = std::atoi(immStr.c_str() + 1);
+    if (N < 0 || N > 4095) return false;
+
+    auto w = instructionWindow(lines, idx + 1, 2);
+    if (w.size() < 2) return false;
+
+    auto &l1 = lines[w[0]];
+    auto &l2 = lines[w[1]];
+
+    if (l1.mnemonic != "add" && l1.mnemonic != "sub") return false;
+    if (l1.operands.size() < 3) return false;
+
+    std::string wM = l1.operands[0];
+    if (!isScratchReg(wM)) return false;
+    if (regClass(wM) != cls) return false;
+
+    // Determine source register wS: wT must appear as one operand
+    std::string wS;
+    if (l1.operands[2] == wT) {
+        wS = l1.operands[1];
+    } else if (l1.mnemonic == "add" && l1.operands[1] == wT) {
+        wS = l1.operands[2];  // commutative: add wM, wT, wS
+    } else {
+        return false;
+    }
+
+    // l2 must be: mov wD, wM
+    if (l2.mnemonic != "mov" || l2.operands.size() < 2) return false;
+    if (l2.operands[1] != wM) return false;
+    std::string wD = l2.operands[0];
+
+    // Safety: wM must be dead after l2 — i.e., the next instruction that
+    // touches wM must write it (not read). Otherwise deleting `op wM,...`
+    // would leave that later read with a stale/undefined value.
+    for (size_t j = w[1] + 1; j < lines.size(); ++j) {
+        if (lines[j].kind != LineKind::Instruction) continue;
+        if (isCallBarrier(lines[j].mnemonic)) break;       // call clobbers scratch → wM is dead from here
+        if (lineWritesReg(lines[j], wM)) break;            // wM rewritten before any read → safe
+        if (lineReadsReg(lines[j], wM)) return false;      // wM still live → unsafe to fold
+    }
+
+    // Apply: delete movz+op, replace mov with op wD, wS, #N
+    std::string newImm = "#" + std::to_string(N);
+    l0.raw.clear(); l0.kind = LineKind::Empty;
+    l1.raw.clear(); l1.kind = LineKind::Empty;
+    l2.raw = makeInsn(l1.mnemonic, {wD, wS, newImm});
+    l2.mnemonic = l1.mnemonic;
+    l2.operands = {wD, wS, newImm};
+    return true;
+}
+
 // Rule 1: forward mov  —  mov rA, rB  +  mov rC, rA  →  mov rC, rB
 static bool tryForwardMov(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l0 = lines[idx];
@@ -963,6 +1065,8 @@ std::string peepholeOptimize(const std::string &asmText) {
 		for (size_t i = 0; i < lines.size(); ++i) {
 			if (lines[i].kind != LineKind::Instruction) continue;
 
+			if (trySwapMov(lines, i))            { changed = true; break; }
+			if (tryImmediateFold(lines, i))      { changed = true; break; }
 			if (tryForwardMov(lines, i))         { changed = true; break; }
 			if (trySelfMove(lines, i))           { changed = true; break; }
 			if (tryMulAddFusion(lines, i))      { changed = true; break; }
