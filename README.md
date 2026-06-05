@@ -57,7 +57,35 @@
     <td></td>
     <td>inlineExpand不支持Unary</td>
   </tr>
-  
+  <tr>
+    <td></td>
+    <td>压栈保存过多被调用者保存寄存器</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>大量无效寄存器到寄存器拷贝(冗余mov)</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>栈帧设计大量槽位闲置</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>无条件跳转链 + 可被 cbz/cbnz 吸收的模式未利用</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>全局变量重复加载</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>movz + mov 双指令中转模式普遍(w9中转)</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>叶函数式尾循环仍设置完整 FP 帧</td>
+  </tr>
+
   <tr>
     <td><b>特性支持</b></td>
     <td>完整支持 Vec 向量类型</td>
