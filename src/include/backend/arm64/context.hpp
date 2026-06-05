@@ -66,6 +66,9 @@ private:
     bool tryEmitCCmpCSel(ICmpInst *icmp, BranchInst *br);
     void emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br);
 
+    // Block layout: reorder basic blocks to maximize fallthrough
+    void reorderBlocks();
+
     const char *icmpCond(ICmpInst::ICmpOp op);
     const char *fcmpCond(FCmpInst::FCmpOp op);
 

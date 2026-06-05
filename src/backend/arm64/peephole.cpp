@@ -1027,6 +1027,44 @@ static bool tryRedundantAdrp(std::vector<ParsedLine> &lines, size_t idx) {
     return false;
 }
 
+// Rule 13: eliminate redundant unconditional branch to immediately
+// following label.  After block reordering this catches the remaining
+// cases that the layout pass could not handle (e.g. multi-predecessor
+// blocks where only one predecessor can get fallthrough).
+//
+//   b .Lfoo          →  (deleted)
+//   .Lfoo:
+static bool tryFallthroughBranch(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "b") return false;
+    if (l0.operands.size() != 1) return false;
+
+    const std::string &target = l0.operands[0];
+
+    // Find the next non-empty, non-comment line
+    for (size_t j = idx + 1; j < lines.size(); ++j) {
+        if (lines[j].kind == LineKind::Empty ||
+            lines[j].kind == LineKind::Comment)
+            continue;
+        // Label whose text (minus trailing colon) matches the branch target
+        if (lines[j].kind == LineKind::Label) {
+            std::string labelText = trim(lines[j].raw);
+            // Remove trailing colon
+            if (!labelText.empty() && labelText.back() == ':')
+                labelText.pop_back();
+            if (labelText == target) {
+                l0.raw.clear();
+                l0.kind = LineKind::Empty;
+                return true;
+            }
+        }
+        // Any other kind (instruction, directive) breaks — the branch is
+        // not jumping to the immediate next line.
+        break;
+    }
+    return false;
+}
+
 // ── Main optimization loop ──────────────────────────────────────────
 
 std::string peepholeOptimize(const std::string &asmText) {
@@ -1057,6 +1095,7 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (tryMergeStores(lines, i))        { changed = true; break; }
 			if (tryMergeLoads(lines, i))         { changed = true; break; }
 			if (tryRedundantAdrp(lines, i))     { changed = true; break; }
+			if (tryFallthroughBranch(lines, i))  { changed = true; break; }
 
 		}
 

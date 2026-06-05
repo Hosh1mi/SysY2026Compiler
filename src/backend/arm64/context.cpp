@@ -34,10 +34,90 @@ void Arm64FuncContext::generate() {
     assignedRegs_ = regAlloc.assignedRegs();
 
     emitPrologue();
+    reorderBlocks();
     for (auto bb : func_->basic_blocks_) {
         emitBlock(bb);
     }
     emitEpilogue();
+}
+
+void Arm64FuncContext::reorderBlocks() {
+    // Determine preferred fallthrough successor for each block.
+    // For conditional branches the generated code is:
+    //   b.cond true_label  (or cbz/cbnz)
+    //   [optional phi copies]
+    //   b fallthrough_target
+    // If fallthrough_target is placed immediately after this block, the 'b'
+    // instruction becomes redundant.
+    std::map<BasicBlock*, BasicBlock*> preferred;
+
+    for (auto bb : func_->basic_blocks_) {
+        auto term = bb->get_terminator();
+        if (!term || !term->is_br()) continue;
+
+        if (term->num_ops_ == 1) {
+            // Unconditional branch: prefer the single target
+            preferred[bb] = static_cast<BasicBlock*>(term->get_operand(0));
+        } else if (term->num_ops_ == 3) {
+            auto trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
+            auto falseBB = static_cast<BasicBlock*>(term->get_operand(2));
+
+            // Check which edges carry phi copies. The codegen (emitFusedCmpBranch /
+            // emitInstruction::Br) emits the unconditional 'b' to:
+            //   - trueBB  when hasTrue && !hasFalse
+            //   - falseBB otherwise
+            bool hasTrue = false, hasFalse = false;
+            for (const auto &pc : phiCopies_) {
+                if (pc.pred != bb) continue;
+                if (pc.succ == trueBB)  hasTrue  = true;
+                if (pc.succ == falseBB) hasFalse = true;
+            }
+            preferred[bb] = (hasTrue && !hasFalse) ? trueBB : falseBB;
+        }
+    }
+
+    // Greedy chain layout: start from the entry block (always first) and
+    // repeatedly place the preferred fallthrough successor, falling back
+    // to any unplaced block when the chain ends.
+    std::vector<BasicBlock*> order;
+    std::set<BasicBlock*> placed;
+
+    BasicBlock *entry = func_->basic_blocks_[0];
+    BasicBlock *current = entry;
+    order.push_back(current);
+    placed.insert(current);
+
+    while (order.size() < func_->basic_blocks_.size()) {
+        // Try the preferred fallthrough successor first
+        auto it = preferred.find(current);
+        if (it != preferred.end() && !placed.count(it->second)) {
+            current = it->second;
+        } else {
+            // Then try any unplaced successor
+            BasicBlock *next = nullptr;
+            auto term = current->get_terminator();
+            if (term && term->is_br()) {
+                for (unsigned i = 0; i < term->num_ops_; ++i) {
+                    // operand 0 of cond br is i1 (not a BB), skipped by dynamic_cast
+                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                        if (!placed.count(succ)) { next = succ; break; }
+                    }
+                }
+            }
+            if (next) {
+                current = next;
+            } else {
+                // Fall back: pick the first unplaced block in original order
+                for (auto bb : func_->basic_blocks_) {
+                    if (!placed.count(bb)) { current = bb; break; }
+                }
+            }
+        }
+        order.push_back(current);
+        placed.insert(current);
+    }
+
+    func_->basic_blocks_ = order;
 }
 
 void Arm64FuncContext::emitPrologue() {
