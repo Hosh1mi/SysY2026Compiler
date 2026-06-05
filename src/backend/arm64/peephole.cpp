@@ -273,12 +273,21 @@ static bool tryForwardMov(std::vector<ParsedLine> &lines, size_t idx) {
     if (l1.operands.size() < 2) return false;
     if (l1.operands[1] != rA) return false;
 
-    // rA must not be read after the second mov — scan until rA is overwritten
+    // rA must not be read after the second mov — scan until rA is overwritten.
     int seen = 0;
     bool safe = false;
     for (size_t j = w[0] + 1; j < lines.size() && seen < 30; ++j) {
         if (lines[j].kind != LineKind::Instruction) continue;
         ++seen;
+
+        // Stop at control-flow barriers — we can't track liveness across BBs.
+        const std::string &mnem = lines[j].mnemonic;
+        if (mnem == "b" || mnem == "ret" ||
+            mnem == "cbnz" || mnem == "cbz" ||
+            mnem == "tbnz" || mnem == "tbz" ||
+            (!mnem.empty() && mnem[0] == 'b' && mnem[1] == '.'))  // b.cond
+            return false;
+
         if (lineReadsReg(lines[j], rA)) return false;  // rA read → unsafe
         if (lineWritesReg(lines[j], rA)) { safe = true; break; }
     }
