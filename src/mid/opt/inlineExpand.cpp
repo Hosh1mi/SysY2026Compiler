@@ -238,7 +238,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
 bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller) {
     if (callee->is_declaration() || callee == caller)
         return false;
-    
+
     unsigned raw = countInstructions(callee);
 
     if (raw > INLINE_THRESHOLD)
@@ -270,7 +270,7 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller)
     // Estimate saved overhead and fold benefit.
     bool callInLoop = isCallInLoop(call);
     int savedOverhead = CALL_OVERHEAD;
-    if (callInLoop && weightedCost <= CALL_OVERHEAD * 3)
+    if (callInLoop)
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
 
