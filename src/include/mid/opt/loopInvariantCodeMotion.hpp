@@ -1,4 +1,5 @@
 #pragma once
+#include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
@@ -18,7 +19,7 @@ private:
         std::set<BasicBlock*> blocks;
     };
 
-    void runOnFunction(Function *func);
+    void runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
     void eliminateSinglePredPhis(Function *func);
     void eliminateTrivialHeaderPhis(const Loop &loop);
 
@@ -28,11 +29,10 @@ private:
                      const std::set<Instruction*>& toHoist, const Loop *loop = nullptr,
                      ScalarEvolution *SE = nullptr, ::Loop *analysisLoop = nullptr);
     bool isSafeToHoist(Instruction *inst, const Loop &loop,
-                       const std::set<Instruction*>& toHoist, bool loopHasCalls);
-    bool hasStoreToSameBase(const Loop &loop, Value *base);
-    static bool doesAnyCallWriteToBase(const Loop &loop, Value *base);
+                       const BasicAliasAnalysis &BAA);
     bool runOnLoop(const Loop &loop, ScalarEvolution *SE = nullptr,
-                   ::Loop *analysisLoop = nullptr);
+                   ::Loop *analysisLoop = nullptr,
+                   const BasicAliasAnalysis *BAA = nullptr);
 
     DominatorInfo *domInfo_ = nullptr;
 };

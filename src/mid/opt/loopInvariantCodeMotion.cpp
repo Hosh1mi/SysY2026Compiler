@@ -8,9 +8,11 @@
 #include <queue>
 
 void LICM::execute(Module *module) {
+    BasicAliasAnalysis BAA;
+    BAA.analyze(module);
     for (auto func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func);
+            runOnFunction(func, BAA);
     }
 }
 
@@ -67,6 +69,11 @@ static bool isLICMSCEVDebugEnabled() {
     return enabled;
 }
 
+static bool isLICMPurityDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_LICM_PURITY") != nullptr;
+    return enabled;
+}
+
 static void debugSCEVInvariant(Value *val, BasicBlock *loopHeader, const SCEV *s) {
     if (!isLICMSCEVDebugEnabled()) return;
 
@@ -120,59 +127,28 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
     return true;
 }
 
-static Value *getBase(Value *ptr) {
-    while (true) {
-        if (auto gep = dynamic_cast<GetElementPtrInst*>(ptr)) { ptr = gep->get_operand(0); continue; }
-        if (auto bc  = dynamic_cast<Bitcast*>(ptr))           { ptr = bc->get_operand(0);  continue; }
-        break;
-    }
-    return ptr;
-}
-
-bool LICM::hasStoreToSameBase(const Loop &loop, Value *base) {
-    for (auto bb : loop.blocks)
-        for (auto inst : bb->instr_list_)
-            if (inst->is_store() && getBase(inst->get_operand(1)) == base)
-                return true;
-    return false;
-}
-
-// 检查 loop 中的 call 是否会写入 base 指向的地址。
-// 对本模块定义的函数：扫描其 body 中的直接 store。
-// 对声明式函数（外部函数）：保守假设可能写入任何地址。
-bool LICM::doesAnyCallWriteToBase(const Loop &loop, Value *base) {
-    for (auto bb : loop.blocks) {
-        for (auto inst : bb->instr_list_) {
-            if (!inst->is_call()) continue;
-            auto *call = static_cast<CallInst *>(inst);
-            auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
-            if (!callee || callee->is_declaration())
-                return true; // 外部函数，保守拒绝
-            // 扫描被调用函数的 body，检查是否有 store 写入同一地址
-            for (auto *cbb : callee->basic_blocks_)
-                for (auto *ci : cbb->instr_list_)
-                    if (ci->is_store() &&
-                        getBase(ci->get_operand(1)) == base)
-                        return true;
-        }
-    }
-    return false;
-}
-
 bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
-                          const std::set<Instruction*>& toHoist, bool loopHasCalls) {
+                          const BasicAliasAnalysis &BAA) {
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
-        inst->is_store() || inst->is_alloca() || inst->is_call())
+        inst->is_store() || inst->is_alloca())
         return false;
 
+    if (inst->is_call()) {
+        if (inst->is_void()) return false;
+        auto *call = static_cast<CallInst *>(inst);
+        auto *callee = dynamic_cast<Function *>(
+            call->get_operand(call->num_ops_ - 1));
+        return callee && BAA.isPure(callee);
+    }
+
     if (inst->is_load()) {
-        Value *base = getBase(inst->get_operand(0));
-        // 检查循环内是否有直接 store 写入同一地址
-        if (hasStoreToSameBase(loop, base)) return false;
-        // 若循环内有 call，检查被调用函数是否会写入此地址。
-        // 不再一刀切拒绝所有 load，只拒绝对应 base 可能被 call 修改的 load。
-        if (loopHasCalls && doesAnyCallWriteToBase(loop, base)) return false;
+        Value *ptr = inst->get_operand(0);
+        for (auto *bb : loop.blocks) {
+            for (auto *other : bb->instr_list_) {
+                if (isModSet(BAA.getModRefInfo(other, ptr)))
+                    return false;
+            }
+        }
         return true;
     }
 
@@ -181,17 +157,13 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
-bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop) {
+bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop,
+                     const BasicAliasAnalysis *BAA) {
     BasicBlock *preheader = getPreheader(loop);
     if (!preheader) return false;
+    if (!BAA) return false;
 
     bool changed = false;
-
-    bool loopHasCalls = false;
-    for (auto bb : loop.blocks)
-        for (auto inst : bb->instr_list_)
-            if (inst->is_call()) { loopHasCalls = true; goto done_call_scan; }
-    done_call_scan:;
 #if 0
     // ── GEP splitting ──────────────────────────────────────────────
     // Split multi-dimensional GEPs at the invariant/variant boundary.
@@ -262,10 +234,12 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
         std::set<Instruction*> toHoist;
         for (auto bb : loop.blocks) {
             for (auto inst : bb->instr_list_) {
-                if (!isSafeToHoist(inst, loop, toHoist, loopHasCalls)) continue;
+                if (!isSafeToHoist(inst, loop, *BAA)) continue;
 
                 bool allInvariant = true;
-                for (unsigned i = 0; i < inst->num_ops_; i++) {
+                unsigned operandLimit = inst->is_call() ? inst->num_ops_ - 1
+                                                        : inst->num_ops_;
+                for (unsigned i = 0; i < operandLimit; i++) {
                     if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist,
                                      &loop, SE, analysisLoop)) {
                         allInvariant = false;
@@ -288,6 +262,16 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
                 bb->remove_instr(inst);
                 inst->parent_ = preheader;
                 preheader->add_instruction_before_terminator(inst);
+                if (inst->is_call() && isLICMPurityDebugEnabled()) {
+                    auto *call = static_cast<CallInst *>(inst);
+                    auto *callee = dynamic_cast<Function *>(
+                        call->get_operand(call->num_ops_ - 1));
+                    std::cerr << "[LICM:PURITY] function=" << preheader->parent_->name_
+                              << " loop_header=" << loop.header->name_
+                              << " call=%" << inst->name_
+                              << " callee=" << (callee ? callee->name_ : "<null>")
+                              << "\n";
+                }
 
                 it = bb->instr_list_.begin();
                 progress = true;
@@ -360,7 +344,7 @@ void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     }
 }
 
-void LICM::runOnFunction(Function *func) {
+void LICM::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
     eliminateSinglePredPhis(func);
@@ -385,7 +369,7 @@ void LICM::runOnFunction(Function *func) {
             }
         }
 
-        runOnLoop(loop, &SE, analysisLoop);
+        runOnLoop(loop, &SE, analysisLoop, &BAA);
         eliminateTrivialHeaderPhis(loop);
     }
 }
