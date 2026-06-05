@@ -1,0 +1,330 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-mono, monospace); }
+.container { padding: 16px 0; color: var(--color-text-primary); }
+.section { margin-bottom: 28px; }
+.section-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--color-background-secondary);
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 12px;
+}
+.section-header .sev {
+  font-size: 11px; font-weight: 500; padding: 2px 7px;
+  border-radius: 4px; white-space: nowrap;
+}
+.sev-high { background: #FCEBEB; color: #A32D2D; }
+.sev-med  { background: #FAEEDA; color: #854F0B; }
+.sev-low  { background: #EAF3DE; color: #3B6D11; }
+@media (prefers-color-scheme: dark) {
+  .sev-high { background: #501313; color: #F09595; }
+  .sev-med  { background: #412402; color: #FAC775; }
+  .sev-low  { background: #173404; color: #C0DD97; }
+}
+.section-title { font-size: 14px; font-weight: 500; flex: 1; }
+.issue { margin-bottom: 14px; padding: 10px 14px; border-radius: 8px;
+  border: 0.5px solid var(--color-border-tertiary);
+  background: var(--color-background-primary); }
+.issue-title { font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--color-text-primary); }
+.issue-desc { font-size: 12px; line-height: 1.6; color: var(--color-text-secondary); font-family: var(--font-sans); }
+.code-block {
+  margin: 8px 0 4px;
+  background: var(--color-background-tertiary);
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  border: 0.5px solid var(--color-border-tertiary);
+  overflow-x: auto;
+  white-space: pre;
+  font-family: var(--font-mono);
+  color: var(--color-text-primary);
+}
+.code-block .bad  { color: #E24B4A; }
+.code-block .good { color: #639922; }
+.code-block .dim  { color: var(--color-text-tertiary); }
+.code-block .hl   { color: #BA7517; }
+.tag { display:inline-block; font-size:10px; padding:1px 5px; border-radius:3px;
+  font-family:var(--font-mono); margin-right:4px; vertical-align:middle; }
+.tag-r { background:#E6F1FB; color:#185FA5; }
+.tag-s { background:#EEEDFE; color:#534AB7; }
+.tag-m { background:#FAEEDA; color:#854F0B; }
+@media (prefers-color-scheme: dark) {
+  .tag-r { background:#042C53; color:#85B7EB; }
+  .tag-s { background:#26215C; color:#AFA9EC; }
+  .tag-m { background:#412402; color:#FAC775; }
+}
+hr.divider { border:none; border-top:0.5px solid var(--color-border-tertiary); margin:6px 0 10px; }
+.summary-bar {
+  display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap;
+}
+.pill {
+  font-size: 11px; padding: 4px 10px; border-radius: 20px;
+  font-family: var(--font-sans); font-weight: 500;
+  border: 0.5px solid var(--color-border-tertiary);
+}
+.pill-r { background:#FCEBEB; color:#A32D2D; border-color:#F7C1C1; }
+.pill-a { background:#FAEEDA; color:#854F0B; border-color:#FAC775; }
+.pill-g { background:#EAF3DE; color:#3B6D11; border-color:#C0DD97; }
+@media (prefers-color-scheme: dark) {
+  .pill-r { background:#501313; color:#F09595; border-color:#791F1F; }
+  .pill-a { background:#412402; color:#FAC775; border-color:#633806; }
+  .pill-g { background:#173404; color:#C0DD97; border-color:#27500A; }
+}
+</style>
+
+<div class="container">
+
+<div class="summary-bar">
+  <span class="pill pill-r">🔴 高严重性 × 4</span>
+  <span class="pill pill-a">🟡 中严重性 × 4</span>
+  <span class="pill pill-g">🟢 低严重性 × 3</span>
+  <span class="pill" style="background:var(--color-background-secondary)">目标: AArch64</span>
+</div>
+
+<!-- ===== 1. REGISTER ALLOCATION ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#E24B4A">
+  <span class="sev sev-high">高</span>
+  <span class="section-title">1. 寄存器分配 — 压栈保存过多被调用者保存寄存器</span>
+</div>
+
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">RegAlloc</span>main 保存了 10 个 callee-saved 寄存器，实际只用 ~6 个</div>
+  <div class="issue-desc">main 的 prologue 保存了 x19–x28（10 个寄存器，5 条 stp），但循环体内实际常驻变量只有 w19(结果暂存)、w24(lim)、w28(i) 等少数几个。寄存器分配器没有做有效的 spill cost 权衡，导致栈帧浪费 80 字节（10 × 8）并在 prologue/epilogue 各产生 5 次 load/store。</div>
+<div class="code-block"><span class="bad">; prologue — 保存了 x20-x28 共 10 个寄存器</span>
+stp x20, x19, [x29, #-120]    <span class="dim">; 实际用到</span>
+stp x22, x21, [x29, #-136]    <span class="bad">; x21 几乎没用</span>
+stp x24, x23, [x29, #-152]    <span class="bad">; x23 没用</span>
+stp x26, x25, [x29, #-168]    <span class="bad">; x25 几乎没用</span>
+stp x28, x27, [x29, #-184]    <span class="bad">; x27 几乎没用</span>
+<span class="good">; 理想: 只需保存 x19-x22, x24, x28 (6个), 节省 4 次 stp/ldp</span></div>
+</div>
+
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">RegAlloc</span>fun 的寄存器分配比 main 好，但 x20/x19 保存同样冗余</div>
+  <div class="issue-desc">fun 是一个紧密循环（尾递归展开），只有 w2/w3/w7 三个活跃变量，却仍然保存 x20/x19，以及分配了 64 字节栈帧——几乎全部浪费。</div>
+<div class="code-block">sub sp, sp, #64              <span class="bad">; 64字节栈帧，实际只有 lim(w7) 需要保留</span>
+stp x20, x19, [x29, #-56]   <span class="bad">; 仅用于临时中间值</span>
+<span class="good">; 理想: 栈帧为 0，w7 直接保持在某个 callee-saved reg</span></div>
+</div>
+</div>
+
+<!-- ===== 2. REDUNDANT MOV ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#E24B4A">
+  <span class="sev sev-high">高</span>
+  <span class="section-title">2. 冗余 mov 指令 — 大量无效寄存器到寄存器拷贝</span>
+</div>
+
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">RedundantMov</span>fun 中每个分支末尾都有 2–3 条冗余 mov</div>
+  <div class="issue-desc">后端在每个"phi 赋值点"都生成了显式 mov，但这些 phi 变量（%v2/%v3）与其前驱值存在直接的寄存器等价关系，完全可以通过 coalescing 消除。</div>
+<div class="code-block"><span class="dim">; fun_label_if_then_4 (执行频繁的热路径: n偶数时 n/2)</span>
+asr w3, w3, #1           <span class="dim">; w3 = n >> 1</span>
+add w20, w2, #1          <span class="dim">; w20 = steps+1</span>
+<span class="bad">mov w9, w20              ; 冗余: w9 ← w20</span>
+<span class="bad">mov w2, w9               ; 冗余: w2 ← w9 (可直接 mov w2, w20 甚至消除)</span>
+b fun_label_tailrec_header
+
+<span class="dim">; fun_label_if_then_7</span>
+add w6, w2, #1
+add w19, w19, #1
+<span class="bad">mov w9, w6               ; 冗余中转</span>
+<span class="bad">mov w10, w19             ; 冗余中转</span>
+<span class="bad">mov w2, w9               ; 两跳才到 w2</span>
+<span class="bad">mov w3, w10              ; 两跳才到 w3</span>
+<span class="good">; 理想: add w2, w2, #1 / add w3, w3, #1 (直接操作目标寄存器)</span></div>
+</div>
+
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">RedundantMov</span>main 热循环内同等问题，每次迭代额外消耗 8–12 条 mov</div>
+  <div class="issue-desc">main_label_19、main_label_26、main_label_32 均有相同的两级 mov 中转链，且这段代码处于最内层循环。按 1e8 次迭代估算，单此问题即浪费约 8–12 亿条无用指令。</div>
+<div class="code-block"><span class="dim">; main_label_26 (3n+1 < lim 分支)</span>
+add w23, w27, #1
+add w22, w19, #1
+<span class="bad">mov w9, w23    ; → w27 需要 2 跳</span>
+<span class="bad">mov w10, w22   ; → w26 需要 2 跳</span>
+<span class="bad">mov w27, w9</span>
+<span class="bad">mov w26, w10</span>
+b main_label_11</div>
+</div>
+</div>
+
+<!-- ===== 3. STACK FRAME ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#E24B4A">
+  <span class="sev sev-high">高</span>
+  <span class="section-title">3. 栈帧设计 — main 分配了 192 字节，大量槽位闲置</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">StackFrame</span>main 栈帧 192 字节，实际有效使用不超过 3 个 slot</div>
+  <div class="issue-desc">实际用到的栈 slot 分析：<code>[x29, #-24]</code> 存 result（sum）、<code>[x29, #-88]</code> 存 lim（用于循环判断）、<code>[x29, #-104]</code> 存 srem 结果的中间值。其余全部用于保存 callee-saved 寄存器。如果分配器能将 sum/lim 全保留在寄存器中（它们完全可以，活跃度分析足够），栈帧可降至 64 字节（仅存 callee-saved）甚至更小。</div>
+<div class="code-block"><span class="bad">sub sp, sp, #192    ; 浪费：80字节寄存器保存 + 112字节"数据"槽 → 实际只用3个</span>
+
+<span class="dim">; 循环体内的 spill/reload（本可在寄存器中）</span>
+str w13, [x29, #-104]   <span class="bad">; srem 结果 spill</span>
+...
+str w10, [x29, #-24]    <span class="bad">; result spill（每次迭代都 load+store）</span>
+ldr w9, [x29, #-24]     <span class="bad">; result reload（下次迭代开头）</span></div>
+</div>
+</div>
+
+<!-- ===== 4. BRANCH ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#E24B4A">
+  <span class="sev sev-high">高</span>
+  <span class="section-title">4. 分支生成 — 无条件跳转链 + 可被 cbz/cbnz 吸收的模式未利用</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">Branch</span>条件分支后接无条件跳转，fallthrough 未利用</div>
+  <div class="issue-desc">AArch64 条件分支（b.ne、b.lt 等）的 fallthrough 语义可以自然跳过一条跳转，但后端每个基本块末尾都生成了显式 b（无条件跳转），这意味着错误的块布局或 fallthrough 优化未启用。</div>
+<div class="code-block"><span class="dim">; 实际生成：</span>
+cmp w3, #1
+b.ne fun_label_if_else_2
+<span class="bad">b fun_label_ret              ; 可以 fallthrough，不需要显式 b</span>
+
+<span class="dim">; 应该：把 label_ret 紧接在此块之后，省掉这条 b</span>
+
+<span class="dim">; 同样问题：</span>
+cbz w4, fun_label_if_then_4
+<span class="bad">b fun_label_if_else_5        ; 可以 fallthrough</span></div>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-r">Branch</span>movz + b 可合并为 mov + b，或用 b.ge 替代跳转逻辑</div>
+  <div class="issue-desc">在 fun_label_if_else_8 中，常数 7 的加载使用了 movz 然后 mov 两条指令中转到 w2，再跳 label_ret。AArch64 的 mov 是 movz 的别名，但在此处 mov w2, #7 直接就够了，不需要额外的寄存器中转。</div>
+<div class="code-block"><span class="bad">movz w9, #7
+mov w2, w9           ; 完全多余的一跳</span>
+<span class="good">mov w2, #7           ; 一条指令搞定</span></div>
+</div>
+</div>
+
+<!-- ===== 5. GLOBAL LOAD ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#BA7517">
+  <span class="sev sev-med">中</span>
+  <span class="section-title">5. 全局变量重复加载 — lim 在 main 中被 load 三次</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-m">GlobalLoad</span>同一个全局变量 lim 在 main 入口处连续 adrp+ldr 三次</div>
+  <div class="issue-desc">main 入口处对 lim 做了三次独立的 adrp/ldr 序列：store 之后立刻 load 了两次（一次到 w10 存入栈，一次到 w24 常驻寄存器）。其中存到栈再 load 出来用于循环条件判断的路径每次迭代还要多一次内存访问。应当在 store 后直接 mov w24, w0 + 使用 w24 即可，完全消除后两次 load。</div>
+<div class="code-block">str w19, [x9, :lo12:lim]     <span class="dim">; store lim = getint()</span>
+<span class="bad">adrp x9, lim
+ldr  w10, [x9, :lo12:lim]   ; load #1 → 存到栈 [x29,#-88]</span>
+<span class="bad">adrp x9, lim
+ldr  w24, [x9, :lo12:lim]   ; load #2 → w24（用于3n比较）</span>
+<span class="good">; 优化: mov w24, w19  (store 之后值还在 w19/w0 中)</span>
+<span class="dim">; 循环条件里还要从栈 reload:</span>
+<span class="bad">ldr w9, [x29, #-88]          ; load #3 (每次迭代!)</span>
+cmp w28, w9</div>
+</div>
+</div>
+
+<!-- ===== 6. SREM ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#BA7517">
+  <span class="sev sev-med">中</span>
+  <span class="section-title">6. 取模实现 — srem 用魔数乘法展开，但有额外 spill</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-m">DivMod</span>魔数乘法展开本身正确，但结果立刻 spill 到栈再 reload</div>
+  <div class="issue-desc">模 1000000007 的取余展开为 smull+asr+msub 组合，这是正确的编译器做法。但生成后的结果 w13 立刻被 str 到 [x29, #-104]，下一行通过 mov w10, w13 / str w10, [x29,-24] 再次 spill。这产生了两次连续 store，本可以直接 str w13, [x29,-24]，省掉整条 mov。</div>
+<div class="code-block">msub w13, w11, w12, w10
+<span class="bad">str  w13, [x29, #-104]    ; 多余的 spill slot</span>
+add  w19, w28, #1
+mov  w9,  w19
+<span class="bad">mov  w10, w13             ; 冗余 mov</span>
+mov  w28, w9
+<span class="bad">str  w10, [x29, #-24]     ; 可直接 str w13, [x29, #-24]</span></div>
+</div>
+</div>
+
+<!-- ===== 7. MOVZ ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#BA7517">
+  <span class="sev sev-med">中</span>
+  <span class="section-title">7. 常数加载 — movz + mov 双指令中转模式普遍</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-m">ConstLoad</span>小常数通过 w9 中转，而非直接写目标寄存器</div>
+  <div class="issue-desc">凡是需要加载立即数的地方（23、28、0、1、7），后端都先 movz 到 w9，再 mov 到目标寄存器。原因是指令选择阶段把立即数加载和寄存器赋值分成了两个独立操作，coalescing 没有消除中转。</div>
+<div class="code-block"><span class="bad">movz w9, #23 / mov w0, w9</span>   <span class="dim">→ <span class="good">mov w0, #23</span></span>
+<span class="bad">movz w9, #28 / mov w0, w9</span>   <span class="dim">→ <span class="good">mov w0, #28</span></span>
+<span class="bad">movz w9, #1  / mov w28, w9</span>  <span class="dim">→ <span class="good">mov w28, #1</span></span>
+<span class="bad">movz w9, #0  / mov w27, w9</span>  <span class="dim">→ <span class="good">mov w27, wzr</span>  (或 str wzr,...)</span></div>
+</div>
+</div>
+
+<!-- ===== 8. INSTRUCTION SELECTION ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#BA7517">
+  <span class="sev sev-med">中</span>
+  <span class="section-title">8. 指令选择 — 错失 AArch64 复合指令机会</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-m">InstrSelect</span>mul 3 展开为 add + lsl，但有更简洁的 madd/mneg 形式</div>
+  <div class="issue-desc"><code>v3 * 3</code> 在 IR 中是 <code>mul i32 %v3, 3</code>，后端正确地展开为 <code>add w, w, w lsl #1</code>，这是好的。但对于后续 3n+1 的 <code>add w19, w19, #1</code> 组合，AArch64 的 <code>add Rd, Rn, Rm, LSL #1</code> 加上 <code>#1</code> 本可用 <code>add Rd, Rx, Rn, LSL #1; add Rd, Rd, #1</code> 两条表达，已经是最优。不过在 <code>or i32 %v15, 1</code> 处生成了 <code>orr w4, w4, #1</code>，这是正确且高效的。</div>
+<div class="code-block"><span class="dim">; 已优化部分 (正确):</span>
+add w9, w26, w26, lsl #1   <span class="good">; = w26 * 3，好</span>
+orr w20, w22, #1            <span class="good">; = w22 | 1，好</span>
+
+<span class="dim">; 可改进: 循环计数器 i++ 与比较合并</span>
+<span class="bad">add w19, w28, #1
+mov w9, w19
+mov w28, w9                 ; 三条完成 i++</span>
+<span class="good">add w28, w28, #1            ; 一条</span></div>
+</div>
+</div>
+
+<!-- ===== 9. BLOCK LAYOUT ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#639922">
+  <span class="sev sev-low">低</span>
+  <span class="section-title">9. 基本块布局 — 热路径未排在前，冷块未分离</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-s">BlockLayout</span>fun 的最频繁路径（偶数分支: asr→loop）经过两次无条件跳转</div>
+  <div class="issue-desc">在典型 Collatz 输入下，n 偶数（除以 2）是最频繁的分支。但 fun_label_if_then_4 并非 fun_label_if_else_2 的 fallthrough，中间还有 <code>b fun_label_if_else_5</code> 的跳转干扰 I-cache 预取。理想布局应把最热的 if_then_4 块紧接在 if_else_2 之后，使 cbz 的 fallthrough 就是热路径。</div>
+</div>
+</div>
+
+<!-- ===== 10. LOOP INVARIANT ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#639922">
+  <span class="sev sev-low">低</span>
+  <span class="section-title">10. 循环不变量 — lim 在 main 的外循环每次从栈 reload</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-s">LICM</span>每次外层循环迭代开头都 ldr lim，但 lim 不变</div>
+  <div class="issue-desc">w24 已经保存了 lim（用于内层比较），但外层循环条件 <code>cmp w28, w9</code> 使用的 w9 来自 <code>ldr w9, [x29, #-88]</code>（栈上的 lim 副本），而非直接复用 w24。两个副本不一致且制造了冗余 load。</div>
+<div class="code-block">main_label_while_cond_11:
+  <span class="bad">ldr w9, [x29, #-88]    ; 每次迭代 reload lim（但 w24 就是 lim）</span>
+  cmp w28, w9
+  <span class="good">; 应直接: cmp w28, w24</span></div>
+</div>
+</div>
+
+<!-- ===== 11. PEELING ===== -->
+<div class="section">
+<div class="section-header" style="--accent:#639922">
+  <span class="sev sev-low">低</span>
+  <span class="section-title">11. 函数调用约定 — fun 完整保留帧指针，实际不必要</span>
+</div>
+<div class="issue">
+  <div class="issue-title"><span class="tag tag-s">FramePtr</span>fun 是叶函数式尾循环，但仍设置完整 FP 帧</div>
+  <div class="issue-desc">fun 展开后实际上是个不调用任何函数的循环（原尾递归已展开为 goto），却仍然保存 x29/x30 并设置 FP。可以用 <code>-fomit-frame-pointer</code> 等效语义省去 stp x29,x30 / mov x29,sp 这对操作，节省 prologue/epilogue 各 2 条指令并释放 x29 供分配。</div>
+<div class="code-block"><span class="bad">stp x29, x30, [sp, #-16]!   ; fun 不调用任何函数，x30 无需保存</span>
+<span class="bad">mov x29, sp                  ; FP 设置纯属浪费</span>
+<span class="dim">...epilogue 同理</span></div>
+</div>
+</div>
+
+<div style="margin-top:20px;padding:10px 14px;background:var(--color-background-secondary);border-radius:8px;font-size:12px;color:var(--color-text-secondary);font-family:var(--font-sans);line-height:1.7;border:0.5px solid var(--color-border-tertiary)">
+  <strong style="color:var(--color-text-primary);font-weight:500">优先修复路径建议：</strong>
+  消除冗余 mov（问题 2）→ 修复寄存器分配/减少 callee-saved 溢出（问题 1）→ 修复全局 lim 重复加载（问题 5）→ 压缩 main 栈帧（问题 3）→ 启用 fallthrough 块布局（问题 4/9）
+</div>
+
+</div>

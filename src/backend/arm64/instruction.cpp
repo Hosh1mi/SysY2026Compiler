@@ -820,13 +820,72 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::GetElementPtr: {
         auto gep = static_cast<GetElementPtrInst*>(inst);
         auto ptr = gep->get_operand(0);
-        std::string base = loadAddr(ptr);          
+
         std::string addr;
-        if(hasAssignedReg(ptr)) {
-            addr = allocAddrReg();
-            os_ << "\tmov " << addr << ", " << base << "\n";
+        auto samePhysReg = [](const std::string &a, const std::string &b) {
+            if (a.size() < 2 || b.size() < 2) return a == b;
+            bool aInt = a[0] == 'w' || a[0] == 'x';
+            bool bInt = b[0] == 'w' || b[0] == 'x';
+            bool aFloat = a[0] == 's' || a[0] == 'd';
+            bool bFloat = b[0] == 's' || b[0] == 'd';
+            return ((aInt && bInt) || (aFloat && bFloat)) && a.substr(1) == b.substr(1);
+        };
+
+        bool useAssignedAddr = hasAssignedReg(inst);
+        std::string assignedAddr = useAssignedAddr ? assignedReg(inst, true) : "";
+        if (useAssignedAddr) {
+            for (unsigned i = 1; i < gep->num_ops_; ++i) {
+                auto idx = gep->get_operand(i);
+                if (dynamic_cast<ConstantInt*>(idx) || !hasAssignedReg(idx))
+                    continue;
+                if (samePhysReg(assignedAddr, assignedReg(idx))) {
+                    useAssignedAddr = false;
+                    break;
+                }
+            }
+        }
+
+        if (useAssignedAddr) {
+            addr = assignedAddr;
+            if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+                emitGlobalAddr(gv, addr);
+            } else if (auto ci = dynamic_cast<ConstantInt*>(ptr)) {
+                emitIntConst(ci->value_, addr);
+            } else if (hasAssignedReg(ptr)) {
+                std::string base = assignedReg(ptr, true);
+                if (addr != base)
+                    os_ << "\tmov " << addr << ", " << base << "\n";
+            } else if (dynamic_cast<AllocaInst*>(ptr)) {
+                int off = getSlot(ptr);
+                if (off < 0) {
+                    int absOff = -off;
+                    if (absOff <= 4095) {
+                        os_ << "\tsub " << addr << ", x29, #" << absOff << "\n";
+                    } else {
+                        os_ << "\tmovz x17, #" << (absOff & 0xFFFF) << "\n";
+                        os_ << "\tmovk x17, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
+                        os_ << "\tsub " << addr << ", x29, x17\n";
+                    }
+                } else {
+                    if (off <= 4095) {
+                        os_ << "\tadd " << addr << ", x29, #" << off << "\n";
+                    } else {
+                        os_ << "\tmovz x17, #" << (off & 0xFFFF) << "\n";
+                        os_ << "\tmovk x17, #" << ((off >> 16) & 0xFFFF) << ", lsl #16\n";
+                        os_ << "\tadd " << addr << ", x29, x17\n";
+                    }
+                }
+            } else {
+                emitLoadReg(os_, addr, getSlot(ptr));
+            }
         } else {
-            addr = base;
+            std::string base = loadAddr(ptr);
+            if (hasAssignedReg(ptr)) {
+                addr = allocAddrReg();
+                os_ << "\tmov " << addr << ", " << base << "\n";
+            } else {
+                addr = base;
+            }
         }
     
         unsigned numIdx = gep->num_ops_ - 1;
@@ -897,7 +956,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
         }
-        storeAddr(inst, addr);
+        if (!useAssignedAddr)
+            storeAddr(inst, addr);
         break;
     }
 

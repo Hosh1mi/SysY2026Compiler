@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/helpers.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <iostream>
 
@@ -35,6 +36,150 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
 
     resetRegs();
 
+    // Fast path for the common case: every edge copy writes to an assigned
+    // scalar phi register and the parallel-copy graph is acyclic.  The old
+    // fallback below first materializes every source in scratch registers,
+    // which is correct but turns simple phi updates into two-hop mov chains.
+    struct DirectPhiCopy {
+        Value *src;
+        std::string dstReg;
+        std::string srcReg;
+        std::string srcKey;
+        std::string dstKey;
+        bool hasSrcReg;
+        bool isFloat;
+        bool isPtr;
+    };
+
+    auto regKey = [](const std::string &reg) -> std::string {
+        if (reg.size() < 2) return reg;
+        if ((reg[0] == 'w' || reg[0] == 'x') && std::isdigit(reg[1]))
+            return "r" + reg.substr(1);
+        if ((reg[0] == 's' || reg[0] == 'd') && std::isdigit(reg[1]))
+            return "f" + reg.substr(1);
+        return reg;
+    };
+
+    auto emitDirectCopy = [&](const DirectPhiCopy &cp) {
+        if (cp.hasSrcReg) {
+            if (cp.srcReg != cp.dstReg)
+                os_ << "\t" << (cp.isFloat ? "fmov " : "mov ")
+                    << cp.dstReg << ", " << cp.srcReg << "\n";
+            return;
+        }
+
+        if (cp.isFloat) {
+            if (auto cf = dynamic_cast<ConstantFloat*>(cp.src)) {
+                emitFloatConst(cf->value_, cp.dstReg);
+            } else {
+                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+            }
+        } else if (cp.isPtr) {
+            if (auto gv = dynamic_cast<GlobalVariable*>(cp.src)) {
+                emitGlobalAddr(gv, cp.dstReg);
+            } else if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
+                emitIntConst(ci->value_, cp.dstReg);
+            } else {
+                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+            }
+        } else {
+            if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
+                emitIntConst(ci->value_, cp.dstReg);
+            } else {
+                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+            }
+        }
+    };
+
+    std::vector<DirectPhiCopy> directCopies;
+    bool canUseDirectCopies = true;
+    bool hasPointerCopy = false;
+    for (const auto &cp : copies) {
+        Value *val = cp.src;
+        if (!cp.phi || !hasAssignedReg(cp.phi) || isVector(val->type_)) {
+            canUseDirectCopies = false;
+            break;
+        }
+
+        bool phiIsFloat = isFloat(cp.phi->type_);
+        bool phiIsPtr = isPtr(cp.phi->type_);
+        bool valIsPtr = isPtr(val->type_);
+        hasPointerCopy = hasPointerCopy || phiIsPtr || valIsPtr;
+        std::string dstReg = assignedReg(cp.phi, phiIsPtr);
+
+        DirectPhiCopy entry{val, dstReg, "", "", regKey(dstReg),
+                            false, phiIsFloat, phiIsPtr};
+        if (hasAssignedReg(val)) {
+            entry.srcReg = assignedReg(val, valIsPtr);
+            entry.srcKey = regKey(entry.srcReg);
+            entry.hasSrcReg = true;
+            if (entry.srcReg == entry.dstReg) continue;
+        } else if (phiIsFloat) {
+            if (!dynamic_cast<ConstantFloat*>(val) && dynamic_cast<Constant*>(val)) {
+                canUseDirectCopies = false;
+                break;
+            }
+        } else if (!phiIsPtr) {
+            if (!dynamic_cast<ConstantInt*>(val) && dynamic_cast<Constant*>(val)) {
+                canUseDirectCopies = false;
+                break;
+            }
+        }
+        directCopies.push_back(entry);
+    }
+    if (!hasPointerCopy) {
+        bool hasCopyDependency = false;
+        for (size_t i = 0; i < directCopies.size() && !hasCopyDependency; ++i) {
+            for (size_t j = 0; j < directCopies.size(); ++j) {
+                if (i == j || !directCopies[j].hasSrcReg) continue;
+                if (directCopies[i].dstKey == directCopies[j].srcKey) {
+                    hasCopyDependency = true;
+                    break;
+                }
+            }
+        }
+        if (hasCopyDependency)
+            canUseDirectCopies = false;
+    }
+
+    if (canUseDirectCopies) {
+        std::vector<size_t> schedule;
+        std::vector<bool> done(directCopies.size(), false);
+
+        while (schedule.size() < directCopies.size()) {
+            bool progressed = false;
+            for (size_t i = 0; i < directCopies.size(); ++i) {
+                if (done[i]) continue;
+
+                bool dstStillNeededAsSource = false;
+                for (size_t j = 0; j < directCopies.size(); ++j) {
+                    if (done[j] || i == j || !directCopies[j].hasSrcReg) continue;
+                    if (directCopies[i].dstKey == directCopies[j].srcKey) {
+                        dstStillNeededAsSource = true;
+                        break;
+                    }
+                }
+                if (dstStillNeededAsSource) continue;
+
+                done[i] = true;
+                schedule.push_back(i);
+                progressed = true;
+                break;
+            }
+
+            if (!progressed) {
+                canUseDirectCopies = false;
+                break;
+            }
+        }
+
+        if (canUseDirectCopies) {
+            for (size_t idx : schedule)
+                emitDirectCopy(directCopies[idx]);
+            return;
+        }
+    }
+
     // Process phi copies in batches to preserve parallel copy semantics
     // (all sources read before any destination written, within a batch)
     // while never exceeding the scratch register pool capacity (r9–r16 = 8).
@@ -45,7 +190,22 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
         // ---- Phase 1: load up to MAX_BATCH source values ----
         struct Entry { Value *phi; std::string tmpReg; int dstSlot; bool isFloat; };
         std::vector<Entry> entries;
-        for (size_t end = std::min(idx + MAX_BATCH, copies.size()); idx < end; ++idx) {
+        size_t end = std::min(idx + MAX_BATCH, copies.size());
+
+        auto batchSourceReadsSlot = [&](int slot, size_t selfIdx) {
+            for (size_t scan = idx; scan < end; ++scan) {
+                if (scan == selfIdx) continue;
+                Value *src = copies[scan].src;
+                if (hasAssignedReg(src) || dynamic_cast<Constant*>(src) ||
+                    dynamic_cast<GlobalVariable*>(src) || dynamic_cast<AllocaInst*>(src))
+                    continue;
+                if (getSlot(src) == slot)
+                    return true;
+            }
+            return false;
+        };
+
+        for (; idx < end; ++idx) {
             const auto &cp = copies[idx];
             Value *val = cp.src;
 
@@ -85,6 +245,14 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                 bool asPtr = isPtr(val->type_);
                 if (assignedReg(val, asPtr) == assignedReg(cp.phi, asPtr))
                     continue;
+            }
+
+            if (cp.phi && !hasAssignedReg(cp.phi) && hasAssignedReg(val) &&
+                isPtr(val->type_) &&
+                !isVector(val->type_) && !batchSourceReadsSlot(cp.dstSlot, idx)) {
+                std::string srcReg = assignedReg(val, isPtr(val->type_));
+                emitStoreReg(os_, srcReg, cp.dstSlot);
+                continue;
             }
 
             std::string tmpReg;
