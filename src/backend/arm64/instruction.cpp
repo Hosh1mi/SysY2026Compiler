@@ -450,11 +450,15 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             } else if (inst->op_id_ == Instruction::Sub) {
                 opcode = "sub";
-                if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                        std::string r1 = loadInt(v1);
-                        os_ << "\tsub " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
-                        usedImm = true;
+                // Skip immediate form when v1 is zero: sub rd, wzr, #imm is illegal
+                // ARM64 sub(immediate) uses the WSP encoding slot, so WZR is not allowed.
+                if (!(dynamic_cast<ConstantInt*>(v1) && static_cast<ConstantInt*>(v1)->value_ == 0)) {
+                    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+                        if (ci->value_ >= 0 && ci->value_ <= 4095) {
+                            std::string r1 = loadInt(v1);
+                            os_ << "\tsub " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                            usedImm = true;
+                        }
                     }
                 }
             }
