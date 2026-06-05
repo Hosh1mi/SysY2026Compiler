@@ -455,13 +455,56 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
 void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     auto v1 = icmp->get_operand(0);
     auto v2 = icmp->get_operand(1);
-    std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
 
     auto trueBB  = static_cast<BasicBlock*>(br->get_operand(1));
     auto falseBB = static_cast<BasicBlock*>(br->get_operand(2));
     BasicBlock *parentBB = br->parent_;
 
     const char *cond = icmpCond(icmp->icmp_op_);
+
+    // Check for phi copies on edges
+    bool hasTrue = false, hasFalse = false;
+    for (const auto &pc : phiCopies_) {
+        if (pc.pred != parentBB) continue;
+        if (pc.succ == trueBB)  hasTrue  = true;
+        if (pc.succ == falseBB) hasFalse = true;
+    }
+
+    // cmp r, #0; b.eq/b.ne → cbz/cbnz (single instruction)
+    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (ci->value_ == 0 && (strcmp(cond, "eq") == 0 || strcmp(cond, "ne") == 0)) {
+            bool useCbz = (strcmp(cond, "eq") == 0);
+            std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
+            const char *op = useCbz ? "cbz" : "cbnz";
+
+            if (!hasTrue && !hasFalse) {
+                os_ << "\t" << op << " " << r1 << ", " << bbLabel(func_, trueBB) << "\n";
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            } else if (hasTrue && !hasFalse) {
+                // Invert: if eq→cbz goes to trueBB, then ne case goes to falseBB via cbnz
+                const char *invOp = useCbz ? "cbnz" : "cbz";
+                os_ << "\t" << invOp << " " << r1 << ", " << bbLabel(func_, falseBB) << "\n";
+                emitPhiCopies(parentBB, trueBB);
+                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+            } else if (!hasTrue && hasFalse) {
+                os_ << "\t" << op << " " << r1 << ", " << bbLabel(func_, trueBB) << "\n";
+                emitPhiCopies(parentBB, falseBB);
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            } else {
+                std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
+                const char *invOp = useCbz ? "cbnz" : "cbz";
+                os_ << "\t" << invOp << " " << r1 << ", " << edgeLbl << "\n";
+                emitPhiCopies(parentBB, trueBB);
+                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+                os_ << edgeLbl << ":\n";
+                emitPhiCopies(parentBB, falseBB);
+                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+            }
+            return;
+        }
+    }
+
+    std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
 
     // Emit cmp with immediate if possible (ARM64 cmp imm is 12-bit: 0-4095)
     if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
@@ -476,14 +519,6 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     } else {
         std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
         os_ << "\tcmp " << r1 << ", " << r2 << "\n";
-    }
-
-    // Check for phi copies on edges
-    bool hasTrue = false, hasFalse = false;
-    for (const auto &pc : phiCopies_) {
-        if (pc.pred != parentBB) continue;
-        if (pc.succ == trueBB)  hasTrue  = true;
-        if (pc.succ == falseBB) hasFalse = true;
     }
 
     if (!hasTrue && !hasFalse) {

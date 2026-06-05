@@ -59,7 +59,14 @@ inline std::vector<int> collectAssignedIntRegs(const std::map<Value*, std::strin
             // Only callee-saved registers (r19-r28) need save/restore.
             // Caller-saved regs (r0-r18) including pre-colored args must not
             // be saved — doing so would clobber the return value on restore.
-            if (r >= 19) regs.insert(r);
+            if (r >= 19) {
+                // Skip if the value has zero uses (dead code not eliminated).
+                // Arguments are always considered live even with empty use_list.
+                Value *v = entry.first;
+                if (v->use_list_.empty() && !dynamic_cast<Argument*>(v))
+                    continue;
+                regs.insert(r);
+            }
         }
     }
     return std::vector<int>(regs.begin(), regs.end());
@@ -72,7 +79,12 @@ inline std::vector<int> collectAssignedFloatRegs(const std::map<Value*, std::str
         if (!reg.empty() && reg[0] == 's') {
             int r = std::stoi(reg.substr(1));
             // Only callee-saved float registers (s8-s15).
-            if (r >= 8 && r <= 15) regs.insert(r);
+            if (r >= 8 && r <= 15) {
+                Value *v = entry.first;
+                if (v->use_list_.empty() && !dynamic_cast<Argument*>(v))
+                    continue;
+                regs.insert(r);
+            }
         }
     }
     return std::vector<int>(regs.begin(), regs.end());
@@ -85,7 +97,12 @@ inline std::vector<int> collectAssignedNEONRegs(const std::map<Value*, std::stri
         if (!reg.empty() && reg[0] == 'v') {
             int r = std::stoi(reg.substr(1));
             // Only callee-saved NEON registers (v8-v15).
-            if (r >= 8 && r <= 15) regs.insert(r);
+            if (r >= 8 && r <= 15) {
+                Value *v = entry.first;
+                if (v->use_list_.empty() && !dynamic_cast<ConstantVector*>(v))
+                    continue;
+                regs.insert(r);
+            }
         }
     }
     return std::vector<int>(regs.begin(), regs.end());

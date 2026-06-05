@@ -92,6 +92,7 @@ std::string Arm64FuncContext::allocAddrReg() {
 
 std::string Arm64FuncContext::loadInt(Value *v) {
     if (auto ci = dynamic_cast<ConstantInt*>(v)) {
+        if (ci->value_ == 0) return "wzr";
         std::string r = allocIntReg();
         emitIntConst(ci->value_, r);
         return r;
@@ -123,6 +124,7 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
         return r;
     }
     if (auto ci = dynamic_cast<ConstantInt*>(v)) {
+        if (ci->value_ == 0) return "xzr";
         std::string r = allocAddrReg();
         emitIntConst(ci->value_, r);
         return r;
