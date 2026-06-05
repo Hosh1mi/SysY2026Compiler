@@ -66,38 +66,83 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
 }
 
 void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *module) {
-    // 1. 创建循环前置块和头块
+    // 1. 创建循环头块，插入 entry 之后。entry 本身充当 preheader，其内容将融入 header
     auto entry_bb = func->basic_blocks_.front();
-    auto *preheader = new BasicBlock(module, "label_tailrec_preheader", func);
     auto *header = new BasicBlock(module, "label_tailrec_header", func);
 
     auto &bbs = func->basic_blocks_;
-    bbs.erase(std::remove(bbs.begin(), bbs.end(), preheader), bbs.end());
+    // header 构造时被 add_basic_block 追加到尾部，移出后插入 entry_bb 之后
     bbs.erase(std::remove(bbs.begin(), bbs.end(), header), bbs.end());
-    bbs.insert(bbs.begin(), header);
-    bbs.insert(bbs.begin(), preheader);
+    auto entry_it = std::find(bbs.begin(), bbs.end(), entry_bb);
+    bbs.insert(entry_it + 1, header);
 
     auto *builder = new IRStmtBuilder(entry_bb, module);
 
-    // 2. 为每个参数创建 phi，并替换所有使用
+    // 2. 为每个参数在 header 中创建 phi，初始值来自 entry_bb，并替换所有使用
     std::vector<PhiInst *> arg_phis;
     for (auto arg : func->arguments_) {
         auto phi = PhiInst::create_phi(arg->type_, header);
         phi->name_ = arg->name_;                 // 保留原名
         arg->replace_all_use_with(phi);
-        phi->add_phi_pair_operand(arg, preheader);
-    
+        phi->add_phi_pair_operand(arg, entry_bb);
+
         // 将 phi 插入 header 指令列表头部
-        header->add_instruction_front(phi);      
+        header->add_instruction_front(phi);
         arg_phis.push_back(phi);
     }
 
-    builder->set_insert_point(preheader);
-    builder->create_br(header);
-    builder->set_insert_point(header);
-    builder->create_br(entry_bb);
+    // 3. 将 entry_bb 的内容融入 header：移动所有指令到 header，entry_bb 改为跳转到 header
+    //    先保存 entry_bb 的终止指令及后继列表
+    auto entry_term = entry_bb->get_terminator();
+    std::vector<BasicBlock *> entry_succs = entry_bb->succ_bbs_;
 
-    // 3. 收集所有尾调用块的信息（bb, call, target_ret_bb），不对 phi 做修改
+    if (entry_term) {
+        entry_bb->remove_instr(entry_term);
+    }
+
+    //    清理 entry_bb 的 CFG 出边
+    for (auto succ : entry_succs) {
+        succ->remove_pre_basic_block(entry_bb);
+    }
+    entry_bb->succ_bbs_.clear();
+
+    //    将后继块中所有引用 entry_bb 的 phi 操作数替换为 header
+    for (auto succ : entry_succs) {
+        for (auto &inst : succ->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(inst);
+            if (!phi) break;  // phi 总是在块头部，遇非 phi 即停止
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) == entry_bb) {
+                    phi->set_operand(i + 1, header);
+                }
+            }
+        }
+    }
+
+    //    将 entry_bb 的非终止指令移到 header（phi 之后）
+    std::vector<Instruction *> instrs_to_move;
+    for (auto instr : entry_bb->instr_list_) {
+        instrs_to_move.push_back(instr);
+    }
+    for (auto instr : instrs_to_move) {
+        entry_bb->remove_instr(instr);
+        header->add_instruction(instr);
+    }
+
+    //    将原终止指令加入 header，并建立 CFG 边
+    if (entry_term) {
+        header->add_instruction(entry_term);
+        for (auto succ : entry_succs) {
+            succ->add_pre_basic_block(header);
+            header->add_succ_basic_block(succ);
+        }
+    }
+
+    //    entry_bb 变为 preheader：仅一条无条件跳转到 header
+    builder->set_insert_point(entry_bb);
+    builder->create_br(header);
+
+    // 4. 收集所有尾调用块的信息（bb, call, target_ret_bb），不对 phi 做修改
     struct TailCallSite {
         BasicBlock *bb;
         CallInst *call;
@@ -140,7 +185,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         sites.push_back({bb, call, target, ret_form});
     }
 
-    // 4. 对每个尾调用块：添加实参到 header 的 phi，并转换为跳转到 header 的循环
+    // 5. 对每个尾调用块：添加实参到 header 的 phi，并转换为跳转到 header 的循环
     for (auto &site : sites) {
         auto bb = site.bb;
         auto call = site.call;
@@ -169,7 +214,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         }
     }
 
-    // 5. 统一处理返回块中的 phi（仅对 br+phi 模式）
+    // 6. 统一处理返回块中的 phi（仅对 br+phi 模式）
     std::set<BasicBlock *> processed_retbb;
     for (auto &site : sites) {
         if (site.is_ret_form || !site.ret_bb) continue;

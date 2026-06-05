@@ -20,10 +20,6 @@
   </tr>
   <tr>
     <td></td>
-    <td>LoopInterchange pass</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>矩阵乘法内层循环展开</td>
   </tr>
   <tr>
@@ -32,7 +28,7 @@
   </tr>
   <tr>
     <td></td>
-    <td>用正规 InstCombine 替换现有 algebraSimplify</td>
+    <td>修复CFGSimplify里的各种错误</td>
   </tr>
   
   <tr>
@@ -47,10 +43,6 @@
   <tr>
     <td></td>
     <td>规范头部全局量分布</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>label 具体有意义的命名</td>
   </tr>
   
   <tr>
