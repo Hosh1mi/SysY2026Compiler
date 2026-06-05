@@ -23,14 +23,11 @@ Value* visitShl(BinaryInst *inst) {
         return make_const_int(ty, 0);
     }
 
-    // 2. Canonicalize: constant to RHS  (shl C, x → shl x, C)
-    if (cx && !cy) {
-        auto *new_inst = new BinaryInst(ty, Instruction::Shl, y, x, bb, true);
-        bb->add_instruction_before_inst(new_inst, inst);
-        return new_inst;
-    }
-
-    // After canonicalization, any constant shift amount is on the RHS.
+    // Shift is non-commutative, so we cannot canonicalize a constant LHS to
+    // the RHS (the old `shl C, x → shl x, C` rule was a copy-paste from a
+    // commutative-op simplification and silently corrupted results when the
+    // shift amount was symbolic, e.g. the `1 << n` produced by VAR_SHL
+    // rewriting of rotlN).
 
     // 3. Identity: x << 0 → x
     if (cy && cy->value_ == 0) {
@@ -87,12 +84,7 @@ Value* visitLShr(BinaryInst *inst) {
         return make_const_int(ty, 0);
     }
 
-    // 2. Canonicalize: constant to RHS  (lshr C, x → lshr x, C)
-    if (cx && !cy) {
-        auto *new_inst = new BinaryInst(ty, Instruction::LShr, y, x, bb, true);
-        bb->add_instruction_before_inst(new_inst, inst);
-        return new_inst;
-    }
+    // (Shift is non-commutative — see visitShl note.)
 
     // 3. Identity: x >> 0 (logical) → x
     if (cy && cy->value_ == 0) {
@@ -146,12 +138,7 @@ Value* visitAShr(BinaryInst *inst) {
         return make_const_int(ty, cx->value_ >> (bits - 1));
     }
 
-    // 2. Canonicalize: constant to RHS  (ashr C, x → ashr x, C)
-    if (cx && !cy) {
-        auto *new_inst = new BinaryInst(ty, Instruction::AShr, y, x, bb, true);
-        bb->add_instruction_before_inst(new_inst, inst);
-        return new_inst;
-    }
+    // (Shift is non-commutative — see visitShl note.)
 
     // 3. Identity: x >> 0 (arithmetic) → x
     if (cy && cy->value_ == 0) {
