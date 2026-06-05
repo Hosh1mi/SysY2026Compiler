@@ -9,6 +9,7 @@
 class Mem2Reg : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "Mem2Reg"; }
 
 private:
     void runOnFunction(Function *func);

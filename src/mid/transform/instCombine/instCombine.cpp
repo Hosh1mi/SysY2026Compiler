@@ -106,9 +106,9 @@ void InstCombine::runOnFunction(Function *func) {
             replacement = visitFNeg(static_cast<UnaryInst*>(inst));
             break;
         // MulDivRem
-        // case Instruction::Mul:
-        //     replacement = visitMul(static_cast<BinaryInst*>(inst));
-        //     break;
+        case Instruction::Mul:
+            replacement = visitMul(static_cast<BinaryInst*>(inst));
+            break;
         case Instruction::SDiv:
             replacement = visitSDiv(static_cast<BinaryInst*>(inst));
             break;

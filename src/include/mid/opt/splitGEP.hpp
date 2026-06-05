@@ -4,18 +4,16 @@
 #include <set>
 #include <vector>
 
-// Split multi-dimensional GEPs inside loops at the invariant/variant boundary.
-// The invariant prefix is hoisted by LICM, leaving only the variant suffix
-// in the loop body — drastically reducing address computation cost.
 class SplitGEP : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "SplitGEP"; }
 
 private:
     struct Loop {
         BasicBlock *header;
-        BasicBlock *latch;             // single back-edge source
-        std::set<BasicBlock*> blocks;  // all blocks in the loop body
+        BasicBlock *latch;
+        std::set<BasicBlock*> blocks;
     };
 
     void runOnFunction(Function *func);

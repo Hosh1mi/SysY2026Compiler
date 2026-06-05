@@ -5,6 +5,7 @@
 class InlineExpand : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "InlineExpand"; }
 private:
     bool canInline(CallInst *call, Function *callee, Function *caller);
     unsigned countCallSites(Function *callee, Module *module);
@@ -13,7 +14,6 @@ private:
     bool isCallInLoop(CallInst *call);
     int weighInstruction(Instruction *inst);
     int estimateConstantFoldBenefit(CallInst *call, Function *callee);
-    // 返回内联过程中新产生的 call 指令列表
     std::vector<CallInst*> performInline(CallInst *callInst);
     std::vector<BasicBlock*> getRPO(Function *func);
     BasicBlock* splitBlockAfterCall(BasicBlock *callBB, CallInst *callInst);

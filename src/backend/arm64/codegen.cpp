@@ -88,7 +88,7 @@ void Arm64CodeGen::generate() {
                 // 找到该函数在原始funcs中的位置，存入results对应索引
                 auto it = std::find(funcs.begin(), funcs.end(), f);
                 size_t idx = it - funcs.begin();
-                results[idx] = peepholeOptimize(local_os.str());
+                results[idx] = no_peephole_ ? local_os.str() : peepholeOptimize(local_os.str());
             }
         });
     }

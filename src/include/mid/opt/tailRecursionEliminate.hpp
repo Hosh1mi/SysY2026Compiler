@@ -3,8 +3,9 @@
 class TailRecursionEliminate : public Pass {
     public:
         void execute(Module *module) override;
+    std::string name() const override { return "TailRecursionEliminate"; }
     
     private:
-        bool isTailRecursive(Function *func); // 检查函数是否所有对自身的调用都是尾调用
+        bool isTailRecursive(Function *func);
         void eliminateTailRecursion(Function *func, Module *module);
     };

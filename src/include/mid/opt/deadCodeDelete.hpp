@@ -5,6 +5,7 @@
 class DeadCodeDelete : public Pass {
 public:
     void execute(Module *module) override;
+    std::string name() const override { return "DeadCodeDelete"; }
 private:
     // 删除函数内不可达的基本块
     bool removeDeadBlocks(Function *func);
