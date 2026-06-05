@@ -32,7 +32,12 @@ namespace bitfunc {
 // ══════════════════════════════════════════════════════════════════════
 
 enum class BitOp : uint8_t {
-    ZERO, ONE, BIT_OF, AND, OR, XOR, NOT, TOP
+    ZERO, ONE, BIT_OF, AND, OR, XOR, NOT, TOP,
+    // Reified `icmp eq Value, const` predicate.  Stored as source=Value, idx=(uint)const.
+    // Used so the recognizer can later identify "n == k" arms in Select chains;
+    // without this atom the predicate would canonicalize into a deep AND-of-XOR-NOT
+    // tree on the value's bits that can't be matched back.
+    ICMP_EQ_CONST
 };
 
 class BitExpr;
@@ -82,6 +87,7 @@ static BE Zero()              { return intern(BitOp::ZERO); }
 static BE One()               { return intern(BitOp::ONE); }
 static BE Top()               { return intern(BitOp::TOP); }
 static BE BitOf(Value *v, unsigned i) { return intern(BitOp::BIT_OF, v, i); }
+static BE IcmpEqConst(Value *v, int k) { return intern(BitOp::ICMP_EQ_CONST, v, (unsigned)k); }
 
 // ══════════════════════════════════════════════════════════════════════
 // §B  Smart constructors with simplification
@@ -191,6 +197,21 @@ static bool isConcrete(const BitVec &bv, int *out = nullptr) {
     }
     if (out) *out = (int)v;
     return true;
+}
+
+// If `bv` is exactly the symbolic form of a single Value `v`
+// (bit i = BitOf(v, i) for all 32 bits), return v.  Otherwise nullptr.
+// Used by processICmp's fast path and by matchVarShl's bit-source check.
+static Value *pureSymbolicSource(const BitVec &bv) {
+    Value *src = nullptr;
+    for (unsigned i = 0; i < 32; i++) {
+        BE e = bv[i];
+        if (e->op != BitOp::BIT_OF) return nullptr;
+        if (e->idx != i) return nullptr;
+        if (i == 0) src = e->source;
+        else if (e->source != src) return nullptr;
+    }
+    return src;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -548,6 +569,23 @@ private:
         if (ci->icmp_op_ != ICmpInst::ICMP_EQ && ci->icmp_op_ != ICmpInst::ICMP_NE)
             { failReason = "icmp: sym non-eq"; return false; }
         bool wantEq = (ci->icmp_op_ == ICmpInst::ICMP_EQ);
+
+        // Fast path: `eq/ne Value, const_int` where the Value is in pure-symbolic
+        // form (each bit is BitOf(src, i)).  Emit an ICMP_EQ_CONST atom so
+        // downstream recognizers (e.g. matchVarShl) can recover the predicate
+        // identity; otherwise the bit-by-bit expansion below produces an AND-of-XOR
+        // tree that hides the semantics.
+        if (Value *symSrc = (a.knownConcrete ? pureSymbolicSource(b.bv)
+                                              : (b.knownConcrete ? pureSymbolicSource(a.bv) : nullptr))) {
+            int kConst = a.knownConcrete ? a.concreteVal : b.concreteVal;
+            BE pred = IcmpEqConst(symSrc, kConst);
+            if (!wantEq) pred = Not_(pred);
+            ValueState out; out.isI1 = true;
+            out.bv = makeConst(0); out.bv[0] = pred;
+            state[ci] = out;
+            return true;
+        }
+
         BE acc = wantEq ? One() : Zero();
         for (unsigned i = 0; i < 32; i++) {
             BE diff = Xor_(a.bv[i], b.bv[i]);
@@ -853,11 +891,19 @@ bool FunctionAnalyzer::run() {
 // ══════════════════════════════════════════════════════════════════════
 
 struct ClosedForm {
-    enum Kind { NONE, AND_OP, OR_OP, XOR_OP, LSHR_OP, SHL_OP, COPY_OP };
+    enum Kind {
+        NONE,
+        AND_OP, OR_OP, XOR_OP,
+        LSHR_OP, SHL_OP, COPY_OP,
+        // Variable shift: `shl x, n` (n is a Value, K is the highest covered
+        // shift amount in the source if-chain).  Rewriter must guard against
+        // n outside [1, K] because the source returns x unchanged there.
+        VAR_SHL_OP,
+    };
     Kind    kind        = NONE;
-    Value  *x           = nullptr;
-    Value  *y           = nullptr;
-    int     shiftAmount = 0;
+    Value  *x           = nullptr;   // base value
+    Value  *y           = nullptr;   // 2nd operand for AND/OR/XOR; shift amount for VAR_SHL
+    int     shiftAmount = 0;         // const shift for LSHR/SHL; max K for VAR_SHL
 };
 
 static bool matchBitwiseOp(const BitVec &bv, BitOp op, Value *&X, Value *&Y) {
@@ -899,6 +945,90 @@ static bool matchCopy(const BitVec &bv, Value *&X) {
     return X != nullptr;
 }
 
+// Verify bit `i` of a presumed `shl X, N` body, where the source code spells
+// out one return per `n == k` for k ∈ [1, K] and falls through to `return X`.
+// The canonicalised form at each level k is either:
+//   Or(And(eq_k, BitOf(X, i-k)), And(Not(eq_k), inner))   — full Select
+//   And(Not(eq_k), inner)                                 — Select(c, ZERO, f)
+// The innermost arm equals BitOf(X, i).
+static bool matchVarShlBit(BE e, Value *X, Value *N, unsigned i, int K) {
+    for (int k = 1; k <= K; k++) {
+        BE c    = IcmpEqConst(N, k);
+        BE notC = intern(BitOp::NOT, nullptr, 0, c);
+        int target = (int)i - k;
+        BE t = (target >= 0 && target < 32) ? BitOf(X, (unsigned)target) : Zero();
+
+        if (t == Zero()) {
+            if (!e || e->op != BitOp::AND) return false;
+            if      (e->a == notC) e = e->b;
+            else if (e->b == notC) e = e->a;
+            else return false;
+            continue;
+        }
+        if (!e || e->op != BitOp::OR) return false;
+        BE L = e->a, R = e->b;
+        auto isAndCT = [&](BE n_) {
+            return n_ && n_->op == BitOp::AND &&
+                   ((n_->a == c && n_->b == t) || (n_->a == t && n_->b == c));
+        };
+        auto extractInner = [&](BE n_) -> BE {
+            if (!n_ || n_->op != BitOp::AND) return nullptr;
+            if (n_->a == notC) return n_->b;
+            if (n_->b == notC) return n_->a;
+            return nullptr;
+        };
+        BE next = nullptr;
+        if      (isAndCT(L)) next = extractInner(R);
+        else if (isAndCT(R)) next = extractInner(L);
+        if (!next) return false;
+        e = next;
+    }
+    return e == BitOf(X, i);
+}
+
+// Detect `shl x, n` style if-chain (rotlN / variants).  Identifies (N, K) by
+// collecting ICMP_EQ_CONST atoms from bv[0], then verifies the structure of
+// every bit against the canonicalised SHL form.
+static bool matchVarShl(const BitVec &bv, Value *&X, Value *&N, int &K) {
+    // Step 1: bv[0] is an all-collapsed chain `And(Not(eq_1), And(Not(eq_2), ..., BitOf(X, 0)))`.
+    // Walk it to extract X, N, K simultaneously.
+    BE e = bv[0];
+    std::vector<int> ks;
+    Value *Ncand = nullptr;
+    while (e && e->op == BitOp::AND) {
+        BE notNode = nullptr, inner = nullptr;
+        for (BE side : {e->a, e->b}) {
+            if (side && side->op == BitOp::NOT && side->a &&
+                side->a->op == BitOp::ICMP_EQ_CONST) {
+                notNode = side;
+                inner   = (side == e->a) ? e->b : e->a;
+                break;
+            }
+        }
+        if (!notNode) break;
+        Value *n_here = notNode->a->source;
+        int    k_here = (int)notNode->a->idx;
+        if (!Ncand) Ncand = n_here;
+        else if (n_here != Ncand) return false;
+        ks.push_back(k_here);
+        e = inner;
+    }
+    if (ks.empty()) return false;
+    if (!e || e->op != BitOp::BIT_OF || e->idx != 0) return false;
+    X = e->source;
+    N = Ncand;
+
+    // The k values appear from outermost (k=1) to innermost (k=K).  Verify
+    // they form {1, 2, ..., K}.
+    K = (int)ks.size();
+    for (int j = 0; j < K; j++) if (ks[j] != j + 1) return false;
+
+    // Step 2: verify each bit.
+    for (unsigned i = 0; i < 32; i++)
+        if (!matchVarShlBit(bv[i], X, N, i, K)) return false;
+    return true;
+}
+
 static ClosedForm recognize(const BitVec &bv) {
     ClosedForm cf; Value *X = nullptr, *Y = nullptr; int k = 0;
     if (matchCopy(bv, X))                      { cf.kind = ClosedForm::COPY_OP; cf.x = X; return cf; }
@@ -908,6 +1038,12 @@ static ClosedForm recognize(const BitVec &bv) {
     if (matchShift(bv, X, k)) {
         if (k > 0) { cf.kind = ClosedForm::LSHR_OP; cf.x = X; cf.shiftAmount =  k; return cf; }
         if (k < 0) { cf.kind = ClosedForm::SHL_OP;  cf.x = X; cf.shiftAmount = -k; return cf; }
+    }
+    if (matchVarShl(bv, X, Y, k)) {
+        cf.kind = ClosedForm::VAR_SHL_OP;
+        cf.x = X; cf.y = Y;          // y is the shift amount Value
+        cf.shiftAmount = k;          // max supported shift
+        return cf;
     }
     return cf;
 }
@@ -953,6 +1089,7 @@ static void dumpBE(BE e, int depth, FILE *out) {
         case BitOp::AND: fprintf(out, "("); dumpBE(e->a, depth+1, out); fprintf(out, "&");  dumpBE(e->b, depth+1, out); fprintf(out, ")"); break;
         case BitOp::OR:  fprintf(out, "("); dumpBE(e->a, depth+1, out); fprintf(out, "|");  dumpBE(e->b, depth+1, out); fprintf(out, ")"); break;
         case BitOp::XOR: fprintf(out, "("); dumpBE(e->a, depth+1, out); fprintf(out, "^");  dumpBE(e->b, depth+1, out); fprintf(out, ")"); break;
+        case BitOp::ICMP_EQ_CONST: fprintf(out, "(%p==%d)", (void*)e->source, (int)e->idx); break;
     }
 }
 
@@ -1034,20 +1171,22 @@ static FuncEquiv tryRecognize(Function *f) {
     eq.inputIdxA   = argIndex(cf.x, f);
     eq.inputIdxB   = argIndex(cf.y, f);
     eq.shiftAmount = cf.shiftAmount;
-    bool needB = (cf.kind == ClosedForm::AND_OP ||
-                  cf.kind == ClosedForm::OR_OP  ||
-                  cf.kind == ClosedForm::XOR_OP);
+    bool needB = (cf.kind == ClosedForm::AND_OP    ||
+                  cf.kind == ClosedForm::OR_OP     ||
+                  cf.kind == ClosedForm::XOR_OP    ||
+                  cf.kind == ClosedForm::VAR_SHL_OP);
     if (eq.inputIdxA < 0) return {};
     if (needB && eq.inputIdxB < 0) return {};
     if (BITFUNC_DEBUG) {
         const char *k = "?";
         switch (cf.kind) {
-            case ClosedForm::AND_OP:  k = "AND";  break;
-            case ClosedForm::OR_OP:   k = "OR";   break;
-            case ClosedForm::XOR_OP:  k = "XOR";  break;
-            case ClosedForm::LSHR_OP: k = "LSHR"; break;
-            case ClosedForm::SHL_OP:  k = "SHL";  break;
-            case ClosedForm::COPY_OP: k = "COPY"; break;
+            case ClosedForm::AND_OP:     k = "AND";     break;
+            case ClosedForm::OR_OP:      k = "OR";      break;
+            case ClosedForm::XOR_OP:     k = "XOR";     break;
+            case ClosedForm::LSHR_OP:    k = "LSHR";    break;
+            case ClosedForm::SHL_OP:     k = "SHL";     break;
+            case ClosedForm::COPY_OP:    k = "COPY";    break;
+            case ClosedForm::VAR_SHL_OP: k = "VAR_SHL"; break;
             default: break;
         }
         fprintf(stderr, "[bitfunc] %s → %s arg[%d] arg[%d] shift=%d\n",
@@ -1153,13 +1292,38 @@ static void rewriteCallSites(Module *module,
                     Value *a = call->get_operand(eq.inputIdxA);
                     Value *b = call->get_operand(eq.inputIdxB);
                     newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, b, bb, true);
+                    bb->add_instruction_before_inst(newInst, call);
                 } else if (eq.kind == ClosedForm::LSHR_OP || eq.kind == ClosedForm::SHL_OP) {
                     Value *a   = call->get_operand(eq.inputIdxA);
                     Value *amt = new ConstantInt(call->type_, eq.shiftAmount);
                     newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, amt, bb, true);
+                    bb->add_instruction_before_inst(newInst, call);
+                } else if (eq.kind == ClosedForm::VAR_SHL_OP) {
+                    // Source `rotlN(x, n)` returns `x << n` for n ∈ [1, K] and
+                    // x unchanged otherwise.  Emit guarded shift:
+                    //     shifted = shl x, n
+                    //     leK     = icmp sle n, K
+                    //     tmp     = select leK, shifted, x
+                    //     ge1     = icmp sge n, 1
+                    //     result  = select ge1, tmp, x
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *n       = call->get_operand(eq.inputIdxB);
+                    int    K       = eq.shiftAmount;
+                    auto *shifted  = new BinaryInst(call->type_, Instruction::Shl, a, n, bb, true);
+                    bb->add_instruction_before_inst(shifted, call);
+                    auto *kConst   = new ConstantInt(call->type_, K);
+                    auto *leK      = new ICmpInst(ICmpInst::ICMP_SLE, n, kConst, bb, true);
+                    bb->add_instruction_before_inst(leK, call);
+                    auto *tmp      = new SelectInst(leK, shifted, a, call->type_);
+                    bb->add_instruction_before_inst(tmp, call);
+                    auto *one      = new ConstantInt(call->type_, 1);
+                    auto *ge1      = new ICmpInst(ICmpInst::ICMP_SGE, n, one, bb, true);
+                    bb->add_instruction_before_inst(ge1, call);
+                    auto *result   = new SelectInst(ge1, tmp, a, call->type_);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst        = result;
                 }
                 if (!newInst) continue;
-                bb->add_instruction_before_inst(newInst, call);
 
                 // Apply mask for parametric closed forms.
                 // Naive `(1 << n) - 1` is wrong at n == 32 because AArch64 LSL
