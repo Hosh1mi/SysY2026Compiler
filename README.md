@@ -46,8 +46,16 @@
   </tr>
   
   <tr>
-    <td style="vertical-align:top;"><b>问题修复</b></td>
+    <td style="vertical-align:top;"><b>已知bug</b></td>
     <td>排查部分测试集上函数内联后寄存器溢出的异常情况</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>CFGSimplify不应生成select（？）</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>inlineExpand不支持Unary</td>
   </tr>
   
   <tr>
