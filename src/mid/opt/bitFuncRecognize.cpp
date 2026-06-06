@@ -899,11 +899,16 @@ struct ClosedForm {
         // shift amount in the source if-chain).  Rewriter must guard against
         // n outside [1, K] because the source returns x unchanged there.
         VAR_SHL_OP,
+        // Variable signed-divide-by-power-of-two: source `x / 2^n` if-chain
+        // (rotrN style).  Bit-vec abstraction collapses sdiv-by-2^k to
+        // lshr(x, k); rewriter emits sdiv to preserve language semantics
+        // for negative x.
+        VAR_LSHR_OP,
     };
     Kind    kind        = NONE;
     Value  *x           = nullptr;   // base value
-    Value  *y           = nullptr;   // 2nd operand for AND/OR/XOR; shift amount for VAR_SHL
-    int     shiftAmount = 0;         // const shift for LSHR/SHL; max K for VAR_SHL
+    Value  *y           = nullptr;   // 2nd operand for AND/OR/XOR; shift amount for VAR_SHL/VAR_LSHR
+    int     shiftAmount = 0;         // const shift for LSHR/SHL; max K for VAR_SHL/VAR_LSHR
 };
 
 static bool matchBitwiseOp(const BitVec &bv, BitOp op, Value *&X, Value *&Y) {
@@ -1029,6 +1034,83 @@ static bool matchVarShl(const BitVec &bv, Value *&X, Value *&N, int &K) {
     return true;
 }
 
+// Same canonical shape as matchVarShlBit, but for `lshr X, N` (rotrN style):
+//   At each k in [1, K], the arm contributes BitOf(X, i+k) (Zero if i+k >= 32).
+//   Fallthrough is BitOf(X, i).
+static bool matchVarLshrBit(BE e, Value *X, Value *N, unsigned i, int K) {
+    for (int k = 1; k <= K; k++) {
+        BE c    = IcmpEqConst(N, k);
+        BE notC = intern(BitOp::NOT, nullptr, 0, c);
+        int target = (int)i + k;
+        BE t = (target < 32) ? BitOf(X, (unsigned)target) : Zero();
+
+        if (t == Zero()) {
+            if (!e || e->op != BitOp::AND) return false;
+            if      (e->a == notC) e = e->b;
+            else if (e->b == notC) e = e->a;
+            else return false;
+            continue;
+        }
+        if (!e || e->op != BitOp::OR) return false;
+        BE L = e->a, R = e->b;
+        auto isAndCT = [&](BE n_) {
+            return n_ && n_->op == BitOp::AND &&
+                   ((n_->a == c && n_->b == t) || (n_->a == t && n_->b == c));
+        };
+        auto extractInner = [&](BE n_) -> BE {
+            if (!n_ || n_->op != BitOp::AND) return nullptr;
+            if (n_->a == notC) return n_->b;
+            if (n_->b == notC) return n_->a;
+            return nullptr;
+        };
+        BE next = nullptr;
+        if      (isAndCT(L)) next = extractInner(R);
+        else if (isAndCT(R)) next = extractInner(L);
+        if (!next) return false;
+        e = next;
+    }
+    return e == BitOf(X, i);
+}
+
+// Detect `lshr x, n` style if-chain (rotrN / variants).  Walks bv[31] for
+// initial (X, N, K) extraction: bit 31 of `x >> k` is Zero for any k >= 1,
+// so bv[31] collapses to a pure And(Not(eq_k), inner) chain (analogous to
+// matchVarShl's use of bv[0]).
+static bool matchVarLshr(const BitVec &bv, Value *&X, Value *&N, int &K) {
+    BE e = bv[31];
+    std::vector<int> ks;
+    Value *Ncand = nullptr;
+    while (e && e->op == BitOp::AND) {
+        BE notNode = nullptr, inner = nullptr;
+        for (BE side : {e->a, e->b}) {
+            if (side && side->op == BitOp::NOT && side->a &&
+                side->a->op == BitOp::ICMP_EQ_CONST) {
+                notNode = side;
+                inner   = (side == e->a) ? e->b : e->a;
+                break;
+            }
+        }
+        if (!notNode) break;
+        Value *n_here = notNode->a->source;
+        int    k_here = (int)notNode->a->idx;
+        if (!Ncand) Ncand = n_here;
+        else if (n_here != Ncand) return false;
+        ks.push_back(k_here);
+        e = inner;
+    }
+    if (ks.empty()) return false;
+    if (!e || e->op != BitOp::BIT_OF || e->idx != 31) return false;
+    X = e->source;
+    N = Ncand;
+
+    K = (int)ks.size();
+    for (int j = 0; j < K; j++) if (ks[j] != j + 1) return false;
+
+    for (unsigned i = 0; i < 32; i++)
+        if (!matchVarLshrBit(bv[i], X, N, i, K)) return false;
+    return true;
+}
+
 static ClosedForm recognize(const BitVec &bv) {
     ClosedForm cf; Value *X = nullptr, *Y = nullptr; int k = 0;
     if (matchCopy(bv, X))                      { cf.kind = ClosedForm::COPY_OP; cf.x = X; return cf; }
@@ -1043,6 +1125,12 @@ static ClosedForm recognize(const BitVec &bv) {
         cf.kind = ClosedForm::VAR_SHL_OP;
         cf.x = X; cf.y = Y;          // y is the shift amount Value
         cf.shiftAmount = k;          // max supported shift
+        return cf;
+    }
+    if (matchVarLshr(bv, X, Y, k)) {
+        cf.kind = ClosedForm::VAR_LSHR_OP;
+        cf.x = X; cf.y = Y;
+        cf.shiftAmount = k;
         return cf;
     }
     return cf;
@@ -1174,7 +1262,8 @@ static FuncEquiv tryRecognize(Function *f) {
     bool needB = (cf.kind == ClosedForm::AND_OP    ||
                   cf.kind == ClosedForm::OR_OP     ||
                   cf.kind == ClosedForm::XOR_OP    ||
-                  cf.kind == ClosedForm::VAR_SHL_OP);
+                  cf.kind == ClosedForm::VAR_SHL_OP ||
+                  cf.kind == ClosedForm::VAR_LSHR_OP);
     if (eq.inputIdxA < 0) return {};
     if (needB && eq.inputIdxB < 0) return {};
     if (BITFUNC_DEBUG) {
@@ -1187,6 +1276,7 @@ static FuncEquiv tryRecognize(Function *f) {
             case ClosedForm::SHL_OP:     k = "SHL";     break;
             case ClosedForm::COPY_OP:    k = "COPY";    break;
             case ClosedForm::VAR_SHL_OP: k = "VAR_SHL"; break;
+            case ClosedForm::VAR_LSHR_OP: k = "VAR_LSHR"; break;
             default: break;
         }
         fprintf(stderr, "[bitfunc] %s → %s arg[%d] arg[%d] shift=%d\n",
@@ -1224,9 +1314,11 @@ static FuncEquiv tryRecognizeParametric(Function *f) {
     }
     // Shifts under parametric retry are unsafe: we'd need to scale the mask
     // by the shift amount, which we don't bother with for now.
-    if (cf.kind == ClosedForm::LSHR_OP ||
-        cf.kind == ClosedForm::SHL_OP  ||
-        cf.kind == ClosedForm::COPY_OP) return {};
+    if (cf.kind == ClosedForm::LSHR_OP    ||
+        cf.kind == ClosedForm::SHL_OP     ||
+        cf.kind == ClosedForm::COPY_OP    ||
+        cf.kind == ClosedForm::VAR_SHL_OP ||
+        cf.kind == ClosedForm::VAR_LSHR_OP) return {};
 
     FuncEquiv eq;
     eq.kind        = cf.kind;
@@ -1318,6 +1410,38 @@ static void rewriteCallSites(Module *module,
                     bb->add_instruction_before_inst(tmp, call);
                     auto *one      = new ConstantInt(call->type_, 1);
                     auto *ge1      = new ICmpInst(ICmpInst::ICMP_SGE, n, one, bb, true);
+                    bb->add_instruction_before_inst(ge1, call);
+                    auto *result   = new SelectInst(ge1, tmp, a, call->type_);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst        = result;
+                } else if (eq.kind == ClosedForm::VAR_LSHR_OP) {
+                    // Source `rotrN(x, n)` returns `x / 2^n` for n ∈ [1, K] and
+                    // x unchanged otherwise.  Bit-vec abstraction treats this
+                    // as lshr (matches sdiv only for non-negative x), but for
+                    // negative x sdiv rounds toward zero while lshr injects
+                    // zero into the sign bit — different results.  Emit sdiv
+                    // to preserve language semantics:
+                    //     pow     = shl 1, n        ; 2^n, divisor
+                    //     divided = sdiv x, pow
+                    //     leK     = icmp sle n, K
+                    //     tmp     = select leK, divided, x
+                    //     ge1     = icmp sge n, 1
+                    //     result  = select ge1, tmp, x
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *n       = call->get_operand(eq.inputIdxB);
+                    int    K       = eq.shiftAmount;
+                    auto *one1     = new ConstantInt(call->type_, 1);
+                    auto *pow      = new BinaryInst(call->type_, Instruction::Shl, one1, n, bb, true);
+                    bb->add_instruction_before_inst(pow, call);
+                    auto *divided  = new BinaryInst(call->type_, Instruction::SDiv, a, pow, bb, true);
+                    bb->add_instruction_before_inst(divided, call);
+                    auto *kConst   = new ConstantInt(call->type_, K);
+                    auto *leK      = new ICmpInst(ICmpInst::ICMP_SLE, n, kConst, bb, true);
+                    bb->add_instruction_before_inst(leK, call);
+                    auto *tmp      = new SelectInst(leK, divided, a, call->type_);
+                    bb->add_instruction_before_inst(tmp, call);
+                    auto *one2     = new ConstantInt(call->type_, 1);
+                    auto *ge1      = new ICmpInst(ICmpInst::ICMP_SGE, n, one2, bb, true);
                     bb->add_instruction_before_inst(ge1, call);
                     auto *result   = new SelectInst(ge1, tmp, a, call->type_);
                     bb->add_instruction_before_inst(result, call);
