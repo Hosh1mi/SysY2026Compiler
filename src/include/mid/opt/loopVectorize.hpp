@@ -1,5 +1,6 @@
 #pragma once
 #include "../ir/ir.hpp"
+#include "../analysis/basicAliasAnalysis.hpp"
 #include "pass.hpp"
 #include <map>
 #include <set>
@@ -9,6 +10,7 @@
 class LoopVectorize : public Pass {
 public:
     void execute(Module *module) override;
+    PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "LoopVectorize"; }
 
 private:
@@ -40,7 +42,7 @@ private:
     };
 
     // ── Per-function driver ────────────────────────────────────────────
-    void runOnFunction(Function *func);
+    void runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
 
     // ── Loop detection ─────────────────────────────────────────────────
     std::vector<Loop> findLoops(Function *func);
@@ -54,7 +56,10 @@ private:
     Value *getBasePtr(Value *ptr);
 
     // ── Vectorization ──────────────────────────────────────────────────
-    bool tryVectorize(Loop &loop, Function *func, Module *module);
+    bool hasSafeMemoryDependencies(const Loop &loop,
+                                   const BasicAliasAnalysis &BAA);
+    bool tryVectorize(Loop &loop, Function *func, Module *module,
+                      const BasicAliasAnalysis &BAA);
     void emitVectorizedLoop(const Loop &loop, const InductionVar &iv,
                             const std::vector<MemAccess> &loads,
                             const std::vector<MemAccess> &stores,

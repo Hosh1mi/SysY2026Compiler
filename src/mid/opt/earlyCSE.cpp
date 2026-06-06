@@ -1,5 +1,8 @@
 #include "../../include/mid/opt/earlyCSE.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/opt/cse_common.hpp"
+#include <cstdlib>
+#include <iostream>
 #include <set>
 #include <stack>
 
@@ -32,11 +35,54 @@ struct MemDef {
     bool         has_been_read;
 };
 
+struct LoopMemoryMod {
+    Instruction *inst = nullptr;
+};
+
+struct ActiveMemoryMod {
+    Instruction *inst = nullptr;
+    Value *token = nullptr;
+};
+
+static bool isEarlyCSEAADebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_EARLY_CSE_AA") != nullptr;
+    return enabled;
+}
+
+static std::string formatEarlyCSEValue(Value *val) {
+    if (!val) return "<null>";
+    if (auto *inst = dynamic_cast<Instruction *>(val))
+        return "%" + inst->name_;
+    if (auto *global = dynamic_cast<GlobalVariable *>(val))
+        return "@" + global->name_;
+    if (!val->name_.empty())
+        return val->name_;
+    return "<anon>";
+}
+
+static bool mayModPtr(const BasicAliasAnalysis &BAA, Instruction *modInst,
+                      Value *ptr) {
+    if (!modInst) return true;
+    return isModSet(BAA.getModRefInfo(modInst, ptr));
+}
+
+static Value *latestModFor(Value *ptr,
+                           const std::vector<ActiveMemoryMod> &activeMods,
+                           const BasicAliasAnalysis &BAA) {
+    for (auto it = activeMods.rbegin(); it != activeMods.rend(); ++it) {
+        if (mayModPtr(BAA, it->inst, ptr))
+            return it->token;
+    }
+    return nullptr;
+}
+
 // ---------- Natural-loop analysis ----------
-// Builds map: loop-header → set of base pointers stored to in that loop.
-// nullptr in the set means "call present — all addresses potentially modified".
-static std::map<BasicBlock*, std::set<Value*>> analyze_loops(Function *func) {
-    std::map<BasicBlock*, std::set<Value*>> loop_stores;
+// Builds map: loop-header → memory operations inside that loop.
+// Header sentinels prevent incorrectly reusing a load across a loop that may
+// modify the queried address.
+static std::map<BasicBlock*, std::vector<LoopMemoryMod>>
+analyze_loops(Function *func) {
+    std::map<BasicBlock*, std::vector<LoopMemoryMod>> loop_mods;
     auto &dom_info = func->getDominatorInfo();
 
     for (auto *bb : func->basic_blocks_) {
@@ -66,14 +112,14 @@ static std::map<BasicBlock*, std::set<Value*>> analyze_loops(Function *func) {
             for (auto *lb : loop_blocks) {
                 for (auto *inst : lb->instr_list_) {
                     if (inst->is_store())
-                        loop_stores[header].insert(getBase(inst->get_operand(1)));
+                        loop_mods[header].push_back({inst});
                     if (inst->is_call())
-                        loop_stores[header].insert(nullptr); // "all" sentinel
+                        loop_mods[header].push_back({inst});
                 }
             }
         }
     }
-    return loop_stores;
+    return loop_mods;
 }
 
 // ---------- Sentinel for "loop-varying" defining store ----------
@@ -87,8 +133,9 @@ static const std::unordered_map<Value*, Value*> empty_vn_map;
 static void early_cse_dfs(BasicBlock *bb,
                           std::unordered_map<ExprSignature, Value*> &expr_map,
                           const std::map<BasicBlock*, std::vector<BasicBlock*>> &dom_children,
-                          const std::map<BasicBlock*, std::set<Value*>> &loop_stores,
-                          std::unordered_map<Value*, Value*> &last_store) // base → defining store
+                          const std::map<BasicBlock*, std::vector<LoopMemoryMod>> &loop_mods,
+                          std::vector<ActiveMemoryMod> &activeMods,
+                          const BasicAliasAnalysis &BAA)
 {
     // ── Join point: clear cached loads to prevent sibling→sibling CSE ──
     // A load defined in one sibling does not dominate another sibling.
@@ -103,36 +150,13 @@ static void early_cse_dfs(BasicBlock *bb,
         }
     }
 
-    // ── Track first-saved values for scoped restoration ──
-    std::vector<std::pair<Value*, Value*>> saved_stores; // {base, old_value}
-    std::set<Value*> saved_bases; // bases already saved (avoid double-save)
-
-    auto save_store = [&](Value *base) {
-        if (saved_bases.count(base)) return;
-        auto it = last_store.find(base);
-        saved_stores.push_back({base, it != last_store.end() ? it->second : nullptr});
-        saved_bases.insert(base);
-    };
+    size_t savedModSize = activeMods.size();
 
     // ── Loop-header: invalidate defining stores for addresses modified in loop ──
-    auto ls_it = loop_stores.find(bb);
-    if (ls_it != loop_stores.end()) {
-        bool all = ls_it->second.count(nullptr);
-        // Invalidate existing entries
-        for (auto &[base, def] : last_store) {
-            if (all || ls_it->second.count(base)) {
-                save_store(base);
-                def = LOOP_SENTINEL;
-            }
-        }
-        // Install sentinel for loop-modified addresses not yet in last_store
-        if (!all) {
-            for (Value *base : ls_it->second) {
-                if (!base) continue; // nullptr = "all" sentinel
-                if (last_store.count(base)) continue; // already handled above
-                save_store(base);
-                last_store[base] = LOOP_SENTINEL;
-            }
+    auto ls_it = loop_mods.find(bb);
+    if (ls_it != loop_mods.end()) {
+        for (auto &mod : ls_it->second) {
+            activeMods.push_back({mod.inst, LOOP_SENTINEL});
         }
     }
 
@@ -162,16 +186,30 @@ static void early_cse_dfs(BasicBlock *bb,
 
             local_mem[ptr] = {inst, val, /*has_been_read=*/false};
 
-            // Update defining store for this base
-            save_store(base);
-            last_store[base] = inst;
+            activeMods.push_back({inst, inst});
 
-            // Store may alias any load — clear Load entries (scoped)
+            // Store may alias some cached loads — clear only affected Load entries.
             for (auto si = expr_map.begin(); si != expr_map.end(); ) {
-                if (si->first.op_id == Instruction::Load) {
+                if (si->first.op_id == Instruction::Load &&
+                    mayModPtr(BAA, inst, si->first.ops[0])) {
+                    if (isEarlyCSEAADebugEnabled()) {
+                        std::cerr << "[EarlyCSE:AA] invalidate load_ptr="
+                                  << formatEarlyCSEValue(si->first.ops[0])
+                                  << " by=" << formatEarlyCSEValue(inst)
+                                  << "\n";
+                    }
                     removed_sigs.push_back({si->first, si->second});
                     si = expr_map.erase(si);
-                } else ++si;
+                } else {
+                    if (isEarlyCSEAADebugEnabled() &&
+                        si->first.op_id == Instruction::Load) {
+                        std::cerr << "[EarlyCSE:AA] preserve load_ptr="
+                                  << formatEarlyCSEValue(si->first.ops[0])
+                                  << " across=" << formatEarlyCSEValue(inst)
+                                  << "\n";
+                    }
+                    ++si;
+                }
             }
             continue;
         }
@@ -179,7 +217,6 @@ static void early_cse_dfs(BasicBlock *bb,
         // ── Load ──
         if (inst->is_load()) {
             Value *ptr  = inst->get_operand(0);
-            Value *base = getBase(ptr);
 
             // Store-load forwarding (within BB).
             // The load uses the SSA value directly, not through memory,
@@ -191,21 +228,7 @@ static void early_cse_dfs(BasicBlock *bb,
                 continue;
             }
 
-            // Determine defining store for versioned CSE
-            Value *def_store = nullptr;
-            auto ds_it = last_store.find(base);
-            if (ds_it != last_store.end()) {
-                def_store = ds_it->second; // may be Store*, LOOP_SENTINEL, or nullptr
-            } else if (ls_it != loop_stores.end()) {
-                // base is in loop's modified set but not yet in last_store.
-                // Install sentinel so loads inside loop won't match loads outside.
-                bool all = ls_it->second.count(nullptr);
-                if (all || ls_it->second.count(base)) {
-                    save_store(base);
-                    last_store[base] = LOOP_SENTINEL;
-                    def_store = LOOP_SENTINEL;
-                }
-            }
+            Value *def_store = latestModFor(ptr, activeMods, BAA);
 
             // Build signature: {Load, ty, 0, [canonical(ptr), defining_store]}
             ExprSignature sig;
@@ -216,6 +239,13 @@ static void early_cse_dfs(BasicBlock *bb,
 
             auto exist = expr_map.find(sig);
             if (exist != expr_map.end()) {
+                if (isEarlyCSEAADebugEnabled()) {
+                    std::cerr << "[EarlyCSE:AA] cse load="
+                              << formatEarlyCSEValue(inst)
+                              << " ptr=" << formatEarlyCSEValue(ptr)
+                              << " version=" << formatEarlyCSEValue(def_store)
+                              << "\n";
+                }
                 inst->replace_all_use_with(exist->second);
                 to_delete.push_back(inst);
             } else {
@@ -228,8 +258,16 @@ static void early_cse_dfs(BasicBlock *bb,
         // ── Call ──
         if (inst->is_call()) {
             local_mem.clear();
+            activeMods.push_back({inst, inst});
             for (auto si = expr_map.begin(); si != expr_map.end(); ) {
-                if (si->first.op_id == Instruction::Load) {
+                if (si->first.op_id == Instruction::Load &&
+                    mayModPtr(BAA, inst, si->first.ops[0])) {
+                    if (isEarlyCSEAADebugEnabled()) {
+                        std::cerr << "[EarlyCSE:AA] invalidate load_ptr="
+                                  << formatEarlyCSEValue(si->first.ops[0])
+                                  << " by=" << formatEarlyCSEValue(inst)
+                                  << "\n";
+                    }
                     removed_sigs.push_back({si->first, si->second});
                     si = expr_map.erase(si);
                 } else ++si;
@@ -258,7 +296,8 @@ static void early_cse_dfs(BasicBlock *bb,
     auto itc = dom_children.find(bb);
     if (itc != dom_children.end())
         for (auto *child : itc->second)
-            early_cse_dfs(child, expr_map, dom_children, loop_stores, last_store);
+            early_cse_dfs(child, expr_map, dom_children, loop_mods,
+                          activeMods, BAA);
 
     // ── Restore scope ──
     for (auto &sig : added_sigs)
@@ -268,33 +307,35 @@ static void early_cse_dfs(BasicBlock *bb,
         if (!inst_val || inst_val->parent_ != bb)
             expr_map[sig] = val;
     }
-    for (auto &[base, old_val] : saved_stores) {
-        if (old_val == nullptr)
-            last_store.erase(base);
-        else
-            last_store[base] = old_val;
-    }
+    activeMods.resize(savedModSize);
 }
 
 // ---------- Entry point ----------
-static void early_cse_on_function(Function *func) {
+static void early_cse_on_function(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
     auto &dom_children = func->getDominatorInfo().domChildren;
     BasicBlock *entry = func->basic_blocks_.front();
-    auto loop_stores = analyze_loops(func);
+    auto loop_mods = analyze_loops(func);
 
     std::unordered_map<ExprSignature, Value*> expr_map;
-    std::unordered_map<Value*, Value*> last_store; // base → defining store
+    std::vector<ActiveMemoryMod> activeMods;
 
-    early_cse_dfs(entry, expr_map, dom_children, loop_stores, last_store);
+    early_cse_dfs(entry, expr_map, dom_children, loop_mods, activeMods, BAA);
 }
 
 void EarlyCSE::execute(Module *module) {
+    AnalysisManager AM;
+    execute(module, AM);
+}
+
+PreservedAnalyses EarlyCSE::execute(Module *module, AnalysisManager &AM) {
+    BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            early_cse_on_function(func);
+            early_cse_on_function(func, BAA);
     }
     for (auto &p : canonical_constants) delete p.second;
     canonical_constants.clear();
+    return PreservedAnalyses::none();
 }

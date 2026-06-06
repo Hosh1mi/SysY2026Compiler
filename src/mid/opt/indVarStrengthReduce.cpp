@@ -1,27 +1,33 @@
 #include "../../include/mid/opt/indVarStrengthReduce.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stack>
 
 void IndVarStrengthReduce::execute(Module *module) {
-    for (auto func : module->function_list_) {
-        if (func->is_declaration()) continue;
-        runOnFunction(func);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
-void IndVarStrengthReduce::runOnFunction(Function *func) {
+PreservedAnalyses IndVarStrengthReduce::execute(Module *module, AnalysisManager &AM) {
+    for (auto func : module->function_list_) {
+        if (func->is_declaration()) continue;
+        runOnFunction(func, AM);
+    }
+    return PreservedAnalyses::none();
+}
+
+void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
     domInfo_ = &func->getDominatorInfo();
-    LoopInfo LI;
-    LI.analyze(func);
-    ScalarEvolution SE(LI);
 
     auto loops = findLoops(func);
 
     Module *module = func->parent_;
     for (auto &loop : loops) {
+        ScalarEvolution &SE = AM.getScalarEvolution(func);
         processLoop(loop, func, module, SE);
+        AM.invalidateFunction(func, PreservedAnalyses::none());
     }
 }
 

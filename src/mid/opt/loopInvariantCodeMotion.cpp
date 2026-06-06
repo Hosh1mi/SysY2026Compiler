@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdlib>
@@ -8,12 +9,16 @@
 #include <queue>
 
 void LICM::execute(Module *module) {
-    BasicAliasAnalysis BAA;
-    BAA.analyze(module);
+    AnalysisManager AM;
+    execute(module, AM);
+}
+
+PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
     for (auto func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func, BAA);
+            runOnFunction(func, AM);
     }
+    return PreservedAnalyses::none();
 }
 
 // ── Loop detection ─────────────────────────────────────────────────────────
@@ -74,6 +79,22 @@ static bool isLICMPurityDebugEnabled() {
     return enabled;
 }
 
+static bool isLICMHoistDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_LICM_HOIST") != nullptr;
+    return enabled;
+}
+
+static std::string formatLICMValue(Value *val) {
+    if (!val) return "<null>";
+    if (auto *inst = dynamic_cast<Instruction *>(val))
+        return "%" + inst->name_;
+    if (auto *global = dynamic_cast<GlobalVariable *>(val))
+        return "@" + global->name_;
+    if (!val->name_.empty())
+        return val->name_;
+    return "<anon>";
+}
+
 static void debugSCEVInvariant(Value *val, BasicBlock *loopHeader, const SCEV *s) {
     if (!isLICMSCEVDebugEnabled()) return;
 
@@ -90,6 +111,40 @@ static void debugSCEVInvariant(Value *val, BasicBlock *loopHeader, const SCEV *s
         std::cerr << "<null>";
     }
     std::cerr << " scev=" << (s ? s->print() : "<null>") << "\n";
+}
+
+static void debugHoistedInst(Instruction *inst, BasicBlock *loopHeader,
+                             BasicBlock *preheader) {
+    if (!isLICMHoistDebugEnabled()) return;
+
+    const char *kind = "inst";
+    const char *reason = "invariant";
+    if (inst->is_load()) {
+        kind = "load";
+        reason = "no-modref";
+    } else if (inst->is_call()) {
+        kind = "call";
+        reason = "pure";
+    } else if (inst->is_gep()) {
+        kind = "gep";
+    }
+
+    std::cerr << "[LICM:HOIST] function="
+              << (preheader && preheader->parent_ ? preheader->parent_->name_ : "<null>")
+              << " loop_header=" << (loopHeader ? loopHeader->name_ : "<null>")
+              << " kind=" << kind
+              << " reason=" << reason
+              << " inst=" << formatLICMValue(inst);
+
+    if (inst->is_load()) {
+        std::cerr << " ptr=" << formatLICMValue(inst->get_operand(0));
+    } else if (inst->is_call()) {
+        auto *call = static_cast<CallInst *>(inst);
+        auto *callee = dynamic_cast<Function *>(
+            call->get_operand(call->num_ops_ - 1));
+        std::cerr << " callee=" << (callee ? callee->name_ : "<null>");
+    }
+    std::cerr << "\n";
 }
 
 bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
@@ -262,6 +317,7 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
                 bb->remove_instr(inst);
                 inst->parent_ = preheader;
                 preheader->add_instruction_before_terminator(inst);
+                debugHoistedInst(inst, loop.header, preheader);
                 if (inst->is_call() && isLICMPurityDebugEnabled()) {
                     auto *call = static_cast<CallInst *>(inst);
                     auto *callee = dynamic_cast<Function *>(
@@ -303,7 +359,8 @@ void LICM::eliminateSinglePredPhis(Function *func) {
     }
 }
 
-void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
+bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
+    bool anyChanged = false;
     bool changed = true;
     while (changed) {
         changed = false;
@@ -336,15 +393,17 @@ void LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
                 phi->replace_all_use_with(non_latch_val);
                 loop.header->delete_instr(phi);
                 changed = true;
+                anyChanged = true;
                 it = loop.header->instr_list_.begin();
                 continue;
             }
             ++it;
         }
     }
+    return anyChanged;
 }
 
-void LICM::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
+void LICM::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return;
 
     eliminateSinglePredPhis(func);
@@ -357,9 +416,9 @@ void LICM::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     });
 
     for (auto &loop : loops) {
-        LoopInfo LI;
-        LI.analyze(func);
-        ScalarEvolution SE(LI);
+        LoopInfo &LI = AM.getLoopInfo(func);
+        ScalarEvolution &SE = AM.getScalarEvolution(func);
+        BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
 
         ::Loop *analysisLoop = nullptr;
         for (auto &ownedLoop : LI.allLoops()) {
@@ -369,7 +428,12 @@ void LICM::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
             }
         }
 
-        runOnLoop(loop, &SE, analysisLoop, &BAA);
-        eliminateTrivialHeaderPhis(loop);
+        bool changed = runOnLoop(loop, &SE, analysisLoop, &BAA);
+        bool phiChanged = eliminateTrivialHeaderPhis(loop);
+        if (changed || phiChanged) {
+            PreservedAnalyses pa;
+            pa.preserveBasicAA();
+            AM.invalidateFunction(func, pa);
+        }
     }
 }
