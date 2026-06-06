@@ -57,6 +57,8 @@ private:
 
     // ── Vectorization ──────────────────────────────────────────────────
     bool hasSafeMemoryDependencies(const Loop &loop,
+                                   const std::vector<MemAccess> &loads,
+                                   const std::vector<MemAccess> &stores,
                                    const BasicAliasAnalysis &BAA);
     bool tryVectorize(Loop &loop, Function *func, Module *module,
                       const BasicAliasAnalysis &BAA);

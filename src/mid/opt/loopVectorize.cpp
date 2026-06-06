@@ -382,6 +382,8 @@ static Value *getMemoryPointer(Instruction *inst) {
 }
 
 bool LoopVectorize::hasSafeMemoryDependencies(const Loop &loop,
+                                              const std::vector<MemAccess> &loads,
+                                              const std::vector<MemAccess> &stores,
                                               const BasicAliasAnalysis &BAA) {
     struct MemInst {
         Instruction *inst;
@@ -389,6 +391,22 @@ bool LoopVectorize::hasSafeMemoryDependencies(const Loop &loop,
         bool isLoad;
         bool isStore;
         int order;
+    };
+
+    auto findMemAccess = [&](Instruction *inst) -> const MemAccess * {
+        for (const auto &access : loads)
+            if (access.inst == inst) return &access;
+        for (const auto &access : stores)
+            if (access.inst == inst) return &access;
+        return nullptr;
+    };
+
+    auto isSameLaneAccess = [&](Instruction *a, Instruction *b) {
+        const MemAccess *ma = findMemAccess(a);
+        const MemAccess *mb = findMemAccess(b);
+        return ma && mb &&
+               ma->basePtr == mb->basePtr &&
+               ma->elementOffset == mb->elementOffset;
     };
 
     std::vector<MemInst> mems;
@@ -425,13 +443,15 @@ bool LoopVectorize::hasSafeMemoryDependencies(const Loop &loop,
             }
 
             bool readBeforeWriteSamePtr =
-                a.ptr == b.ptr &&
+                (a.ptr == b.ptr || isSameLaneAccess(a.inst, b.inst)) &&
                 ((a.isLoad && b.isStore && a.order < b.order) ||
                  (b.isLoad && a.isStore && b.order < a.order));
             if (readBeforeWriteSamePtr) {
                 if (isLoopVectorizeAADebugEnabled()) {
-                    std::cerr << "[LoopVectorize:AA] allow same-address-rmw ptr="
-                              << formatLoopVectorizeValue(a.ptr) << "\n";
+                    std::cerr << "[LoopVectorize:AA] allow same-address-rmw ptr_a="
+                              << formatLoopVectorizeValue(a.ptr)
+                              << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
+                              << "\n";
                 }
                 continue;
             }
@@ -520,7 +540,7 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         return false;
     }
 
-    if (!hasSafeMemoryDependencies(loop, BAA)) {
+    if (!hasSafeMemoryDependencies(loop, loads, stores, BAA)) {
         return false;
     }
 
