@@ -93,7 +93,6 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
 
     std::vector<DirectPhiCopy> directCopies;
     bool canUseDirectCopies = true;
-    bool hasPointerCopy = false;
     for (const auto &cp : copies) {
         Value *val = cp.src;
         if (!cp.phi || !hasAssignedReg(cp.phi) || isVector(val->type_)) {
@@ -104,7 +103,6 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
         bool phiIsFloat = isFloat(cp.phi->type_);
         bool phiIsPtr = isPtr(cp.phi->type_);
         bool valIsPtr = isPtr(val->type_);
-        hasPointerCopy = hasPointerCopy || phiIsPtr || valIsPtr;
         std::string dstReg = assignedReg(cp.phi, phiIsPtr);
 
         DirectPhiCopy entry{val, dstReg, "", "", regKey(dstReg),
@@ -126,20 +124,6 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             }
         }
         directCopies.push_back(entry);
-    }
-    if (!hasPointerCopy) {
-        bool hasCopyDependency = false;
-        for (size_t i = 0; i < directCopies.size() && !hasCopyDependency; ++i) {
-            for (size_t j = 0; j < directCopies.size(); ++j) {
-                if (i == j || !directCopies[j].hasSrcReg) continue;
-                if (directCopies[i].dstKey == directCopies[j].srcKey) {
-                    hasCopyDependency = true;
-                    break;
-                }
-            }
-        }
-        if (hasCopyDependency)
-            canUseDirectCopies = false;
     }
 
     if (canUseDirectCopies) {
