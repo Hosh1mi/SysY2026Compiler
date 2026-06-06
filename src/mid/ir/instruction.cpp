@@ -108,6 +108,10 @@ std::string print_cmp_type(ICmpInst::ICmpOp op) {
         case ICmpInst::ICMP_SGT: return "sgt";
         case ICmpInst::ICMP_SLE: return "sle";
         case ICmpInst::ICMP_SLT: return "slt";
+        case ICmpInst::ICMP_UGE: return "uge";
+        case ICmpInst::ICMP_UGT: return "ugt";
+        case ICmpInst::ICMP_ULE: return "ule";
+        case ICmpInst::ICMP_ULT: return "ult";
         case ICmpInst::ICMP_EQ:  return "eq";
         case ICmpInst::ICMP_NE:  return "ne";
         default: break;
