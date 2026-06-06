@@ -553,6 +553,10 @@ const char *Arm64FuncContext::icmpCond(ICmpInst::ICmpOp op) {
     case ICmpInst::ICMP_SGE: return "ge";
     case ICmpInst::ICMP_SLT: return "lt";
     case ICmpInst::ICMP_SLE: return "le";
+    case ICmpInst::ICMP_UGT: return "hi";
+    case ICmpInst::ICMP_UGE: return "hs";
+    case ICmpInst::ICMP_ULT: return "lo";
+    case ICmpInst::ICMP_ULE: return "ls";
     default: return "eq";
     }
 }
