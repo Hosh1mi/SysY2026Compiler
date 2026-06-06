@@ -317,7 +317,13 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l2 = lines[w[1]];
 
     if (l1.mnemonic != "add" && l1.mnemonic != "sub") return false;
-    if (l1.operands.size() < 3) return false;
+    // Require exactly 3 operands — i.e. plain `add Rd, Rs, Rt` form.
+    // 4+ operands means a shifted/extended operand suffix (`lsl #N`,
+    // `lsr #N`, `asr #N`, `sxtw`, `uxtb`, etc.).  Folding `add Rd, X, Y, lsl #2`
+    // into `add Rd, X, #imm` silently drops the shift and miscompiles
+    // (e.g. `5*5` lowered as `add w10, w9, w9, lsl #2` was being folded
+    // to `add w0, w9, #5`, losing the lsl #2 multiplier).
+    if (l1.operands.size() != 3) return false;
 
     std::string wM = l1.operands[0];
     if (!isScratchReg(wM)) return false;
