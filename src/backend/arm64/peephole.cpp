@@ -317,12 +317,9 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l2 = lines[w[1]];
 
     if (l1.mnemonic != "add" && l1.mnemonic != "sub") return false;
-    // Require exactly 3 operands — i.e. plain `add Rd, Rs, Rt` form.
-    // 4+ operands means a shifted/extended operand suffix (`lsl #N`,
-    // `lsr #N`, `asr #N`, `sxtw`, `uxtb`, etc.).  Folding `add Rd, X, Y, lsl #2`
-    // into `add Rd, X, #imm` silently drops the shift and miscompiles
-    // (e.g. `5*5` lowered as `add w10, w9, w9, lsl #2` was being folded
-    // to `add w0, w9, #5`, losing the lsl #2 multiplier).
+    // Require exactly 3 operands (no shift/extend modifier).  `add Rd, X, Y, lsl #2`
+    // would be silently folded to `add Rd, X, #N`, dropping the lsl #2 — e.g. `5*5`
+    // lowered as `add w10, w9, w9, lsl #2` was being folded to `add w0, w9, #5`.
     if (l1.operands.size() != 3) return false;
 
     std::string wM = l1.operands[0];
@@ -338,6 +335,11 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     } else {
         return false;
     }
+    // Reject self-reference: `add Rm, Rt, Rt` (wS == wT) computes 2*N but
+    // folding to `add Rd, Rt, #N` after deleting movz reads an uninitialized
+    // Rt.  This is also the path that `add Rd, Rs, Rt, lsl #k` (caught above
+    // by the operand-count check) would have triggered through.
+    if (wS == wT) return false;
 
     // l2 must be: mov wD, wM
     if (l2.mnemonic != "mov" || l2.operands.size() < 2) return false;
@@ -347,6 +349,12 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     // Safety: wM must be dead after l2 — i.e., the next instruction that
     // touches wM must write it (not read). Otherwise deleting `op wM,...`
     // would leave that later read with a stale/undefined value.
+    // NOTE: wT (the movz dest) is not similarly liveness-checked.  In the
+    // current emitter wT is always a freshly allocated scratch with no use
+    // outside the immediate (movz/op/mov) triple, so deletion is safe in
+    // practice.  If a future register-allocation change reuses wT before
+    // the next def, this fold will silently miscompile — adding a deadAfter
+    // check for wT here is the correct long-term fix (tracked separately).
     for (size_t j = w[1] + 1; j < lines.size(); ++j) {
         if (lines[j].kind != LineKind::Instruction) continue;
         if (isCallBarrier(lines[j].mnemonic)) break;       // call clobbers scratch → wM is dead from here
