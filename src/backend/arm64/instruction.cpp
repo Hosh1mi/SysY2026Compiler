@@ -1147,10 +1147,19 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     stackIdx++;
                 }
             } else {
-                std::string r = loadInt(arg);
                 if (intArg < 8) {
-                    os_ << "\tmov w" << intArg++ << ", " << r << "\n";
+                    std::string dst = "w" + std::to_string(intArg++);
+                    if (auto ci = dynamic_cast<ConstantInt*>(arg)) {
+                        if (ci->value_ == 0)
+                            os_ << "\tmov " << dst << ", wzr\n";
+                        else
+                            emitIntConst(ci->value_, dst);
+                    } else {
+                        std::string r = loadInt(arg);
+                        os_ << "\tmov " << dst << ", " << r << "\n";
+                    }
                 } else {
+                    std::string r = loadInt(arg);
                     std::string tmp = allocAddrReg();
                     os_ << "\tsxtw " << tmp << ", " << r << "\n";
                     os_ << "\tstr " << tmp << ", [sp, #" << (stackIdx * 8) << "]\n";

@@ -205,6 +205,18 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             return false;
         };
 
+        auto batchSourceReadsReg = [&](const std::string &reg, size_t selfIdx) {
+            std::string key = regKey(reg);
+            for (size_t scan = idx; scan < end; ++scan) {
+                if (scan == selfIdx) continue;
+                Value *src = copies[scan].src;
+                if (!hasAssignedReg(src)) continue;
+                if (regKey(assignedReg(src, isPtr(src->type_))) == key)
+                    return true;
+            }
+            return false;
+        };
+
         for (; idx < end; ++idx) {
             const auto &cp = copies[idx];
             Value *val = cp.src;
@@ -253,6 +265,20 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                 std::string srcReg = assignedReg(val, isPtr(val->type_));
                 emitStoreReg(os_, srcReg, cp.dstSlot);
                 continue;
+            }
+
+            if (cp.phi && hasAssignedReg(cp.phi) && !isFloat(val->type_) &&
+                !isPtr(val->type_)) {
+                if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                    std::string dstReg = assignedReg(cp.phi);
+                    if (!batchSourceReadsReg(dstReg, idx)) {
+                        if (ci->value_ == 0)
+                            os_ << "\tmov " << dstReg << ", wzr\n";
+                        else
+                            emitIntConst(ci->value_, dstReg);
+                        continue;
+                    }
+                }
             }
 
             std::string tmpReg;
