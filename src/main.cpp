@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
 
         pm.addPass(std::make_unique<BitFuncRecognize>());     // 位级抽象解释识别位运算仿真
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        pm.addPass(std::make_unique<EarlyCSE>());             // 消除内联后产生的冗余全局变量 load
+        // pm.addPass(std::make_unique<EarlyCSE>());             // 消除内联后产生的冗余全局变量 load — breaks dijkstra
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播 CSE 产生的复制
         pm.addPass(std::make_unique<GlobalScalarPromotion>()); // 全局标量→alloca，消除热循环中的全局 load/store
         pm.addPass(std::make_unique<Mem2Reg>());              // 将上一步新增的 alloca 提升为 SSA 寄存器
