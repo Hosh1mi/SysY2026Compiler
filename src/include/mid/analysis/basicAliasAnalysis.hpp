@@ -4,7 +4,8 @@
 #include "../ir/instruction.hpp"
 
 #include <map>
-#include <set>
+#include <string>
+#include <vector>
 
 enum class AliasResult {
     NoAlias,
@@ -35,12 +36,20 @@ struct MemoryLocation {
     Value *ptr = nullptr;
     Type *elemType = nullptr;
     long long sizeBytes = -1;
+
+    bool operator==(const MemoryLocation &other) const {
+        return ptr == other.ptr &&
+               elemType == other.elemType &&
+               sizeBytes == other.sizeBytes;
+    }
 };
 
 class BasicAliasAnalysis {
 public:
     void analyze(Module *module);
 
+    MemoryLocation getMemoryLocation(Value *ptr) const;
+    AliasResult alias(const MemoryLocation &a, const MemoryLocation &b) const;
     AliasResult alias(Value *a, Value *b) const;
     ModRefInfo getModRefInfo(Instruction *inst, Value *ptr) const;
     ModRefInfo getFunctionModRef(Function *func, Value *ptrOrGlobal = nullptr) const;
@@ -57,17 +66,29 @@ private:
     };
 
     struct FunctionSummary {
+        struct LocationEffect {
+            MemoryLocation loc;
+            ModRefInfo effect = ModRefInfo::NoModRef;
+
+            bool operator==(const LocationEffect &other) const {
+                return loc == other.loc && effect == other.effect;
+            }
+        };
+
         bool pure = false;
         bool sideEffect = true;
         ModRefInfo overall = ModRefInfo::ModRef;
-        std::map<Value *, ModRefInfo> objectEffects;
+        bool hasUnknownMemoryEffect = true;
+        std::vector<LocationEffect> locationEffects;
     };
 
     PointerInfo getPointerInfo(Value *ptr) const;
     long long typeSize(Type *ty) const;
-    void addObjectEffect(FunctionSummary &summary, Value *ptr, ModRefInfo effect) const;
+    void addLocationEffect(FunctionSummary &summary, MemoryLocation loc,
+                           ModRefInfo effect) const;
     FunctionSummary computeFunctionSummary(Function *func) const;
     bool isTrackedMemoryObject(Value *value) const;
+    std::string aliasResultName(AliasResult result) const;
 
     Module *module_ = nullptr;
     std::map<Function *, FunctionSummary> summaries_;

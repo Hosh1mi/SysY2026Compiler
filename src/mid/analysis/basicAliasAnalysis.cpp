@@ -2,7 +2,13 @@
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
 
-#include <limits>
+#include <cstdlib>
+#include <iostream>
+
+static bool isBasicAADebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_BASIC_AA") != nullptr;
+    return enabled;
+}
 
 void BasicAliasAnalysis::analyze(Module *module) {
     module_ = module;
@@ -15,6 +21,7 @@ void BasicAliasAnalysis::analyze(Module *module) {
             summary.pure = true;
             summary.sideEffect = false;
             summary.overall = ModRefInfo::NoModRef;
+            summary.hasUnknownMemoryEffect = false;
         }
         summaries_[func] = summary;
     }
@@ -29,7 +36,8 @@ void BasicAliasAnalysis::analyze(Module *module) {
             if (next.pure != cur.pure ||
                 next.sideEffect != cur.sideEffect ||
                 next.overall != cur.overall ||
-                next.objectEffects != cur.objectEffects) {
+                next.hasUnknownMemoryEffect != cur.hasUnknownMemoryEffect ||
+                next.locationEffects != cur.locationEffects) {
                 cur = next;
                 changed = true;
             }
@@ -112,38 +120,96 @@ bool BasicAliasAnalysis::isTrackedMemoryObject(Value *value) const {
            dynamic_cast<Argument *>(value);
 }
 
-AliasResult BasicAliasAnalysis::alias(Value *a, Value *b) const {
-    if (!a || !b) return AliasResult::MayAlias;
-    if (a == b) return AliasResult::MustAlias;
-
-    PointerInfo pa = getPointerInfo(a);
-    PointerInfo pb = getPointerInfo(b);
-    if (pa.base == pb.base) {
-        if (pa.hasConstantOffset && pb.hasConstantOffset &&
-            pa.offsetBytes == pb.offsetBytes)
-            return AliasResult::MustAlias;
-        return AliasResult::MayAlias;
-    }
-
-    bool aGlobal = dynamic_cast<GlobalVariable *>(pa.base) != nullptr;
-    bool bGlobal = dynamic_cast<GlobalVariable *>(pb.base) != nullptr;
-    bool aAlloca = dynamic_cast<AllocaInst *>(pa.base) != nullptr;
-    bool bAlloca = dynamic_cast<AllocaInst *>(pb.base) != nullptr;
-
-    if ((aGlobal && bGlobal) || (aAlloca && bAlloca) ||
-        (aGlobal && bAlloca) || (aAlloca && bGlobal))
-        return AliasResult::NoAlias;
-
-    return AliasResult::MayAlias;
+MemoryLocation BasicAliasAnalysis::getMemoryLocation(Value *ptr) const {
+    MemoryLocation loc;
+    loc.ptr = ptr;
+    auto *ptrTy = ptr ? dynamic_cast<PointerType *>(ptr->type_) : nullptr;
+    if (!ptrTy) return loc;
+    loc.elemType = ptrTy->contained_;
+    loc.sizeBytes = typeSize(ptrTy->contained_);
+    return loc;
 }
 
-void BasicAliasAnalysis::addObjectEffect(FunctionSummary &summary, Value *ptr,
-                                         ModRefInfo effect) const {
+std::string BasicAliasAnalysis::aliasResultName(AliasResult result) const {
+    switch (result) {
+    case AliasResult::NoAlias:
+        return "NoAlias";
+    case AliasResult::MayAlias:
+        return "MayAlias";
+    case AliasResult::MustAlias:
+        return "MustAlias";
+    }
+    return "MayAlias";
+}
+
+AliasResult BasicAliasAnalysis::alias(const MemoryLocation &a,
+                                      const MemoryLocation &b) const {
+    if (!a.ptr || !b.ptr) return AliasResult::MayAlias;
+
+    PointerInfo pa = getPointerInfo(a.ptr);
+    PointerInfo pb = getPointerInfo(b.ptr);
+    AliasResult result = AliasResult::MayAlias;
+    if (pa.base == pb.base) {
+        if (pa.hasConstantOffset && pb.hasConstantOffset) {
+            bool sameRange = pa.offsetBytes == pb.offsetBytes &&
+                             a.sizeBytes == b.sizeBytes;
+            bool knownRanges = a.sizeBytes >= 0 && b.sizeBytes >= 0;
+            if (sameRange) {
+                result = AliasResult::MustAlias;
+            } else if (knownRanges) {
+                long long aEnd = pa.offsetBytes + a.sizeBytes;
+                long long bEnd = pb.offsetBytes + b.sizeBytes;
+                result = (aEnd <= pb.offsetBytes || bEnd <= pa.offsetBytes)
+                             ? AliasResult::NoAlias
+                             : AliasResult::MayAlias;
+            }
+        }
+    } else {
+        bool aGlobal = dynamic_cast<GlobalVariable *>(pa.base) != nullptr;
+        bool bGlobal = dynamic_cast<GlobalVariable *>(pb.base) != nullptr;
+        bool aAlloca = dynamic_cast<AllocaInst *>(pa.base) != nullptr;
+        bool bAlloca = dynamic_cast<AllocaInst *>(pb.base) != nullptr;
+
+        if ((aGlobal && bGlobal) || (aAlloca && bAlloca) ||
+            (aGlobal && bAlloca) || (aAlloca && bGlobal))
+            result = AliasResult::NoAlias;
+    }
+
+    if (isBasicAADebugEnabled()) {
+        std::cerr << "[BasicAA] alias result=" << aliasResultName(result)
+                  << " a_base=" << (pa.base ? pa.base->name_ : "<null>")
+                  << " a_off=" << (pa.hasConstantOffset ? std::to_string(pa.offsetBytes) : "?")
+                  << " a_size=" << a.sizeBytes
+                  << " b_base=" << (pb.base ? pb.base->name_ : "<null>")
+                  << " b_off=" << (pb.hasConstantOffset ? std::to_string(pb.offsetBytes) : "?")
+                  << " b_size=" << b.sizeBytes
+                  << "\n";
+    }
+
+    return result;
+}
+
+AliasResult BasicAliasAnalysis::alias(Value *a, Value *b) const {
+    return alias(getMemoryLocation(a), getMemoryLocation(b));
+}
+
+void BasicAliasAnalysis::addLocationEffect(FunctionSummary &summary,
+                                           MemoryLocation loc,
+                                           ModRefInfo effect) const {
     summary.overall = combineModRef(summary.overall, effect);
-    PointerInfo info = getPointerInfo(ptr);
-    if (!isTrackedMemoryObject(info.base)) return;
-    summary.objectEffects[info.base] =
-        combineModRef(summary.objectEffects[info.base], effect);
+    PointerInfo info = getPointerInfo(loc.ptr);
+    if (!isTrackedMemoryObject(info.base)) {
+        summary.hasUnknownMemoryEffect = true;
+        return;
+    }
+
+    for (auto &record : summary.locationEffects) {
+        if (record.loc == loc) {
+            record.effect = combineModRef(record.effect, effect);
+            return;
+        }
+    }
+    summary.locationEffects.push_back({loc, effect});
 }
 
 BasicAliasAnalysis::FunctionSummary
@@ -152,19 +218,24 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
     summary.pure = true;
     summary.sideEffect = false;
     summary.overall = ModRefInfo::NoModRef;
+    summary.hasUnknownMemoryEffect = false;
 
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_load()) {
                 summary.pure = false;
-                addObjectEffect(summary, inst->get_operand(0), ModRefInfo::Ref);
+                addLocationEffect(summary,
+                                  getMemoryLocation(inst->get_operand(0)),
+                                  ModRefInfo::Ref);
                 continue;
             }
 
             if (inst->is_store()) {
                 summary.pure = false;
                 summary.sideEffect = true;
-                addObjectEffect(summary, inst->get_operand(1), ModRefInfo::Mod);
+                addLocationEffect(summary,
+                                  getMemoryLocation(inst->get_operand(1)),
+                                  ModRefInfo::Mod);
                 continue;
             }
 
@@ -177,6 +248,7 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
                     summary.pure = false;
                     summary.sideEffect = true;
                     summary.overall = combineModRef(summary.overall, ModRefInfo::ModRef);
+                    summary.hasUnknownMemoryEffect = true;
                     continue;
                 }
 
@@ -185,15 +257,16 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
                 if (calleeSummary.sideEffect) summary.sideEffect = true;
                 summary.overall = combineModRef(summary.overall, calleeSummary.overall);
 
-                for (auto &kv : calleeSummary.objectEffects) {
-                    Value *formalObj = kv.first;
-                    ModRefInfo effect = kv.second;
-                    Value *actualObj = formalObj;
-                    if (auto *arg = dynamic_cast<Argument *>(formalObj)) {
+                if (calleeSummary.hasUnknownMemoryEffect)
+                    summary.hasUnknownMemoryEffect = true;
+
+                for (auto &record : calleeSummary.locationEffects) {
+                    MemoryLocation actualLoc = record.loc;
+                    if (auto *arg = dynamic_cast<Argument *>(record.loc.ptr)) {
                         if (arg->arg_no_ < call->num_ops_ - 1)
-                            actualObj = call->get_operand(arg->arg_no_);
+                            actualLoc = getMemoryLocation(call->get_operand(arg->arg_no_));
                     }
-                    addObjectEffect(summary, actualObj, effect);
+                    addLocationEffect(summary, actualLoc, record.effect);
                 }
             }
         }
@@ -211,13 +284,13 @@ ModRefInfo BasicAliasAnalysis::getFunctionModRef(Function *func,
     const FunctionSummary &summary = it->second;
     if (!ptrOrGlobal) return summary.overall;
 
-    PointerInfo query = getPointerInfo(ptrOrGlobal);
+    MemoryLocation query = getMemoryLocation(ptrOrGlobal);
     ModRefInfo result = ModRefInfo::NoModRef;
-    for (auto &kv : summary.objectEffects) {
-        if (alias(kv.first, query.base) != AliasResult::NoAlias)
-            result = combineModRef(result, kv.second);
+    for (auto &record : summary.locationEffects) {
+        if (alias(record.loc, query) != AliasResult::NoAlias)
+            result = combineModRef(result, record.effect);
     }
-    if (result == ModRefInfo::NoModRef && summary.overall != ModRefInfo::NoModRef)
+    if (result == ModRefInfo::NoModRef && summary.hasUnknownMemoryEffect)
         return ModRefInfo::ModRef;
     return result;
 }
@@ -226,13 +299,15 @@ ModRefInfo BasicAliasAnalysis::getModRefInfo(Instruction *inst, Value *ptr) cons
     if (!inst) return ModRefInfo::NoModRef;
 
     if (inst->is_load()) {
-        return alias(inst->get_operand(0), ptr) == AliasResult::NoAlias
+        return alias(getMemoryLocation(inst->get_operand(0)),
+                     getMemoryLocation(ptr)) == AliasResult::NoAlias
                    ? ModRefInfo::NoModRef
                    : ModRefInfo::Ref;
     }
 
     if (inst->is_store()) {
-        return alias(inst->get_operand(1), ptr) == AliasResult::NoAlias
+        return alias(getMemoryLocation(inst->get_operand(1)),
+                     getMemoryLocation(ptr)) == AliasResult::NoAlias
                    ? ModRefInfo::NoModRef
                    : ModRefInfo::Mod;
     }
