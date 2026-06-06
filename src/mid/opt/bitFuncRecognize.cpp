@@ -1390,60 +1390,47 @@ static void rewriteCallSites(Module *module,
                     Value *amt = new ConstantInt(call->type_, eq.shiftAmount);
                     newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, amt, bb, true);
                     bb->add_instruction_before_inst(newInst, call);
-                } else if (eq.kind == ClosedForm::VAR_SHL_OP) {
-                    // Source `rotlN(x, n)` returns `x << n` for n ∈ [1, K] and
-                    // x unchanged otherwise.  Emit guarded shift:
-                    //     shifted = shl x, n
-                    //     leK     = icmp sle n, K
-                    //     tmp     = select leK, shifted, x
-                    //     ge1     = icmp sge n, 1
-                    //     result  = select ge1, tmp, x
+                } else if (eq.kind == ClosedForm::VAR_SHL_OP ||
+                           eq.kind == ClosedForm::VAR_LSHR_OP) {
+                    // Source `rotlN(x, n)` / `rotrN(x, n)` returns the shifted /
+                    // divided form for n ∈ [1, K] and x unchanged otherwise.
+                    // Compress the range check `(n >= 1) && (n <= K)` to a
+                    // single unsigned compare `(unsigned)(K - n) < K`, which
+                    // is correct for any signed n (negative n yields a large
+                    // unsigned K-n, n==0 yields K itself which fails ult K,
+                    // n>K yields a wrap to a large unsigned).  We deliberately
+                    // emit `sub K, n` (constant on LHS, variable on RHS) so
+                    // foldICmpAddSub's Category B (which requires constant on
+                    // sub's RHS) does not fire — that fold drops 2's-complement
+                    // wrap guarantees and would silently break the predicate.
+                    // The (K-n, ult) expressions CSE across sibling calls
+                    // sharing the same `n` and `K`.
+                    //     body    = shl x, n   (VAR_SHL)
+                    //     body    = sdiv x, (shl 1, n)   (VAR_LSHR)
+                    //     diff    = sub K, n
+                    //     inRange = icmp ult diff, K
+                    //     result  = select inRange, body, x
                     Value *a       = call->get_operand(eq.inputIdxA);
                     Value *n       = call->get_operand(eq.inputIdxB);
                     int    K       = eq.shiftAmount;
-                    auto *shifted  = new BinaryInst(call->type_, Instruction::Shl, a, n, bb, true);
-                    bb->add_instruction_before_inst(shifted, call);
-                    auto *kConst   = new ConstantInt(call->type_, K);
-                    auto *leK      = new ICmpInst(ICmpInst::ICMP_SLE, n, kConst, bb, true);
-                    bb->add_instruction_before_inst(leK, call);
-                    auto *tmp      = new SelectInst(leK, shifted, a, call->type_);
-                    bb->add_instruction_before_inst(tmp, call);
-                    auto *one      = new ConstantInt(call->type_, 1);
-                    auto *ge1      = new ICmpInst(ICmpInst::ICMP_SGE, n, one, bb, true);
-                    bb->add_instruction_before_inst(ge1, call);
-                    auto *result   = new SelectInst(ge1, tmp, a, call->type_);
-                    bb->add_instruction_before_inst(result, call);
-                    newInst        = result;
-                } else if (eq.kind == ClosedForm::VAR_LSHR_OP) {
-                    // Source `rotrN(x, n)` returns `x / 2^n` for n ∈ [1, K] and
-                    // x unchanged otherwise.  Bit-vec abstraction treats this
-                    // as lshr (matches sdiv only for non-negative x), but for
-                    // negative x sdiv rounds toward zero while lshr injects
-                    // zero into the sign bit — different results.  Emit sdiv
-                    // to preserve language semantics:
-                    //     pow     = shl 1, n        ; 2^n, divisor
-                    //     divided = sdiv x, pow
-                    //     leK     = icmp sle n, K
-                    //     tmp     = select leK, divided, x
-                    //     ge1     = icmp sge n, 1
-                    //     result  = select ge1, tmp, x
-                    Value *a       = call->get_operand(eq.inputIdxA);
-                    Value *n       = call->get_operand(eq.inputIdxB);
-                    int    K       = eq.shiftAmount;
-                    auto *one1     = new ConstantInt(call->type_, 1);
-                    auto *pow      = new BinaryInst(call->type_, Instruction::Shl, one1, n, bb, true);
-                    bb->add_instruction_before_inst(pow, call);
-                    auto *divided  = new BinaryInst(call->type_, Instruction::SDiv, a, pow, bb, true);
-                    bb->add_instruction_before_inst(divided, call);
-                    auto *kConst   = new ConstantInt(call->type_, K);
-                    auto *leK      = new ICmpInst(ICmpInst::ICMP_SLE, n, kConst, bb, true);
-                    bb->add_instruction_before_inst(leK, call);
-                    auto *tmp      = new SelectInst(leK, divided, a, call->type_);
-                    bb->add_instruction_before_inst(tmp, call);
-                    auto *one2     = new ConstantInt(call->type_, 1);
-                    auto *ge1      = new ICmpInst(ICmpInst::ICMP_SGE, n, one2, bb, true);
-                    bb->add_instruction_before_inst(ge1, call);
-                    auto *result   = new SelectInst(ge1, tmp, a, call->type_);
+                    Instruction *body = nullptr;
+                    if (eq.kind == ClosedForm::VAR_SHL_OP) {
+                        body = new BinaryInst(call->type_, Instruction::Shl, a, n, bb, true);
+                        bb->add_instruction_before_inst(body, call);
+                    } else {
+                        auto *one1 = new ConstantInt(call->type_, 1);
+                        auto *pow  = new BinaryInst(call->type_, Instruction::Shl, one1, n, bb, true);
+                        bb->add_instruction_before_inst(pow, call);
+                        body = new BinaryInst(call->type_, Instruction::SDiv, a, pow, bb, true);
+                        bb->add_instruction_before_inst(body, call);
+                    }
+                    auto *kLhs     = new ConstantInt(call->type_, K);
+                    auto *diff     = new BinaryInst(call->type_, Instruction::Sub, kLhs, n, bb, true);
+                    bb->add_instruction_before_inst(diff, call);
+                    auto *kRhs     = new ConstantInt(call->type_, K);
+                    auto *inRange  = new ICmpInst(ICmpInst::ICMP_ULT, diff, kRhs, bb, true);
+                    bb->add_instruction_before_inst(inRange, call);
+                    auto *result   = new SelectInst(inRange, body, a, call->type_);
                     bb->add_instruction_before_inst(result, call);
                     newInst        = result;
                 }
