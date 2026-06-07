@@ -544,6 +544,22 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
+    for (auto *bb : func->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            auto *alloca = dynamic_cast<AllocaInst *>(inst);
+            if (alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID)
+                return;
+        }
+    }
+
+    int inLoopHeaderPreds = 0;
+    for (auto *pred : loop.header->pre_bbs_) {
+        if (loop.blocks.count(pred))
+            inLoopHeaderPreds++;
+    }
+    if (inLoopHeaderPreds != 1)
+        return;
+
     // Skip loops that already contain vector operations — converting
     // GEPs to pointer phis in these loops causes register spills because
     // the new phis compete with vector registers.
@@ -591,7 +607,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 auto *gepPtrTy = dynamic_cast<PointerType *>(gep->type_);
                 bool gepYieldsArray =
                     gepPtrTy && gepPtrTy->contained_->tid_ == Type::ArrayTyID;
-                SCEVGEPInfo gepInfo = gepYieldsArray ? SCEVGEPInfo{} : SE.getLinearizedGEP(gep);
+                SCEVGEPInfo gepInfo = SCEVGEPInfo{};
                 if (gepInfo.valid) {
                     LinearIVExpr flatExpr =
                         linearizeSCEVForIV(gepInfo.elementOffset, iv, loop, SE);

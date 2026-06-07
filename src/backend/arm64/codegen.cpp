@@ -76,7 +76,7 @@ void Arm64CodeGen::generate() {
 #endif
                 for (auto f : partitions[t]) {
                     std::ostringstream local_os;
-                    Arm64FuncContext ctx(f, local_os);
+                    Arm64FuncContext ctx(f, local_os, enable_regalloc_);
                     ctx.generate();
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
@@ -199,6 +199,6 @@ void Arm64CodeGen::emitExtern(Function *f) {
 }
 
 void Arm64CodeGen::emitFunction(Function *f) {
-    Arm64FuncContext ctx(f, os_);
+    Arm64FuncContext ctx(f, os_, enable_regalloc_);
     ctx.generate();
 }

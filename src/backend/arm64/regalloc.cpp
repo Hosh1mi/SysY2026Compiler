@@ -37,6 +37,7 @@ bool Arm64RegAlloc::canAssignRegister(Value *v) const {
 
 void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                                const std::vector<int> &colorToReg, bool isFloat,
+                               const std::set<int> &callerSavedRegs,
                                const std::map<Value*, double> &spillCost,
                                const std::map<Value*, std::set<Value*>> &phiAffinity) {
     if (pool.empty()) return;
@@ -45,6 +46,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     std::vector<Interval> sorted = pool;
     std::sort(sorted.begin(), sorted.end(),
               [](const Interval &a, const Interval &b) { return a.start < b.start; });
+    std::map<Value*, Interval> intervalForValue;
+    for (auto &iv : sorted) intervalForValue[iv.value] = iv;
 
     // Build interference graph
     std::map<Value*, std::set<Value*>> adj;
@@ -105,13 +108,22 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             if (it != colors.end()) neighborColors.insert(it->second);
         }
 
+        const Interval &iv = intervalForValue[v];
+        auto colorAllowed = [&](int c) {
+            if (c < 0 || c >= K) return false;
+            int regNo = colorToReg[c];
+            return !iv.crossesCall || !callerSavedRegs.count(regNo);
+        };
+
         int color = -1;
         // Biased: prefer color of already-colored phi partners
         auto affIt = phiAffinity.find(v);
         if (affIt != phiAffinity.end()) {
             for (auto partner : affIt->second) {
                 auto pc = colors.find(partner);
-                if (pc != colors.end() && !neighborColors.count(pc->second)) {
+                if (pc != colors.end() &&
+                    colorAllowed(pc->second) &&
+                    !neighborColors.count(pc->second)) {
                     color = pc->second;
                     break;
                 }
@@ -119,7 +131,7 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
         if (color < 0) {
             for (int c = 0; c < K; c++) {
-                if (!neighborColors.count(c)) { color = c; break; }
+                if (colorAllowed(c) && !neighborColors.count(c)) { color = c; break; }
             }
         }
         if (color >= 0) {
@@ -216,10 +228,16 @@ void Arm64RegAlloc::allocate() {
         }
     }
 
-    // Build color→physical-register mapping
+    // Build color→physical-register mapping.
+    // Values that live through calls must stay in callee-saved registers.
+    // Short-lived values should prefer caller-saved registers so they do not
+    // force save/restore slots in leaf functions or for call-local temporaries.
     std::vector<int> intColorToReg;
     std::vector<int> floatColorToReg;
     std::vector<int> neonColorToReg;
+    std::set<int> callerSavedIntRegs;
+    std::set<int> callerSavedFloatRegs;
+    std::set<int> callerSavedNEONRegs;
     {
         std::set<int> precoloredIntRegs;
         for (auto &kv : assignedRegs_) {
@@ -228,11 +246,24 @@ void Arm64RegAlloc::allocate() {
                 precoloredIntRegs.insert(std::stoi(reg.substr(1)));
         }
         if (isLeaf) {
-            for (int r : {0,1,2,3,4,5,6,7, 19,20,21,22,23,24,25,26,27,28}) {
+            const int callerIntRegs[] = {0,1,2,3,4,5,6,7, 9};
+            for (int r : callerIntRegs) {
+                if (!precoloredIntRegs.count(r))
+                    intColorToReg.push_back(r);
+                callerSavedIntRegs.insert(r);
+            }
+            for (int r = 19; r <= 28; ++r) {
                 if (!precoloredIntRegs.count(r))
                     intColorToReg.push_back(r);
             }
         } else {
+            const int callerIntRegs[] = {9,0,1,2,3,4,5,6,7};
+            for (int r : callerIntRegs) {
+                if (!precoloredIntRegs.count(r))
+                    intColorToReg.push_back(r);
+                callerSavedIntRegs.insert(r);
+            }
+            callerSavedIntRegs.insert(9);
             for (int r = 19; r <= 28; ++r) {
                 if (!precoloredIntRegs.count(r))
                     intColorToReg.push_back(r);
@@ -244,11 +275,31 @@ void Arm64RegAlloc::allocate() {
             if (!reg.empty() && reg[0] == 's')
                 precoloredFloatRegs.insert(std::stoi(reg.substr(1)));
         }
-        for (int r = 8; r <= 15; ++r) {
-            if (!precoloredFloatRegs.count(r))
-                floatColorToReg.push_back(r);
+        if (isLeaf) {
+            const int callerFloatRegs[] = {0,1,2,3,4,5,6,7, 16};
+            for (int r : callerFloatRegs) {
+                if (!precoloredFloatRegs.count(r))
+                    floatColorToReg.push_back(r);
+                callerSavedFloatRegs.insert(r);
+            }
+            for (int r = 8; r <= 15; ++r) {
+                if (!precoloredFloatRegs.count(r))
+                    floatColorToReg.push_back(r);
+            }
+        } else {
+            for (int r = 0; r <= 7; ++r) {
+                if (!precoloredFloatRegs.count(r))
+                    floatColorToReg.push_back(r);
+                callerSavedFloatRegs.insert(r);
+            }
+            if (!precoloredFloatRegs.count(16))
+                floatColorToReg.push_back(16);
+            callerSavedFloatRegs.insert(16);
+            for (int r = 8; r <= 15; ++r) {
+                if (!precoloredFloatRegs.count(r))
+                    floatColorToReg.push_back(r);
+            }
         }
-        // NEON callee-saved registers v8-v15 (8 regs)
         for (int r = 8; r <= 15; ++r)
             neonColorToReg.push_back(r);
     }
@@ -308,6 +359,7 @@ void Arm64RegAlloc::allocate() {
                     }
                 }
             }
+
         }
         blockEnd[bb] = idx;
     }
@@ -336,11 +388,6 @@ void Arm64RegAlloc::allocate() {
         for (auto inst : bb->instr_list_) {
             if (auto phi = dynamic_cast<PhiInst*>(inst)) {
                 if (canAssignRegister(phi)) info.def.insert(phi);
-                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                    auto val = phi->get_operand(i);
-                    auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                    bbInfo[pred].use.insert(val);
-                }
                 continue;
             }
 
@@ -387,6 +434,41 @@ void Arm64RegAlloc::allocate() {
         }
     } while (changed);
 
+    std::set<Value*> crossesCallValues;
+    for (auto bb : blocksOrder) {
+        std::set<Value*> live = liveOut[bb];
+        for (auto it = bb->instr_list_.rbegin(); it != bb->instr_list_.rend(); ++it) {
+            Instruction *inst = *it;
+
+            if (inst->is_call()) {
+                std::set<Value*> liveAfterCall = live;
+                if (canAssignRegister(inst))
+                    liveAfterCall.erase(inst);
+                for (auto v : liveAfterCall)
+                    if (canAssignRegister(v))
+                        crossesCallValues.insert(v);
+            }
+
+            if (canAssignRegister(inst))
+                live.erase(inst);
+
+            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    auto val = phi->get_operand(i);
+                    if (canAssignRegister(val))
+                        live.insert(val);
+                }
+                continue;
+            }
+
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val))
+                    live.insert(val);
+            }
+        }
+    }
+
     // ---- 4. Build live intervals ----
     for (auto &entry : defPos) {
         Value *v = entry.first;
@@ -403,10 +485,12 @@ void Arm64RegAlloc::allocate() {
             continue;
 
         if (end >= start) {
+            bool crossesCall = crossesCallValues.count(v) > 0;
             intervals.push_back({v, start, end,
                                  isAllocatableFloatValue(v->type_),
                                  isAllocatablePtrValue(v->type_),
-                                 isAllocatableNEONValue(v->type_)});
+                                 isAllocatableNEONValue(v->type_),
+                                 crossesCall});
         }
     }
 
@@ -519,7 +603,7 @@ void Arm64RegAlloc::allocate() {
                 spillCost[partner] = maxCost;
     }
 
-    // ---- 9. Separate into pools ----
+    // ---- 9. Separate into register-class pools ----
     std::vector<Interval> intPool, floatPool, neonPool;
     for (auto &iv : intervals) {
         if (iv.isNEON)
@@ -531,7 +615,7 @@ void Arm64RegAlloc::allocate() {
     }
 
     // ---- 10. Graph coloring (Chaitin-Briggs) ----
-    colorPool(intPool, intColorToReg, false, spillCost, phiAffinity);
-    colorPool(floatPool, floatColorToReg, true, spillCost, phiAffinity);
-    colorPool(neonPool, neonColorToReg, false, spillCost, phiAffinity);
+    colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity);
+    colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity);
+    colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity);
 }

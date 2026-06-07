@@ -233,7 +233,7 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 }
 
 // Call instructions (bl, blr) clobber all caller-saved registers.
-// Since scratch regs (w9-w15, x9-x15, s16-s31) are all caller-saved,
+// Since scratch regs (w10-w15, x10-x15, s16-s31) are all caller-saved,
 // any call between a store and a load makes forwarding unsafe.
 static bool isCallBarrier(const std::string &m) {
 	return m == "bl" || m == "blr";
@@ -257,11 +257,11 @@ static std::vector<size_t> instructionWindow(const std::vector<ParsedLine> &line
 // Each returns true if it made a change.
 
 // Scratch register range — must agree with the AArch64 codegen's caller-saved
-// scratch allocator (backend/arm64/arm64_context.*).  w9–w15 / x9–x15 are the
+// scratch allocator (backend/arm64/load_store.cpp).  w10–w15 / x10–x15 are the
 // short-lived temporaries the emitter uses for intermediate values within a
 // single materialization (e.g. the movz→add→mov triple that tryImmediateFold
 // folds).  If the allocator's scratch range changes, both sides must move.
-static constexpr int kScratchRegMin = 9;
+static constexpr int kScratchRegMin = 10;
 static constexpr int kScratchRegMax = 15;
 
 // AArch64 add/sub unshifted imm12 range.  The `lsl #12` variant ([4096,
@@ -270,7 +270,7 @@ static constexpr int kScratchRegMax = 15;
 // require a more careful operand-shape check.
 static constexpr int kAddSubImm12Max = 4095;
 
-// True for w9-w15 / x9-x15.
+// True for w10-w15 / x10-x15.
 static bool isScratchReg(const std::string &r) {
     if (r.size() < 2) return false;
     if (r[0] != 'w' && r[0] != 'x') return false;
@@ -1084,6 +1084,7 @@ static bool tryFoldAddSubMov(std::vector<ParsedLine> &lines, size_t idx) {
     char cls = regClass(rX);
     if (cls != 'w' && cls != 'x') return false;
     if (rX == "wzr" || rX == "xzr") return false;
+    if (!isScratchReg(rX)) return false;
 
     auto w = instructionWindow(lines, idx + 1, 6);
 
@@ -1126,7 +1127,7 @@ static bool tryFoldAddSubMov(std::vector<ParsedLine> &lines, size_t idx) {
                     mnem == "cbnz" || mnem == "cbz" ||
                     mnem == "tbnz" || mnem == "tbz" ||
                     (!mnem.empty() && mnem[0] == 'b' && mnem[1] == '.')) {
-                    safe = true; break;  // end of BB: rX dies here
+                    return false;
                 }
                 if (lineReadsReg(lines[j], rX)) return false;
                 if (lineWritesReg(lines[j], rX)) { safe = true; break; }

@@ -15,7 +15,7 @@ prompt/
 *.ll
 out
 checklist.md
-test/performance/
+test/performance*
 .vscode/
 .idea/
 CLAUDE.md

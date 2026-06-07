@@ -1,7 +1,9 @@
 #pragma once
 #include "../../mid/ir/ir.hpp"
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 /// Chaitin-Briggs optimistic graph-coloring register allocator.
 /// Standalone class that takes a Function* and produces a mapping
@@ -30,10 +32,12 @@ private:
         bool isFloat;
         bool isPtr;
         bool isNEON;
+        bool crossesCall;
     };
 
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,
+                   const std::set<int> &callerSavedRegs,
                    const std::map<Value*, double> &spillCost,
                    const std::map<Value*, std::set<Value*>> &phiAffinity);
 

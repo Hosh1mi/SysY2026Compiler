@@ -10,7 +10,7 @@ class Arm64CodeGen;
 
 class Arm64FuncContext {
 public:
-    Arm64FuncContext(Function *f, std::ostream &os);
+    Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc = true);
     void generate();
 
 private:
@@ -74,6 +74,7 @@ private:
 
     Function *func_;
     std::ostream &os_;
+    bool enableRegAlloc_ = true;
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)
     int frameSize_ = 0;
@@ -83,6 +84,9 @@ private:
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
     std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7, v16-v31
+    std::set<int> reservedIntRegs_;
+    std::set<int> reservedFloatRegs_;
+    std::set<int> reservedNEONRegs_;
     std::set<BasicBlock*> blockSkipped_;  // blocks handled by csel, don't emit
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 
