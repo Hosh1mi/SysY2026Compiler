@@ -83,6 +83,9 @@ private:
     std::set<int> usedIntRegs_;
     std::set<int> usedFloatRegs_;
     std::set<int> usedNEONRegs_;    // NEON scratch: v0-v7, v16-v31
+    std::set<int> reservedIntRegs_;
+    std::set<int> reservedFloatRegs_;
+    std::set<int> reservedNEONRegs_;
     std::set<BasicBlock*> blockSkipped_;  // blocks handled by csel, don't emit
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 

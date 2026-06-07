@@ -8,9 +8,9 @@
 // ---- scratch register pool ----
 
 void Arm64FuncContext::resetRegs() {
-    usedIntRegs_.clear();
-    usedFloatRegs_.clear();
-    usedNEONRegs_.clear();
+    usedIntRegs_ = reservedIntRegs_;
+    usedFloatRegs_ = reservedFloatRegs_;
+    usedNEONRegs_ = reservedNEONRegs_;
 }
 
 std::string Arm64FuncContext::allocNEONReg() {
@@ -33,17 +33,19 @@ std::string Arm64FuncContext::allocNEONReg() {
 void Arm64FuncContext::freeNEONReg(const std::string &reg) {
     if (reg.size() >= 2 && reg[0] == 'v') {
         int num = std::stoi(reg.substr(1));
+        if (reservedNEONRegs_.count(num)) return;
         usedNEONRegs_.erase(num);
     }
 }
 
 void Arm64FuncContext::resetNEONRegs() {
-    usedNEONRegs_.clear();
+    usedNEONRegs_ = reservedNEONRegs_;
 }
 
 void Arm64FuncContext::freeIntReg(const std::string &reg) {
     if (reg.size() >= 2 && reg[0] == 'w') {
         int num = std::stoi(reg.substr(1));
+        if (reservedIntRegs_.count(num)) return;
         usedIntRegs_.erase(num);
     }
 }
@@ -51,12 +53,18 @@ void Arm64FuncContext::freeIntReg(const std::string &reg) {
 void Arm64FuncContext::freeAddrReg(const std::string& reg) {
     if (reg.size() >= 2 && reg[0] == 'x') {
         int num = std::stoi(reg.substr(1));
+        if (reservedIntRegs_.count(num)) return;
         usedIntRegs_.erase(num);
     }
 }
 
+static int physRegNo(const std::string &reg) {
+    if (reg.size() < 2) return -1;
+    return std::stoi(reg.substr(1));
+}
+
 std::string Arm64FuncContext::allocIntReg() {
-    for (int r = 9; r <= 15; r++) {
+    for (int r = 10; r <= 15; r++) {
         if (!usedIntRegs_.count(r)) {
             usedIntRegs_.insert(r);
             return "w" + std::to_string(r);
@@ -78,7 +86,7 @@ std::string Arm64FuncContext::allocFloatReg() {
 }
 
 std::string Arm64FuncContext::allocAddrReg() {
-    for (int r = 9; r <= 15; r++) {
+    for (int r = 10; r <= 15; r++) {
         if (!usedIntRegs_.count(r)) {
             usedIntRegs_.insert(r);
             return "x" + std::to_string(r);
@@ -97,7 +105,12 @@ std::string Arm64FuncContext::loadInt(Value *v) {
         emitIntConst(ci->value_, r);
         return r;
     }
-    if (hasAssignedReg(v)) return assignedReg(v);
+    if (hasAssignedReg(v)) {
+        std::string reg = assignedReg(v);
+        int num = physRegNo(reg);
+        if (num >= 0) usedIntRegs_.insert(num);
+        return reg;
+    }
     std::string r = allocIntReg();
     int off = getSlot(v);
     emitLoadReg(os_, r, off);
@@ -110,7 +123,12 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
         emitFloatConst(cf->value_, r);
         return r;
     }
-    if (hasAssignedReg(v)) return assignedReg(v);
+    if (hasAssignedReg(v)) {
+        std::string reg = assignedReg(v);
+        int num = physRegNo(reg);
+        if (num >= 0) usedFloatRegs_.insert(num);
+        return reg;
+    }
     std::string r = allocFloatReg();
     int off = getSlot(v);
     emitLoadReg(os_, r, off);
@@ -129,7 +147,12 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
         emitIntConst(ci->value_, r);
         return r;
     }
-    if (hasAssignedReg(v)) return assignedReg(v, true);
+    if (hasAssignedReg(v)) {
+        std::string reg = assignedReg(v, true);
+        int num = physRegNo(reg);
+        if (num >= 0) usedIntRegs_.insert(num);
+        return reg;
+    }
     if (dynamic_cast<AllocaInst*>(v)) {
         std::string r = allocAddrReg();
         int off = getSlot(v);
@@ -210,7 +233,12 @@ std::string Arm64FuncContext::loadVector(Value *v) {
         }
         return rd;
     }
-    if (hasAssignedReg(v)) return assignedReg(v);
+    if (hasAssignedReg(v)) {
+        std::string reg = assignedReg(v);
+        int num = physRegNo(reg);
+        if (num >= 0) usedNEONRegs_.insert(num);
+        return reg;
+    }
     std::string r = allocNEONReg();
     int off = getSlot(v);
     // ldr qN only supports unsigned offset; use sub+ldr for negative offsets

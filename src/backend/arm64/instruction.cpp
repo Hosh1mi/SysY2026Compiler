@@ -7,6 +7,9 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <set>
+#include <vector>
 
 void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     if (blockSkipped_.count(bb)) return;
@@ -91,7 +94,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     BinaryInst *mulInst = static_cast<BinaryInst*>(inst);
 
                     // 1. Load mul operands and pin to w8 / w16.
-                    //    w8 is never returned by allocIntReg (pool is w9-w15).
+                    //    w8 is never returned by allocIntReg (pool is w10-w15).
                     //    w16 is the fallback — we re-mark it after each
                     //    intervening instruction to prevent re-use.
                     resetRegs();
@@ -149,6 +152,23 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
 
 void Arm64FuncContext::emitInstruction(Instruction *inst) {
     resetRegs();
+    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        Value *op = inst->get_operand(i);
+        if (!hasAssignedReg(op)) continue;
+
+        std::string reg = assignedReg(op, isPtr(op->type_));
+        if (reg.size() < 2) continue;
+
+        int regNo = std::stoi(reg.substr(1));
+        if (reg[0] == 'w' || reg[0] == 'x') {
+            usedIntRegs_.insert(regNo);
+        } else if (reg[0] == 's' || reg[0] == 'd') {
+            usedFloatRegs_.insert(regNo);
+        } else if (reg[0] == 'v') {
+            usedNEONRegs_.insert(regNo);
+        }
+    }
+
     switch (inst->op_id_) {
 
     // ---- Alloca ----
@@ -1100,7 +1120,100 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto call = static_cast<CallInst*>(inst);
         unsigned numArgs = call->num_ops_ - 1;
         auto callee = static_cast<Function*>(call->get_operand(numArgs));
-    
+
+        struct RegArg {
+            unsigned index;
+            Value *value;
+            std::string dst;
+            bool isFloat;
+            bool isPtr;
+        };
+
+        std::vector<RegArg> regArgs;
+        std::set<int> intArgDests;
+        std::set<int> floatArgDests;
+
+        int scanIntArg = 0, scanFloatArg = 0;
+        for (unsigned i = 0; i < numArgs; i++) {
+            auto arg = call->get_operand(i);
+            if (isFloat(arg->type_)) {
+                if (scanFloatArg < 8) {
+                    regArgs.push_back({i, arg, "s" + std::to_string(scanFloatArg), true, false});
+                    floatArgDests.insert(scanFloatArg);
+                }
+                scanFloatArg++;
+            } else {
+                bool ptr = isPtr(arg->type_);
+                if (scanIntArg < 8) {
+                    regArgs.push_back({i, arg,
+                                      (ptr ? "x" : "w") + std::to_string(scanIntArg),
+                                      false, ptr});
+                    intArgDests.insert(scanIntArg);
+                }
+                scanIntArg++;
+            }
+        }
+
+        // Register argument assignment is a parallel copy: evaluating it
+        // sequentially can clobber a later source already sitting in x0-x7/s0-s7.
+        // Pre-copy those sources to scratch registers so regalloc does not need
+        // to force every call operand into callee-saved registers.
+        std::map<Value*, std::string> callArgTemps;
+        auto regNo = [](const std::string &reg) -> int {
+            if (reg.size() < 2) return -1;
+            return std::stoi(reg.substr(1));
+        };
+        auto regPrefix = [](const std::string &reg) -> char {
+            return reg.empty() ? '\0' : reg[0];
+        };
+        for (unsigned i = 0; i < numArgs; i++) {
+            auto arg = call->get_operand(i);
+            if (!hasAssignedReg(arg) || callArgTemps.count(arg))
+                continue;
+
+            bool argIsFloat = isFloat(arg->type_);
+            bool argIsPtr = isPtr(arg->type_);
+            std::string src = assignedReg(arg, argIsPtr);
+            int srcNo = regNo(src);
+            if (srcNo < 0)
+                continue;
+
+            bool sourceCanBeClobbered = false;
+            if (argIsFloat) {
+                sourceCanBeClobbered = floatArgDests.count(srcNo) > 0;
+            } else {
+                sourceCanBeClobbered = intArgDests.count(srcNo) > 0;
+            }
+            if (!sourceCanBeClobbered)
+                continue;
+
+            bool hasSameRegisterDest = false;
+            for (const auto &ra : regArgs) {
+                if (ra.index != i) continue;
+                hasSameRegisterDest = (regNo(ra.dst) == srcNo && regPrefix(ra.dst) == regPrefix(src));
+                break;
+            }
+            if (hasSameRegisterDest)
+                continue;
+
+            if (argIsFloat) {
+                usedFloatRegs_.insert(srcNo);
+                std::string tmp = allocFloatReg();
+                os_ << "\tfmov " << tmp << ", " << src << "\n";
+                callArgTemps[arg] = tmp;
+            } else if (argIsPtr) {
+                usedIntRegs_.insert(srcNo);
+                std::string tmp = allocAddrReg();
+                os_ << "\tmov " << tmp << ", " << src << "\n";
+                callArgTemps[arg] = tmp;
+            } else {
+                usedIntRegs_.insert(srcNo);
+                std::string tmp = allocIntReg();
+                os_ << "\tmov " << tmp << ", " << src << "\n";
+                callArgTemps[arg] = tmp;
+            }
+        }
+
         // 计算参数分配信息
         int intArg = 0, floatArg = 0;
         int stackArgsCount = 0;
@@ -1131,7 +1244,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         for (unsigned i = 0; i < numArgs; i++) {
             auto arg = call->get_operand(i);
             if (isFloat(arg->type_)) {
-                std::string r = loadFloat(arg);
+                std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadFloat(arg);
                 if (floatArg < 8) {
                     os_ << "\tfmov s" << floatArg++ << ", " << r << "\n";
                 } else {
@@ -1139,7 +1252,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     stackIdx++;
                 }
             } else if (isPtr(arg->type_)) {
-                std::string r = loadAddr(arg);
+                std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadAddr(arg);
                 if (intArg < 8) {
                     os_ << "\tmov x" << intArg++ << ", " << r << "\n";
                 } else {
@@ -1155,11 +1268,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         else
                             emitIntConst(ci->value_, dst);
                     } else {
-                        std::string r = loadInt(arg);
+                        std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
                         os_ << "\tmov " << dst << ", " << r << "\n";
                     }
                 } else {
-                    std::string r = loadInt(arg);
+                    std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
                     std::string tmp = allocAddrReg();
                     os_ << "\tsxtw " << tmp << ", " << r << "\n";
                     os_ << "\tstr " << tmp << ", [sp, #" << (stackIdx * 8) << "]\n";

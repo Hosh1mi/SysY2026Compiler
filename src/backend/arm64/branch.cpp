@@ -13,7 +13,7 @@ void Arm64FuncContext::preparePhi() {
         for (auto inst : bb->instr_list_) {
             if (!inst->is_phi()) continue;
             auto phi = static_cast<PhiInst*>(inst);
-            int phiSlot = getSlot(phi);
+            int phiSlot = hasAssignedReg(phi) ? 0 : getSlot(phi);
             for (int i = 0; i < phi->num_ops_ / 2; i++) {
                 auto val = phi->get_operand(2 * i);
                 auto predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
@@ -166,9 +166,9 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
 
     // Process phi copies in batches to preserve parallel copy semantics
     // (all sources read before any destination written, within a batch)
-    // while never exceeding the scratch register pool capacity (r9–r16 = 8).
+    // while never exceeding the scratch register pool capacity (r10–r16 = 7).
     // Float copies use a separate pool (s16–s31 = 16) so they are fine.
-    static const int MAX_BATCH = 7;  // leave one register for address base
+    static const int MAX_BATCH = 6;  // leave one register for address base
     size_t idx = 0;
     while (idx < copies.size()) {
         // ---- Phase 1: load up to MAX_BATCH source values ----
@@ -269,6 +269,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             if (isFloat(val->type_)) {
                 if (hasAssignedReg(val)) {
                     std::string srcReg = assignedReg(val);
+                    usedFloatRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocFloatReg();
                     if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
                 } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
@@ -281,6 +282,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             } else if (isPtr(val->type_)) {
                 if (hasAssignedReg(val)) {
                     std::string srcReg = assignedReg(val, true);
+                    usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocAddrReg();
                     if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
                 } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
@@ -293,6 +295,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             } else { // int
                 if (hasAssignedReg(val)) {
                     std::string srcReg = assignedReg(val);
+                    usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocIntReg();
                     if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
                 } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {

@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<InstCombine>());
         // pm.addPass(std::make_unique<CFGSimplify>());
         // pm.addPass(std::make_unique<DeadCodeDelete>());
-        pm.addPass(std::make_unique<TailRecursionEliminate>());// 尾递归→循环
+        pm.addPass(std::make_unique<TailRecursionEliminate>());
         pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
         make_basic_clean(pm);                                 // ConstantFold + InstCombine + DCE
@@ -183,7 +183,6 @@ int main(int argc, char **argv) {
 
         pm.addPass(std::make_unique<BitFuncRecognize>());     // 位级抽象解释识别位运算仿真
         pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        // pm.addPass(std::make_unique<EarlyCSE>());             // 消除内联后产生的冗余全局变量 load — breaks dijkstra
         pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播 CSE 产生的复制
         pm.addPass(std::make_unique<GlobalScalarPromotion>()); // 全局标量→alloca，消除热循环中的全局 load/store
         pm.addPass(std::make_unique<Mem2Reg>());              // 将上一步新增的 alloca 提升为 SSA 寄存器
@@ -193,7 +192,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
 
         pm.addPass(std::make_unique<LoopSimplify>());          // 循环规范化（插入 preheader）
-        // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist
+        // // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
         pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱

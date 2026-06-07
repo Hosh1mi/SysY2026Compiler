@@ -25,13 +25,27 @@ void Arm64FuncContext::generate() {
         }
     }
 
-    preparePhi();
-    blockSkipped_.clear();
-    cselHandled_.clear();
-
     Arm64RegAlloc regAlloc(func_);
     regAlloc.allocate();
     assignedRegs_ = regAlloc.assignedRegs();
+    reservedIntRegs_.clear();
+    reservedFloatRegs_.clear();
+    reservedNEONRegs_.clear();
+    for (const auto &kv : assignedRegs_) {
+        const std::string &reg = kv.second;
+        if (reg.size() < 2) continue;
+        int regNo = std::stoi(reg.substr(1));
+        if (reg[0] == 'w' || reg[0] == 'x')
+            reservedIntRegs_.insert(regNo);
+        else if (reg[0] == 's' || reg[0] == 'd')
+            reservedFloatRegs_.insert(regNo);
+        else if (reg[0] == 'v')
+            reservedNEONRegs_.insert(regNo);
+    }
+
+    preparePhi();
+    blockSkipped_.clear();
+    cselHandled_.clear();
 
     emitPrologue();
     reorderBlocks();
