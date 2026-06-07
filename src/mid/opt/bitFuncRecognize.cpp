@@ -75,32 +75,57 @@ struct BEHash {
     }
 };
 
-// Hash-consing pool for BitExpr atoms.
+// Hash-consing arena for BitExpr atoms.
 //
-// Lifetime:  All BE pointers handed out by intern() alias entries in this map.
-//            execute() must clear() the cache before and after each module-
-//            level pass run so that no BE pointer leaks across runs.  Any
-//            cached state outside this file (e.g. FunctionAnalyzer::pins
-//            inside an in-flight execute()) holds BE pointers only for the
-//            duration of that call.
+// All BE pointers handed out by intern() alias entries in `cache_`.  The arena
+// owns those BitExpr nodes; its destruction invalidates every BE that came
+// out of it.  Lifetime is bounded by BitExprArenaScope (RAII) so that no BE
+// can outlive a single pass invocation.
 //
-// Concurrency: not thread-safe.  The current PassManager is single-threaded;
-//              parallel execution would require either a per-instance arena
-//              or a thread-local cache.
-static std::unordered_map<BEKey, std::unique_ptr<BitExpr>, BEHash> g_cache;
+// Access is funneled through the thread_local `t_arena` pointer set by
+// BitExprArenaScope.  This keeps the existing free-function call sites
+// (Zero(), And_(), bvAnd(), …) ignorant of the arena instance while still
+// making the storage instance-local — the moral equivalent of an implicit
+// `this` parameter, but without rewriting ~40 helper signatures.  Two
+// consequences:
+//   - thread-safe (each thread carries its own current arena).
+//   - re-entrancy is allowed (a nested Scope stacks a new arena and
+//     restores the previous on destruction), although the recognizer
+//     currently never re-enters itself.
+class BitExprArena {
+public:
+    BE intern(BitOp op, Value *src = nullptr, unsigned idx = 0,
+              BE a = nullptr, BE b = nullptr) {
+        BEKey key{op, src, idx, a, b};
+        auto it = cache_.find(key);
+        if (it != cache_.end()) return it->second.get();
+        auto owned = std::make_unique<BitExpr>(op, src, idx, a, b);
+        BE result = owned.get();
+        cache_.emplace(key, std::move(owned));
+        return result;
+    }
+private:
+    std::unordered_map<BEKey, std::unique_ptr<BitExpr>, BEHash> cache_;
+};
+
+static thread_local BitExprArena *t_arena = nullptr;
+
+class BitExprArenaScope {
+public:
+    BitExprArenaScope() : prev_(t_arena) { t_arena = &arena_; }
+    ~BitExprArenaScope() { t_arena = prev_; }
+    BitExprArenaScope(const BitExprArenaScope &) = delete;
+    BitExprArenaScope &operator=(const BitExprArenaScope &) = delete;
+private:
+    BitExprArena  arena_;
+    BitExprArena *prev_;
+};
 
 static BE intern(BitOp op, Value *src = nullptr, unsigned idx = 0,
                  BE a = nullptr, BE b = nullptr) {
-    BEKey key{op, src, idx, a, b};
-    auto it = g_cache.find(key);
-    if (it != g_cache.end()) return it->second.get();
-    auto owned = std::make_unique<BitExpr>(op, src, idx, a, b);
-    BE result = owned.get();
-    g_cache.emplace(key, std::move(owned));
-    return result;
+    return t_arena->intern(op, src, idx, a, b);
 }
 
-static void clearCache() { g_cache.clear(); }
 static BE Zero()              { return intern(BitOp::ZERO); }
 static BE One()               { return intern(BitOp::ONE); }
 static BE Top()               { return intern(BitOp::TOP); }
@@ -1508,7 +1533,11 @@ static void rewriteCallSites(Module *module,
 } // namespace bitfunc
 
 void BitFuncRecognize::execute(Module *module) {
-    bitfunc::clearCache();
+    // Install a fresh BitExpr arena for this pass invocation.  All BE pointers
+    // produced inside this scope are owned by the arena and die when it does;
+    // nothing outside must hold one past the closing brace.
+    bitfunc::BitExprArenaScope arena_scope;
+
     std::unordered_map<Function *, bitfunc::FuncEquiv> equiv;
     for (auto *f : module->function_list_) {
         if (f->is_declaration()) continue;
@@ -1533,5 +1562,4 @@ void BitFuncRecognize::execute(Module *module) {
     }
     if (!equiv.empty())
         bitfunc::rewriteCallSites(module, equiv);
-    bitfunc::clearCache();
 }
