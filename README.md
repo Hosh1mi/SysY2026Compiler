@@ -129,6 +129,8 @@ TODO: 用参数选择pass
 | `--dump-ir` | 每个 pass 前后 dump IR |
 | `--verify-ir` | 每个 pass 后校验 IR 完整性（TODO:目前无作用） |
 | `--fno-peephole` | 禁用 peephole 汇编后优化 |
+| `--enable-schedule` | 实验性开启 MachineInstr 块内调度（默认关闭） |
+| `--fno-schedule` | 强制禁用 MachineInstr 调度 |
 
 Pass 基类 (`pass.hpp`) 提供 `name()` 纯虚函数，每个 pass 需返回类名（如 `"Mem2Reg"`），供 dump/verify 使用。
 

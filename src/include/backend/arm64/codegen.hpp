@@ -9,6 +9,7 @@ public:
 
     void setNoPeephole(bool v) { no_peephole_ = v; }
     void setEnableRegAlloc(bool v) { enable_regalloc_ = v; }
+    void setNoSchedule(bool v) { no_schedule_ = v; }
 
 private:
     void emitGlobal(GlobalVariable *gv);
@@ -19,4 +20,5 @@ private:
     std::ostream &os_;
     bool no_peephole_ = false;
     bool enable_regalloc_ = true;
+    bool no_schedule_ = true;
 };

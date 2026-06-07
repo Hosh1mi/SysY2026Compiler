@@ -1,6 +1,7 @@
 #include "../../include/backend/arm64/codegen.hpp"
 #include "../../include/backend/arm64/peephole.hpp"
 #include "../../include/backend/arm64/context.hpp"
+#include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <cstring>
 #include <functional>
@@ -80,7 +81,12 @@ void Arm64CodeGen::generate() {
                     ctx.generate();
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
-                    results[idx] = no_peephole_ ? local_os.str() : peepholeOptimize(local_os.str());
+                    std::string funcAsm = local_os.str();
+                    if (!no_schedule_ && enable_regalloc_) {
+                        MachineScheduler scheduler;
+                        funcAsm = scheduler.scheduleFunctionText(funcAsm);
+                    }
+                    results[idx] = no_peephole_ ? funcAsm : peepholeOptimize(funcAsm);
                 }
             });
         }
