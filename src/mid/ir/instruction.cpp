@@ -39,6 +39,7 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::FPtoSI, "fptosi"},
     {Instruction::SItoFP, "sitofp"},
     {Instruction::BitCast, "bitcast"},
+    {Instruction::Clz, "clz"},
     {Instruction::InsertElement, "insertelement"},
     {Instruction::ICmp, "icmp"},
     {Instruction::FCmp, "fcmp"},

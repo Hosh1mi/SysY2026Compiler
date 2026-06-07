@@ -1,15 +1,5 @@
 #include "instCombineInternal.hpp"
 
-static bool isPowerOfTwo(int v) {
-    return v > 0 && (v & (v - 1)) == 0;
-}
-
-static int log2Int(int v) {
-    int r = 0;
-    while (v >>= 1) ++r;
-    return r;
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // visitMul  —  integer Mul simplifications
 // ═══════════════════════════════════════════════════════════════════════
@@ -155,7 +145,7 @@ Value* visitSDiv(BinaryInst *inst) {
         return neg;
     }
 
-    // 5. sdiv x, 2^k  →  ashr x, k
+    // 5. sdiv x, 2^k  →  ashr x, k   (constant power-of-2 divisor)
     //    Exact when x ≥ 0 (no sign issue) or x is a multiple of 2^k
     //    (no remainder to lose — ashr matches sdiv even for negative x).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
@@ -166,6 +156,35 @@ Value* visitSDiv(BinaryInst *inst) {
             bb->add_instruction_before_inst(ashr, inst);
             return ashr;
         }
+    }
+
+    // 6. sdiv x, pow2_var  →  ashr x, k   (variable divisor proven = 2^k)
+    if (!cy) {
+        int k;
+        if (isKnownPowerOfTwo(y, k) && k > 0) {
+            if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+                auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
+                                make_const_int(ty, k), bb, true);
+                bb->add_instruction_before_inst(ashr, inst);
+                return ashr;
+            }
+        }
+    }
+
+    // 7. sdiv x, pow2_var  →  ashr x, (31 - clz(y))
+    //    Divisor is provably a power of 2 but k is not statically known
+    //    (e.g. loaded from a global that receives varying 2^k stores).
+    //    Compute k = 31 - clz(y) at runtime, then ashr.
+    if (!cy && isKnownNonNegative(x) && isProvenPowerOfTwo(y)) {
+        auto *clz = new UnaryInst(ty, Instruction::Clz, y, bb, true);
+        bb->add_instruction_before_inst(clz, inst);
+        auto *k_inst = new BinaryInst(ty, Instruction::Sub,
+                           make_const_int(ty, 31), clz, bb, true);
+        bb->add_instruction_before_inst(k_inst, inst);
+        auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
+                        k_inst, bb, true);
+        bb->add_instruction_before_inst(ashr, inst);
+        return ashr;
     }
 
     return nullptr;

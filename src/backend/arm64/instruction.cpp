@@ -1012,6 +1012,16 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 
+    // ---- Clz (count leading zeros) ----
+    case Instruction::Clz: {
+        auto val = inst->get_operand(0);
+        std::string r = loadInt(val);
+        std::string rd = allocIntReg();
+        os_ << "\tclz " << rd << ", " << r << "\n";
+        storeInt(inst, rd);
+        break;
+    }
+
     // ---- Br ----
     case Instruction::Br: {
         auto parentBB = inst->parent_;

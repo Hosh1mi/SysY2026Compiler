@@ -25,6 +25,157 @@ inline ConstantFloat* make_const_float(Type* ty, float v) {
     return new ConstantFloat(ty, v);
 }
 
+// ── Power-of-two helpers ──────────────────────────────────────────────
+
+inline bool isPowerOfTwo(int v) {
+    return v > 0 && (v & (v - 1)) == 0;
+}
+
+inline int log2Int(int v) {
+    int r = 0;
+    while (v >>= 1) ++r;
+    return r;
+}
+
+// Forward declaration for mutual recursion
+static bool isStoredValuePow2(Value *v, GlobalVariable *gv, int &k);
+
+// 能否证明 v = 2^k？如能证明则设置 k 并返回 true。
+inline bool isKnownPowerOfTwo(Value *v, int &k) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
+        if (ci->value_ > 0 && isPowerOfTwo(ci->value_)) {
+            k = log2Int(ci->value_);
+            return true;
+        }
+        return false;
+    }
+
+    auto *inst = dynamic_cast<Instruction*>(v);
+    if (!inst) return false;
+
+    // shl base, n — if base is a known power of 2, then result is 2^(k_base + n)
+    if (inst->op_id_ == Instruction::Shl) {
+        auto *amt = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+        if (!amt) return false;
+        int baseK;
+        if (isKnownPowerOfTwo(inst->get_operand(0), baseK)) {
+            k = baseK + amt->value_;
+            return true;
+        }
+        return false;
+    }
+
+    // Load from global: scan all stores to this global in the function.
+    // If every stored value is the same 2^k, return k.
+    if (inst->is_load()) {
+        auto *gv = dynamic_cast<GlobalVariable*>(inst->get_operand(0));
+        if (!gv) return false;
+        auto *func = inst->parent_->parent_;
+        int commonK = -1;
+        for (auto *bb : func->basic_blocks_) {
+            for (auto *other : bb->instr_list_) {
+                if (!other->is_store()) continue;
+                if (other->get_operand(1) != gv) continue;
+                int storedK = -1;
+                if (!isStoredValuePow2(other->get_operand(0), gv, storedK))
+                    return false;
+                if (storedK >= 0) {
+                    if (commonK == -1) commonK = storedK;
+                    else if (commonK != storedK) return false;
+                }
+            }
+        }
+        if (commonK >= 0) { k = commonK; return true; }
+        return false;
+    }
+
+    return false;
+}
+
+// 检查 stored value 的结构是否为 2 的幂，避免递归追踪同全局 Load。
+// 返回 true 且设置 k 如果 k 可以从语法确定；否则返回 true 但 k 保持不变。
+// 该函数绝不调用 isKnownPowerOfTwo（避免递归）；仅做语法检查。
+static bool isStoredValuePow2(Value *v, GlobalVariable *gv, int &k) {
+    // Constant: check if it's a power of 2
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
+        if (ci->value_ > 0 && isPowerOfTwo(ci->value_)) {
+            k = log2Int(ci->value_);
+            return true;
+        }
+        return false;
+    }
+
+    auto *inst = dynamic_cast<Instruction*>(v);
+    if (!inst) return false;
+
+    // shl base, const_n
+    if (inst->op_id_ == Instruction::Shl) {
+        auto *amt = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+        if (!amt) return false;
+        auto *base = inst->get_operand(0);
+
+        // Check if base is a constant power-of-2 (syntactic, no recursion)
+        if (auto *baseCI = dynamic_cast<ConstantInt*>(base)) {
+            if (baseCI->value_ > 0 && isPowerOfTwo(baseCI->value_)) {
+                k = log2Int(baseCI->value_) + amt->value_;
+                return true;
+            }
+        }
+
+        // Or base is a load from the same global (inductive: k unknown)
+        auto *baseInst = dynamic_cast<Instruction*>(base);
+        if (baseInst && baseInst->is_load() && baseInst->get_operand(0) == gv)
+            return true;  // k stays as-is (unknown)
+
+        return false;
+    }
+
+    // Load from same global: inductive case, k unknown
+    if (inst->is_load() && inst->get_operand(0) == gv)
+        return true;
+
+    return false;
+}
+
+// 能否证明 v 一定是 2 的某次幂（即使不知道具体指数）？
+// 用于获取 Clz 动态计算的资格检查。
+inline bool isProvenPowerOfTwo(Value *v) {
+    int dummy;
+    if (isKnownPowerOfTwo(v, dummy)) return true;
+
+    auto *inst = dynamic_cast<Instruction*>(v);
+    if (!inst) return false;
+
+    // shl base, const_n — if base is a proven power-of-2
+    if (inst->op_id_ == Instruction::Shl) {
+        if (!dynamic_cast<ConstantInt*>(inst->get_operand(1)))
+            return false;
+        return isProvenPowerOfTwo(inst->get_operand(0));
+    }
+
+    // Load from global: scan all stores — if every stored value
+    // structurally matches a pow2 pattern, the load is pow2.
+    if (inst->is_load()) {
+        auto *gv = dynamic_cast<GlobalVariable*>(inst->get_operand(0));
+        if (!gv) return false;
+        auto *func = inst->parent_->parent_;
+        bool foundStore = false;
+        for (auto *bb : func->basic_blocks_) {
+            for (auto *other : bb->instr_list_) {
+                if (!other->is_store()) continue;
+                if (other->get_operand(1) != gv) continue;
+                foundStore = true;
+                int ignoredK;
+                if (!isStoredValuePow2(other->get_operand(0), gv, ignoredK))
+                    return false;
+            }
+        }
+        return foundStore;
+    }
+
+    return false;
+}
+
 // ── Value analysis ────────────────────────────────────────────────────
 //
 // These queries answer "what can we prove about a Value?" by inspecting

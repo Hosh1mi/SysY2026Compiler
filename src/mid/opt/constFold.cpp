@@ -168,6 +168,17 @@ Constant* ConstantFold::foldUnary(UnaryInst *unary, Module *module) {
             // int32 -> float
             return new ConstantFloat(unary->type_, (float)ci->value_);
         }
+        if (unary->op_id_ == Instruction::Clz) {
+            // count leading zeros
+            int v = ci->value_;
+            int r = 0;
+            if (v == 0) {
+                r = 32;
+            } else {
+                while ((v & 0x80000000) == 0) { v <<= 1; ++r; }
+            }
+            return new ConstantInt(unary->type_, r);
+        }
     }
     if (auto *cf = dynamic_cast<ConstantFloat*>(op)) {
         if (unary->op_id_ == Instruction::FPtoSI) {

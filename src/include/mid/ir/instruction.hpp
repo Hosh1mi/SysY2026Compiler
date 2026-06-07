@@ -23,7 +23,7 @@ public:
         Alloca, Load, Store,                     // 内存操作
         Select,                                  // select i1 cond, T val1, F val2
         GetElementPtr,                           // 地址计算
-        ZExt, FPtoSI, SItoFP, BitCast,           // 类型转换
+        ZExt, FPtoSI, SItoFP, BitCast, Clz,       // 类型转换 + 内建
         InsertElement,                            // insertelement <4 x i32> %vec, i32 %val, i32 %idx
         ICmp, FCmp, PHI, Call                    // 比较、phi、调用
     };
