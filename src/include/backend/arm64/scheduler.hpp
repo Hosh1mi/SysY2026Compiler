@@ -1,13 +1,13 @@
 #pragma once
 
-#include <string>
+#include "machine.hpp"
+
 #include <vector>
 
 class MachineScheduler {
 public:
-    std::string scheduleFunctionText(const std::string &asmText) const;
+    void schedule(MachineFunction &func) const;
 
 private:
-    std::string scheduleSegment(const std::vector<std::string> &segment,
-                                int firstOriginalIndex) const;
+    std::vector<MachineInstr> scheduleSegment(const std::vector<MachineInstr> &segment) const;
 };

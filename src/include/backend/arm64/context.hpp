@@ -1,4 +1,5 @@
 #pragma once
+#include "machine.hpp"
 #include "../../mid/ir/ir.hpp"
 #include <map>
 #include <ostream>
@@ -11,9 +12,13 @@ class Arm64CodeGen;
 class Arm64FuncContext {
 public:
     Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc = true);
+    Arm64FuncContext(Function *f, MachineEmitter &emitter, bool enableRegAlloc = true);
     void generate();
 
 private:
+    void emitMachineLine(const std::string &line);
+    void emitMachineInstr(MachineInstr inst);
+
     void emitPrologue();
     void emitEpilogue();
     void emitBlock(BasicBlock *bb);
@@ -74,6 +79,7 @@ private:
 
     Function *func_;
     std::ostream &os_;
+    MachineEmitter *machineEmitter_ = nullptr;
     bool enableRegAlloc_ = true;
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)

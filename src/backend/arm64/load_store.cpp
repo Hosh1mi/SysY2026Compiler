@@ -285,9 +285,13 @@ void Arm64FuncContext::storeVector(Value *v, const std::string &reg) {
 
 void Arm64FuncContext::emitIntConst(int val, const std::string &reg) {
     uint32_t u = (uint32_t)val;
-    os_ << "\tmovz " << reg << ", #" << (u & 0xFFFF) << "\n";
+    emitMachineInstr(MachineInstr::make(
+        "\tmovz " + reg + ", #" + std::to_string(u & 0xFFFF),
+        MOpcode::Mov, {reg}));
     if ((u >> 16) & 0xFFFF) {
-        os_ << "\tmovk " << reg << ", #" << ((u >> 16) & 0xFFFF) << ", lsl #16\n";
+        emitMachineInstr(MachineInstr::make(
+            "\tmovk " + reg + ", #" + std::to_string((u >> 16) & 0xFFFF) + ", lsl #16",
+            MOpcode::Mov, {reg}, {reg}));
     }
 }
 
@@ -296,14 +300,24 @@ void Arm64FuncContext::emitFloatConst(float val, const std::string &reg) {
     std::memcpy(&bits, &val, sizeof(bits));
     uint32_t u = (uint32_t)bits;
     std::string tmp = allocIntReg();
-    os_ << "\tmovz " << tmp << ", #" << (u & 0xFFFF) << "\n";
+    emitMachineInstr(MachineInstr::make(
+        "\tmovz " + tmp + ", #" + std::to_string(u & 0xFFFF),
+        MOpcode::Mov, {tmp}));
     if ((u >> 16) & 0xFFFF) {
-        os_ << "\tmovk " << tmp << ", #" << ((u >> 16) & 0xFFFF) << ", lsl #16\n";
+        emitMachineInstr(MachineInstr::make(
+            "\tmovk " + tmp + ", #" + std::to_string((u >> 16) & 0xFFFF) + ", lsl #16",
+            MOpcode::Mov, {tmp}, {tmp}));
     }
-    os_ << "\tfmov " << reg << ", " << tmp << "\n";
+    emitMachineInstr(MachineInstr::make(
+        "\tfmov " + reg + ", " + tmp,
+        MOpcode::Mov, {reg}, {tmp}));
 }
 
 void Arm64FuncContext::emitGlobalAddr(GlobalVariable *gv, const std::string &reg) {
-    os_ << "\tadrp " << reg << ", " << gv->name_ << "\n";
-    os_ << "\tadd " << reg << ", " << reg << ", :lo12:" << gv->name_ << "\n";
+    emitMachineInstr(MachineInstr::make(
+        "\tadrp " + reg + ", " + gv->name_,
+        MOpcode::Adr, {reg}));
+    emitMachineInstr(MachineInstr::make(
+        "\tadd " + reg + ", " + reg + ", :lo12:" + gv->name_,
+        MOpcode::Alu, {reg}, {reg}));
 }

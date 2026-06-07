@@ -4,6 +4,7 @@
 #include <cctype>
 #include <regex>
 #include <sstream>
+#include <utility>
 
 namespace {
 
@@ -99,6 +100,33 @@ bool touchesLinkOrFrameCritical(const MachineInstr &mi) {
 }
 
 } // namespace
+
+MachineInstr MachineInstr::raw(const std::string &line) {
+    return parseMachineInstr(line, 0);
+}
+
+MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
+                                std::initializer_list<std::string> defs,
+                                std::initializer_list<std::string> uses,
+                                int latency) {
+    MachineInstr mi;
+    mi.text = line;
+    mi.opcode = opcode;
+    mi.latency = latency;
+
+    for (const auto &reg : defs) {
+        std::string normalized = normalizeReg(reg);
+        if (normalized != "zr")
+            mi.defs.insert(normalized);
+    }
+    for (const auto &reg : uses) {
+        std::string normalized = normalizeReg(reg);
+        if (normalized != "zr")
+            mi.uses.insert(normalized);
+    }
+
+    return mi;
+}
 
 MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
     MachineInstr mi;
@@ -241,4 +269,82 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.isBarrier = true;
 
     return mi;
+}
+
+void appendMachineInstr(MachineFunction &func, MachineInstr inst) {
+    if (func.blocks.empty())
+        func.blocks.push_back({});
+
+    if (inst.opcode == MOpcode::Label && !func.blocks.back().instrs.empty()) {
+        func.blocks.push_back({});
+        func.blocks.back().label = inst.text;
+    }
+    func.blocks.back().instrs.push_back(std::move(inst));
+}
+
+std::string printMachineFunction(const MachineFunction &func) {
+    std::ostringstream out;
+    for (const auto &block : func.blocks) {
+        for (const auto &inst : block.instrs)
+            out << inst.text << "\n";
+    }
+    return out.str();
+}
+
+MachineStreamBuf::MachineStreamBuf(MachineFunction &func) : func_(func) {
+    if (func_.blocks.empty())
+        func_.blocks.push_back({});
+}
+
+MachineStreamBuf::~MachineStreamBuf() {
+    sync();
+}
+
+int MachineStreamBuf::overflow(int ch) {
+    if (ch == traits_type::eof())
+        return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+    append(static_cast<char>(ch));
+    return ch;
+}
+
+std::streamsize MachineStreamBuf::xsputn(const char *s, std::streamsize n) {
+    for (std::streamsize i = 0; i < n; ++i)
+        append(s[i]);
+    return n;
+}
+
+int MachineStreamBuf::sync() {
+    if (!line_.empty())
+        flushLine();
+    return 0;
+}
+
+void MachineStreamBuf::append(char ch) {
+    if (ch == '\n') {
+        flushLine();
+    } else {
+        line_.push_back(ch);
+    }
+}
+
+void MachineStreamBuf::flushLine() {
+    MachineInstr mi = parseMachineInstr(line_, lineIndex_++);
+    appendMachineInstr(func_, std::move(mi));
+    line_.clear();
+}
+
+MachineEmitter::MachineEmitter(MachineFunction &func)
+    : func_(func), streamBuf_(func), stream_(&streamBuf_) {}
+
+std::ostream &MachineEmitter::stream() {
+    return stream_;
+}
+
+void MachineEmitter::emit(MachineInstr inst) {
+    stream_.flush();
+    appendMachineInstr(func_, std::move(inst));
+}
+
+void MachineEmitter::emitLine(const std::string &line) {
+    emit(MachineInstr::raw(line));
 }

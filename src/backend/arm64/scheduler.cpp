@@ -1,13 +1,11 @@
 #include "../../include/backend/arm64/scheduler.hpp"
 
-#include "../../include/backend/arm64/machine.hpp"
-
 #include <algorithm>
 #include <functional>
+#include <iterator>
 #include <map>
-#include <numeric>
 #include <set>
-#include <sstream>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -27,52 +25,40 @@ bool candidateHasLoadUseHazard(const MachineInstr &prev,
 
 } // namespace
 
-std::string MachineScheduler::scheduleFunctionText(const std::string &asmText) const {
-    std::istringstream input(asmText);
-    std::ostringstream output;
-    std::vector<std::string> segment;
-    std::string line;
-    int lineIndex = 0;
-    int segmentStart = 0;
+void MachineScheduler::schedule(MachineFunction &func) const {
+    for (auto &block : func.blocks) {
+        std::vector<MachineInstr> scheduled;
+        std::vector<MachineInstr> segment;
 
-    auto flushSegment = [&]() {
-        if (segment.empty())
-            return;
-        output << scheduleSegment(segment, segmentStart);
-        segment.clear();
-    };
-
-    while (std::getline(input, line)) {
-        MachineInstr mi = parseMachineInstr(line, lineIndex);
-        if (mi.isBarrier || mi.isLabelLike) {
-            flushSegment();
-            output << line << "\n";
-        } else {
+        auto flushSegment = [&]() {
             if (segment.empty())
-                segmentStart = lineIndex;
-            segment.push_back(line);
-        }
-        ++lineIndex;
-    }
-    flushSegment();
+                return;
+            auto reordered = scheduleSegment(segment);
+            scheduled.insert(scheduled.end(),
+                             std::make_move_iterator(reordered.begin()),
+                             std::make_move_iterator(reordered.end()));
+            segment.clear();
+        };
 
-    return output.str();
+        for (auto &inst : block.instrs) {
+            if (inst.isBarrier || inst.isLabelLike) {
+                flushSegment();
+                scheduled.push_back(std::move(inst));
+            } else {
+                segment.push_back(std::move(inst));
+            }
+        }
+
+        flushSegment();
+        block.instrs = std::move(scheduled);
+    }
 }
 
-std::string MachineScheduler::scheduleSegment(const std::vector<std::string> &segment,
-                                               int firstOriginalIndex) const {
-    if (segment.size() <= 1) {
-        std::ostringstream out;
-        for (const auto &line : segment)
-            out << line << "\n";
-        return out.str();
-    }
+std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<MachineInstr> &segment) const {
+    if (segment.size() <= 1)
+        return segment;
 
-    std::vector<MachineInstr> instrs;
-    instrs.reserve(segment.size());
-    for (size_t i = 0; i < segment.size(); ++i)
-        instrs.push_back(parseMachineInstr(segment[i], firstOriginalIndex + static_cast<int>(i)));
-
+    std::vector<MachineInstr> instrs = segment;
     const int n = static_cast<int>(instrs.size());
     std::vector<std::set<int>> succ(n);
     std::vector<std::set<int>> pred(n);
@@ -170,14 +156,12 @@ std::string MachineScheduler::scheduleSegment(const std::vector<std::string> &se
     }
 
     if (static_cast<int>(order.size()) != n) {
-        std::ostringstream fallback;
-        for (const auto &line : segment)
-            fallback << line << "\n";
-        return fallback.str();
+        return segment;
     }
 
-    std::ostringstream out;
+    std::vector<MachineInstr> out;
+    out.reserve(order.size());
     for (int idx : order)
-        out << instrs[idx].text << "\n";
-    return out.str();
+        out.push_back(std::move(instrs[idx]));
+    return out;
 }

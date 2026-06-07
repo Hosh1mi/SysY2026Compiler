@@ -1,6 +1,7 @@
 #include "../../include/backend/arm64/codegen.hpp"
 #include "../../include/backend/arm64/peephole.hpp"
 #include "../../include/backend/arm64/context.hpp"
+#include "../../include/backend/arm64/machine.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <cstring>
@@ -76,16 +77,21 @@ void Arm64CodeGen::generate() {
                 pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 #endif
                 for (auto f : partitions[t]) {
-                    std::ostringstream local_os;
-                    Arm64FuncContext ctx(f, local_os, enable_regalloc_);
+                    MachineFunction machineFunc;
+                    machineFunc.name = f->name_;
+                    MachineEmitter emitter(machineFunc);
+
+                    Arm64FuncContext ctx(f, emitter, enable_regalloc_);
                     ctx.generate();
+                    emitter.stream().flush();
+
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
-                    std::string funcAsm = local_os.str();
                     if (!no_schedule_ && enable_regalloc_) {
                         MachineScheduler scheduler;
-                        funcAsm = scheduler.scheduleFunctionText(funcAsm);
+                        scheduler.schedule(machineFunc);
                     }
+                    std::string funcAsm = printMachineFunction(machineFunc);
                     results[idx] = no_peephole_ ? funcAsm : peepholeOptimize(funcAsm);
                 }
             });
