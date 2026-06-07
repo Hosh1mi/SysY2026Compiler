@@ -54,6 +54,12 @@ void MachineScheduler::schedule(MachineFunction &func) const {
     }
 }
 
+// Virtual register name used to track flag (NZCV) dependencies in the
+// dependency graph.  Instructions that set flags are treated as defining
+// $flags; instructions that use flags are treated as using $flags.  This
+// prevents the scheduler from reordering flag users before flag setters.
+static const std::string kFlagReg = "$flags";
+
 std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<MachineInstr> &segment) const {
     if (segment.size() <= 1)
         return segment;
@@ -72,28 +78,47 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         pred[to].insert(from);
     };
 
+    auto processRegUse = [&](int i, const std::string &reg) {
+        auto defIt = lastDef.find(reg);
+        if (defIt != lastDef.end())
+            addEdge(defIt->second, i);
+        liveUsesSinceDef[reg].insert(i);
+    };
+
+    auto processRegDef = [&](int i, const std::string &reg) {
+        // WAW: previous definition → this definition
+        auto defIt = lastDef.find(reg);
+        if (defIt != lastDef.end())
+            addEdge(defIt->second, i);
+
+        // WAR: all outstanding uses must happen before this new definition
+        auto useIt = liveUsesSinceDef.find(reg);
+        if (useIt != liveUsesSinceDef.end()) {
+            for (int user : useIt->second)
+                addEdge(user, i);
+            useIt->second.clear();
+        }
+
+        lastDef[reg] = i;
+    };
+
     for (int i = 0; i < n; ++i) {
-        for (const auto &reg : instrs[i].uses) {
-            auto defIt = lastDef.find(reg);
-            if (defIt != lastDef.end())
-                addEdge(defIt->second, i);
-            liveUsesSinceDef[reg].insert(i);
-        }
+        // Register uses → RAW edges from last def to this use
+        for (const auto &reg : instrs[i].uses)
+            processRegUse(i, reg);
 
-        for (const auto &reg : instrs[i].defs) {
-            auto defIt = lastDef.find(reg);
-            if (defIt != lastDef.end())
-                addEdge(defIt->second, i);
+        // Flag uses → must happen after the most recent flag setter
+        if (instrs[i].usesFlags)
+            processRegUse(i, kFlagReg);
 
-            auto useIt = liveUsesSinceDef.find(reg);
-            if (useIt != liveUsesSinceDef.end()) {
-                for (int user : useIt->second)
-                    addEdge(user, i);
-                useIt->second.clear();
-            }
+        // Register defs → WAW + WAR edges
+        for (const auto &reg : instrs[i].defs)
+            processRegDef(i, reg);
 
-            lastDef[reg] = i;
-        }
+        // Flag def → all prior flag uses must happen before this new setter,
+        // and this setter must happen after the previous flag setter (WAW).
+        if (instrs[i].setsFlags)
+            processRegDef(i, kFlagReg);
     }
 
     std::vector<int> critical(n, 0);
