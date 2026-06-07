@@ -41,6 +41,7 @@ struct MachineInstr {
     bool mayStore = false;
     bool setsFlags = false;
     bool usesFlags = false;
+    bool isCall = false;
     bool isBarrier = false;
     bool isLabelLike = false;
     int latency = 1;
@@ -61,6 +62,7 @@ struct MachineBasicBlock {
 struct MachineFunction {
     std::string name;
     std::vector<MachineBasicBlock> blocks;
+    int nextIndex = 0;
 };
 
 MachineInstr parseMachineInstr(const std::string &line, int originalIndex);

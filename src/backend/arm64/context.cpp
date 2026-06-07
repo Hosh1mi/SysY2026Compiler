@@ -34,6 +34,93 @@ void Arm64FuncContext::emitMachineInstr(MachineInstr inst) {
     }
 }
 
+void Arm64FuncContext::emitMachineInstrLine(const std::string &line, MOpcode opcode,
+                                            std::initializer_list<std::string> defs,
+                                            std::initializer_list<std::string> uses,
+                                            int latency,
+                                            bool setsFlags,
+                                            bool usesFlags,
+                                            bool isBarrier) {
+    MachineInstr inst = MachineInstr::make(line, opcode, defs, uses, latency);
+    inst.setsFlags = setsFlags;
+    inst.usesFlags = usesFlags;
+    inst.isBarrier = isBarrier;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitMoveMachine(const std::string &dst, const std::string &src,
+                                       const std::string &opcode) {
+    emitMachineInstrLine("\t" + opcode + " " + dst + ", " + src,
+                         MOpcode::Mov, {dst}, {src});
+}
+
+void Arm64FuncContext::emitUnaryMachine(const std::string &opcode, const std::string &dst,
+                                        const std::string &src, MOpcode mop,
+                                        int latency) {
+    emitMachineInstrLine("\t" + opcode + " " + dst + ", " + src,
+                         mop, {dst}, {src}, latency);
+}
+
+void Arm64FuncContext::emitBinaryMachine(const std::string &opcode, const std::string &dst,
+                                         const std::string &lhs, const std::string &rhs,
+                                         MOpcode mop, int latency) {
+    emitMachineInstrLine("\t" + opcode + " " + dst + ", " + lhs + ", " + rhs,
+                         mop, {dst}, {lhs, rhs}, latency);
+}
+
+void Arm64FuncContext::emitRawAluMachine(const std::string &line, const std::string &dst,
+                                         std::initializer_list<std::string> uses,
+                                         MOpcode mop, int latency) {
+    emitMachineInstrLine(line, mop, {dst}, uses, latency);
+}
+
+void Arm64FuncContext::emitBranchMachine(const std::string &line,
+                                         std::initializer_list<std::string> uses,
+                                         bool usesFlags) {
+    emitMachineInstrLine(line, MOpcode::Branch, {}, uses, 1,
+                         false, usesFlags, true);
+}
+
+void Arm64FuncContext::emitCallMachine(const std::string &callee) {
+    MachineInstr inst = MachineInstr::make("\tbl " + callee, MOpcode::Call);
+    inst.isCall = true;
+    inst.isBarrier = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitRetMachine() {
+    emitMachineInstrLine("\tret", MOpcode::Ret, {}, {}, 1,
+                         false, false, true);
+}
+
+void Arm64FuncContext::emitStackAdjustMachine(const std::string &opcode, int bytes) {
+    emitMachineInstrLine("\t" + opcode + " sp, sp, #" + std::to_string(bytes),
+                         MOpcode::Alu, {"sp"}, {"sp"}, 1,
+                         false, false, true);
+}
+
+void Arm64FuncContext::emitStackAdjustMachine(const std::string &opcode, const std::string &reg) {
+    emitMachineInstrLine("\t" + opcode + " sp, sp, " + reg,
+                         MOpcode::Alu, {"sp"}, {"sp", reg}, 1,
+                         false, false, true);
+}
+
+void Arm64FuncContext::emitFramePushMachine() {
+    MachineInstr inst = MachineInstr::make("\tstp x29, x30, [sp, #-16]!",
+                                           MOpcode::PairStore, {"sp"}, {"x29", "x30", "sp"});
+    inst.mayStore = true;
+    inst.isBarrier = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitFramePopMachine() {
+    MachineInstr inst = MachineInstr::make("\tldp x29, x30, [sp], #16",
+                                           MOpcode::PairLoad, {"x29", "x30", "sp"}, {"sp"}, 4);
+    inst.mayLoad = true;
+    inst.isBarrier = true;
+    emitMachineInstr(std::move(inst));
+}
+
 void Arm64FuncContext::generate() {
     func_->set_instr_name();
 
@@ -160,9 +247,9 @@ void Arm64FuncContext::reorderBlocks() {
 }
 
 void Arm64FuncContext::emitPrologue() {
-    os_ << "\t.global " << func_->name_ << "\n";
-    os_ << "\t.p2align 2\n";
-    os_ << func_->name_ << ":\n";
+    emitMachineLine("\t.global " + func_->name_);
+    emitMachineLine("\t.p2align 2");
+    emitMachineLine(func_->name_ + ":");
 
     // Allocate slots for arguments that actually need them.
     // Pre-colored args (leaf functions, assigned to their incoming register)
@@ -245,35 +332,34 @@ void Arm64FuncContext::emitPrologue() {
 
     if (needsFrame_) {
         // stp supports only -512..504 range; use minimal stp + sub for large frames
-        os_ << "\tstp x29, x30, [sp, #-16]!\n";
-        os_ << "\tmov x29, sp\n";
+        emitFramePushMachine();
+        emitMoveMachine("x29", "sp");
         if (localSize <= 4095) {
-            os_ << "\tsub sp, sp, #" << localSize << "\n";
+            emitStackAdjustMachine("sub", localSize);
         } else {
-            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-            os_ << "\tsub sp, sp, x17\n";
+            emitIntConst(localSize, "x17");
+            emitStackAdjustMachine("sub", "x17");
         }
     }
 
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {
             saveOffset -= 16;
-            emitStorePair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                          "x" + std::to_string(savedIntRegs[i]), saveOffset);
+            emitStorePairMachine("x" + std::to_string(savedIntRegs[i+1]),
+                                 "x" + std::to_string(savedIntRegs[i]), saveOffset);
         } else {
             saveOffset -= 8;
-            emitStoreReg(os_, "x" + std::to_string(savedIntRegs[i]), saveOffset);
+            emitStoreRegMachine("x" + std::to_string(savedIntRegs[i]), saveOffset);
         }
     }
     for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
         if (i + 1 < savedFloatRegs.size()) {
             saveOffset -= 16;
-            emitStorePair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                          "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            emitStorePairMachine("d" + std::to_string(savedFloatRegs[i+1]),
+                                 "d" + std::to_string(savedFloatRegs[i]), saveOffset);
         } else {
             saveOffset -= 8;
-            emitStoreReg(os_, "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            emitStoreRegMachine("d" + std::to_string(savedFloatRegs[i]), saveOffset);
         }
     }
     // Save callee-saved NEON registers (v8-v15), 16 bytes each.
@@ -282,17 +368,20 @@ void Arm64FuncContext::emitPrologue() {
         saveOffset -= 16;
         int r = savedNEONRegs[i];
         if (saveOffset >= 0) {
-            os_ << "\tstr q" << r << ", [x29, #" << saveOffset << "]\n";
+            emitStoreMemMachine("q" + std::to_string(r),
+                                "[x29, #" + std::to_string(saveOffset) + "]",
+                                {"q" + std::to_string(r), "x29"}, MOpcode::Store);
         } else {
             int absOff = -saveOffset;
             if (absOff <= 4095)
-                os_ << "\tsub x16, x29, #" << absOff << "\n";
+                emitRawAluMachine("\tsub x16, x29, #" + std::to_string(absOff),
+                                  "x16", {"x29"});
             else {
-                os_ << "\tmovz x16, #" << (absOff & 0xFFFF) << "\n";
-                os_ << "\tmovk x16, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub x16, x29, x16\n";
+                emitIntConst(absOff, "x16");
+                emitBinaryMachine("sub", "x16", "x29", "x16");
             }
-            os_ << "\tstr q" << r << ", [x16]\n";
+            emitStoreMemMachine("q" + std::to_string(r), "[x16]",
+                                {"q" + std::to_string(r), "x16"}, MOpcode::Store);
         }
     }
 
@@ -311,26 +400,26 @@ void Arm64FuncContext::emitPrologue() {
                         // Pre-colored to incoming register — no spill needed
                     } else {
                         int slot = getSlot(arg);
-                        emitStoreReg(os_, src, slot);
-                        os_ << "\tfmov " << dst << ", " << src << "\n";
+                        emitStoreRegMachine(src, slot);
+                        emitMoveMachine(dst, src, "fmov");
                     }
                 } else {
                     int slot = getSlot(arg);
-                    emitStoreReg(os_, src, slot);
+                    emitStoreRegMachine(src, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
                 if (off <= 4095) {
-                    os_ << "\tldr s17, [x29, #" << off << "]\n";
+                    emitLoadMemMachine("s17", "[x29, #" + std::to_string(off) + "]", {"x29"});
                 } else {
-                    os_ << "\tmovz x17, #" << off << "\n";
-                    os_ << "\tldr s17, [x29, x17]\n";
+                    emitIntConst(off, "x17");
+                    emitLoadMemMachine("s17", "[x29, x17]", {"x29", "x17"});
                 }
                 int slot = getSlot(arg);
-                emitStoreReg(os_, "s17", slot);
+                emitStoreRegMachine("s17", slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
-                    os_ << "\tfmov " << dst << ", s17\n";
+                    emitMoveMachine(dst, "s17", "fmov");
                 }
                 stackOffset += 8;
             }
@@ -347,32 +436,32 @@ void Arm64FuncContext::emitPrologue() {
                         // Pre-colored to incoming register — no spill needed
                     } else {
                         int slot = getSlot(arg);
-                        emitStoreReg(os_, reg, slot);
-                        os_ << "\tmov " << dst << ", " << reg << "\n";
+                        emitStoreRegMachine(reg, slot);
+                        emitMoveMachine(dst, reg);
                     }
                 } else {
                     int slot = getSlot(arg);
-                    emitStoreReg(os_, reg, slot);
+                    emitStoreRegMachine(reg, slot);
                 }
             } else {
                 int off = 16 + stackOffset;
                 if (off <= 4095) {
-                    os_ << "\tldr x17, [x29, #" << off << "]\n";
+                    emitLoadMemMachine("x17", "[x29, #" + std::to_string(off) + "]", {"x29"});
                 } else {
-                    os_ << "\tmovz x17, #" << off << "\n";
-                    os_ << "\tldr x17, [x29, x17]\n";
+                    emitIntConst(off, "x17");
+                    emitLoadMemMachine("x17", "[x29, x17]", {"x29", "x17"});
                 }
                 int slot = getSlot(arg);
-                emitStoreReg(os_, "x17", slot);
+                emitStoreRegMachine("x17", slot);
                 if (hasAssignedReg(arg)) {
                     bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
                                 arg->type_->tid_ == Type::ArrayTyID);
                     std::string dst = assignedReg(arg, isPtr);
                     if (isPtr) {
-                        if (dst != "x17") os_ << "\tmov " << dst << ", x17\n";
+                        if (dst != "x17") emitMoveMachine(dst, "x17");
                     } else {
                         // dst 形如 "w24"，从 x17 取出低 32 位
-                        os_ << "\tmov " << dst << ", w17\n";
+                        emitMoveMachine(dst, "w17");
                     }
                 }
                 stackOffset += 8;
@@ -387,7 +476,7 @@ void Arm64FuncContext::emitEpilogue() {
     // When no frame is needed, Ret emits 'ret' directly — no epilogue at all.
     if (!needsFrame_) return;
 
-    os_ << ".L" << func_->name_ << "_epilogue:\n";
+    emitMachineLine(".L" + func_->name_ + "_epilogue:");
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
@@ -399,21 +488,21 @@ void Arm64FuncContext::emitEpilogue() {
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {
             restoreOffset -= 16;
-            emitLoadPair(os_, "x" + std::to_string(savedIntRegs[i+1]),
-                         "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            emitLoadPairMachine("x" + std::to_string(savedIntRegs[i+1]),
+                                "x" + std::to_string(savedIntRegs[i]), restoreOffset);
         } else {
             restoreOffset -= 8;
-            emitLoadReg(os_, "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            emitLoadRegMachine("x" + std::to_string(savedIntRegs[i]), restoreOffset);
         }
     }
     for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
         if (i + 1 < savedFloatRegs.size()) {
             restoreOffset -= 16;
-            emitLoadPair(os_, "d" + std::to_string(savedFloatRegs[i+1]),
-                         "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            emitLoadPairMachine("d" + std::to_string(savedFloatRegs[i+1]),
+                                "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
         } else {
             restoreOffset -= 8;
-            emitLoadReg(os_, "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            emitLoadRegMachine("d" + std::to_string(savedFloatRegs[i]), restoreOffset);
         }
     }
     // Restore callee-saved NEON registers (v8-v15).
@@ -422,31 +511,33 @@ void Arm64FuncContext::emitEpilogue() {
         restoreOffset -= 16;
         int r = savedNEONRegs[i];
         if (restoreOffset >= 0) {
-            os_ << "\tldr q" << r << ", [x29, #" << restoreOffset << "]\n";
+            emitLoadMemMachine("q" + std::to_string(r),
+                               "[x29, #" + std::to_string(restoreOffset) + "]",
+                               {"x29"}, MOpcode::Load, 4);
         } else {
             int absOff = -restoreOffset;
             if (absOff <= 4095)
-                os_ << "\tsub x16, x29, #" << absOff << "\n";
+                emitRawAluMachine("\tsub x16, x29, #" + std::to_string(absOff),
+                                  "x16", {"x29"});
             else {
-                os_ << "\tmovz x16, #" << (absOff & 0xFFFF) << "\n";
-                os_ << "\tmovk x16, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub x16, x29, x16\n";
+                emitIntConst(absOff, "x16");
+                emitBinaryMachine("sub", "x16", "x29", "x16");
             }
-            os_ << "\tldr q" << r << ", [x16]\n";
+            emitLoadMemMachine("q" + std::to_string(r), "[x16]",
+                               {"x16"}, MOpcode::Load, 4);
         }
     }
 
     if (localSize > 0) {
         if (localSize <= 4095) {
-            os_ << "\tadd sp, sp, #" << localSize << "\n";
+            emitStackAdjustMachine("add", localSize);
         } else {
-            os_ << "\tmovz x17, #" << (localSize & 0xFFFF) << "\n";
-            os_ << "\tmovk x17, #" << ((localSize >> 16) & 0xFFFF) << ", lsl #16\n";
-            os_ << "\tadd sp, sp, x17\n";
+            emitIntConst(localSize, "x17");
+            emitStackAdjustMachine("add", "x17");
         }
     }
-    os_ << "\tldp x29, x30, [sp], #16\n";
-    os_ << "\tret\n";
+    emitFramePopMachine();
+    emitRetMachine();
 }
 
 

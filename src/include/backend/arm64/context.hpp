@@ -18,6 +18,43 @@ public:
 private:
     void emitMachineLine(const std::string &line);
     void emitMachineInstr(MachineInstr inst);
+    void emitMachineInstrLine(const std::string &line, MOpcode opcode,
+                              std::initializer_list<std::string> defs = {},
+                              std::initializer_list<std::string> uses = {},
+                              int latency = 1,
+                              bool setsFlags = false,
+                              bool usesFlags = false,
+                              bool isBarrier = false);
+    void emitLoadRegMachine(const std::string &reg, int off);
+    void emitStoreRegMachine(const std::string &reg, int off);
+    void emitLoadPairMachine(const std::string &r1, const std::string &r2, int off);
+    void emitStorePairMachine(const std::string &r1, const std::string &r2, int off);
+    void emitLoadMemMachine(const std::string &reg, const std::string &addrText,
+                            std::initializer_list<std::string> uses,
+                            MOpcode opcode = MOpcode::Load, int latency = 4);
+    void emitStoreMemMachine(const std::string &reg, const std::string &addrText,
+                             std::initializer_list<std::string> uses,
+                             MOpcode opcode = MOpcode::Store);
+    void emitMoveMachine(const std::string &dst, const std::string &src,
+                         const std::string &opcode = "mov");
+    void emitUnaryMachine(const std::string &opcode, const std::string &dst,
+                          const std::string &src, MOpcode mop = MOpcode::Alu,
+                          int latency = 1);
+    void emitBinaryMachine(const std::string &opcode, const std::string &dst,
+                           const std::string &lhs, const std::string &rhs,
+                           MOpcode mop = MOpcode::Alu, int latency = 1);
+    void emitRawAluMachine(const std::string &line, const std::string &dst,
+                           std::initializer_list<std::string> uses,
+                           MOpcode mop = MOpcode::Alu, int latency = 1);
+    void emitBranchMachine(const std::string &line,
+                           std::initializer_list<std::string> uses = {},
+                           bool usesFlags = false);
+    void emitCallMachine(const std::string &callee);
+    void emitRetMachine();
+    void emitStackAdjustMachine(const std::string &opcode, int bytes);
+    void emitStackAdjustMachine(const std::string &opcode, const std::string &reg);
+    void emitFramePushMachine();
+    void emitFramePopMachine();
 
     void emitPrologue();
     void emitEpilogue();

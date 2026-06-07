@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 
 // ---- scratch register pool ----
 
@@ -63,6 +64,150 @@ static int physRegNo(const std::string &reg) {
     return std::stoi(reg.substr(1));
 }
 
+void Arm64FuncContext::emitStoreRegMachine(const std::string &reg, int off) {
+    auto emitStore = [&](const std::string &line, std::initializer_list<std::string> uses) {
+        MachineInstr inst = MachineInstr::make(line, MOpcode::Store, {}, uses);
+        inst.mayStore = true;
+        inst.isBarrier = true;
+        emitMachineInstr(std::move(inst));
+    };
+
+    if (off >= -256 && off <= 255) {
+        emitStore("\tstr " + reg + ", [x29, #" + std::to_string(off) + "]",
+                  {reg, "x29"});
+    } else {
+        int pos = -off;
+        std::string base = (reg == "x17") ? "x16" : "x17";
+        if (pos <= 4095) {
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, #" + std::to_string(pos),
+                MOpcode::Alu, {base}, {"x29"}));
+        } else {
+            emitIntConst(pos, base);
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, " + base,
+                MOpcode::Alu, {base}, {"x29", base}));
+        }
+        emitStore("\tstr " + reg + ", [" + base + "]", {reg, base});
+    }
+}
+
+void Arm64FuncContext::emitLoadRegMachine(const std::string &reg, int off) {
+    auto emitLoad = [&](const std::string &line, std::initializer_list<std::string> uses) {
+        MachineInstr inst = MachineInstr::make(line, MOpcode::Load, {reg}, uses, 4);
+        inst.mayLoad = true;
+        emitMachineInstr(std::move(inst));
+    };
+
+    if (off >= -256 && off <= 255) {
+        emitLoad("\tldr " + reg + ", [x29, #" + std::to_string(off) + "]",
+                 {"x29"});
+    } else {
+        int pos = -off;
+        std::string base = (reg == "x17") ? "x16" : "x17";
+        if (pos <= 4095) {
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, #" + std::to_string(pos),
+                MOpcode::Alu, {base}, {"x29"}));
+        } else {
+            emitIntConst(pos, base);
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, " + base,
+                MOpcode::Alu, {base}, {"x29", base}));
+        }
+        emitLoad("\tldr " + reg + ", [" + base + "]", {base});
+    }
+}
+
+void Arm64FuncContext::emitStorePairMachine(const std::string &r1, const std::string &r2, int off) {
+    bool is64 = (r1[0] == 'x' || r1[0] == 'd' || r2[0] == 'x' || r2[0] == 'd');
+    int range = is64 ? 504 : 252;
+    int align = is64 ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        MachineInstr inst = MachineInstr::make(
+            "\tstp " + r1 + ", " + r2 + ", [x29, #" + std::to_string(off) + "]",
+            MOpcode::PairStore, {}, {r1, r2, "x29"});
+        inst.mayStore = true;
+        inst.isBarrier = true;
+        emitMachineInstr(std::move(inst));
+    } else if (off >= -256 && off <= 255) {
+        emitStoreRegMachine(r1, off);
+        emitStoreRegMachine(r2, off + (is64 ? 8 : 4));
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, #" + std::to_string(pos),
+                MOpcode::Alu, {base}, {"x29"}));
+        } else {
+            emitIntConst(pos, base);
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, " + base,
+                MOpcode::Alu, {base}, {"x29", base}));
+        }
+        MachineInstr inst = MachineInstr::make(
+            "\tstp " + r1 + ", " + r2 + ", [" + base + "]",
+            MOpcode::PairStore, {}, {r1, r2, base});
+        inst.mayStore = true;
+        inst.isBarrier = true;
+        emitMachineInstr(std::move(inst));
+    }
+}
+
+void Arm64FuncContext::emitLoadPairMachine(const std::string &r1, const std::string &r2, int off) {
+    bool is64 = (r1[0] == 'x' || r1[0] == 'd' || r2[0] == 'x' || r2[0] == 'd');
+    int range = is64 ? 504 : 252;
+    int align = is64 ? 8 : 4;
+    if (off >= -range && off <= range && off % align == 0) {
+        MachineInstr inst = MachineInstr::make(
+            "\tldp " + r1 + ", " + r2 + ", [x29, #" + std::to_string(off) + "]",
+            MOpcode::PairLoad, {r1, r2}, {"x29"}, 4);
+        inst.mayLoad = true;
+        emitMachineInstr(std::move(inst));
+    } else if (off >= -256 && off <= 255) {
+        emitLoadRegMachine(r1, off);
+        emitLoadRegMachine(r2, off + (is64 ? 8 : 4));
+    } else {
+        std::string base = (r1 == "x17" || r2 == "x17") ? "x16" : "x17";
+        int pos = -off;
+        if (pos <= 4095) {
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, #" + std::to_string(pos),
+                MOpcode::Alu, {base}, {"x29"}));
+        } else {
+            emitIntConst(pos, base);
+            emitMachineInstr(MachineInstr::make(
+                "\tsub " + base + ", x29, " + base,
+                MOpcode::Alu, {base}, {"x29", base}));
+        }
+        MachineInstr inst = MachineInstr::make(
+            "\tldp " + r1 + ", " + r2 + ", [" + base + "]",
+            MOpcode::PairLoad, {r1, r2}, {base}, 4);
+        inst.mayLoad = true;
+        emitMachineInstr(std::move(inst));
+    }
+}
+
+void Arm64FuncContext::emitLoadMemMachine(const std::string &reg, const std::string &addrText,
+                                          std::initializer_list<std::string> uses,
+                                          MOpcode opcode, int latency) {
+    MachineInstr inst = MachineInstr::make("\tldr " + reg + ", " + addrText,
+                                           opcode, {reg}, uses, latency);
+    inst.mayLoad = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitStoreMemMachine(const std::string &reg, const std::string &addrText,
+                                           std::initializer_list<std::string> uses,
+                                           MOpcode opcode) {
+    MachineInstr inst = MachineInstr::make("\tstr " + reg + ", " + addrText,
+                                           opcode, {}, uses);
+    inst.mayStore = true;
+    inst.isBarrier = true;
+    emitMachineInstr(std::move(inst));
+}
+
 std::string Arm64FuncContext::allocIntReg() {
     for (int r = 10; r <= 15; r++) {
         if (!usedIntRegs_.count(r)) {
@@ -113,7 +258,7 @@ std::string Arm64FuncContext::loadInt(Value *v) {
     }
     std::string r = allocIntReg();
     int off = getSlot(v);
-    emitLoadReg(os_, r, off);
+    emitLoadRegMachine(r, off);
     return r;
 }
 
@@ -131,7 +276,7 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
     }
     std::string r = allocFloatReg();
     int off = getSlot(v);
-    emitLoadReg(os_, r, off);
+    emitLoadRegMachine(r, off);
     return r;
 }
 
@@ -159,26 +304,26 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
         if (off < 0) {
             int absOff = -off;
             if (absOff <= 4095) {
-                os_ << "\tsub " << r << ", x29, #" << absOff << "\n";
+                emitRawAluMachine("\tsub " + r + ", x29, #" + std::to_string(absOff),
+                                  r, {"x29"});
             } else {
-                os_ << "\tmovz x17, #" << (absOff & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub " << r << ", x29, x17\n";
+                emitIntConst(absOff, "x17");
+                emitBinaryMachine("sub", r, "x29", "x17");
             }
         } else {
             if (off <= 4095) {
-                os_ << "\tadd " << r << ", x29, #" << off << "\n";
+                emitRawAluMachine("\tadd " + r + ", x29, #" + std::to_string(off),
+                                  r, {"x29"});
             } else {
-                os_ << "\tmovz x17, #" << (off & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((off >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tadd " << r << ", x29, x17\n";
+                emitIntConst(off, "x17");
+                emitBinaryMachine("add", r, "x29", "x17");
             }
         }
         return r;
     }
     std::string r = allocAddrReg();
     int off = getSlot(v);
-    emitLoadReg(os_, r, off);
+    emitLoadRegMachine(r, off);
     return r;
 }
 
@@ -187,31 +332,31 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
 void Arm64FuncContext::storeInt(Value *v, const std::string &reg) {
     if (hasAssignedReg(v)) {
         std::string target = assignedReg(v);
-        if (target != reg) os_ << "\tmov " << target << ", " << reg << "\n";
+        if (target != reg) emitMoveMachine(target, reg);
         return;
     }
     int off = getSlot(v);
-    emitStoreReg(os_, reg, off);
+    emitStoreRegMachine(reg, off);
 }
 
 void Arm64FuncContext::storeFloat(Value *v, const std::string &reg) {
     if (hasAssignedReg(v)) {
         std::string target = assignedReg(v);
-        if (target != reg) os_ << "\tfmov " << target << ", " << reg << "\n";
+        if (target != reg) emitMoveMachine(target, reg, "fmov");
         return;
     }
     int off = getSlot(v);
-    emitStoreReg(os_, reg, off);
+    emitStoreRegMachine(reg, off);
 }
 
 void Arm64FuncContext::storeAddr(Value *v, const std::string &reg) {
     if (hasAssignedReg(v)) {
         std::string target = assignedReg(v, true);
-        if (target != reg) os_ << "\tmov " << target << ", " << reg << "\n";
+        if (target != reg) emitMoveMachine(target, reg);
         return;
     }
     int off = getSlot(v);
-    emitStoreReg(os_, reg, off);
+    emitStoreRegMachine(reg, off);
 }
 
 std::string Arm64FuncContext::loadVector(Value *v) {
@@ -225,11 +370,12 @@ std::string Arm64FuncContext::loadVector(Value *v) {
             if (isFloat(elem->type_)) {
                 std::string sr = loadFloat(elem);
                 ws = allocIntReg();
-                os_ << "\tfmov " << ws << ", " << sr << "\n";
+                emitMoveMachine(ws, sr, "fmov");
             } else {
                 ws = loadInt(elem);
             }
-            os_ << "\tmov " << rd << ".s[" << i << "], " << ws << "\n";
+            emitRawAluMachine("\tmov " + rd + ".s[" + std::to_string(i) + "], " + ws,
+                              rd, {ws}, MOpcode::Neon);
         }
         return rd;
     }
@@ -243,17 +389,18 @@ std::string Arm64FuncContext::loadVector(Value *v) {
     int off = getSlot(v);
     // ldr qN only supports unsigned offset; use sub+ldr for negative offsets
     if (off >= 0 && off <= 65520 && off % 16 == 0) {
-        os_ << "\tldr q" << r.substr(1) << ", [x29, #" << off << "]\n";
+        emitLoadMemMachine("q" + r.substr(1), "[x29, #" + std::to_string(off) + "]",
+                           {"x29"}, MOpcode::Load, 4);
     } else {
         int pos = -off;
         if (pos <= 4095) {
-            os_ << "\tsub x16, x29, #" << pos << "\n";
+            emitRawAluMachine("\tsub x16, x29, #" + std::to_string(pos),
+                              "x16", {"x29"});
         } else {
-            os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
-            os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
-            os_ << "\tsub x16, x29, x16\n";
+            emitIntConst(pos, "x16");
+            emitBinaryMachine("sub", "x16", "x29", "x16");
         }
-        os_ << "\tldr q" << r.substr(1) << ", [x16]\n";
+        emitLoadMemMachine("q" + r.substr(1), "[x16]", {"x16"}, MOpcode::Load, 4);
     }
     return r;
 }
@@ -261,23 +408,27 @@ std::string Arm64FuncContext::loadVector(Value *v) {
 void Arm64FuncContext::storeVector(Value *v, const std::string &reg) {
     if (hasAssignedReg(v)) {
         std::string target = assignedReg(v);
-        if (target != reg) os_ << "\tmov " << target << ".16b, " << reg << ".16b\n";
+        if (target != reg)
+            emitRawAluMachine("\tmov " + target + ".16b, " + reg + ".16b",
+                              target, {reg}, MOpcode::Neon);
         return;
     }
     int off = getSlot(v);
     // str qN only supports unsigned offset; use sub+str for negative offsets
     if (off >= 0 && off <= 65520 && off % 16 == 0) {
-        os_ << "\tstr q" << reg.substr(1) << ", [x29, #" << off << "]\n";
+        emitStoreMemMachine("q" + reg.substr(1), "[x29, #" + std::to_string(off) + "]",
+                            {"q" + reg.substr(1), "x29"}, MOpcode::Store);
     } else {
         int pos = -off;
         if (pos <= 4095) {
-            os_ << "\tsub x16, x29, #" << pos << "\n";
+            emitRawAluMachine("\tsub x16, x29, #" + std::to_string(pos),
+                              "x16", {"x29"});
         } else {
-            os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
-            os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
-            os_ << "\tsub x16, x29, x16\n";
+            emitIntConst(pos, "x16");
+            emitBinaryMachine("sub", "x16", "x29", "x16");
         }
-        os_ << "\tstr q" << reg.substr(1) << ", [x16]\n";
+        emitStoreMemMachine("q" + reg.substr(1), "[x16]",
+                            {"q" + reg.substr(1), "x16"}, MOpcode::Store);
     }
 }
 

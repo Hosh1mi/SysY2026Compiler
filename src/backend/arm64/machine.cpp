@@ -223,6 +223,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         addUses(mi, rest);
     } else if (op == "bl") {
         mi.opcode = MOpcode::Call;
+        mi.isCall = true;
         mi.isBarrier = true;
     } else if (op == "ret") {
         mi.opcode = MOpcode::Ret;
@@ -274,6 +275,8 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
 void appendMachineInstr(MachineFunction &func, MachineInstr inst) {
     if (func.blocks.empty())
         func.blocks.push_back({});
+
+    inst.originalIndex = func.nextIndex++;
 
     if (inst.opcode == MOpcode::Label && !func.blocks.back().instrs.empty()) {
         func.blocks.push_back({});

@@ -63,8 +63,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
     auto emitDirectCopy = [&](const DirectPhiCopy &cp) {
         if (cp.hasSrcReg) {
             if (cp.srcReg != cp.dstReg)
-                os_ << "\t" << (cp.isFloat ? "fmov " : "mov ")
-                    << cp.dstReg << ", " << cp.srcReg << "\n";
+                emitMoveMachine(cp.dstReg, cp.srcReg, cp.isFloat ? "fmov" : "mov");
             return;
         }
 
@@ -72,7 +71,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             if (auto cf = dynamic_cast<ConstantFloat*>(cp.src)) {
                 emitFloatConst(cf->value_, cp.dstReg);
             } else {
-                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+                emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
             }
         } else if (cp.isPtr) {
             if (auto gv = dynamic_cast<GlobalVariable*>(cp.src)) {
@@ -80,13 +79,13 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
             } else if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
                 emitIntConst(ci->value_, cp.dstReg);
             } else {
-                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+                emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
             }
         } else {
             if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
                 emitIntConst(ci->value_, cp.dstReg);
             } else {
-                emitLoadReg(os_, cp.dstReg, getSlot(cp.src));
+                emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
             }
         }
     };
@@ -221,18 +220,25 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                         int off = getSlot(val);
                         // Load 16 bytes from stack: use sub+ldr for negative off
                         if (off >= 0 && off <= 65520 && off % 16 == 0)
-                            os_ << "\tldr q" << srcReg.substr(1) << ", [x29, #" << off << "]\n";
+                            emitLoadMemMachine("q" + srcReg.substr(1),
+                                               "[x29, #" + std::to_string(off) + "]",
+                                               {"x29"}, MOpcode::Load, 4);
                         else {
                             int pos = -off;
-                            if (pos <= 4095) os_ << "\tsub x16, x29, #" << pos << "\n";
-                            else { os_ << "\tmovz x16, #" << (pos & 0xFFFF) << "\n";
-                                   os_ << "\tmovk x16, #" << ((pos >> 16) & 0xFFFF) << ", lsl #16\n";
-                                   os_ << "\tsub x16, x29, x16\n"; }
-                            os_ << "\tldr q" << srcReg.substr(1) << ", [x16]\n";
+                            if (pos <= 4095) {
+                                emitRawAluMachine("\tsub x16, x29, #" + std::to_string(pos),
+                                                  "x16", {"x29"});
+                            } else {
+                                emitIntConst(pos, "x16");
+                                emitBinaryMachine("sub", "x16", "x29", "x16");
+                            }
+                            emitLoadMemMachine("q" + srcReg.substr(1), "[x16]",
+                                               {"x16"}, MOpcode::Load, 4);
                         }
                     }
                     if (srcReg != dstReg)
-                        os_ << "\tmov " << dstReg << ".16b, " << srcReg << ".16b\n";
+                        emitRawAluMachine("\tmov " + dstReg + ".16b, " + srcReg + ".16b",
+                                          dstReg, {srcReg}, MOpcode::Neon);
                 }
                 continue;
             }
@@ -247,7 +253,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                 isPtr(val->type_) &&
                 !isVector(val->type_) && !batchSourceReadsSlot(cp.dstSlot, idx)) {
                 std::string srcReg = assignedReg(val, isPtr(val->type_));
-                emitStoreReg(os_, srcReg, cp.dstSlot);
+                emitStoreRegMachine(srcReg, cp.dstSlot);
                 continue;
             }
 
@@ -257,7 +263,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                     std::string dstReg = assignedReg(cp.phi);
                     if (!batchSourceReadsReg(dstReg, idx)) {
                         if (ci->value_ == 0)
-                            os_ << "\tmov " << dstReg << ", wzr\n";
+                            emitMoveMachine(dstReg, "wzr");
                         else
                             emitIntConst(ci->value_, dstReg);
                         continue;
@@ -271,39 +277,39 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                     std::string srcReg = assignedReg(val);
                     usedFloatRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocFloatReg();
-                    if (tmpReg != srcReg) os_ << "\tfmov " << tmpReg << ", " << srcReg << "\n";
+                    if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg, "fmov");
                 } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
                     tmpReg = allocFloatReg();
                     emitFloatConst(cf->value_, tmpReg);
                 } else {
                     tmpReg = allocFloatReg();
-                    emitLoadReg(os_, tmpReg, getSlot(val));
+                    emitLoadRegMachine(tmpReg, getSlot(val));
                 }
             } else if (isPtr(val->type_)) {
                 if (hasAssignedReg(val)) {
                     std::string srcReg = assignedReg(val, true);
                     usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocAddrReg();
-                    if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+                    if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg);
                 } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
                     tmpReg = allocAddrReg();
                     emitGlobalAddr(gv, tmpReg);
                 } else {
                     tmpReg = allocAddrReg();
-                    emitLoadReg(os_, tmpReg, getSlot(val));
+                    emitLoadRegMachine(tmpReg, getSlot(val));
                 }
             } else { // int
                 if (hasAssignedReg(val)) {
                     std::string srcReg = assignedReg(val);
                     usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocIntReg();
-                    if (tmpReg != srcReg) os_ << "\tmov " << tmpReg << ", " << srcReg << "\n";
+                    if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg);
                 } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
                     tmpReg = allocIntReg();
                     emitIntConst(ci->value_, tmpReg);
                 } else {
                     tmpReg = allocIntReg();
-                    emitLoadReg(os_, tmpReg, getSlot(val));
+                    emitLoadRegMachine(tmpReg, getSlot(val));
                 }
             }
             entries.push_back({cp.phi, tmpReg, cp.dstSlot, isFloat(val->type_)});
@@ -315,12 +321,12 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                 bool isPhiPtr = e.phi->type_->tid_ == Type::PointerTyID;
                 std::string dstReg = assignedReg(e.phi, isPhiPtr);
                 if (e.isFloat) {
-                    if (e.tmpReg != dstReg) os_ << "\tfmov " << dstReg << ", " << e.tmpReg << "\n";
+                    if (e.tmpReg != dstReg) emitMoveMachine(dstReg, e.tmpReg, "fmov");
                 } else {
-                    if (e.tmpReg != dstReg) os_ << "\tmov " << dstReg << ", " << e.tmpReg << "\n";
+                    if (e.tmpReg != dstReg) emitMoveMachine(dstReg, e.tmpReg);
                 }
             } else {
-                emitStoreReg(os_, e.tmpReg, e.dstSlot);
+                emitStoreRegMachine(e.tmpReg, e.dstSlot);
             }
         }
         for (const auto &e : entries) {
@@ -442,7 +448,7 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     if (falseInst && hasAssignedReg(falseInst) &&
         assignedReg(falseInst) == trueAssigned && !trueAssigned.empty()) {
         trueSaveReg = allocIntReg();
-        os_ << "\tmov " << trueSaveReg << ", " << trueAssigned << "\n";
+        emitMoveMachine(trueSaveReg, trueAssigned);
     }
     if (falseInst)
         emitInstruction(falseInst);
@@ -457,12 +463,15 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
             if (val >= 0 && val <= 4095)
-                os_ << "\tcmp " << r1 << ", #" << val << "\n";
+                emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
+                                     MOpcode::Cmp, {}, {r1}, 1, true, false, true);
             else { std::string r2 = allocIntReg(); emitIntConst(val, r2);
-                os_ << "\tcmp " << r1 << ", " << r2 << "\n"; }
+                emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                     MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
         } else {
             std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
-            os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+            emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                 MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
         }
     };
     emitCmp();
@@ -476,7 +485,9 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     // For Pattern A, falseInst was emitted above; its value is now in its assigned reg or slot.
     // For Pattern B, falsePhiVal comes from the cond block (already live).
     std::string falseReg = hasAssignedReg(falsePhiVal)? assignedReg(falsePhiVal): loadInt(falsePhiVal);
-    os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << cond << "\n";
+    emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
+                         MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
+                         false, true, true);
     if (!hasAssignedReg(phi)) storeInt(phi, dstReg);
 
     // Mark this phi copy as handled — don't emit it again
@@ -484,7 +495,7 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
 
     // Emit other phi copies and the branch
     emitPhiCopies(br->parent_, mergeBB);
-    os_ << "\tb " << bbLabel(func_, mergeBB) << "\n";
+    emitBranchMachine("\tb " + bbLabel(func_, mergeBB));
 
     // Don't skip trueBB/falseBB — their phi copies are still needed
     // for proper value flow to the merge block.
@@ -568,11 +579,14 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
             if (val >= 0 && val <= 4095)
-                os_ << "\tcmp " << r1 << ", #" << val << "\n";
+                emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
+                                     MOpcode::Cmp, {}, {r1}, 1, true, false, true);
             else { std::string r2 = allocIntReg(); emitIntConst(val, r2);
-                os_ << "\tcmp " << r1 << ", " << r2 << "\n"; }
+                emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                     MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
         } else { std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
-            os_ << "\tcmp " << r1 << ", " << r2 << "\n"; }
+            emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                 MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
     };
 
     // cmp for OUTER icmp (sets initial flags)
@@ -586,9 +600,11 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
         const char *outerCond = icmpCond(icmp1->icmp_op_);
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
-            os_ << "\tccmp " << r1 << ", #" << val << ", #0, " << outerCond << "\n";
+            emitMachineInstrLine("\tccmp " + r1 + ", #" + std::to_string(val) + ", #0, " + outerCond,
+                                 MOpcode::FlagUse, {}, {r1}, 1, true, true, true);
         } else { std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
-            os_ << "\tccmp " << r1 << ", " << r2 << ", #0, " << outerCond << "\n"; }
+            emitMachineInstrLine("\tccmp " + r1 + ", " + r2 + ", #0, " + outerCond,
+                                 MOpcode::FlagUse, {}, {r1, r2}, 1, true, true, true); }
     }
 
     // Emit the true instruction inline, then re-establish flags for csel.
@@ -608,28 +624,34 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
 
     // Re-emit cmp (outer) + ccmp (inner) using saved operand regs
     if (io1_isImm && io1_imm >= 0 && io1_imm <= 4095)
-        os_ << "\tcmp " << io1_r1 << ", #" << io1_imm << "\n";
+        emitMachineInstrLine("\tcmp " + io1_r1 + ", #" + std::to_string(io1_imm),
+                             MOpcode::Cmp, {}, {io1_r1}, 1, true, false, true);
     else
-        os_ << "\tcmp " << io1_r1 << ", " << io1_r2 << "\n";
+        emitMachineInstrLine("\tcmp " + io1_r1 + ", " + io1_r2,
+                             MOpcode::Cmp, {}, {io1_r1, io1_r2}, 1, true, false, true);
 
     {
         const char *outerCond = icmpCond(icmp1->icmp_op_);
         if (io2_isImm)
-            os_ << "\tccmp " << io2_r1 << ", #" << io2_imm << ", #0, " << outerCond << "\n";
+            emitMachineInstrLine("\tccmp " + io2_r1 + ", #" + std::to_string(io2_imm) + ", #0, " + outerCond,
+                                 MOpcode::FlagUse, {}, {io2_r1}, 1, true, true, true);
         else
-            os_ << "\tccmp " << io2_r1 << ", " << io2_r2 << ", #0, " << outerCond << "\n";
+            emitMachineInstrLine("\tccmp " + io2_r1 + ", " + io2_r2 + ", #0, " + outerCond,
+                                 MOpcode::FlagUse, {}, {io2_r1, io2_r2}, 1, true, true, true);
     }
 
     const char *outerCond = icmpCond(icmp1->icmp_op_);
     std::string dstReg   = hasAssignedReg(phi)       ? assignedReg(phi)       : allocIntReg();
     std::string trueReg  = hasAssignedReg(trueInst)  ? assignedReg(trueInst)  : loadInt(trueInst);
     std::string falseReg = hasAssignedReg(falseVal)  ? assignedReg(falseVal)  : loadInt(falseVal);
-    os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << outerCond << "\n";
+    emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + outerCond,
+                         MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
+                         false, true, true);
     if (!hasAssignedReg(phi)) storeInt(phi, dstReg);
 
     cselHandled_.insert({bb, phi});
     emitPhiCopies(bb, mergeBB);
-    os_ << "\tb " << bbLabel(func_, mergeBB) << "\n";
+    emitBranchMachine("\tb " + bbLabel(func_, mergeBB));
     return true;
 }
 
@@ -659,27 +681,27 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
             const char *op = useCbz ? "cbz" : "cbnz";
 
             if (!hasTrue && !hasFalse) {
-                os_ << "\t" << op << " " << r1 << ", " << bbLabel(func_, trueBB) << "\n";
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\t" + std::string(op) + " " + r1 + ", " + bbLabel(func_, trueBB), {r1});
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             } else if (hasTrue && !hasFalse) {
                 // Invert: if eq→cbz goes to trueBB, then ne case goes to falseBB via cbnz
                 const char *invOp = useCbz ? "cbnz" : "cbz";
-                os_ << "\t" << invOp << " " << r1 << ", " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\t" + std::string(invOp) + " " + r1 + ", " + bbLabel(func_, falseBB), {r1});
                 emitPhiCopies(parentBB, trueBB);
-                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, trueBB));
             } else if (!hasTrue && hasFalse) {
-                os_ << "\t" << op << " " << r1 << ", " << bbLabel(func_, trueBB) << "\n";
+                emitBranchMachine("\t" + std::string(op) + " " + r1 + ", " + bbLabel(func_, trueBB), {r1});
                 emitPhiCopies(parentBB, falseBB);
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             } else {
                 std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
                 const char *invOp = useCbz ? "cbnz" : "cbz";
-                os_ << "\t" << invOp << " " << r1 << ", " << edgeLbl << "\n";
+                emitBranchMachine("\t" + std::string(invOp) + " " + r1 + ", " + edgeLbl, {r1});
                 emitPhiCopies(parentBB, trueBB);
-                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
-                os_ << edgeLbl << ":\n";
+                emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+                emitMachineLine(edgeLbl + ":");
                 emitPhiCopies(parentBB, falseBB);
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             }
             return;
         }
@@ -691,36 +713,39 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
         int val = ci->value_;
         if (val >= 0 && val <= 4095) {
-            os_ << "\tcmp " << r1 << ", #" << val << "\n";
+            emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
+                                 MOpcode::Cmp, {}, {r1}, 1, true, false, true);
         } else {
             std::string r2 = allocIntReg();
             emitIntConst(val, r2);
-            os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+            emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                 MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
         }
     } else {
         std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
-        os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+        emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                             MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
     }
 
     if (!hasTrue && !hasFalse) {
-        os_ << "\tb." << cond << " " << bbLabel(func_, trueBB) << "\n";
-        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+        emitBranchMachine("\tb." + std::string(cond) + " " + bbLabel(func_, trueBB), {}, true);
+        emitBranchMachine("\tb " + bbLabel(func_, falseBB));
     } else if (hasTrue && !hasFalse) {
-        os_ << "\tb." << invertCond(cond) << " " << bbLabel(func_, falseBB) << "\n";
+        emitBranchMachine("\tb." + std::string(invertCond(cond)) + " " + bbLabel(func_, falseBB), {}, true);
         emitPhiCopies(parentBB, trueBB);
-        os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+        emitBranchMachine("\tb " + bbLabel(func_, trueBB));
     } else if (!hasTrue && hasFalse) {
-        os_ << "\tb." << cond << " " << bbLabel(func_, trueBB) << "\n";
+        emitBranchMachine("\tb." + std::string(cond) + " " + bbLabel(func_, trueBB), {}, true);
         emitPhiCopies(parentBB, falseBB);
-        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+        emitBranchMachine("\tb " + bbLabel(func_, falseBB));
     } else {
         std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
-        os_ << "\tb." << invertCond(cond) << " " << edgeLbl << "\n";
+        emitBranchMachine("\tb." + std::string(invertCond(cond)) + " " + edgeLbl, {}, true);
         emitPhiCopies(parentBB, trueBB);
-        os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
-        os_ << edgeLbl << ":\n";
+        emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+        emitMachineLine(edgeLbl + ":");
         emitPhiCopies(parentBB, falseBB);
-        os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+        emitBranchMachine("\tb " + bbLabel(func_, falseBB));
     }
 }
 

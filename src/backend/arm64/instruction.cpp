@@ -30,7 +30,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     // The entry block is reached via the function name, not its label.
     bool isEntry = (bb == func_->basic_blocks_[0]);
     if (!isEntry || branchTargets_.count(bb))
-        os_ << bbLabel(func_, bb) << ":\n";
+        emitMachineLine(bbLabel(func_, bb) + ":");
 
     resetRegs();
 
@@ -100,8 +100,8 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     resetRegs();
                     std::string rA = loadInt(mulInst->get_operand(0));
                     std::string rB = loadInt(mulInst->get_operand(1));
-                    os_ << "\tmov w8, " << rA << "\n";
-                    os_ << "\tmov w16, " << rB << "\n";
+                    emitMoveMachine("w8", rA);
+                    emitMoveMachine("w16", rB);
 
                     // 2. Emit intervening instructions.  Each calls resetRegs(),
                     //    so we re-pin w16 in usedIntRegs_ to keep it alive.
@@ -121,21 +121,24 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                         std::string rAcc = loadInt(accOp);
                         std::string rd = allocIntReg();
                         if (canMAdd) {
-                            os_ << "\tmadd " << rd << ", " << rA2 << ", " << rB2
-                                << ", " << rAcc << "\n";
+                            emitRawAluMachine("\tmadd " + rd + ", " + rA2 + ", " + rB2
+                                              + ", " + rAcc,
+                                              rd, {rA2, rB2, rAcc}, MOpcode::Mul, 3);
                         } else {
                             Value *minuend = addSub->get_operand(0);
                             if (auto *ci = dynamic_cast<ConstantInt*>(minuend)) {
                                 if (ci->value_ == 0) {
-                                    os_ << "\tmneg " << rd << ", " << rA2
-                                        << ", " << rB2 << "\n";
+                                    emitRawAluMachine("\tmneg " + rd + ", " + rA2
+                                                      + ", " + rB2,
+                                                      rd, {rA2, rB2}, MOpcode::Mul, 3);
                                     storeInt(addSub, rd);
                                     it = scan; fused = true; break;
                                 }
                             }
                             std::string rMin = loadInt(minuend);
-                            os_ << "\tmsub " << rd << ", " << rA2 << ", " << rB2
-                                << ", " << rMin << "\n";
+                            emitRawAluMachine("\tmsub " + rd + ", " + rA2 + ", " + rB2
+                                              + ", " + rMin,
+                                              rd, {rA2, rB2, rMin}, MOpcode::Mul, 3);
                         }
                         storeInt(addSub, rd);
                     }
@@ -184,33 +187,38 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (isVector(val->type_)) {
             std::string addr = loadAddr(ptr);
             std::string vs = loadVector(val);
-            os_ << "\tst1 {" << vs << ".4s}, [" << addr << "]\n";
+            MachineInstr st = MachineInstr::make("\tst1 {" + vs + ".4s}, [" + addr + "]",
+                                                 MOpcode::Store, {}, {vs, addr});
+            st.mayStore = true;
+            st.isBarrier = true;
+            emitMachineInstr(std::move(st));
             break;
         }
         if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
-            os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
+            emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
+                                 MOpcode::Adr, {base});
             if (isFloat(val->type_)) {
                 std::string r = loadFloat(val);
-                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             } else if (isPtr(val->type_)) {
                 std::string r = loadAddr(val);
-                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             } else {
                 std::string r = loadInt(val);
-                os_ << "\tstr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             }
         } else {
             std::string addr = loadAddr(ptr);
             if (isFloat(val->type_)) {
                 std::string r = loadFloat(val);
-                os_ << "\tstr " << r << ", [" << addr << "]\n";
+                emitStoreMemMachine(r, "[" + addr + "]", {r, addr});
             } else if (isPtr(val->type_)) {
                 std::string r = loadAddr(val);
-                os_ << "\tstr " << r << ", [" << addr << "]\n";
+                emitStoreMemMachine(r, "[" + addr + "]", {r, addr});
             } else {
                 std::string r = loadInt(val);
-                os_ << "\tstr " << r << ", [" << addr << "]\n";
+                emitStoreMemMachine(r, "[" + addr + "]", {r, addr});
             }
         }
         break;
@@ -222,39 +230,43 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (isVector(inst->type_)) {
             std::string addr = loadAddr(ptr);
             std::string vd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
-            os_ << "\tld1 {" << vd << ".4s}, [" << addr << "]\n";
+            MachineInstr ld = MachineInstr::make("\tld1 {" + vd + ".4s}, [" + addr + "]",
+                                                MOpcode::Load, {vd}, {addr}, 4);
+            ld.mayLoad = true;
+            emitMachineInstr(std::move(ld));
             if (!hasAssignedReg(inst)) storeVector(inst, vd);
             break;
         }
         if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
-            os_ << "\tadrp " << base << ", " << gv->name_ << "\n";
+            emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
+                                 MOpcode::Adr, {base});
             if (isFloat(inst->type_)) {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
-                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitLoadMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {base});
                 storeFloat(inst, r);
             } else if (isPtr(inst->type_)) {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst, true) : allocAddrReg();
-                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitLoadMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {base});
                 storeAddr(inst, r);
             } else {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                os_ << "\tldr " << r << ", [" << base << ", :lo12:" << gv->name_ << "]\n";
+                emitLoadMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {base});
                 storeInt(inst, r);
             }
         } else {
             std::string addr = loadAddr(ptr);
             if (isFloat(inst->type_)) {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
-                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                emitLoadMemMachine(r, "[" + addr + "]", {addr});
                 storeFloat(inst, r);
             } else if (isPtr(inst->type_)) {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst, true) : allocAddrReg();
-                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                emitLoadMemMachine(r, "[" + addr + "]", {addr});
                 storeAddr(inst, r);
             } else {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                os_ << "\tldr " << r << ", [" << addr << "]\n";
+                emitLoadMemMachine(r, "[" + addr + "]", {addr});
                 storeInt(inst, r);
             }
         }
@@ -281,7 +293,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 case Instruction::Mul: opcode = "mul"; break;
                 default: break;
             }
-            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ".4s, " + r1
+                                  + ".4s, " + r2 + ".4s",
+                              rd, {r1, r2}, MOpcode::Neon,
+                              inst->op_id_ == Instruction::Mul ? 3 : 1);
             if (!hasAssignedReg(inst)) storeVector(inst, rd);
             break;
         }
@@ -312,16 +327,20 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         if (k == 1) {
                             // ÷2:  barrel-shifter folds bias into add
                             //   bias = rNum >>> 31  (0 or 1)
-                            os_ << "\tadd " << rResult << ", " << rNum << ", " << rNum << ", lsr #31\n";
+                            emitRawAluMachine("\tadd " + rResult + ", " + rNum + ", " + rNum + ", lsr #31",
+                                              rResult, {rNum});
                         } else {
                             std::string rTmp = allocIntReg();
-                            os_ << "\tasr " << rTmp << ", " << rNum << ", #31\n";
-                            os_ << "\tbic " << rTmp << ", " << rTmp << ", " << rTmp << ", lsl #" << k << "\n";
-                            os_ << "\tadd " << rResult << ", " << rNum << ", " << rTmp << "\n";
+                            emitRawAluMachine("\tasr " + rTmp + ", " + rNum + ", #31",
+                                              rTmp, {rNum});
+                            emitRawAluMachine("\tbic " + rTmp + ", " + rTmp + ", " + rTmp + ", lsl #" + std::to_string(k),
+                                              rTmp, {rTmp});
+                            emitBinaryMachine("add", rResult, rNum, rTmp);
                         }
-                        os_ << "\tasr " << rResult << ", " << rResult << ", #" << k << "\n";
+                        emitRawAluMachine("\tasr " + rResult + ", " + rResult + ", #" + std::to_string(k),
+                                          rResult, {rResult});
                         if (d < 0)
-                            os_ << "\tneg " << rResult << ", " << rResult << "\n";
+                            emitUnaryMachine("neg", rResult, rResult);
 
                         storeInt(inst, rResult);
                         emitted = true;
@@ -335,22 +354,26 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         emitIntConst(mag.multiplier, wMagic);
 
                         std::string wNumSafe = allocIntReg();
-                        os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
+                        emitMoveMachine(wNumSafe, wNum);
 
                         std::string xTemp = allocAddrReg();
                         std::string wHi = "w" + xTemp.substr(1);
 
-                        os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
-                        os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
+                        emitRawAluMachine("\tsmull " + xTemp + ", " + wNumSafe + ", " + wMagic,
+                                          xTemp, {wNumSafe, wMagic}, MOpcode::Mul, 3);
+                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
+                                          xTemp, {xTemp});
 
                         if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                            os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                            emitBinaryMachine("add", wHi, wHi, wNumSafe);
                         } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                            os_ << "\tsub " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                            emitBinaryMachine("sub", wHi, wHi, wNumSafe);
                         }
 
-                        os_ << "\tasr " << wHi << ", " << wHi << ", #" << mag.shift << "\n";
-                        os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << ", lsr #31\n";
+                        emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
+                                          wHi, {wHi});
+                        emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNumSafe + ", lsr #31",
+                                          wHi, {wHi, wNumSafe});
 
                         storeInt(inst, wHi);
                         emitted = true;
@@ -376,7 +399,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     // × -1：negate
                     std::string r  = loadInt(var);
                     std::string rd = allocIntReg();
-                    os_ << "\tneg " << rd << ", " << r << "\n";
+                    emitUnaryMachine("neg", rd, r);
                     storeInt(inst, rd);
                     emitted = true;
 
@@ -391,9 +414,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         int k = __builtin_ctz(abs_f);
                         std::string r  = loadInt(var);
                         std::string rd = allocIntReg();
-                        os_ << "\tlsl " << rd << ", " << r << ", #" << k << "\n";
+                        emitRawAluMachine("\tlsl " + rd + ", " + r + ", #" + std::to_string(k),
+                                          rd, {r});
                         if (negative)
-                            os_ << "\tneg " << rd << ", " << rd << "\n";
+                            emitUnaryMachine("neg", rd, rd);
                         storeInt(inst, rd);
                         emitted = true;
                     }
@@ -407,10 +431,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         int k = __builtin_ctz(m1);
                         std::string r  = loadInt(var);
                         std::string rd = allocIntReg();
-                        os_ << "\tadd " << rd << ", " << r << ", "
-                            << r << ", lsl #" << k << "\n";
+                        emitRawAluMachine("\tadd " + rd + ", " + r + ", "
+                                          + r + ", lsl #" + std::to_string(k),
+                                          rd, {r});
                         if (negative)
-                            os_ << "\tneg " << rd << ", " << rd << "\n";
+                            emitUnaryMachine("neg", rd, rd);
                         storeInt(inst, rd);
                         emitted = true;
                     }
@@ -427,12 +452,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         std::string rd = allocIntReg();
                         if (negative) {
                             // r*(1 - 2^k) = r - r*2^k
-                            os_ << "\tsub " << rd << ", " << r << ", "
-                                << r << ", lsl #" << k << "\n";
+                            emitRawAluMachine("\tsub " + rd + ", " + r + ", "
+                                              + r + ", lsl #" + std::to_string(k),
+                                              rd, {r});
                         } else {
                             std::string rTmp = allocIntReg();
-                            os_ << "\tlsl " << rTmp << ", " << r << ", #" << k << "\n";
-                            os_ << "\tsub " << rd   << ", " << rTmp << ", " << r << "\n";
+                            emitRawAluMachine("\tlsl " + rTmp + ", " + r + ", #" + std::to_string(k),
+                                              rTmp, {r});
+                            emitBinaryMachine("sub", rd, rTmp, r);
                         }
                         storeInt(inst, rd);
                         emitted = true;
@@ -456,7 +483,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
                     if (ci->value_ >= 0 && ci->value_ <= 4095) {
                         std::string r1 = loadInt(v1);
-                        os_ << "\tadd " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                        emitMachineInstrLine(
+                            "\tadd " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
+                            MOpcode::Alu, {rd}, {r1});
                         usedImm = true;
                     }
                 }
@@ -464,7 +493,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     auto ci = static_cast<ConstantInt*>(v1);
                     if (ci->value_ >= 0 && ci->value_ <= 4095) {
                         std::string r2 = loadInt(v2);
-                        os_ << "\tadd " << rd << ", " << r2 << ", #" << ci->value_ << "\n";
+                        emitMachineInstrLine(
+                            "\tadd " + rd + ", " + r2 + ", #" + std::to_string(ci->value_),
+                            MOpcode::Alu, {rd}, {r2});
                         usedImm = true;
                     }
                 }
@@ -476,7 +507,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
                         if (ci->value_ >= 0 && ci->value_ <= 4095) {
                             std::string r1 = loadInt(v1);
-                            os_ << "\tsub " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                            emitMachineInstrLine(
+                                "\tsub " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
+                                MOpcode::Alu, {rd}, {r1});
                             usedImm = true;
                         }
                     }
@@ -493,7 +526,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     case Instruction::SDiv: opcode = "sdiv"; break;
                     default: break;
                 }
-                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+                MOpcode mop = (inst->op_id_ == Instruction::Mul) ? MOpcode::Mul :
+                              (inst->op_id_ == Instruction::SDiv) ? MOpcode::Div :
+                              MOpcode::Alu;
+                int latency = (inst->op_id_ == Instruction::Mul) ? 3 :
+                              (inst->op_id_ == Instruction::SDiv) ? 12 : 1;
+                emitMachineInstrLine(
+                    "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", " + r2,
+                    mop, {rd}, {r1, r2}, latency);
             }
             storeInt(inst, rd);
         }
@@ -511,16 +551,18 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             // ---- 除数为 1，余数恒为 0 ----
             else if (divisor == -1) {
                 std::string rd = allocIntReg();
-                os_ << "\tmov " << rd << ", wzr\n";
+                emitMoveMachine(rd, "wzr");
                 storeInt(inst, rd);
                 break;
             }
             else if (divisor == 2) {
                 std::string r = loadInt(v1);
                 std::string rd = allocIntReg();
-                os_ << "\tand " << rd << ", " << r << ", #1\n";   
-                os_ << "\ttst " << r << ", " << r << "\n";        
-                os_ << "\tcneg " << rd << ", " << rd << ", mi\n"; 
+                emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
+                emitMachineInstrLine("\ttst " + r + ", " + r,
+                                     MOpcode::Cmp, {}, {r}, 1, true);
+                emitMachineInstrLine("\tcneg " + rd + ", " + rd + ", mi",
+                                     MOpcode::FlagUse, {rd}, {rd}, 1, false, true);
                 storeInt(inst, rd);
                 break;
             }
@@ -532,14 +574,16 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 std::string rSign = allocIntReg();
                 std::string rQ = allocIntReg();
 
-                os_ << "\tasr " << rSign << ", " << rNum << ", #31\n";
-                os_ << "\tand " << rSign << ", " << rSign << ", #" << (divisor - 1) << "\n";
-                os_ << "\tadd " << rQ << ", " << rNum << ", " << rSign << "\n";
-                os_ << "\tasr " << rQ << ", " << rQ << ", #" << k << "\n";
-                os_ << "\tlsl " << rQ << ", " << rQ << ", #" << k << "\n";
+                emitRawAluMachine("\tasr " + rSign + ", " + rNum + ", #31", rSign, {rNum});
+                emitRawAluMachine("\tand " + rSign + ", " + rSign + ", #"
+                                      + std::to_string(divisor - 1),
+                                  rSign, {rSign});
+                emitBinaryMachine("add", rQ, rNum, rSign);
+                emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
+                emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
 
                 std::string rResult = allocIntReg();
-                os_ << "\tsub " << rResult << ", " << rNum << ", " << rQ << "\n";
+                emitBinaryMachine("sub", rResult, rNum, rQ);
                 storeInt(inst, rResult);
                 break;
             }
@@ -552,27 +596,32 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitIntConst(mag.multiplier, wMagic);
 
                 std::string wNumSafe = allocIntReg();
-                os_ << "\tmov " << wNumSafe << ", " << wNum << "\n";
+                emitMoveMachine(wNumSafe, wNum);
 
                 std::string xTemp = allocAddrReg();
                 std::string wHi = "w" + xTemp.substr(1);
 
-                os_ << "\tsmull " << xTemp << ", " << wNumSafe << ", " << wMagic << "\n";
-                os_ << "\tasr " << xTemp << ", " << xTemp << ", #32\n";
+                emitRawAluMachine("\tsmull " + xTemp + ", " + wNumSafe + ", " + wMagic,
+                                  xTemp, {wNumSafe, wMagic}, MOpcode::Mul, 3);
+                emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
+                                  xTemp, {xTemp});
 
                 if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                    os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                    emitBinaryMachine("add", wHi, wHi, wNumSafe);
                 } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                    os_ << "\tsub " << wHi << ", " << wHi << ", " << wNumSafe << "\n";
+                    emitBinaryMachine("sub", wHi, wHi, wNumSafe);
                 }
 
-                os_ << "\tasr " << wHi << ", " << wHi << ", #" << mag.shift << "\n";
-                os_ << "\tadd " << wHi << ", " << wHi << ", " << wNumSafe << ", lsr #31\n";
+                emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
+                                  wHi, {wHi});
+                emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNumSafe + ", lsr #31",
+                                  wHi, {wHi, wNumSafe});
 
                 std::string wD = allocIntReg();
                 emitIntConst(divisor, wD);
                 std::string wResult = allocIntReg();
-                os_ << "\tmsub " << wResult << ", " << wHi << ", " << wD << ", " << wNumSafe << "\n";
+                emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNumSafe,
+                                  wResult, {wHi, wD, wNumSafe}, MOpcode::Mul, 3);
 
                 storeInt(inst, wResult);
                 break;
@@ -585,8 +634,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string rb = loadInt(v2);
         std::string rq = allocIntReg();
         std::string rr = allocIntReg();
-        os_ << "\tsdiv " << rq << ", " << ra << ", " << rb << "\n";
-        os_ << "\tmsub " << rr << ", " << rq << ", " << rb << ", " << ra << "\n";
+        emitBinaryMachine("sdiv", rq, ra, rb, MOpcode::Div, 12);
+        emitRawAluMachine("\tmsub " + rr + ", " + rq + ", " + rb + ", " + ra,
+                          rr, {rq, rb, ra}, MOpcode::Mul, 3);
         storeInt(inst, rr);
         break;
     }
@@ -635,18 +685,20 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
 
             if (useImmediate) {
-                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+                emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ", " + r1
+                                      + ", #" + std::to_string(ci->value_),
+                                  rd, {r1});
             } else {
                 // 加载立即数到寄存器
                 std::string r2 = allocIntReg();
                 emitIntConst(ci->value_, r2);
-                os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+                emitBinaryMachine(opcode, rd, r1, r2);
                 freeIntReg(r2);
             }
         } else {
             // 寄存器位运算：and/orr/eor wd, w1, w2
             std::string r2 = loadInt(v2);
-            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+            emitBinaryMachine(opcode, rd, r1, r2);
         }
         storeInt(inst, rd);
         break;
@@ -671,7 +723,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 case Instruction::LShr: opcode = "ushr"; break;
                 default: break;
             }
-            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ".4s, " + r1
+                                  + ".4s, " + r2 + ".4s",
+                              rd, {r1, r2}, MOpcode::Neon);
             if (!hasAssignedReg(inst)) storeVector(inst, rd);
             break;
         }
@@ -685,10 +739,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         else                                        opcode = "asr";
 
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", #" << ci->value_ << "\n";
+            emitMachineInstrLine(
+                "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
+                MOpcode::Alu, {rd}, {r1});
         } else {
             std::string r2 = loadInt(v2);
-            os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+            emitMachineInstrLine(
+                "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", " + r2,
+                MOpcode::Alu, {rd}, {r1, r2});
         }
         storeInt(inst, rd);
         break;
@@ -714,7 +772,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 case Instruction::FMul: opcode = "fmul"; break;
                 default: break;
             }
-            os_ << "\t" << opcode << " " << rd << ".4s, " << r1 << ".4s, " << r2 << ".4s\n";
+            emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ".4s, " + r1
+                                  + ".4s, " + r2 + ".4s",
+                              rd, {r1, r2}, MOpcode::Neon,
+                              inst->op_id_ == Instruction::FMul ? 4 : 1);
             if (!hasAssignedReg(inst)) storeVector(inst, rd);
             break;
         }
@@ -730,7 +791,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         case Instruction::FDiv: opcode = "fdiv"; break;
         default: break;
         }
-        os_ << "\t" << opcode << " " << rd << ", " << r1 << ", " << r2 << "\n";
+        MOpcode mop = (inst->op_id_ == Instruction::FMul) ? MOpcode::Mul :
+                      (inst->op_id_ == Instruction::FDiv) ? MOpcode::Div :
+                      MOpcode::Alu;
+        int latency = (inst->op_id_ == Instruction::FMul) ? 5 :
+                      (inst->op_id_ == Instruction::FDiv) ? 12 : 4;
+        emitMachineInstrLine(
+            "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", " + r2,
+            mop, {rd}, {r1, r2}, latency);
         storeFloat(inst, rd);
         break;
     }
@@ -748,7 +816,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (isFloat(val->type_)) {
             std::string sr = loadFloat(val);
             ws = allocIntReg();
-            os_ << "\tfmov " << ws << ", " << sr << "\n";
+            emitMoveMachine(ws, sr, "fmov");
         } else {
             ws = loadInt(val);
         }
@@ -757,9 +825,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         // skip the copy and initialize the vector fresh.
         if (isVector(vec->type_)) {
             std::string vs = loadVector(vec);
-            if (rd != vs) os_ << "\tmov " << rd << ".16b, " << vs << ".16b\n";
+            if (rd != vs)
+                emitRawAluMachine("\tmov " + rd + ".16b, " + vs + ".16b",
+                                  rd, {vs}, MOpcode::Neon);
         }
-        os_ << "\tmov " << rd << ".s[" << lane << "], " << ws << "\n";
+        emitRawAluMachine("\tmov " + rd + ".s[" + std::to_string(lane) + "], " + ws,
+                          rd, {ws}, MOpcode::Neon);
         if (!hasAssignedReg(inst)) storeVector(inst, rd);
         break;
     }
@@ -772,8 +843,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
         std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
         std::string rd = allocIntReg();
-        os_ << "\tcmp " << r1 << ", " << r2 << "\n";
-        os_ << "\tcset " << rd << ", " << icmpCond(icmp->icmp_op_) << "\n";
+        emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                             MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
+        emitMachineInstrLine("\tcset " + rd + ", " + icmpCond(icmp->icmp_op_),
+                             MOpcode::FlagUse, {rd}, {}, 1, false, true, true);
         storeInt(inst, rd);
         break;
     }
@@ -794,12 +867,15 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (auto ci = dynamic_cast<ConstantInt*>(cv2)) {
             int val = ci->value_;
             if (val >= 0 && val <= 4095)
-                os_ << "\tcmp " << r1 << ", #" << val << "\n";
+                emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
+                                     MOpcode::Cmp, {}, {r1}, 1, true, false, true);
             else { std::string r2 = allocIntReg(); emitIntConst(val, r2);
-                os_ << "\tcmp " << r1 << ", " << r2 << "\n"; }
+                emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                     MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
         } else {
             std::string r2 = isPtr(cv2->type_) ? loadAddr(cv2) : loadInt(cv2);
-            os_ << "\tcmp " << r1 << ", " << r2 << "\n";
+            emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                 MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
         }
 
         std::string dstReg;
@@ -817,7 +893,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
         std::string trueReg = hasAssignedReg(tv)  ? assignedReg(tv)  : loadInt(tv);
         std::string falseReg= hasAssignedReg(fv)  ? assignedReg(fv)  : loadInt(fv);
-        os_ << "\tcsel " << dstReg << ", " << trueReg << ", " << falseReg << ", " << cond << "\n";
+        emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
+                             MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
+                             false, true, true);
         if (!directRet && !hasAssignedReg(inst)) storeInt(inst, dstReg);
         break;
     }
@@ -830,8 +908,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string r1 = loadFloat(v1);
         std::string r2 = loadFloat(v2);
         std::string rd = allocIntReg();
-        os_ << "\tfcmp " << r1 << ", " << r2 << "\n";
-        os_ << "\tcset " << rd << ", " << fcmpCond(fcmp->fcmp_op_) << "\n";
+        emitMachineInstrLine("\tfcmp " + r1 + ", " + r2,
+                             MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
+        emitMachineInstrLine("\tcset " + rd + ", " + fcmpCond(fcmp->fcmp_op_),
+                             MOpcode::FlagUse, {rd}, {}, 1, false, true, true);
         storeInt(inst, rd);
         break;
     }
@@ -874,35 +954,35 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             } else if (hasAssignedReg(ptr)) {
                 std::string base = assignedReg(ptr, true);
                 if (addr != base)
-                    os_ << "\tmov " << addr << ", " << base << "\n";
+                    emitMoveMachine(addr, base);
             } else if (dynamic_cast<AllocaInst*>(ptr)) {
                 int off = getSlot(ptr);
                 if (off < 0) {
                     int absOff = -off;
                     if (absOff <= 4095) {
-                        os_ << "\tsub " << addr << ", x29, #" << absOff << "\n";
+                        emitRawAluMachine("\tsub " + addr + ", x29, #" + std::to_string(absOff),
+                                          addr, {"x29"});
                     } else {
-                        os_ << "\tmovz x17, #" << (absOff & 0xFFFF) << "\n";
-                        os_ << "\tmovk x17, #" << ((absOff >> 16) & 0xFFFF) << ", lsl #16\n";
-                        os_ << "\tsub " << addr << ", x29, x17\n";
+                        emitIntConst(absOff, "x17");
+                        emitBinaryMachine("sub", addr, "x29", "x17");
                     }
                 } else {
                     if (off <= 4095) {
-                        os_ << "\tadd " << addr << ", x29, #" << off << "\n";
+                        emitRawAluMachine("\tadd " + addr + ", x29, #" + std::to_string(off),
+                                          addr, {"x29"});
                     } else {
-                        os_ << "\tmovz x17, #" << (off & 0xFFFF) << "\n";
-                        os_ << "\tmovk x17, #" << ((off >> 16) & 0xFFFF) << ", lsl #16\n";
-                        os_ << "\tadd " << addr << ", x29, x17\n";
+                        emitIntConst(off, "x17");
+                        emitBinaryMachine("add", addr, "x29", "x17");
                     }
                 }
             } else {
-                emitLoadReg(os_, addr, getSlot(ptr));
+                emitLoadRegMachine(addr, getSlot(ptr));
             }
         } else {
             std::string base = loadAddr(ptr);
             if (hasAssignedReg(ptr)) {
                 addr = allocAddrReg();
-                os_ << "\tmov " << addr << ", " << base << "\n";
+                emitMoveMachine(addr, base);
             } else {
                 addr = base;
             }
@@ -932,23 +1012,24 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 int offset = ci->value_ * elemSize;
                 if (offset != 0) {
                     if (offset > 0 && offset <= 4095) {
-                        os_ << "\tadd " << addr << ", " << addr << ", #" << offset << "\n";
+                        emitRawAluMachine("\tadd " + addr + ", " + addr + ", #" + std::to_string(offset),
+                                          addr, {addr});
                     } else if (offset < 0 && -offset <= 4095) {
-                        os_ << "\tsub " << addr << ", " << addr << ", #" << -offset << "\n";
+                        emitRawAluMachine("\tsub " + addr + ", " + addr + ", #" + std::to_string(-offset),
+                                          addr, {addr});
                     } else {
-                        os_ << "\tmovz x17, #" << (abs(offset) & 0xFFFF) << "\n";
-                        os_ << "\tmovk x17, #" << ((abs(offset) >> 16) & 0xFFFF) << ", lsl #16\n";
+                        emitIntConst(abs(offset), "x17");
                         if (offset > 0)
-                            os_ << "\tadd " << addr << ", " << addr << ", x17\n";
+                            emitBinaryMachine("add", addr, addr, "x17");
                         else
-                            os_ << "\tsub " << addr << ", " << addr << ", x17\n";
+                            emitBinaryMachine("sub", addr, addr, "x17");
                     }
                 }
             }else {
                 std::string idxReg = loadInt(idx);
                 std::string scaled = allocAddrReg();
                 // 符号扩展索引到64位
-                os_ << "\tsxtw " << scaled << ", " << idxReg << "\n";
+                emitMoveMachine(scaled, idxReg, "sxtw");
                 freeIntReg(idxReg);
     
                 if (elemSize > 1) {
@@ -956,22 +1037,20 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if (isPowerOfTwo(elemSize)) {
                         int shift = 0;
                         while ((1 << shift) < elemSize) shift++;
-                        os_ << "\tadd " << addr << ", " << addr << ", " << scaled << ", lsl #" << shift << "\n";
+                        emitRawAluMachine("\tadd " + addr + ", " + addr + ", " + scaled
+                                          + ", lsl #" + std::to_string(shift),
+                                          addr, {addr, scaled});
                         freeAddrReg(scaled);
                     } else {
                         std::string elemReg = allocAddrReg();
-                        uint32_t val = static_cast<uint32_t>(elemSize);
-                        os_ << "\tmovz " << elemReg << ", #" << (val & 0xFFFF) << "\n";
-                        if (val & 0xFFFF0000) {
-                            os_ << "\tmovk " << elemReg << ", #" << ((val >> 16) & 0xFFFF) << ", lsl #16\n";
-                        }
-                        os_ << "\tmul " << scaled << ", " << scaled << ", " << elemReg << "\n";
-                        os_ << "\tadd " << addr << ", " << addr << ", " << scaled << "\n";
+                        emitIntConst(elemSize, elemReg);
+                        emitBinaryMachine("mul", scaled, scaled, elemReg, MOpcode::Mul, 3);
+                        emitBinaryMachine("add", addr, addr, scaled);
                         freeAddrReg(elemReg);
                         freeAddrReg(scaled);  // scaled 可以释放了，因为结果已累加到 addr
                     }
                 } else {
-                    os_ << "\tadd " << addr << ", " << addr << ", " << scaled << "\n";
+                    emitBinaryMachine("add", addr, addr, scaled);
                     freeAddrReg(scaled);
                 }
             }
@@ -986,7 +1065,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         std::string r = loadInt(val);
         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-        os_ << "\tand " << rd << ", " << r << ", #1\n";
+        emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
         storeInt(inst, rd);
         break;
     }
@@ -996,7 +1075,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         std::string r = loadFloat(val);
         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-        os_ << "\tfcvtzs " << rd << ", " << r << "\n";
+        emitUnaryMachine("fcvtzs", rd, r, MOpcode::Alu, 4);
         storeInt(inst, rd);
         break;
     }
@@ -1006,7 +1085,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         std::string r = loadInt(val);
         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
-        os_ << "\tscvtf " << rd << ", " << r << "\n";
+        emitUnaryMachine("scvtf", rd, r, MOpcode::Alu, 4);
         storeFloat(inst, rd);
         break;
     }
@@ -1017,12 +1096,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (isFloat(inst->type_) && isInt(val->type_)) {
             std::string r = loadInt(val);
             std::string rd = allocFloatReg();
-            os_ << "\tfmov " << rd << ", " << r << "\n";
+            emitMoveMachine(rd, r, "fmov");
             storeFloat(inst, rd);
         } else if (isInt(inst->type_) && isFloat(val->type_)) {
             std::string r = loadFloat(val);
             std::string rd = allocIntReg();
-            os_ << "\tfmov " << rd << ", " << r << "\n";
+            emitMoveMachine(rd, r, "fmov");
             storeInt(inst, rd);
         } else {
             // pointer bitcasts: just copy
@@ -1037,7 +1116,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         std::string r = loadInt(val);
         std::string rd = allocIntReg();
-        os_ << "\tclz " << rd << ", " << r << "\n";
+        emitUnaryMachine("clz", rd, r);
         storeInt(inst, rd);
         break;
     }
@@ -1050,7 +1129,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             // Unconditional branch: emit copies for the single edge
             auto target = static_cast<BasicBlock*>(inst->get_operand(0));
             emitPhiCopies(parentBB, target);
-            os_ << "\tb " << bbLabel(func_, target) << "\n";
+            emitBranchMachine("\tb " + bbLabel(func_, target));
         } else {
             // Conditional branch: evaluate condition FIRST, then edge-specific copies
             auto cond = inst->get_operand(0);
@@ -1068,26 +1147,26 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             std::string cr = loadInt(cond);
 
             if (!hasTrue && !hasFalse) {
-                os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tcbnz " + cr + ", " + bbLabel(func_, trueBB), {cr});
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             } else if (hasTrue && !hasFalse) {
-                os_ << "\tcbz " << cr << ", " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tcbz " + cr + ", " + bbLabel(func_, falseBB), {cr});
                 emitPhiCopies(parentBB, trueBB);
-                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, trueBB));
             } else if (!hasTrue && hasFalse) {
-                os_ << "\tcbnz " << cr << ", " << bbLabel(func_, trueBB) << "\n";
+                emitBranchMachine("\tcbnz " + cr + ", " + bbLabel(func_, trueBB), {cr});
                 emitPhiCopies(parentBB, falseBB);
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             } else {
                 // Both edges have copies: use edge label
                 std::string edgeLbl = ".L" + func_->name_ + "_edge_" +
                     std::to_string(edgeCounter_++);
-                os_ << "\tcbz " << cr << ", " << edgeLbl << "\n";
+                emitBranchMachine("\tcbz " + cr + ", " + edgeLbl, {cr});
                 emitPhiCopies(parentBB, trueBB);
-                os_ << "\tb " << bbLabel(func_, trueBB) << "\n";
-                os_ << edgeLbl << ":\n";
+                emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+                emitMachineLine(edgeLbl + ":");
                 emitPhiCopies(parentBB, falseBB);
-                os_ << "\tb " << bbLabel(func_, falseBB) << "\n";
+                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             }
         }
         break;
@@ -1108,20 +1187,20 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (!alreadyInW0) {
                 if (isFloat(val->type_)) {
                     std::string r = loadFloat(val);
-                    os_ << "\tfmov s0, " << r << "\n";
+                    emitMoveMachine("s0", r, "fmov");
                 } else if (isPtr(val->type_)) {
                     std::string r = loadAddr(val);
-                    os_ << "\tmov x0, " << r << "\n";
+                    emitMoveMachine("x0", r);
                 } else {
                     std::string r = loadInt(val);
-                    os_ << "\tmov w0, " << r << "\n";
+                    emitMoveMachine("w0", r);
                 }
             }
         }
         if (needsFrame_)
-            os_ << "\tb .L" << func_->name_ << "_epilogue\n";
+            emitBranchMachine("\tb .L" + func_->name_ + "_epilogue");
         else
-            os_ << "\tret\n";
+            emitRetMachine();
         break;
     }
 
@@ -1209,17 +1288,17 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (argIsFloat) {
                 usedFloatRegs_.insert(srcNo);
                 std::string tmp = allocFloatReg();
-                os_ << "\tfmov " << tmp << ", " << src << "\n";
+                emitMoveMachine(tmp, src, "fmov");
                 callArgTemps[arg] = tmp;
             } else if (argIsPtr) {
                 usedIntRegs_.insert(srcNo);
                 std::string tmp = allocAddrReg();
-                os_ << "\tmov " << tmp << ", " << src << "\n";
+                emitMoveMachine(tmp, src);
                 callArgTemps[arg] = tmp;
             } else {
                 usedIntRegs_.insert(srcNo);
                 std::string tmp = allocIntReg();
-                os_ << "\tmov " << tmp << ", " << src << "\n";
+                emitMoveMachine(tmp, src);
                 callArgTemps[arg] = tmp;
             }
         }
@@ -1240,11 +1319,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         // 分配栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
-                os_ << "\tsub sp, sp, #" << stackBytes << "\n";
+                emitStackAdjustMachine("sub", stackBytes);
             else {
-                os_ << "\tmovz x17, #" << (stackBytes & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((stackBytes >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tsub sp, sp, x17\n";
+                emitIntConst(stackBytes, "x17");
+                emitStackAdjustMachine("sub", "x17");
             }
         }
     
@@ -1256,17 +1334,17 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (isFloat(arg->type_)) {
                 std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadFloat(arg);
                 if (floatArg < 8) {
-                    os_ << "\tfmov s" << floatArg++ << ", " << r << "\n";
+                    emitMoveMachine("s" + std::to_string(floatArg++), r, "fmov");
                 } else {
-                    os_ << "\tstr " << r << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    emitStoreMemMachine(r, "[sp, #" + std::to_string(stackIdx * 8) + "]", {r, "sp"});
                     stackIdx++;
                 }
             } else if (isPtr(arg->type_)) {
                 std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadAddr(arg);
                 if (intArg < 8) {
-                    os_ << "\tmov x" << intArg++ << ", " << r << "\n";
+                    emitMoveMachine("x" + std::to_string(intArg++), r);
                 } else {
-                    os_ << "\tstr " << r << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    emitStoreMemMachine(r, "[sp, #" + std::to_string(stackIdx * 8) + "]", {r, "sp"});
                     stackIdx++;
                 }
             } else {
@@ -1274,18 +1352,18 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     std::string dst = "w" + std::to_string(intArg++);
                     if (auto ci = dynamic_cast<ConstantInt*>(arg)) {
                         if (ci->value_ == 0)
-                            os_ << "\tmov " << dst << ", wzr\n";
+                            emitMoveMachine(dst, "wzr");
                         else
                             emitIntConst(ci->value_, dst);
                     } else {
                         std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
-                        os_ << "\tmov " << dst << ", " << r << "\n";
+                        emitMoveMachine(dst, r);
                     }
                 } else {
                     std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
                     std::string tmp = allocAddrReg();
-                    os_ << "\tsxtw " << tmp << ", " << r << "\n";
-                    os_ << "\tstr " << tmp << ", [sp, #" << (stackIdx * 8) << "]\n";
+                    emitMoveMachine(tmp, r, "sxtw");
+                    emitStoreMemMachine(tmp, "[sp, #" + std::to_string(stackIdx * 8) + "]", {tmp, "sp"});
                     freeAddrReg(tmp);
                     stackIdx++;
                 }
@@ -1293,16 +1371,15 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
     
         // 执行调用
-        os_ << "\tbl " << callee->name_ << "\n";
+        emitCallMachine(callee->name_);
     
         // 回收栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
-                os_ << "\tadd sp, sp, #" << stackBytes << "\n";
+                emitStackAdjustMachine("add", stackBytes);
             else {
-                os_ << "\tmovz x17, #" << (stackBytes & 0xFFFF) << "\n";
-                os_ << "\tmovk x17, #" << ((stackBytes >> 16) & 0xFFFF) << ", lsl #16\n";
-                os_ << "\tadd sp, sp, x17\n";
+                emitIntConst(stackBytes, "x17");
+                emitStackAdjustMachine("add", "x17");
             }
         }
     
@@ -1328,13 +1405,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         std::string r = loadFloat(val);
         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
-        os_ << "\tfneg " << rd << ", " << r << "\n";
+        emitMachineInstrLine("\tfneg " + rd + ", " + r,
+                             MOpcode::Alu, {rd}, {r}, 4);
         storeFloat(inst, rd);
         break;
     }
 
     default:
-        os_ << "\t// unsupported op_id: " << (int)inst->op_id_ << "\n";
+        emitMachineLine("\t// unsupported op_id: " + std::to_string((int)inst->op_id_));
         break;
     }
 }
