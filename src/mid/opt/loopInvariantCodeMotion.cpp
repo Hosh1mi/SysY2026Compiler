@@ -142,6 +142,19 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
         inst->is_store() || inst->is_alloca())
         return false;
 
+    // 收益判断：当 ICmp 的全部使用都是循环内的分支时，外提会破坏 codegen 的
+    // cmp+br 融合（变成 cset+cbz 并跨循环占用一个 w 寄存器），通常得不偿失。
+    // 让 ICmp 保留在分支所在 BB，codegen 可融合为 cbz/cbnz 或 cmp+b.cond。
+    if (inst->op_id_ == Instruction::ICmp) {
+        bool allBranchUseInLoop = !inst->use_list_.empty();
+        for (auto &use : inst->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->is_br()) { allBranchUseInLoop = false; break; }
+            if (!loop.blocks.count(user->parent_)) { allBranchUseInLoop = false; break; }
+        }
+        if (allBranchUseInLoop) return false;
+    }
+
     if (inst->is_call()) {
         if (inst->is_void()) return false;
         auto *call = static_cast<CallInst *>(inst);
