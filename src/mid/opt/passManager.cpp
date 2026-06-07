@@ -12,11 +12,13 @@ void PassManager::run(Module *module) {
                       << module->print() << "\n";
         }
 
-        pass->execute(module);
+        PreservedAnalyses preserved = pass->execute(module, analyses_);
 
         if (verify_ir_) {
             module->verify();
         }
+
+        analyses_.invalidate(module, preserved);
 
         if (dump_ir_) {
             std::cerr << "; === IR After " << pass->name() << " ===\n"

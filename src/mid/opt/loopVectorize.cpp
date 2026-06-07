@@ -1,10 +1,13 @@
 #include "../../include/mid/opt/loopVectorize.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include <stack>
 #include <queue>
 #include <algorithm>
 #include <functional>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <iostream>
 
 // =====================================================================
 // Vectorization
@@ -37,10 +40,17 @@ static const bool useVectorIR = true;
 // ── Entry point ──────────────────────────────────────────────────────────
 
 void LoopVectorize::execute(Module *module) {
+    AnalysisManager AM;
+    execute(module, AM);
+}
+
+PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
+    BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     for (auto func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func);
+            runOnFunction(func, BAA);
     }
+    return PreservedAnalyses::none();
 }
 
 // =====================================================================
@@ -340,7 +350,128 @@ static bool isVectorizableInstruction(Instruction *inst,
 // 判断循环是否可以被向量化
 // =====================================================================
 
-bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
+static bool isLoopVectorizeAADebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_LOOP_VECTORIZE_AA") != nullptr;
+    return enabled;
+}
+
+static std::string formatLoopVectorizeValue(Value *val) {
+    if (!val) return "<null>";
+    if (auto *inst = dynamic_cast<Instruction *>(val))
+        return "%" + inst->name_;
+    if (auto *global = dynamic_cast<GlobalVariable *>(val))
+        return "@" + global->name_;
+    if (!val->name_.empty())
+        return val->name_;
+    return "<anon>";
+}
+
+static const char *aliasResultNameForLV(AliasResult result) {
+    switch (result) {
+    case AliasResult::NoAlias: return "NoAlias";
+    case AliasResult::MayAlias: return "MayAlias";
+    case AliasResult::MustAlias: return "MustAlias";
+    }
+    return "MayAlias";
+}
+
+static Value *getMemoryPointer(Instruction *inst) {
+    if (inst->is_load()) return inst->get_operand(0);
+    if (inst->is_store()) return inst->get_operand(1);
+    return nullptr;
+}
+
+bool LoopVectorize::hasSafeMemoryDependencies(const Loop &loop,
+                                              const std::vector<MemAccess> &loads,
+                                              const std::vector<MemAccess> &stores,
+                                              const BasicAliasAnalysis &BAA) {
+    struct MemInst {
+        Instruction *inst;
+        Value *ptr;
+        bool isLoad;
+        bool isStore;
+        int order;
+    };
+
+    auto findMemAccess = [&](Instruction *inst) -> const MemAccess * {
+        for (const auto &access : loads)
+            if (access.inst == inst) return &access;
+        for (const auto &access : stores)
+            if (access.inst == inst) return &access;
+        return nullptr;
+    };
+
+    auto isSameLaneAccess = [&](Instruction *a, Instruction *b) {
+        const MemAccess *ma = findMemAccess(a);
+        const MemAccess *mb = findMemAccess(b);
+        return ma && mb &&
+               ma->basePtr == mb->basePtr &&
+               ma->elementOffset == mb->elementOffset;
+    };
+
+    std::vector<MemInst> mems;
+    int order = 0;
+    Function *func = loop.header ? loop.header->parent_ : nullptr;
+    if (!func) return false;
+    for (auto *bb : func->basic_blocks_) {
+        if (!loop.blocks.count(bb)) continue;
+        for (auto *inst : bb->instr_list_) {
+            if (!inst->is_load() && !inst->is_store()) {
+                ++order;
+                continue;
+            }
+            mems.push_back({inst, getMemoryPointer(inst), inst->is_load(),
+                            inst->is_store(), order++});
+        }
+    }
+
+    for (size_t i = 0; i < mems.size(); ++i) {
+        for (size_t j = i + 1; j < mems.size(); ++j) {
+            MemInst &a = mems[i];
+            MemInst &b = mems[j];
+            if (a.isLoad && b.isLoad) continue;
+
+            AliasResult alias = BAA.alias(a.ptr, b.ptr);
+            if (alias == AliasResult::NoAlias) {
+                if (isLoopVectorizeAADebugEnabled()) {
+                    std::cerr << "[LoopVectorize:AA] allow NoAlias ptr_a="
+                              << formatLoopVectorizeValue(a.ptr)
+                              << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
+                              << "\n";
+                }
+                continue;
+            }
+
+            bool readBeforeWriteSamePtr =
+                (a.ptr == b.ptr || isSameLaneAccess(a.inst, b.inst)) &&
+                ((a.isLoad && b.isStore && a.order < b.order) ||
+                 (b.isLoad && a.isStore && b.order < a.order));
+            if (readBeforeWriteSamePtr) {
+                if (isLoopVectorizeAADebugEnabled()) {
+                    std::cerr << "[LoopVectorize:AA] allow same-address-rmw ptr_a="
+                              << formatLoopVectorizeValue(a.ptr)
+                              << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
+                              << "\n";
+                }
+                continue;
+            }
+
+            if (isLoopVectorizeAADebugEnabled()) {
+                std::cerr << "[LoopVectorize:AA] reject alias="
+                          << aliasResultNameForLV(alias)
+                          << " ptr_a=" << formatLoopVectorizeValue(a.ptr)
+                          << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
+                          << "\n";
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
+                                 const BasicAliasAnalysis &BAA) {
     (void)module;
     (void)func;
 
@@ -406,6 +537,10 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module) {
     // 7. Count total memory accesses - very small loops may not benefit
     //    from vectorization
     if (loads.empty() && stores.empty()) {
+        return false;
+    }
+
+    if (!hasSafeMemoryDependencies(loop, loads, stores, BAA)) {
         return false;
     }
 
@@ -1383,7 +1518,7 @@ void LoopVectorize::emitVectorizedLoop(
 // 对函数运行向量化
 // =====================================================================
 
-void LoopVectorize::runOnFunction(Function *func) {
+void LoopVectorize::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
     domInfo_ = &func->getDominatorInfo();
@@ -1397,7 +1532,7 @@ void LoopVectorize::runOnFunction(Function *func) {
         });
 
         for (auto &loop : loops) {
-            if (tryVectorize(loop, func, func->parent_)) {
+            if (tryVectorize(loop, func, func->parent_, BAA)) {
                 changed = true;
                 // 变换修改了 CFG，失效并重新计算支配信息
                 func->invalidateDominatorInfo();
@@ -1410,4 +1545,3 @@ void LoopVectorize::runOnFunction(Function *func) {
 
     func->set_instr_name();
 }
-

@@ -17,6 +17,7 @@
 #include "include/mid/opt/localCopyPropagation.hpp"
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/bitFuncRecognize.hpp"
+#include "include/mid/opt/loopSimplify.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
@@ -191,6 +192,7 @@ int main(int argc, char **argv) {
         pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
         pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
 
+        pm.addPass(std::make_unique<LoopSimplify>());          // 循环规范化（插入 preheader）
         // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist
         pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
         pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
@@ -205,7 +207,7 @@ int main(int argc, char **argv) {
 	}
 	// For specific pass test
 	if(optLevel >= 2){
-	    pm.addPass(std::make_unique<TailRecursionEliminate>());
+        pm.addPass(std::make_unique<LoopSimplify>());
 	}
 	pm.run(m.get());
 

@@ -51,6 +51,14 @@
   </tr>
   <tr>
     <td></td>
+    <td>寄存器liveness分析</td>
+  </tr>
+  <tr>
+    <td></td>
+    <td>废除scratch池</td>
+  </tr>
+  <tr>
+    <td></td>
     <td>CFGSimplify不应生成select（？）</td>
   </tr>
   <tr>

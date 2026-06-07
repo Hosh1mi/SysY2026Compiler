@@ -1064,7 +1064,89 @@ static bool trySxtwCSE(std::vector<ParsedLine> &lines) {
     return changed;
 }
 
-// Rule 11: eliminate redundant adrp to the same symbol.
+// Rule 11: fold add/sub + mov → add/sub with forwarded destination
+//   add rX, rY, #imm  +  mov rZ, rX  →  add rZ, rY, #imm
+//   sub rX, rY, #imm  +  mov rZ, rX  →  sub rZ, rY, #imm
+// When rX is only consumed by the mov and dead after it.
+// Handles intervening instructions that don't touch rX (e.g., two independent
+// add→mov pairs interleaved).
+static bool tryFoldAddSubMov(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "add" && l0.mnemonic != "sub") return false;
+    if (l0.operands.size() < 3) return false;
+
+    // Third operand must be an immediate (#0..#4095)
+    const std::string &immOp = l0.operands[2];
+    if (immOp.empty() || immOp[0] != '#') return false;
+
+    std::string rX = l0.operands[0];  // add/sub destination
+    std::string rY = l0.operands[1];  // add/sub first source
+    char cls = regClass(rX);
+    if (cls != 'w' && cls != 'x') return false;
+    if (rX == "wzr" || rX == "xzr") return false;
+
+    auto w = instructionWindow(lines, idx + 1, 6);
+
+    for (size_t wi : w) {
+        auto &li = lines[wi];
+
+        // Calls clobber caller-saved registers — rX may be clobbered
+        if (isCallBarrier(li.mnemonic)) return false;
+
+        // If rX is written before the mov, it's a different value now
+        if (lineWritesReg(li, rX)) return false;
+
+        // If rX is read by a non-mov instruction, the add has another consumer
+        bool isMov = (li.mnemonic == "mov" && li.operands.size() >= 2);
+        if (lineUsesReg(li, rX) && !isMov) return false;
+
+        // Match: mov rZ, rX
+        if (isMov && li.operands[1] == rX) {
+            std::string rZ = li.operands[0];
+            if (regClass(rZ) != cls) return false;
+
+            // Self-mov: just delete it (keep add unchanged)
+            if (rZ == rX) {
+                li.raw.clear();
+                li.kind = LineKind::Empty;
+                return true;
+            }
+
+            // Safety check: rX must not be read after the mov, since the
+            // transformation stops updating rX.  Scan forward until rX is
+            // overwritten or a control-flow barrier is reached.
+            int seen = 0;
+            bool safe = false;
+            for (size_t j = wi + 1; j < lines.size() && seen < 30; ++j) {
+                if (lines[j].kind != LineKind::Instruction) continue;
+                ++seen;
+
+                const std::string &mnem = lines[j].mnemonic;
+                if (mnem == "b" || mnem == "ret" ||
+                    mnem == "cbnz" || mnem == "cbz" ||
+                    mnem == "tbnz" || mnem == "tbz" ||
+                    (!mnem.empty() && mnem[0] == 'b' && mnem[1] == '.')) {
+                    safe = true; break;  // end of BB: rX dies here
+                }
+                if (lineReadsReg(lines[j], rX)) return false;
+                if (lineWritesReg(lines[j], rX)) { safe = true; break; }
+            }
+            if (!safe) return false;
+
+            // Transform: add/sub rZ, rY, #imm
+            l0.operands[0] = rZ;
+            l0.raw = makeInsn(l0.mnemonic, l0.operands);
+
+            // Delete the mov
+            li.raw.clear();
+            li.kind = LineKind::Empty;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Rule 12: eliminate redundant adrp to the same symbol.
 //   adrp xN, sym  ... (no write to xN) ...  adrp xN, sym  →  delete second
 static bool tryRedundantAdrp(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l0 = lines[idx];
@@ -1083,6 +1165,44 @@ static bool tryRedundantAdrp(std::vector<ParsedLine> &lines, size_t idx) {
             li.kind = LineKind::Empty;
             return true;
         }
+    }
+    return false;
+}
+
+// Rule 13: eliminate redundant unconditional branch to immediately
+// following label.  After block reordering this catches the remaining
+// cases that the layout pass could not handle (e.g. multi-predecessor
+// blocks where only one predecessor can get fallthrough).
+//
+//   b .Lfoo          →  (deleted)
+//   .Lfoo:
+static bool tryFallthroughBranch(std::vector<ParsedLine> &lines, size_t idx) {
+    auto &l0 = lines[idx];
+    if (l0.mnemonic != "b") return false;
+    if (l0.operands.size() != 1) return false;
+
+    const std::string &target = l0.operands[0];
+
+    // Find the next non-empty, non-comment line
+    for (size_t j = idx + 1; j < lines.size(); ++j) {
+        if (lines[j].kind == LineKind::Empty ||
+            lines[j].kind == LineKind::Comment)
+            continue;
+        // Label whose text (minus trailing colon) matches the branch target
+        if (lines[j].kind == LineKind::Label) {
+            std::string labelText = trim(lines[j].raw);
+            // Remove trailing colon
+            if (!labelText.empty() && labelText.back() == ':')
+                labelText.pop_back();
+            if (labelText == target) {
+                l0.raw.clear();
+                l0.kind = LineKind::Empty;
+                return true;
+            }
+        }
+        // Any other kind (instruction, directive) breaks — the branch is
+        // not jumping to the immediate next line.
+        break;
     }
     return false;
 }
@@ -1110,6 +1230,7 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (tryForwardMov(lines, i))         { changed = true; break; }
 			if (trySelfMove(lines, i))           { changed = true; break; }
 			if (tryMulAddFusion(lines, i))      { changed = true; break; }
+			if (tryFoldAddSubMov(lines, i))     { changed = true; break; }
 			if (tryZeroStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
 			if (tryRedundantSub(lines, i))       { changed = true; break; }
@@ -1118,6 +1239,7 @@ std::string peepholeOptimize(const std::string &asmText) {
 			if (tryMergeStores(lines, i))        { changed = true; break; }
 			if (tryMergeLoads(lines, i))         { changed = true; break; }
 			if (tryRedundantAdrp(lines, i))     { changed = true; break; }
+			if (tryFallthroughBranch(lines, i))  { changed = true; break; }
 
 		}
 

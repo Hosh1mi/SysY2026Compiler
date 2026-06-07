@@ -10,6 +10,7 @@
 class LICM : public Pass {
 public:
     void execute(Module *module) override;
+    PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "LICM"; }
 
 private:
@@ -19,9 +20,9 @@ private:
         std::set<BasicBlock*> blocks;
     };
 
-    void runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
+    void runOnFunction(Function *func, AnalysisManager &AM);
     void eliminateSinglePredPhis(Function *func);
-    void eliminateTrivialHeaderPhis(const Loop &loop);
+    bool eliminateTrivialHeaderPhis(const Loop &loop);
 
     std::vector<Loop> findLoops(Function *func);
     BasicBlock *getPreheader(const Loop &loop);

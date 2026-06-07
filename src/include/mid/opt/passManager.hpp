@@ -1,9 +1,11 @@
 #include "pass.hpp"
+#include "../analysis/analysisManager.hpp"
 #include <vector>
 #include <memory>
 
 class PassManager {
     std::vector<std::unique_ptr<Pass>> passes;
+    AnalysisManager analyses_;
     bool dump_ir_    = false;
     bool verify_ir_  = false;
 public:
