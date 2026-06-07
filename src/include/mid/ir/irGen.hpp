@@ -143,16 +143,31 @@ public:
         output_type = new FunctionType(TyVoid, output_params);
         auto sysy_stop_time = new Function(output_type, "_sysy_stoptime", module.get());
 
-        // Profiling helpers (sylib.c) — declared but not used by stock testcases.
-        // redirect_stdin(): freopen /tmp/mmc-1.in onto stdin (lib hardcodes path)
-        // debug_progress(int seg): fprintf(stderr, "[profile] seg%d\n", seg)
-        output_type = new FunctionType(TyVoid, {});
-        auto redirect_stdin_fn = new Function(output_type, "redirect_stdin", module.get());
+#ifdef ENABLE_PROFILING_HOOKS
+        // Opt-in profiling helpers (lib/sylib.c).  Exposed only when the
+        // compiler is built with -DENABLE_PROFILING_HOOKS, because both are
+        // unsafe on the A53 target / production .sy programs:
+        //   - redirect_stdin: freopens "/tmp/mmc-1.in" onto stdin.  On the
+        //     A53 board the file doesn't exist; freopen fails and leaves
+        //     stdin == NULL, which breaks every getint/getarray call
+        //     (input is normally read from a memory page at 0xc0000000).
+        //     See MEMORY.md feedback_redirect_stdin_a53.
+        //   - debug_progress: fprintf(stderr, "[profile] seg%d\n", seg).
+        //     Useless on A53 (no console) and the extra UART traffic skews
+        //     timing measurements.
+        // Stock contest .sy programs must not call these; they are reserved
+        // for in-tree profiling scratch files only.
+        Function *redirect_stdin_fn = nullptr;
+        Function *debug_progress_fn = nullptr;
+        {
+            auto rs_ty = new FunctionType(TyVoid, {});
+            redirect_stdin_fn = new Function(rs_ty, "redirect_stdin", module.get());
 
-        std::vector<Type *>().swap(output_params);
-        output_params.push_back(TyInt32);
-        output_type = new FunctionType(TyVoid, output_params);
-        auto debug_progress_fn = new Function(output_type, "debug_progress", module.get());
+            std::vector<Type *> dp_params{TyInt32};
+            auto dp_ty = new FunctionType(TyVoid, dp_params);
+            debug_progress_fn = new Function(dp_ty, "debug_progress", module.get());
+        }
+#endif
 
         // output_params.clear();
         // output_params.push_back(TyInt32);
@@ -173,8 +188,10 @@ public:
         scope.push("putfarray", put_float_array);
         scope.push("_sysy_starttime", sysy_start_time);
         scope.push("_sysy_stoptime", sysy_stop_time);
+#ifdef ENABLE_PROFILING_HOOKS
         scope.push("redirect_stdin", redirect_stdin_fn);
         scope.push("debug_progress", debug_progress_fn);
+#endif
     }
     std::unique_ptr<Module> getModule() {
         return std::move(module);

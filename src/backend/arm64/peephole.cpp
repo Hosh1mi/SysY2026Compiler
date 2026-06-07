@@ -256,12 +256,50 @@ static std::vector<size_t> instructionWindow(const std::vector<ParsedLine> &line
 // ── RULE implementations ────────────────────────────────────────────
 // Each returns true if it made a change.
 
-// Helper: true for w9-w15 / x9-x15, caller-saved scratch registers.
+// Scratch register range — must agree with the AArch64 codegen's caller-saved
+// scratch allocator (backend/arm64/arm64_context.*).  w9–w15 / x9–x15 are the
+// short-lived temporaries the emitter uses for intermediate values within a
+// single materialization (e.g. the movz→add→mov triple that tryImmediateFold
+// folds).  If the allocator's scratch range changes, both sides must move.
+static constexpr int kScratchRegMin = 9;
+static constexpr int kScratchRegMax = 15;
+
+// AArch64 add/sub unshifted imm12 range.  The `lsl #12` variant ([4096,
+// 16773120]) is intentionally not folded — the emitter does not currently
+// generate the fold-eligible pattern for those, and supporting it would
+// require a more careful operand-shape check.
+static constexpr int kAddSubImm12Max = 4095;
+
+// True for w9-w15 / x9-x15.
 static bool isScratchReg(const std::string &r) {
     if (r.size() < 2) return false;
     if (r[0] != 'w' && r[0] != 'x') return false;
     int num = std::atoi(r.c_str() + 1);
-    return num >= 9 && num <= 15;
+    return num >= kScratchRegMin && num <= kScratchRegMax;
+}
+
+// Liveness check: starting after `startIdx`, decide whether `r` is dead — i.e.
+// safe to delete the producing instruction.  Three outcomes scanning forward:
+//   - call barrier → dead (calls clobber caller-saved scratch regs)
+//   - write to r before any read → dead (overwritten before being observed)
+//   - read of r before any write → live (cannot delete the producer)
+// Returns true on dead, false on live OR on falling off the end of the region
+// (conservative: no proof of death == live).
+//
+// Limitation: does not follow control flow.  A subsequent branch joining a
+// region where r is still live is invisible here.  For the patterns that
+// invoke this — scratch regs used within a single emitter materialization —
+// the next instruction is always within the same basic block, so the linear
+// scan is sufficient in practice.
+static bool regDeadAfter(const std::vector<ParsedLine> &lines, size_t startIdx,
+                         const std::string &r) {
+    for (size_t j = startIdx + 1; j < lines.size(); ++j) {
+        if (lines[j].kind != LineKind::Instruction) continue;
+        if (isCallBarrier(lines[j].mnemonic)) return true;
+        if (lineWritesReg(lines[j], r))       return true;
+        if (lineReadsReg(lines[j], r))        return false;
+    }
+    return false;
 }
 
 // Rule 0a: swap-mov elimination
@@ -291,10 +329,21 @@ static bool trySwapMov(std::vector<ParsedLine> &lines, size_t idx) {
     return true;
 }
 
-// Rule 0b: immediate fold
+// Rule 0b: immediate fold.
 //   movz wT, #N  +  add/sub wM, wS, wT  +  mov wD, wM  →  add/sub wD, wS, #N
-//   Also handles commutative add: movz wT, #N + add wM, wT, wS + mov wD, wM
-//   Requires N in [0,4095], wT and wM are scratch registers (w9-w15).
+//   Also handles the commutative-add form: movz wT, #N + add wM, wT, wS + mov wD, wM.
+//
+// Constraints:
+//   - N ∈ [0, kAddSubImm12Max] (4095) — bare imm12 only; lsl #12 variant skipped.
+//   - wT, wM are scratch regs (kScratchRegMin..kScratchRegMax) — matches the
+//     emitter's short-lived-temporary contract.
+//   - l1 must have exactly 3 operands (no `, lsl #k` / `, sxtw` etc.):
+//     `add Rd, X, Y, lsl #2` lowered from `x*5` was once folded to `add Rd, X, #5`,
+//     silently dropping the lsl — that historic bug motivates the strict check.
+//   - wS != wT: `add wM, wT, wT` (= 2N) folded to `add wD, wT, #N` would read
+//     an uninitialized wT after the movz is deleted.
+//   - Both wT and wM must be dead after l2 (regDeadAfter): nothing later in
+//     the same straight-line region observes their pre-fold values.
 static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l0 = lines[idx];
     if (l0.mnemonic != "movz") return false;
@@ -308,7 +357,7 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     const std::string &immStr = l0.operands[1];
     if (immStr.empty() || immStr[0] != '#') return false;
     int N = std::atoi(immStr.c_str() + 1);
-    if (N < 0 || N > 4095) return false;
+    if (N < 0 || N > kAddSubImm12Max) return false;
 
     auto w = instructionWindow(lines, idx + 1, 2);
     if (w.size() < 2) return false;
@@ -317,52 +366,29 @@ static bool tryImmediateFold(std::vector<ParsedLine> &lines, size_t idx) {
     auto &l2 = lines[w[1]];
 
     if (l1.mnemonic != "add" && l1.mnemonic != "sub") return false;
-    // Require exactly 3 operands (no shift/extend modifier).  `add Rd, X, Y, lsl #2`
-    // would be silently folded to `add Rd, X, #N`, dropping the lsl #2 — e.g. `5*5`
-    // lowered as `add w10, w9, w9, lsl #2` was being folded to `add w0, w9, #5`.
-    if (l1.operands.size() != 3) return false;
+    if (l1.operands.size() != 3) return false;  // no shift/extend modifier — see header
 
     std::string wM = l1.operands[0];
     if (!isScratchReg(wM)) return false;
     if (regClass(wM) != cls) return false;
 
-    // Determine source register wS: wT must appear as one operand
     std::string wS;
-    if (l1.operands[2] == wT) {
-        wS = l1.operands[1];
-    } else if (l1.mnemonic == "add" && l1.operands[1] == wT) {
-        wS = l1.operands[2];  // commutative: add wM, wT, wS
-    } else {
-        return false;
-    }
-    // Reject self-reference: `add Rm, Rt, Rt` (wS == wT) computes 2*N but
-    // folding to `add Rd, Rt, #N` after deleting movz reads an uninitialized
-    // Rt.  This is also the path that `add Rd, Rs, Rt, lsl #k` (caught above
-    // by the operand-count check) would have triggered through.
+    if (l1.operands[2] == wT)                                    wS = l1.operands[1];
+    else if (l1.mnemonic == "add" && l1.operands[1] == wT)       wS = l1.operands[2];
+    else                                                          return false;
     if (wS == wT) return false;
 
-    // l2 must be: mov wD, wM
     if (l2.mnemonic != "mov" || l2.operands.size() < 2) return false;
     if (l2.operands[1] != wM) return false;
     std::string wD = l2.operands[0];
 
-    // Safety: wM must be dead after l2 — i.e., the next instruction that
-    // touches wM must write it (not read). Otherwise deleting `op wM,...`
-    // would leave that later read with a stale/undefined value.
-    // NOTE: wT (the movz dest) is not similarly liveness-checked.  In the
-    // current emitter wT is always a freshly allocated scratch with no use
-    // outside the immediate (movz/op/mov) triple, so deletion is safe in
-    // practice.  If a future register-allocation change reuses wT before
-    // the next def, this fold will silently miscompile — adding a deadAfter
-    // check for wT here is the correct long-term fix (tracked separately).
-    for (size_t j = w[1] + 1; j < lines.size(); ++j) {
-        if (lines[j].kind != LineKind::Instruction) continue;
-        if (isCallBarrier(lines[j].mnemonic)) break;       // call clobbers scratch → wM is dead from here
-        if (lineWritesReg(lines[j], wM)) break;            // wM rewritten before any read → safe
-        if (lineReadsReg(lines[j], wM)) return false;      // wM still live → unsafe to fold
-    }
+    // Both scratch regs must be dead after the triple — otherwise the deletion
+    // of movz/op leaves a later read with a stale or undefined value.  wT was
+    // historically not checked here; that was relying on an undocumented
+    // emitter contract.  Now made explicit.
+    if (!regDeadAfter(lines, w[1], wM)) return false;
+    if (!regDeadAfter(lines, w[1], wT)) return false;
 
-    // Apply: delete movz+op, replace mov with op wD, wS, #N
     std::string newImm = "#" + std::to_string(N);
     l0.raw.clear(); l0.kind = LineKind::Empty;
     l1.raw.clear(); l1.kind = LineKind::Empty;

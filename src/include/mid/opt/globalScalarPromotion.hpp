@@ -1,7 +1,21 @@
 #pragma once
-// Promotes scalar global variables to alloca'd locals within functions that
-// have no remaining function calls (i.e., after full inlining). The allocas
-// are then promoted to SSA registers by a subsequent Mem2Reg run.
+// GlobalScalarPromotion — replace direct loads/stores of scalar (integer)
+// globals with loads/stores of a function-local alloca that mirrors the
+// global's value across the function's lifetime.  A subsequent Mem2Reg lifts
+// the alloca into SSA, removing memory traffic from the hot path.
+//
+// Scope and limitations:
+//   - Runs only on functions where hasAnyCall() returns false.  Calls can
+//     reach into the same global through another function, and promoting
+//     locally would break what the callee observes.  In practice this gate
+//     fires almost exclusively on the post-inline `main`.
+//   - Integer-typed globals only.  Float globals and arrays are skipped.
+//   - Each ret block grows two instructions per promoted global (load alloca
+//     + store global) so the observable value at return matches the
+//     unpromoted program.
+//
+// Pipeline order: must run after InlineExpand (so `main` is call-free) and
+// before Mem2Reg (which SSA-promotes the inserted allocas).
 #include "pass.hpp"
 class GlobalScalarPromotion : public Pass {
 public:

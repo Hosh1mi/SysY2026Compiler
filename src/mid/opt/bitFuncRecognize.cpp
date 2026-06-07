@@ -16,6 +16,7 @@
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -59,16 +60,33 @@ struct BEKey {
     }
 };
 struct BEHash {
+    // Multiplier is Justin Sobel's "FNV-ish" mixing constant (also known from
+    // the Hsieh / SDBM hash family).  Chosen for cheap mixing across 64 bits
+    // when combining heterogeneous tuples; not collision-critical because the
+    // cache is small (≤ MAX_VISITS * 32 entries per analyzed function).
     size_t operator()(const BEKey &k) const {
+        constexpr size_t kMix = 1315423911u;
         size_t h = (size_t)k.op;
-        h = h * 1315423911u + (size_t)k.src;
-        h = h * 1315423911u + (size_t)k.idx;
-        h = h * 1315423911u + (size_t)k.a;
-        h = h * 1315423911u + (size_t)k.b;
+        h = h * kMix + (size_t)k.src;
+        h = h * kMix + (size_t)k.idx;
+        h = h * kMix + (size_t)k.a;
+        h = h * kMix + (size_t)k.b;
         return h;
     }
 };
 
+// Hash-consing pool for BitExpr atoms.
+//
+// Lifetime:  All BE pointers handed out by intern() alias entries in this map.
+//            execute() must clear() the cache before and after each module-
+//            level pass run so that no BE pointer leaks across runs.  Any
+//            cached state outside this file (e.g. FunctionAnalyzer::pins
+//            inside an in-flight execute()) holds BE pointers only for the
+//            duration of that call.
+//
+// Concurrency: not thread-safe.  The current PassManager is single-threaded;
+//              parallel execution would require either a per-instance arena
+//              or a thread-local cache.
 static std::unordered_map<BEKey, std::unique_ptr<BitExpr>, BEHash> g_cache;
 
 static BE intern(BitOp op, Value *src = nullptr, unsigned idx = 0,
@@ -1118,7 +1136,20 @@ static ClosedForm recognize(const BitVec &bv) {
     if (matchBitwiseOp(bv, BitOp::OR,  X, Y))  { cf.kind = ClosedForm::OR_OP;  cf.x = X; cf.y = Y; return cf; }
     if (matchBitwiseOp(bv, BitOp::XOR, X, Y))  { cf.kind = ClosedForm::XOR_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchShift(bv, X, k)) {
-        if (k > 0) { cf.kind = ClosedForm::LSHR_OP; cf.x = X; cf.shiftAmount =  k; return cf; }
+        // Limitation: only emit constant SHL (k < 0 in our delta sign).  We do
+        // NOT recognize LSHR (k > 0) here, because the bit-vector abstraction
+        // is ambiguous about its source IR op:
+        //   - `sdiv x, 1<<k` (SysY's only way to spell a constant right shift)
+        //     abstracts to lshr via bvSdivByConstAsLshr.  Rewriting back to
+        //     `lshr` would miscompile negative x (sdiv rounds toward zero;
+        //     lshr fills with 0).
+        //   - A hand-written bit-assembly emulating `(unsigned)x >> k` would
+        //     produce the same bv shape.  Rewriting that to `sdiv x, 1<<k`
+        //     would also miscompile negative x (opposite direction).
+        // The two sources are indistinguishable at the bv level, so neither
+        // rewrite target is sound.  SHL is safe because SysY `x * (1<<k)` and
+        // a hand-written shl-emulation agree on all x (mul/shl have identical
+        // two's-complement semantics).
         if (k < 0) { cf.kind = ClosedForm::SHL_OP;  cf.x = X; cf.shiftAmount = -k; return cf; }
     }
     if (matchVarShl(bv, X, Y, k)) {
@@ -1139,8 +1170,6 @@ static ClosedForm recognize(const BitVec &bv) {
 // ══════════════════════════════════════════════════════════════════════
 // §G  Module-level driver
 // ══════════════════════════════════════════════════════════════════════
-
-#include <cstdio>
 
 struct FuncEquiv {
     ClosedForm::Kind kind        = ClosedForm::NONE;
@@ -1385,7 +1414,11 @@ static void rewriteCallSites(Module *module,
                     Value *b = call->get_operand(eq.inputIdxB);
                     newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, b, bb, true);
                     bb->add_instruction_before_inst(newInst, call);
-                } else if (eq.kind == ClosedForm::LSHR_OP || eq.kind == ClosedForm::SHL_OP) {
+                } else if (eq.kind == ClosedForm::SHL_OP) {
+                    // Note: LSHR_OP is intentionally not handled here.  See
+                    // recognize() — constant lshr cannot be safely materialized
+                    // because the bv abstraction loses the original signed-ness
+                    // of the source (sdiv vs hand-written lshr-emulation).
                     Value *a   = call->get_operand(eq.inputIdxA);
                     Value *amt = new ConstantInt(call->type_, eq.shiftAmount);
                     newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, amt, bb, true);
