@@ -10,8 +10,8 @@
 
 // ---- Arm64FuncContext ----
 
-Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os)
-    : func_(f), os_(os) {}
+Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc)
+    : func_(f), os_(os), enableRegAlloc_(enableRegAlloc) {}
 
 void Arm64FuncContext::generate() {
     func_->set_instr_name();
@@ -25,9 +25,13 @@ void Arm64FuncContext::generate() {
         }
     }
 
-    Arm64RegAlloc regAlloc(func_);
-    regAlloc.allocate();
-    assignedRegs_ = regAlloc.assignedRegs();
+    if (enableRegAlloc_) {
+        Arm64RegAlloc regAlloc(func_);
+        regAlloc.allocate();
+        assignedRegs_ = regAlloc.assignedRegs();
+    } else {
+        assignedRegs_.clear();
+    }
     reservedIntRegs_.clear();
     reservedFloatRegs_.clear();
     reservedNEONRegs_.clear();

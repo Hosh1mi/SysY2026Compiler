@@ -167,9 +167,7 @@ int main(int argc, char **argv) {
 	    pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
 		pm.addPass(std::make_unique<Mem2Reg>());
         pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
-        pm.addPass(std::make_unique<InstCombine>());
-        // pm.addPass(std::make_unique<CFGSimplify>());
-        // pm.addPass(std::make_unique<DeadCodeDelete>());
+        make_basic_clean(pm);
         pm.addPass(std::make_unique<TailRecursionEliminate>());
         pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
         pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
@@ -224,7 +222,8 @@ int main(int argc, char **argv) {
 	/* backend */
 	if (print_asm) {
 		Arm64CodeGen codegen(m.get(), *out);
-			codegen.setNoPeephole(flag_no_peephole);
+		codegen.setEnableRegAlloc(optLevel >= 1);
+		codegen.setNoPeephole(flag_no_peephole || optLevel < 1);
 		codegen.generate();
 	}else if (print_ir) {
 		*out << m->print();

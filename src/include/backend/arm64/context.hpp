@@ -10,7 +10,7 @@ class Arm64CodeGen;
 
 class Arm64FuncContext {
 public:
-    Arm64FuncContext(Function *f, std::ostream &os);
+    Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc = true);
     void generate();
 
 private:
@@ -74,6 +74,7 @@ private:
 
     Function *func_;
     std::ostream &os_;
+    bool enableRegAlloc_ = true;
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)
     int frameSize_ = 0;
