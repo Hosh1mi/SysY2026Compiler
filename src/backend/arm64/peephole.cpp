@@ -48,6 +48,20 @@ static int regSize(char cls) {
 	return 0;
 }
 
+static bool samePhysicalReg(const std::string &a, const std::string &b) {
+	if (a == b) return true;
+	if (a.size() < 2 || b.size() < 2) return false;
+
+	char aCls = a[0];
+	char bCls = b[0];
+	bool sameIntFile = (aCls == 'w' || aCls == 'x') && (bCls == 'w' || bCls == 'x');
+	bool sameFloatFile = (aCls == 's' || aCls == 'd') && (bCls == 's' || bCls == 'd');
+	if (!sameIntFile && !sameFloatFile) return false;
+
+	if (!std::isdigit(a[1]) || !std::isdigit(b[1])) return false;
+	return a.substr(1) == b.substr(1);
+}
+
 // Parse [base, #offset], [base], [base, #-offset]
 // Rejects post-index ([base], #imm) and pre-index ([base, #imm]!)
 static MemOperand parseMemOp(const std::string &s) {
@@ -1499,6 +1513,132 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
 	return false;
 }
 
+static bool deadAfterConsumer(const MachineBasicBlock &block,
+                              size_t consumerIdx,
+                              const std::string &removedReg,
+                              const std::string &consumerDst) {
+	if (samePhysicalReg(removedReg, consumerDst)) return true;
+	return machineRegDeadAfter(block, consumerIdx, removedReg);
+}
+
+static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine mul = parseLine(block.instrs[idx].text);
+	if (mul.kind != LineKind::Instruction) return false;
+	if (mul.mnemonic != "mul" || mul.operands.size() != 3) return false;
+
+	const std::string &mulDst = mul.operands[0];
+	const std::string &mulOp1 = mul.operands[1];
+	const std::string &mulOp2 = mul.operands[2];
+	char cls = regClass(mulDst);
+	if (cls != 'w' && cls != 'x') return false;
+	if (regClass(mulOp1) != cls || regClass(mulOp2) != cls) return false;
+
+	size_t consumerIdx = idx + 1;
+	std::string effectiveSrc = mulDst;
+	std::string forwardedReg;
+
+	ParsedLine consumer = parseLine(block.instrs[consumerIdx].text);
+	if (consumer.kind != LineKind::Instruction) return false;
+	if (consumer.mnemonic == "mov" && consumer.operands.size() == 2 &&
+	    consumer.operands[1] == mulDst && regClass(consumer.operands[0]) == cls) {
+		forwardedReg = consumer.operands[0];
+		if (samePhysicalReg(forwardedReg, mulOp1) ||
+		    samePhysicalReg(forwardedReg, mulOp2))
+			return false;
+		if (idx + 2 >= block.instrs.size()) return false;
+		consumerIdx = idx + 2;
+		effectiveSrc = forwardedReg;
+		consumer = parseLine(block.instrs[consumerIdx].text);
+		if (consumer.kind != LineKind::Instruction) return false;
+	}
+
+	if (consumer.mnemonic != "add" && consumer.mnemonic != "sub") return false;
+	if (consumer.operands.size() != 3) return false;
+
+	const std::string &dst = consumer.operands[0];
+	const std::string &lhs = consumer.operands[1];
+	const std::string &rhs = consumer.operands[2];
+	if (regClass(dst) != cls) return false;
+
+	std::string replacementMnemonic;
+	std::vector<std::string> replacementOperands;
+
+	if (consumer.mnemonic == "add") {
+		std::string acc;
+		if (lhs == effectiveSrc && regClass(rhs) == cls) {
+			acc = rhs;
+		} else if (rhs == effectiveSrc && regClass(lhs) == cls) {
+			acc = lhs;
+		} else {
+			return false;
+		}
+		if (samePhysicalReg(acc, effectiveSrc)) return false;
+		replacementMnemonic = "madd";
+		replacementOperands = {dst, mulOp1, mulOp2, acc};
+	} else {
+		if (rhs != effectiveSrc) return false;
+		if (lhs == "wzr" || lhs == "xzr") {
+			replacementMnemonic = "mneg";
+			replacementOperands = {dst, mulOp1, mulOp2};
+		} else if (regClass(lhs) == cls) {
+			if (samePhysicalReg(lhs, effectiveSrc)) return false;
+			replacementMnemonic = "msub";
+			replacementOperands = {dst, mulOp1, mulOp2, lhs};
+		} else {
+			return false;
+		}
+	}
+
+	if (!deadAfterConsumer(block, consumerIdx, mulDst, dst)) return false;
+	if (!forwardedReg.empty() && !deadAfterConsumer(block, consumerIdx, forwardedReg, dst))
+		return false;
+
+	replaceMachineInstr(block.instrs[consumerIdx],
+	                    makeMachineInsn(replacementMnemonic, replacementOperands));
+	if (!forwardedReg.empty()) {
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+		block.instrs.erase(block.instrs.begin() + idx);
+	} else {
+		block.instrs.erase(block.instrs.begin() + idx);
+	}
+	return true;
+}
+
+static bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine store = parseLine(block.instrs[idx].text);
+	ParsedLine load = parseLine(block.instrs[idx + 1].text);
+	if (store.kind != LineKind::Instruction || load.kind != LineKind::Instruction)
+		return false;
+	if (store.mnemonic != "str" || load.mnemonic != "ldr") return false;
+	if (store.operands.size() != 2 || load.operands.size() != 2) return false;
+
+	MemOperand storeMem = parseMemOp(store.operands[1]);
+	MemOperand loadMem = parseMemOp(load.operands[1]);
+	if (!storeMem.valid || !loadMem.valid) return false;
+	if (storeMem.base != "x29" || loadMem.base != "x29") return false;
+	if (storeMem.offset != loadMem.offset) return false;
+
+	const std::string &src = store.operands[0];
+	const std::string &dst = load.operands[0];
+	char cls = regClass(src);
+	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
+	if (regClass(dst) != cls) return false;
+
+	if (samePhysicalReg(src, dst)) {
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+		return true;
+	}
+
+	std::string movMnemonic = (cls == 's' || cls == 'd') ? "fmov" : "mov";
+	replaceMachineInstr(block.instrs[idx + 1],
+	                    makeMachineInsn(movMnemonic, {dst, src}));
+	return true;
+}
+
 static bool isControlFlowBarrier(const std::string &mnemonic) {
 	return mnemonic == "b" || mnemonic == "ret" ||
 	       mnemonic == "cbnz" || mnemonic == "cbz" ||
@@ -1558,6 +1698,129 @@ static bool tryMachineRedundantSubFrame(MachineBasicBlock &block, size_t idx) {
 	}
 
 	return false;
+}
+
+static bool validPairOffset(int offset, int stride) {
+	if (stride <= 0) return false;
+	if (offset % stride != 0) return false;
+	int scaled = offset / stride;
+	return scaled >= -64 && scaled <= 63;
+}
+
+static bool tryMachineDeadStore(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	ParsedLine second = parseLine(block.instrs[idx + 1].text);
+	if (first.kind != LineKind::Instruction || second.kind != LineKind::Instruction)
+		return false;
+	if (first.mnemonic != "str" || second.mnemonic != "str") return false;
+	if (first.operands.size() != 2 || second.operands.size() != 2) return false;
+
+	MemOperand firstMem = parseMemOp(first.operands[1]);
+	MemOperand secondMem = parseMemOp(second.operands[1]);
+	if (!firstMem.valid || !secondMem.valid) return false;
+	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
+	if (firstMem.offset != secondMem.offset) return false;
+
+	char firstClass = regClass(first.operands[0]);
+	if (firstClass != 'w' && firstClass != 'x' && firstClass != 's' && firstClass != 'd')
+		return false;
+	if (regClass(second.operands[0]) != firstClass) return false;
+
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool tryMachineMergeStores(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	ParsedLine second = parseLine(block.instrs[idx + 1].text);
+	if (first.kind != LineKind::Instruction || second.kind != LineKind::Instruction)
+		return false;
+	if (first.mnemonic != "str" || second.mnemonic != "str") return false;
+	if (first.operands.size() != 2 || second.operands.size() != 2) return false;
+
+	MemOperand firstMem = parseMemOp(first.operands[1]);
+	MemOperand secondMem = parseMemOp(second.operands[1]);
+	if (!firstMem.valid || !secondMem.valid) return false;
+	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
+
+	char cls = regClass(first.operands[0]);
+	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
+	if (regClass(second.operands[0]) != cls) return false;
+
+	int stride = regSize(cls);
+	int diff = secondMem.offset - firstMem.offset;
+	if (std::abs(diff) != stride) return false;
+
+	bool firstIsLower = diff > 0;
+	int lowerOffset = firstIsLower ? firstMem.offset : secondMem.offset;
+	if (!validPairOffset(lowerOffset, stride)) return false;
+
+	std::string lowerReg = firstIsLower ? first.operands[0] : second.operands[0];
+	std::string higherReg = firstIsLower ? second.operands[0] : first.operands[0];
+	std::string addr = "[x29, #" + std::to_string(lowerOffset) + "]";
+
+	if (firstIsLower) {
+		replaceMachineInstr(block.instrs[idx],
+		                    makeMachineInsn("stp", {lowerReg, higherReg, addr}));
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+	} else {
+		replaceMachineInstr(block.instrs[idx + 1],
+		                    makeMachineInsn("stp", {lowerReg, higherReg, addr}));
+		block.instrs.erase(block.instrs.begin() + idx);
+	}
+	return true;
+}
+
+static bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	ParsedLine second = parseLine(block.instrs[idx + 1].text);
+	if (first.kind != LineKind::Instruction || second.kind != LineKind::Instruction)
+		return false;
+	if (first.mnemonic != "ldr" || second.mnemonic != "ldr") return false;
+	if (first.operands.size() != 2 || second.operands.size() != 2) return false;
+
+	MemOperand firstMem = parseMemOp(first.operands[1]);
+	MemOperand secondMem = parseMemOp(second.operands[1]);
+	if (!firstMem.valid || !secondMem.valid) return false;
+	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
+
+	const std::string &firstDst = first.operands[0];
+	const std::string &secondDst = second.operands[0];
+	char cls = regClass(firstDst);
+	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
+	if (regClass(secondDst) != cls) return false;
+	if (samePhysicalReg(firstDst, secondDst)) return false;
+	if (samePhysicalReg(firstDst, firstMem.base) ||
+	    samePhysicalReg(secondDst, secondMem.base)) return false;
+
+	int stride = regSize(cls);
+	int diff = secondMem.offset - firstMem.offset;
+	if (std::abs(diff) != stride) return false;
+
+	bool firstIsLower = diff > 0;
+	int lowerOffset = firstIsLower ? firstMem.offset : secondMem.offset;
+	if (!validPairOffset(lowerOffset, stride)) return false;
+
+	std::string lowerReg = firstIsLower ? firstDst : secondDst;
+	std::string higherReg = firstIsLower ? secondDst : firstDst;
+	std::string addr = "[x29, #" + std::to_string(lowerOffset) + "]";
+
+	if (firstIsLower) {
+		replaceMachineInstr(block.instrs[idx],
+		                    makeMachineInsn("ldp", {lowerReg, higherReg, addr}));
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+	} else {
+		replaceMachineInstr(block.instrs[idx + 1],
+		                    makeMachineInsn("ldp", {lowerReg, higherReg, addr}));
+		block.instrs.erase(block.instrs.begin() + idx);
+	}
+	return true;
 }
 
 static std::string labelName(const MachineInstr &inst) {
@@ -1628,6 +1891,14 @@ void peepholeOptimize(MachineFunction &func) {
 					changed = true;
 					break;
 				}
+				if (tryMachineMulAddFusion(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineStoreLoadForward(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
 				if (tryMachineRedundantAdrp(func.blocks[b], i)) {
 					changed = true;
 					break;
@@ -1637,6 +1908,18 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineZeroStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineDeadStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineMergeStores(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineMergeLoads(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
@@ -1650,33 +1933,5 @@ void peepholeOptimize(MachineFunction &func) {
 }
 
 std::string peepholeOptimize(const std::string &asmText) {
-	if (asmText.empty()) return asmText;
-
-	std::string current = asmText;
-	const int MAX_ITERS = 30;
-
-	for (int iter = 0; iter < MAX_ITERS; ++iter) {
-		auto lines = parseLines(current);
-		bool changed = false;
-
-		// Block-level pass: sxtw CSE (operates on whole function)
-		if (trySxtwCSE(lines)) changed = true;
-
-		for (size_t i = 0; i < lines.size(); ++i) {
-			if (lines[i].kind != LineKind::Instruction) continue;
-
-			if (tryMulAddFusion(lines, i))      { changed = true; break; }
-			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
-			if (tryDeadStore(lines, i))          { changed = true; break; }
-			if (tryStoreLoadForwardX17(lines, i)){ changed = true; break; }
-			if (tryMergeStores(lines, i))        { changed = true; break; }
-			if (tryMergeLoads(lines, i))         { changed = true; break; }
-
-		}
-
-		if (!changed) return current;
-		current = reassemble(lines);
-	}
-
-	return current;
+	return asmText;
 }
