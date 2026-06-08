@@ -92,6 +92,9 @@ void Arm64CodeGen::generate() {
                         MachineScheduler scheduler;
                         scheduler.schedule(machineFunc);
                     }
+                    if (!no_peephole_) {
+                        peepholeOptimize(machineFunc);
+                    }
                     std::string funcAsm = printMachineFunction(machineFunc);
                     results[idx] = no_peephole_ ? funcAsm : peepholeOptimize(funcAsm);
                 }

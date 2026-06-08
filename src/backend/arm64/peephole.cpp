@@ -163,6 +163,26 @@ static std::string makeInsn(const std::string &mnemonic,
 	return s;
 }
 
+static std::string makeMachineInsn(const std::string &mnemonic,
+                                   const std::vector<std::string> &operands) {
+	std::string s = "\t" + mnemonic;
+	if (!operands.empty()) {
+		s += "\t";
+		for (size_t i = 0; i < operands.size(); ++i) {
+			if (i > 0) s += ", ";
+			s += operands[i];
+		}
+	}
+	return s;
+}
+
+static void replaceMachineInstr(MachineInstr &inst, const std::string &text) {
+	int originalIndex = inst.originalIndex;
+	MachineInstr parsed = parseMachineInstr(text, originalIndex);
+	parsed.originalIndex = originalIndex;
+	inst = std::move(parsed);
+}
+
 // ── helper: count occurrences of a register in a line's operands ────
 
 // Check if r is read as a source operand (not just written as destination)
@@ -1210,6 +1230,425 @@ static bool tryFallthroughBranch(std::vector<ParsedLine> &lines, size_t idx) {
 
 // ── Main optimization loop ──────────────────────────────────────────
 
+static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
+	auto &inst = block.instrs[idx];
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction) return false;
+	if (line.mnemonic != "mov" && line.mnemonic != "fmov") return false;
+	if (line.operands.size() < 2) return false;
+	if (line.operands[0] != line.operands[1]) return false;
+
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool tryMachineSwapMov(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	ParsedLine second = parseLine(block.instrs[idx + 1].text);
+	if (first.kind != LineKind::Instruction || second.kind != LineKind::Instruction)
+		return false;
+	if (first.mnemonic != "mov" || second.mnemonic != "mov") return false;
+	if (first.operands.size() < 2 || second.operands.size() < 2) return false;
+
+	const std::string &rA = first.operands[0];
+	const std::string &rB = first.operands[1];
+	if (rA == rB) return false;
+	if (rB.empty() || rB[0] == '#') return false;
+	if (!regClass(rA) || !regClass(rB)) return false;
+	if (second.operands[0] != rB || second.operands[1] != rA) return false;
+
+	block.instrs.erase(block.instrs.begin() + idx + 1);
+	return true;
+}
+
+static bool machineRegDeadAfter(const MachineBasicBlock &block,
+                                size_t idx,
+                                const std::string &reg);
+
+static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	if (first.kind != LineKind::Instruction) return false;
+	if (first.mnemonic != "mov" || first.operands.size() != 2) return false;
+
+	const std::string &tempReg = first.operands[0];
+	const std::string &srcReg = first.operands[1];
+	if (tempReg == srcReg) return false;
+	if (!regClass(tempReg)) return false;
+
+	ParsedLine second = parseLine(block.instrs[idx + 1].text);
+	if (second.kind != LineKind::Instruction) return false;
+	if (second.mnemonic != "mov" || second.operands.size() != 2) return false;
+	if (second.operands[1] != tempReg) return false;
+
+	const std::string &dstReg = second.operands[0];
+	if (regClass(dstReg) != regClass(tempReg)) return false;
+
+	if (!machineRegDeadAfter(block, idx + 1, tempReg)) return false;
+
+	replaceMachineInstr(block.instrs[idx + 1],
+	                    makeMachineInsn("mov", {dstReg, srcReg}));
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool machineRegDeadAfter(const MachineBasicBlock &block,
+                                size_t idx,
+                                const std::string &reg) {
+	for (size_t i = idx + 1; i < block.instrs.size(); ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction) continue;
+		if (isCallBarrier(line.mnemonic)) return isScratchReg(reg);
+		if (lineWritesReg(line, reg)) return true;
+		if (lineReadsReg(line, reg)) return false;
+		if (line.mnemonic == "b" || line.mnemonic == "ret" ||
+		    line.mnemonic == "cbnz" || line.mnemonic == "cbz" ||
+		    line.mnemonic == "tbnz" || line.mnemonic == "tbz" ||
+		    (line.mnemonic.size() >= 2 && line.mnemonic[0] == 'b' && line.mnemonic[1] == '.'))
+			return false;
+	}
+	return false;
+}
+
+static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx) {
+	auto &inst = block.instrs[idx];
+	ParsedLine zero = parseLine(inst.text);
+	if (zero.kind != LineKind::Instruction) return false;
+	if (zero.mnemonic != "movz" && zero.mnemonic != "mov") return false;
+	if (zero.operands.empty()) return false;
+
+	std::string zeroedReg = zero.operands[0];
+	char cls = regClass(zeroedReg);
+	if (cls != 'w' && cls != 'x') return false;
+
+	bool isZeroing = false;
+	if (zero.mnemonic == "movz" && zero.operands.size() >= 2) {
+		isZeroing = zero.operands[1] == "#0";
+	} else if (zero.mnemonic == "mov" && zero.operands.size() >= 2) {
+		const std::string &src = zero.operands[1];
+		isZeroing = src == "wzr" || src == "xzr" || src == "#0";
+	}
+	if (!isZeroing) return false;
+
+	std::string architecturalZero = cls == 'w' ? "wzr" : "xzr";
+	bool foundStore = false;
+	size_t lastTouched = idx;
+	int seen = 0;
+
+	for (size_t i = idx + 1; i < block.instrs.size() && seen < 3; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction) continue;
+		++seen;
+
+		if (isCallBarrier(line.mnemonic)) return false;
+		if (lineWritesReg(line, zeroedReg)) return false;
+
+		if (line.mnemonic == "str" && line.operands.size() >= 2 &&
+		    line.operands[0] == zeroedReg) {
+			line.operands[0] = architecturalZero;
+			replaceMachineInstr(block.instrs[i], makeMachineInsn("str", line.operands));
+			foundStore = true;
+			lastTouched = i;
+			continue;
+		}
+
+		if (lineUsesReg(line, zeroedReg)) return false;
+	}
+
+	if (!foundStore) return false;
+	if (!machineRegDeadAfter(block, lastTouched, zeroedReg)) return false;
+
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static std::vector<size_t> machineInstructionWindow(const MachineBasicBlock &block,
+                                                    size_t idx,
+                                                    int count) {
+	std::vector<size_t> window;
+	for (size_t i = idx; i < block.instrs.size() && (int)window.size() < count; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind == LineKind::Instruction) {
+			window.push_back(i);
+		} else if (line.kind != LineKind::Empty && line.kind != LineKind::Comment) {
+			break;
+		}
+	}
+	return window;
+}
+
+static bool validAddSubSourceForClass(const std::string &reg, char cls) {
+	char sourceCls = regClass(reg);
+	if (sourceCls == cls) return true;
+	return cls == 'x' && reg == "sp";
+}
+
+static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx) {
+	ParsedLine movz = parseLine(block.instrs[idx].text);
+	if (movz.kind != LineKind::Instruction) return false;
+	if (movz.mnemonic != "movz") return false;
+	if (movz.operands.size() != 2) return false;
+
+	std::string tempReg = movz.operands[0];
+	if (!isScratchReg(tempReg)) return false;
+	char cls = regClass(tempReg);
+	if (cls != 'w' && cls != 'x') return false;
+
+	const std::string &imm = movz.operands[1];
+	if (imm.empty() || imm[0] != '#') return false;
+	int value = std::atoi(imm.c_str() + 1);
+	if (value < 0 || value > kAddSubImm12Max) return false;
+
+	auto window = machineInstructionWindow(block, idx + 1, 2);
+	if (window.size() < 2) return false;
+
+	size_t aluIdx = window[0];
+	size_t movIdx = window[1];
+	ParsedLine alu = parseLine(block.instrs[aluIdx].text);
+	ParsedLine outMov = parseLine(block.instrs[movIdx].text);
+
+	if (alu.mnemonic != "add" && alu.mnemonic != "sub") return false;
+	if (alu.operands.size() != 3) return false;
+
+	std::string middleReg = alu.operands[0];
+	if (!isScratchReg(middleReg)) return false;
+	if (regClass(middleReg) != cls) return false;
+
+	std::string sourceReg;
+	if (alu.operands[2] == tempReg) {
+		sourceReg = alu.operands[1];
+	} else if (alu.mnemonic == "add" && alu.operands[1] == tempReg) {
+		sourceReg = alu.operands[2];
+	} else {
+		return false;
+	}
+	if (sourceReg == tempReg) return false;
+	if (!validAddSubSourceForClass(sourceReg, cls)) return false;
+
+	if (outMov.mnemonic != "mov" || outMov.operands.size() != 2) return false;
+	if (outMov.operands[1] != middleReg) return false;
+	std::string dstReg = outMov.operands[0];
+	if (regClass(dstReg) != cls) return false;
+
+	if (!machineRegDeadAfter(block, movIdx, middleReg)) return false;
+	if (!machineRegDeadAfter(block, movIdx, tempReg)) return false;
+
+	std::string newImm = "#" + std::to_string(value);
+	replaceMachineInstr(block.instrs[movIdx],
+	                    makeMachineInsn(alu.mnemonic, {dstReg, sourceReg, newImm}));
+
+	block.instrs.erase(block.instrs.begin() + aluIdx);
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
+	ParsedLine alu = parseLine(block.instrs[idx].text);
+	if (alu.kind != LineKind::Instruction) return false;
+	if (alu.mnemonic != "add" && alu.mnemonic != "sub") return false;
+	if (alu.operands.size() != 3) return false;
+
+	const std::string &imm = alu.operands[2];
+	if (imm.empty() || imm[0] != '#') return false;
+
+	std::string tempReg = alu.operands[0];
+	if (!isScratchReg(tempReg)) return false;
+	char cls = regClass(tempReg);
+	if (cls != 'w' && cls != 'x') return false;
+	if (!validAddSubSourceForClass(alu.operands[1], cls)) return false;
+
+	auto window = machineInstructionWindow(block, idx + 1, 6);
+	for (size_t movIdx : window) {
+		ParsedLine line = parseLine(block.instrs[movIdx].text);
+		if (line.kind != LineKind::Instruction) continue;
+		if (isCallBarrier(line.mnemonic)) return false;
+		if (lineWritesReg(line, tempReg)) return false;
+
+		bool isMov = line.mnemonic == "mov" && line.operands.size() == 2;
+		if (lineUsesReg(line, tempReg) && !isMov) return false;
+		if (!isMov || line.operands[1] != tempReg)
+			continue;
+
+		std::string dstReg = line.operands[0];
+		if (regClass(dstReg) != cls) return false;
+
+		if (dstReg == tempReg) {
+			block.instrs.erase(block.instrs.begin() + movIdx);
+			return true;
+		}
+
+		for (size_t j = idx + 1; j < movIdx; ++j) {
+			ParsedLine between = parseLine(block.instrs[j].text);
+			if (between.kind != LineKind::Instruction) continue;
+			if (lineUsesReg(between, dstReg) || lineWritesReg(between, dstReg))
+				return false;
+		}
+
+		if (!machineRegDeadAfter(block, movIdx, tempReg)) return false;
+
+		std::vector<std::string> newOperands = alu.operands;
+		newOperands[0] = dstReg;
+		replaceMachineInstr(block.instrs[idx], makeMachineInsn(alu.mnemonic, newOperands));
+		block.instrs.erase(block.instrs.begin() + movIdx);
+		return true;
+	}
+
+	return false;
+}
+
+static bool isControlFlowBarrier(const std::string &mnemonic) {
+	return mnemonic == "b" || mnemonic == "ret" ||
+	       mnemonic == "cbnz" || mnemonic == "cbz" ||
+	       mnemonic == "tbnz" || mnemonic == "tbz" ||
+	       (mnemonic.size() >= 2 && mnemonic[0] == 'b' && mnemonic[1] == '.');
+}
+
+static bool tryMachineRedundantAdrp(MachineBasicBlock &block, size_t idx) {
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	if (first.kind != LineKind::Instruction) return false;
+	if (first.mnemonic != "adrp" || first.operands.size() < 2) return false;
+
+	const std::string &reg = first.operands[0];
+	const std::string &symbol = first.operands[1];
+
+	auto window = machineInstructionWindow(block, idx + 1, 20);
+	for (size_t wi : window) {
+		ParsedLine line = parseLine(block.instrs[wi].text);
+		if (line.kind != LineKind::Instruction) continue;
+		if (isCallBarrier(line.mnemonic) || isControlFlowBarrier(line.mnemonic))
+			return false;
+		if (lineWritesReg(line, reg)) return false;
+
+		if (line.mnemonic == "adrp" && line.operands.size() >= 2 &&
+		    line.operands[0] == reg && line.operands[1] == symbol) {
+			block.instrs.erase(block.instrs.begin() + wi);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool tryMachineRedundantSubFrame(MachineBasicBlock &block, size_t idx) {
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	if (first.kind != LineKind::Instruction) return false;
+	if (first.mnemonic != "sub" || first.operands.size() != 3) return false;
+	if (first.operands[0] != "x17" || first.operands[1] != "x29") return false;
+	const std::string &imm = first.operands[2];
+	if (imm.empty() || imm[0] != '#') return false;
+
+	auto window = machineInstructionWindow(block, idx + 1, 3);
+	for (size_t wi : window) {
+		ParsedLine line = parseLine(block.instrs[wi].text);
+		if (line.kind != LineKind::Instruction) continue;
+		if (isCallBarrier(line.mnemonic) || isControlFlowBarrier(line.mnemonic))
+			return false;
+
+		if (line.mnemonic == "sub" && line.operands.size() == 3 &&
+		    line.operands[0] == "x17" && line.operands[1] == "x29") {
+			if (line.operands[2] != imm) return false;
+			block.instrs.erase(block.instrs.begin() + wi);
+			return true;
+		}
+
+		if (lineWritesReg(line, "x17")) return false;
+	}
+
+	return false;
+}
+
+static std::string labelName(const MachineInstr &inst) {
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Label) return "";
+	std::string label = trim(line.raw);
+	if (!label.empty() && label.back() == ':')
+		label.pop_back();
+	return label;
+}
+
+static bool nextVisibleIsLabel(const MachineFunction &func,
+                               size_t blockIdx,
+                               size_t instrIdx,
+                               const std::string &target) {
+	for (size_t b = blockIdx; b < func.blocks.size(); ++b) {
+		const auto &instrs = func.blocks[b].instrs;
+		size_t begin = (b == blockIdx) ? instrIdx + 1 : 0;
+		for (size_t i = begin; i < instrs.size(); ++i) {
+			ParsedLine line = parseLine(instrs[i].text);
+			if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+				continue;
+			if (line.kind == LineKind::Label)
+				return labelName(instrs[i]) == target;
+			return false;
+		}
+	}
+	return false;
+}
+
+static bool tryMachineFallthroughBranch(MachineFunction &func,
+                                        size_t blockIdx,
+                                        size_t instrIdx) {
+	auto &block = func.blocks[blockIdx];
+	auto &inst = block.instrs[instrIdx];
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction) return false;
+	if (line.mnemonic != "b" || line.operands.size() != 1) return false;
+	if (!nextVisibleIsLabel(func, blockIdx, instrIdx, line.operands[0])) return false;
+
+	block.instrs.erase(block.instrs.begin() + instrIdx);
+	return true;
+}
+
+void peepholeOptimize(MachineFunction &func) {
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (size_t b = 0; b < func.blocks.size() && !changed; ++b) {
+			for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
+				if (tryMachineSelfMove(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineSwapMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineForwardMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineImmediateFold(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineFoldAddSubMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineRedundantAdrp(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineRedundantSubFrame(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineZeroStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineFallthroughBranch(func, b, i)) {
+					changed = true;
+					break;
+				}
+			}
+		}
+	}
+}
+
 std::string peepholeOptimize(const std::string &asmText) {
 	if (asmText.empty()) return asmText;
 
@@ -1226,21 +1665,12 @@ std::string peepholeOptimize(const std::string &asmText) {
 		for (size_t i = 0; i < lines.size(); ++i) {
 			if (lines[i].kind != LineKind::Instruction) continue;
 
-			if (trySwapMov(lines, i))            { changed = true; break; }
-			if (tryImmediateFold(lines, i))      { changed = true; break; }
-			if (tryForwardMov(lines, i))         { changed = true; break; }
-			if (trySelfMove(lines, i))           { changed = true; break; }
 			if (tryMulAddFusion(lines, i))      { changed = true; break; }
-			if (tryFoldAddSubMov(lines, i))     { changed = true; break; }
-			if (tryZeroStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForward(lines, i))   { changed = true; break; }
-			if (tryRedundantSub(lines, i))       { changed = true; break; }
 			if (tryDeadStore(lines, i))          { changed = true; break; }
 			if (tryStoreLoadForwardX17(lines, i)){ changed = true; break; }
 			if (tryMergeStores(lines, i))        { changed = true; break; }
 			if (tryMergeLoads(lines, i))         { changed = true; break; }
-			if (tryRedundantAdrp(lines, i))     { changed = true; break; }
-			if (tryFallthroughBranch(lines, i))  { changed = true; break; }
 
 		}
 

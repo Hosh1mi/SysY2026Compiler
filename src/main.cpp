@@ -90,7 +90,6 @@ int main(int argc, char **argv) {
 	bool flag_verify_ir    = false;
 	bool flag_no_peephole  = false;
 	bool flag_no_schedule  = false;
-	bool flag_enable_schedule = false;
 
 	for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -135,7 +134,7 @@ int main(int argc, char **argv) {
             flag_no_schedule = true;
         }
         else if (arg == "--enable-schedule") {
-            flag_enable_schedule = true;
+            // Kept for compatibility; -O1 enables scheduling by default.
         }
         else if (arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
@@ -232,7 +231,7 @@ int main(int argc, char **argv) {
 		Arm64CodeGen codegen(m.get(), *out);
 		codegen.setEnableRegAlloc(optLevel >= 1);
 		codegen.setNoPeephole(flag_no_peephole || optLevel < 1);
-        codegen.setNoSchedule(flag_no_schedule || !flag_enable_schedule || optLevel < 1);
+        codegen.setNoSchedule(flag_no_schedule || optLevel < 1);
 		codegen.generate();
 	}else if (print_ir) {
 		*out << m->print();
