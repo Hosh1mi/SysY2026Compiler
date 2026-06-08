@@ -175,12 +175,13 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-static void addLoopPipeline(PassManager &pm) {
+static void addLoopPipeline(PassManager &pm, bool withRotate = true) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<LICM>());
+    addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
@@ -199,19 +200,16 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     addCfgCleanup(pm);
 
-    /* Only used for experiment */
+    // Full pipeline with LoopRotate controlled by opt level
+    // O2: full pipeline WITHOUT LoopRotate (baseline)
+    // O3: full pipeline WITH LoopRotate
     if (optLevel >= 2) {
-        pm.addPass(std::make_unique<CFGSimplify>());
-        pm.addPass(std::make_unique<Mem2Reg>());
-        pm.addPass(std::make_unique<EarlyCSE>());
-        pm.addPass(std::make_unique<InstCombine>());
-        pm.addPass(std::make_unique<CFGSimplify>());
-        pm.addPass(std::make_unique<TailRecursionEliminate>());
-        pm.addPass(std::make_unique<LoopSimplify>());
-    }
-    if(optLevel >= 3){
-        pm.addPass(std::make_unique<LoopRotate>());
-        pm.addPass(std::make_unique<LICM>());
+        addSsaPreparation(pm);
+        addScalarNormalization(pm);
+        addInterproceduralAndGlobals(pm);
+        addLoopPipeline(pm, /*withRotate=*/optLevel >= 3);
+        addCanonicalCleanup(pm);
+        addCfgCleanup(pm);
     }
 }
 
