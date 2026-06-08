@@ -197,8 +197,17 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     addCfgCleanup(pm);
 
+    /* Only used for experiment */
     if (optLevel >= 2) {
-        pm.addPass(std::make_unique<LoopSimplify>());
+        // pm.addPass(std::make_unique<CFGSimplify>());
+        // pm.addPass(std::make_unique<Mem2Reg>());
+        // pm.addPass(std::make_unique<EarlyCSE>());
+        // pm.addPass(std::make_unique<InstCombine>());
+        // pm.addPass(std::make_unique<CFGSimplify>());
+        // pm.addPass(std::make_unique<TailRecursionEliminate>());
+    }
+    if(optLevel >= 3){
+        // pm.addPass(std::make_unique<LoopSimplify>());
     }
 }
 

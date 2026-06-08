@@ -4,9 +4,10 @@
 
 // LoopSimplify: canonicalize loops for downstream loop passes.
 //   - Inserts a dedicated preheader for every natural loop that doesn't already
-//     have one (header has >1 predecessor or the sole outside predecessor is not
-//     a clean unconditional-branch block).
+//     have one.
+//   - Merges multiple backedges through one dedicated backedge block.
 //   - Updates phi nodes in the header to reference the new preheader.
+//   - Updates phi nodes in the header to reference the new backedge block.
 //
 // This should run early in the loop pipeline, before LICM / LoopUnroll /
 // LoopVectorize / IndVarStrengthReduce, so those passes can rely on preheaders.
@@ -19,4 +20,5 @@ public:
 private:
     bool runOnFunction(Function *func);
     bool insertPreheader(Loop *loop, Function *func);
+    bool insertBackedgeBlock(Loop *loop, Function *func);
 };

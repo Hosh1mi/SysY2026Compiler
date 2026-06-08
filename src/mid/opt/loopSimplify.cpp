@@ -15,55 +15,88 @@ void LoopSimplify::execute(Module *module) {
 bool LoopSimplify::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return false;
 
-    LoopInfo LI;
-    LI.analyze(func);
-
-    // Process innermost loops first so that outer-loop preheader insertion
-    // doesn't accidentally capture an inner-loop preheader as "outside".
-    // Sort by depth descending.
-    std::vector<Loop *> sorted;
-    for (auto &l : LI.allLoops())
-        sorted.push_back(l.get());
-    std::sort(sorted.begin(), sorted.end(),
-              [](Loop *a, Loop *b) { return a->depth > b->depth; });
-
     bool changed = false;
-    for (auto *loop : sorted) {
-        if (insertPreheader(loop, func))
-            changed = true;
-    }
+    bool progress = true;
+    while (progress) {
+        progress = false;
 
-    // Re-run analysis so downstream passes see accurate loop info
-    if (changed) {
+        LoopInfo LI;
         LI.analyze(func);
-        func->set_instr_name();
+
+        // Process innermost loops first so that outer-loop canonicalization
+        // sees loop blocks created for children after the next analysis round.
+        std::vector<Loop *> sorted;
+        for (auto &l : LI.allLoops())
+            sorted.push_back(l.get());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](Loop *a, Loop *b) { return a->depth > b->depth; });
+
+        for (auto *loop : sorted) {
+            if (insertPreheader(loop, func) ||
+                insertBackedgeBlock(loop, func)) {
+                changed = true;
+                progress = true;
+                func->set_instr_name();
+                break;
+            }
+        }
     }
 
     return changed;
 }
 
-// Return true if bb is a "clean" preheader for header:
-//   - is NOT the function entry block (entry block should not double as preheader)
-//   - has exactly one successor (header)
-//   - terminates with an unconditional branch to header
-//   - contains no instructions other than the branch (empty landing pad)
-static bool isCleanPreheader(BasicBlock *bb, BasicBlock *header) {
-    // The function entry block should never serve as a loop preheader,
-    // even if it has been cleared to just a branch by upstream passes.
-    Function *func = bb->parent_;
-    if (!func->basic_blocks_.empty() && func->basic_blocks_.front() == bb)
+// Return true if bb is already a valid preheader for header:
+//   - it has exactly one successor, the loop header;
+//   - it terminates with an unconditional branch to the header.
+// A preheader may contain setup instructions, and the function entry block may
+// be a preheader when it has no other successor.
+static bool isExistingPreheader(BasicBlock *bb, BasicBlock *header) {
+    if (bb->succ_bbs_.size() != 1 || bb->succ_bbs_[0] != header)
         return false;
-
     auto *term = bb->get_terminator();
     if (!term || !term->is_br() || term->num_ops_ != 1)
         return false;
     if (term->get_operand(0) != header)
         return false;
-    // Check that there are no non-terminator instructions
-    for (auto *inst : bb->instr_list_) {
-        if (inst != term) return false;
-    }
     return true;
+}
+
+static void placeBlockBefore(Function *func, BasicBlock *block, BasicBlock *before) {
+    auto &bbs = func->basic_blocks_;
+    auto blockIt = std::find(bbs.begin(), bbs.end(), block);
+    if (blockIt != bbs.end())
+        bbs.erase(blockIt);
+
+    auto beforeIt = std::find(bbs.begin(), bbs.end(), before);
+    if (beforeIt != bbs.end())
+        bbs.insert(beforeIt, block);
+    else
+        bbs.push_back(block);
+}
+
+static void placeBlockAfter(Function *func, BasicBlock *block, BasicBlock *after) {
+    auto &bbs = func->basic_blocks_;
+    auto blockIt = std::find(bbs.begin(), bbs.end(), block);
+    if (blockIt != bbs.end())
+        bbs.erase(blockIt);
+
+    auto afterIt = std::find(bbs.begin(), bbs.end(), after);
+    if (afterIt != bbs.end())
+        bbs.insert(afterIt + 1, block);
+    else
+        bbs.push_back(block);
+}
+
+static void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
+                                BasicBlock *newTarget) {
+    auto *term = pred->get_terminator();
+    if (!term || !term->is_br())
+        return;
+
+    for (unsigned i = 0; i < term->num_ops_; i++) {
+        if (term->get_operand(i) == oldTarget)
+            term->set_operand(i, newTarget);
+    }
 }
 
 bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
@@ -83,9 +116,8 @@ bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
         return false;
 
     // ── 2. Check if a preheader already exists ─────────────────────────
-    // A clean preheader = single outside predecessor that contains only an
-    // unconditional branch to the header.
-    if (outsidePreds.size() == 1 && isCleanPreheader(outsidePreds[0], header))
+    // A valid preheader is already a dedicated single-successor predecessor.
+    if (outsidePreds.size() == 1 && isExistingPreheader(outsidePreds[0], header))
         return false;
 
     // ── 3. Check if we need a preheader at all ─────────────────────────
@@ -97,6 +129,7 @@ bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
     // ── 4. Create the preheader block ──────────────────────────────────
     std::string preheaderName = header->name_ + ".preheader";
     auto *preheader = new BasicBlock(func->parent_, preheaderName, func);
+    placeBlockBefore(func, preheader, header);
 
     // Unconditional branch from preheader to header
     new BranchInst(header, preheader);
@@ -111,25 +144,7 @@ bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
         header->remove_pre_basic_block(pred);
 
         // Redirect the terminator operand that points to header
-        if (auto *br = dynamic_cast<BranchInst *>(term)) {
-            if (br->num_ops_ == 1) {
-                // Unconditional branch: change target
-                // Update use-def: old target (header) removes its use, new target adds
-                br->get_operand(0)->remove_use(br->use_pos_[0]);
-                br->operands_[0]    = preheader;
-                br->use_pos_[0]     = preheader->add_use(br, 0);
-            } else if (br->num_ops_ == 3) {
-                // Conditional branch: find which operand is header and replace
-                for (unsigned i = 1; i <= 2; i++) {
-                    if (br->get_operand(i) == header) {
-                        br->get_operand(i)->remove_use(br->use_pos_[i]);
-                        br->operands_[i]    = preheader;
-                        br->use_pos_[i]     = preheader->add_use(br, i);
-                        break;
-                    }
-                }
-            }
-        }
+        replaceBranchTarget(pred, header, preheader);
 
         // Add new CFG edge pred→preheader
         pred->add_succ_basic_block(preheader);
@@ -185,6 +200,54 @@ bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
         }
 
         phi->addIncoming(preheaderVal, preheader);
+    }
+
+    return true;
+}
+
+bool LoopSimplify::insertBackedgeBlock(Loop *loop, Function *func) {
+    BasicBlock *header = loop->header;
+    if (!header) return false;
+    if (loop->latches.size() <= 1) return false;
+
+    std::vector<BasicBlock *> latches = loop->latches;
+    std::string backedgeName = header->name_ + ".backedge";
+    auto *backedge = new BasicBlock(func->parent_, backedgeName, func);
+    placeBlockAfter(func, backedge, header);
+    new BranchInst(header, backedge);
+
+    for (auto *latch : latches) {
+        replaceBranchTarget(latch, header, backedge);
+        latch->remove_succ_basic_block(header);
+        latch->add_succ_basic_block(backedge);
+        header->remove_pre_basic_block(latch);
+        backedge->add_pre_basic_block(latch);
+    }
+
+    for (auto *instr : header->instr_list_) {
+        if (!instr->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instr);
+
+        std::vector<Value *> latchVals;
+        std::vector<BasicBlock *> latchBBs;
+        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+            auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (!predBB) continue;
+            if (std::find(latches.begin(), latches.end(), predBB) == latches.end())
+                continue;
+
+            latchVals.push_back(phi->get_operand(i));
+            latchBBs.push_back(predBB);
+            phi->remove_operands(i, i + 1);
+        }
+
+        if (latchVals.empty()) continue;
+
+        auto *backedgePhi = PhiInst::create_phi(phi->type_, backedge);
+        for (size_t i = 0; i < latchVals.size(); i++)
+            backedgePhi->addIncoming(latchVals[i], latchBBs[i]);
+        backedge->add_instruction_before_terminator(backedgePhi);
+        phi->addIncoming(backedgePhi, backedge);
     }
 
     return true;

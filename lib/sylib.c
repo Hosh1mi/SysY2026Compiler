@@ -4,11 +4,6 @@
 #include<string.h>
 #include"sylib.h"
 
-/* ARM EABI helpers for aarch64 */
-void __aeabi_memclr4(void *dst, int n) { memset(dst, 0, n); }
-void __aeabi_memcpy4(void *dst, const void *src, int n) { memcpy(dst, src, n); }
-void __aeabi_memset4(void *dst, int n, int c) { memset(dst, c, n); }
-
 /* Input & output functions */
 int getint(){int t; scanf("%d",&t); return t; }
 int getch(){char c; scanf("%c",&c); return (int)c; }
