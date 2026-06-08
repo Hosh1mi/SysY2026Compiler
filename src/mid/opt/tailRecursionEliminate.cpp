@@ -11,7 +11,39 @@ void TailRecursionEliminate::execute(Module *module) {
     }
 }
 
-// 检查函数是否只包含尾递归调用（允许 ret <call> 或 call + br + phi + ret 两种形式）
+// Check if a self-call matches Pattern 2:
+//   call @func + unconditional br to ret_block, where all call uses are
+//   phis in ret_block, and at least one phi is the ret operand.
+static bool isPattern2TailCall(CallInst *call, Function *func,
+                                BasicBlock *target, BasicBlock *term_bb) {
+    auto call_term = term_bb->get_terminator();
+    (void)call_term; // terminator already validated by caller
+    auto targetTerm = target->get_terminator();
+    if (!targetTerm || !targetTerm->is_ret()) return false;
+
+    bool all_in_target = true;
+    for (auto &use : call->use_list_) {
+        auto phi = dynamic_cast<PhiInst *>(use.val_);
+        if (!phi || phi->parent_ != target) {
+            all_in_target = false;
+            break;
+        }
+    }
+    if (!all_in_target) return false;
+
+    if (targetTerm->num_ops_ > 0) {
+        Value *retVal = targetTerm->get_operand(0);
+        bool usedByRet = false;
+        for (auto &use : call->use_list_) {
+            if (use.val_ == retVal) { usedByRet = true; break; }
+        }
+        if (!usedByRet) return false;
+    }
+    return true;
+}
+
+// 检查函数是否包含尾递归调用（允许 ret <call> 或 call + br + phi + ret 两种形式）
+// 现在支持部分转换：只要至少有一个尾调用即可，非尾调用的自调用保留不动。
 bool TailRecursionEliminate::isTailRecursive(Function *func) {
     bool hasTailCall = false;
     for (auto bb : func->basic_blocks_) {
@@ -32,34 +64,13 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
             // 模式 2：call 后无条件 br 到返回块，返回块中有 phi 使用 call，并最终由 ret 返回
             if (term && term->is_br() && term->num_ops_ == 1) {
                 BasicBlock *target = static_cast<BasicBlock *>(term->get_operand(0));
-                // call 的所有使用者必须都在 target 中且都是 phi
-                bool all_in_target = true;
-                for (auto &use : call->use_list_) {
-                    auto phi = dynamic_cast<PhiInst *>(use.val_);
-                    if (!phi || phi->parent_ != target) {
-                        all_in_target = false;
-                        break;
-                    }
+                if (isPattern2TailCall(call, func, target, bb)) {
+                    hasTailCall = true;
+                    continue;
                 }
-                if (!all_in_target) return false;   // 存在非 phi 或不在返回块的使用，不安全
-
-                auto targetTerm = target->get_terminator();
-                if (!targetTerm || !targetTerm->is_ret()) return false;
-                // 确保至少一个 phi 被 ret 直接使用（返回值类型非 void 时必须）
-                if (targetTerm->num_ops_ > 0) {
-                    Value *retVal = targetTerm->get_operand(0);
-                    bool usedByRet = false;
-                    for (auto &use : call->use_list_) {
-                        if (use.val_ == retVal) { usedByRet = true; break; }
-                    }
-                    if (!usedByRet) return false;
-                }
-                hasTailCall = true;
-                continue;
             }
 
-            // 既不是 ret<call> 也不是 br+phi+ret，说明该自调用不是尾调用
-            return false;
+            // 非尾调用的自调用：部分转换时保留不动，不拒绝整个函数
         }
     }
     return hasTailCall;
@@ -142,7 +153,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
     builder->set_insert_point(entry_bb);
     builder->create_br(header);
 
-    // 4. 收集所有尾调用块的信息（bb, call, target_ret_bb），不对 phi 做修改
+    // 4. 收集所有尾调用块的信息（bb, call, target_ret_bb），只收集经模式1/2验证的尾调用
     struct TailCallSite {
         BasicBlock *bb;
         CallInst *call;
@@ -160,19 +171,21 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         bool ret_form = false;
 
         if (term->is_ret() && term->num_ops_ > 0) {
+            // 模式 1: ret <call>
             call = dynamic_cast<CallInst *>(term->get_operand(0));
             if (call) ret_form = true;
         } else if (term->is_br() && term->num_ops_ == 1) {
+            // 模式 2: call + br ret_bb, verify with isPattern2TailCall
             target = static_cast<BasicBlock *>(term->get_operand(0));
             for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
                 if (*rit == term) continue;
                 auto *c = dynamic_cast<CallInst *>(*rit);
                 if (c) {
                     auto *callee = dynamic_cast<Function *>(c->get_operand(c->num_ops_ - 1));
-                    if (callee == func) {
+                    if (callee == func && isPattern2TailCall(c, func, target, bb)) {
                         call = c;
                         ret_form = false;
-                        break;
+                        break;  // 只取最后一个匹配的尾调用
                     }
                 }
             }
