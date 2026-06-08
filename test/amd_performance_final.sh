@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
-RESULT_FILE="$RESULT_DIR/result_final.txt"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+RESULT_FILE="$PROJ_DIR/test/results/result_final_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
 TEST_DIR="$PROJ_DIR/test/performance_final"
 

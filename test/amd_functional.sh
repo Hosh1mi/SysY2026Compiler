@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
-RESULT_FILE="$RESULT_DIR/result_functional.txt"
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+RESULT_FILE="$PROJ_DIR/test/results/result_functional_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
 TEST_DIRS=("$PROJ_DIR/test/functional" "$PROJ_DIR/test/h_functional")
 
@@ -48,7 +49,7 @@ for TEST_DIR in "${TEST_DIRS[@]}"; do
         name=$(echo "$base" | sed 's/^[0-9]*_//')
 
         # 1. SysY -> ARM64 asm
-        ./compiler -S "$sy" -o "/tmp/${base}.s" -O1 2>/dev/null
+        ./compiler -S "$sy" -o "/tmp/${base}.s" 2>/dev/null
         if [ $? -ne 0 ]; then
             echo "${RED}CE${RESET} [$dir_name] ${num} ${name}"
             echo "[$dir_name] $base : CE" >> "$RESULT_FILE"
