@@ -10,8 +10,10 @@ private:
     bool canInline(CallInst *call, Function *callee, Function *caller);
     unsigned countCallSites(Function *callee, Module *module);
     unsigned countInstructions(Function *func);
-    bool hasLoops(Function *func);
+    bool isSelfRecursive(Function *func);
+    bool hasNonSelfCalls(Function *func);
     bool isCallInLoop(CallInst *call);
+    int estimateInlineCost(Function *func);
     int weighInstruction(Instruction *inst);
     int estimateConstantFoldBenefit(CallInst *call, Function *callee);
     std::vector<CallInst*> performInline(CallInst *callInst);
@@ -26,6 +28,8 @@ private:
 
 constexpr int INLINE_THRESHOLD = 80;
 constexpr int INLINE_ALWAYS_THRESHOLD = 6;
+constexpr int INLINE_RECURSIVE_THRESHOLD = 40;
+constexpr int INLINE_RECURSIVE_HOT_COST = 45;
 constexpr int INLINE_COST_BUDGET = 300;
 constexpr int CALL_OVERHEAD = 8;
 constexpr int LOOP_MULTIPLIER = 5;

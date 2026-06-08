@@ -105,6 +105,37 @@ int InlineExpand::weighInstruction(Instruction *inst) {
     }
 }
 
+int InlineExpand::estimateInlineCost(Function *func) {
+    int cost = 0;
+    for (auto bb : func->basic_blocks_)
+        for (auto inst : bb->instr_list_)
+            cost += weighInstruction(inst);
+    return cost;
+}
+
+bool InlineExpand::isSelfRecursive(Function *func) {
+    for (auto bb : func->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (auto *call = dynamic_cast<CallInst*>(inst)) {
+                if (call->get_operand(call->num_ops_ - 1) == func)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool InlineExpand::hasNonSelfCalls(Function *func) {
+    for (auto bb : func->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (auto *call = dynamic_cast<CallInst*>(inst)) {
+                if (call->get_operand(call->num_ops_ - 1) != func)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
 
 int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) {
     // Phase A: seed known-constant set from constant actual arguments
@@ -240,32 +271,18 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller)
         return false;
 
     unsigned raw = countInstructions(callee);
+    bool recursive = isSelfRecursive(callee);
 
-    if (raw > INLINE_THRESHOLD)
+    if (!recursive && raw > INLINE_THRESHOLD)
+        return false;
+    if (recursive && raw > INLINE_RECURSIVE_THRESHOLD)
         return false;
 
     if (raw <= INLINE_ALWAYS_THRESHOLD)
         return true;
 
-    // 递归函数内联会导致 worklist 无限展开
-    for (auto bb : callee->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
-            if (auto *c = dynamic_cast<CallInst*>(inst)) {
-                if (c->get_operand(c->num_ops_ - 1) == callee)
-                    return false;
-            }
-        }
-    }
-
     unsigned sites = countCallSites(callee, caller->parent_);
-
-    if (sites == 1)
-        return true;
-
-    int weightedCost = 0;
-    for (auto bb : callee->basic_blocks_)
-        for (auto inst : bb->instr_list_)
-            weightedCost += weighInstruction(inst);
+    int weightedCost = estimateInlineCost(callee);
 
     // Estimate saved overhead and fold benefit.
     bool callInLoop = isCallInLoop(call);
@@ -273,6 +290,19 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller)
     if (callInLoop)
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
+
+    if (recursive) {
+        if (hasNonSelfCalls(callee))
+            return false;
+        if (!callInLoop && foldBenefit == 0)
+            return false;
+        if (callInLoop && weightedCost <= INLINE_RECURSIVE_HOT_COST)
+            return true;
+        return savedOverhead + foldBenefit > weightedCost;
+    }
+
+    if (sites == 1)
+        return true;
 
     // Net benefit decision
     int netBenefit = savedOverhead + foldBenefit - weightedCost;
@@ -378,8 +408,11 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     // 收集新产生的 call 指令
     for (auto *bb : newBBs) {
         for (auto *inst : bb->instr_list_) {
-            if (auto *c = dynamic_cast<CallInst*>(inst))
+            if (auto *c = dynamic_cast<CallInst*>(inst)) {
+                if (c->get_operand(c->num_ops_ - 1) == callee)
+                    continue;
                 newCalls.push_back(c);
+            }
         }
     }
 

@@ -187,6 +187,9 @@ std::string UnaryInst::print() {
             instr_ir += " to ";
             instr_ir += this->type_->print();
             break;
+        case Instruction::Clz:
+            // clz i32 %x  (no "to" suffix; result type == operand type)
+            break;
         default:
             assert(0 && "UnaryInst opID invalid!");
             break;
