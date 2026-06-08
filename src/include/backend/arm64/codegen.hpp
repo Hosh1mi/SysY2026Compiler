@@ -11,6 +11,7 @@ public:
     void setNoPeephole(bool v) { no_peephole_ = v; }
     void setEnableRegAlloc(bool v) { enable_regalloc_ = v; }
     void setNoSchedule(bool v) { no_schedule_ = v; }
+    void setDumpMachineInstr(bool v) { dump_machine_instr_ = v; }
 
 private:
     void emitGlobal(MachineModule &module, GlobalVariable *gv);
@@ -21,4 +22,5 @@ private:
     bool no_peephole_ = false;
     bool enable_regalloc_ = true;
     bool no_schedule_ = true;
+    bool dump_machine_instr_ = false;
 };

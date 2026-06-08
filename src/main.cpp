@@ -47,6 +47,7 @@ struct DriverOptions {
     bool verifyIR = false;
     bool disablePeephole = false;
     bool disableSchedule = false;
+    bool dumpMachineInstr = false;
 };
 
 static bool parseOptLevel(const std::string &arg, int argc, char **argv,
@@ -96,8 +97,8 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.disablePeephole = true;
         } else if (arg == "--fno-schedule") {
             options.disableSchedule = true;
-        } else if (arg == "--enable-schedule") {
-            // Compatibility flag; optimization level now owns the default.
+        } else if (arg == "--dump-machine-instr") {
+            options.dumpMachineInstr = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -206,6 +207,7 @@ static void configureBackend(Arm64CodeGen &codegen, const DriverOptions &options
     codegen.setEnableRegAlloc(enableOptimizations);
     codegen.setNoPeephole(!enableOptimizations || options.disablePeephole);
     codegen.setNoSchedule(!enableOptimizations || options.disableSchedule);
+    codegen.setDumpMachineInstr(options.dumpMachineInstr);
 }
 
 } // namespace
@@ -247,7 +249,7 @@ int main(int argc, char **argv) {
     if (!openOutput(options, fout, out))
         return -1;
 
-    if (options.printAsm) {
+    if (options.printAsm || options.dumpMachineInstr) {
         Arm64CodeGen codegen(m.get(), *out);
         configureBackend(codegen, options);
         codegen.generate();

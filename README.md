@@ -16,19 +16,7 @@
   </tr>
   <tr>
     <td></td>
-    <td>LoopTiling pass</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>矩阵乘法内层循环展开</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>实现更彻底的死代码消除（DCE）</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>修复CFGSimplify里的各种错误</td>
   </tr>
   
   <tr>
@@ -51,47 +39,7 @@
   </tr>
   <tr>
     <td></td>
-    <td>寄存器liveness分析</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>废除scratch池</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>CFGSimplify不应生成select（？）</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>inlineExpand不支持Unary</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>压栈保存过多被调用者保存寄存器</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>大量无效寄存器到寄存器拷贝(冗余mov)</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>栈帧设计大量槽位闲置</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>无条件跳转链 + 可被 cbz/cbnz 吸收的模式未利用</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>全局变量重复加载</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>movz + mov 双指令中转模式普遍(w9中转)</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>叶函数式尾循环仍设置完整 FP 帧</td>
   </tr>
 
   <tr>
@@ -110,13 +58,23 @@ docker build --platform linux/arm64 -t sysy-dev .; docker run -it --platform lin
 
 在根目录下构建：
 ```bash
-mkdir build && cd build && cmake .. && make -j4
+mkdir build && cd build && cmake .. && make -j8
 ```
 
-在`build/`下运行:
+生成IR:
 ```bash
-./compiler <.sy path> > out.s
+./compiler -c -o out.ll <testpath>
+```
+
+生成汇编:
+```bash
+./compiler -S -o out.s <.sy path>
+```
+
+编译运行:
+```bash
 gcc out.s ../lib/libsysy.a -o out
+./out < <testinput>
 ```
 
 调试选项:
@@ -129,21 +87,43 @@ TODO: 用参数选择pass
 | `--dump-ir` | 每个 pass 前后 dump IR |
 | `--verify-ir` | 每个 pass 后校验 IR 完整性（TODO:目前无作用） |
 | `--fno-peephole` | 在 `-O1` 下禁用 peephole 汇编后优化 |
-| `--enable-schedule` | 兼容旧参数；`-O1` 默认已开启 MachineInstr 块内调度 |
 | `--fno-schedule` | 在 `-O1` 下禁用 MachineInstr 调度 |
+| `--dump-machine-instr` | 输出每个函数的 MachineInstr 详细信息（opcode类型、defs/uses、latency、标志位），dump 到 stderr |
 
 Pass 基类 (`pass.hpp`) 提供 `name()` 纯虚函数，每个 pass 需返回类名（如 `"Mem2Reg"`），供 dump/verify 使用。
 
 注:`--dump-ir`为stderr实现，输出极长，使用`2>`重定向到文件里查看
 
-对`performance/`采用批量测试，在`test/`下运行：
+`--dump-machine-instr` 同样输出到 stderr，可单独使用或配合 `-S`：
 ```bash
-./arm_test.sh
+./compiler test.sy --dump-machine-instr 2> dump.txt   # 只 dump MachineInstr
+./compiler -S test.sy --dump-machine-instr 2> dump.txt # 同时输出汇编
 ```
 
-注：如果使用`qemu`交叉编译，在`test/`下运行：
+批量测试脚本在 `test/` 下，命名规则：
+- `arm_` 前缀：ARM 原生环境（容器内 `gcc` 直接编译运行）
+- `amd_` 前缀：交叉编译环境（`aarch64-linux-gnu-gcc` + `qemu-aarch64`）
+
+| 脚本 | 测试集 | 输出文件 |
+|------|--------|----------|
+| `arm_functional.sh` | functional + h_functional | `results/result_functional.txt` |
+| `amd_functional.sh` | functional + h_functional | `results/result_functional.txt` |
+| `arm_performance.sh` | performance | `results/result_performance.txt` |
+| `amd_performance.sh` | performance | `results/result_performance.txt` |
+| `arm_performance_final.sh` | performance_final | `results/result_final.txt` |
+| `amd_performance_final.sh` | performance_final | `results/result_final.txt` |
+
+示例：
 ```bash
-./run_tests.sh
+# ARM 原生环境
+./arm_functional.sh
+./arm_performance.sh
+./arm_performance_final.sh
+
+# 交叉编译环境
+./amd_functional.sh
+./amd_performance.sh
+./amd_performance_final.sh
 ```
 
 ## `git commit`规范

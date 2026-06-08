@@ -295,6 +295,72 @@ std::string printMachineFunction(const MachineFunction &func) {
     return out.str();
 }
 
+namespace {
+
+const char *mopcodeToString(MOpcode op) {
+    switch (op) {
+        case MOpcode::Unknown:    return "Unknown";
+        case MOpcode::Label:      return "Label";
+        case MOpcode::Directive:  return "Directive";
+        case MOpcode::Comment:    return "Comment";
+        case MOpcode::Mov:        return "Mov";
+        case MOpcode::Alu:        return "Alu";
+        case MOpcode::Mul:        return "Mul";
+        case MOpcode::Div:        return "Div";
+        case MOpcode::Load:       return "Load";
+        case MOpcode::Store:      return "Store";
+        case MOpcode::PairLoad:   return "PairLoad";
+        case MOpcode::PairStore:  return "PairStore";
+        case MOpcode::Cmp:        return "Cmp";
+        case MOpcode::FlagUse:    return "FlagUse";
+        case MOpcode::Branch:     return "Branch";
+        case MOpcode::Call:       return "Call";
+        case MOpcode::Ret:        return "Ret";
+        case MOpcode::Adr:        return "Adr";
+        case MOpcode::Neon:       return "Neon";
+    }
+    return "?";
+}
+
+std::string joinSet(const std::set<std::string> &s) {
+    std::string result;
+    for (const auto &v : s) {
+        if (!result.empty()) result += ", ";
+        result += v;
+    }
+    return result.empty() ? "{}" : "{" + result + "}";
+}
+
+} // anonymous namespace
+
+std::string dumpMachineFunction(const MachineFunction &func) {
+    std::ostringstream out;
+    out << "=== MachineFunction: " << func.name << " ===\n";
+    for (size_t bi = 0; bi < func.blocks.size(); ++bi) {
+        const auto &block = func.blocks[bi];
+        out << "  BB" << bi;
+        if (!block.label.empty()) out << " [" << block.label << "]";
+        out << " (" << block.instrs.size() << " instrs)\n";
+        for (const auto &inst : block.instrs) {
+            out << "    [" << inst.originalIndex << "] "
+                << mopcodeToString(inst.opcode) << " | "
+                << "text=\"" << inst.text << "\" "
+                << "defs=" << joinSet(inst.defs) << " "
+                << "uses=" << joinSet(inst.uses) << " "
+                << "lat=" << inst.latency;
+            if (inst.mayLoad)    out << " LOAD";
+            if (inst.mayStore)   out << " STORE";
+            if (inst.setsFlags)  out << " SETS_FLAGS";
+            if (inst.usesFlags)  out << " USES_FLAGS";
+            if (inst.isCall)     out << " CALL";
+            if (inst.isBarrier)  out << " BARRIER";
+            if (inst.isLabelLike)out << " LABEL_LIKE";
+            out << "\n";
+        }
+    }
+    return out.str();
+}
+
 std::string printMachineModule(const MachineModule &module) {
     std::ostringstream out;
     for (const auto &inst : module.lines)

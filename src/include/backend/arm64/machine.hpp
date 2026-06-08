@@ -71,6 +71,7 @@ struct MachineModule {
 MachineInstr parseMachineInstr(const std::string &line, int originalIndex);
 std::string printMachineFunction(const MachineFunction &func);
 std::string printMachineModule(const MachineModule &module);
+std::string dumpMachineFunction(const MachineFunction &func);
 void appendMachineInstr(MachineFunction &func, MachineInstr inst);
 void appendMachineLine(MachineModule &module, const std::string &line);
 void appendMachineText(MachineModule &module, const std::string &text);

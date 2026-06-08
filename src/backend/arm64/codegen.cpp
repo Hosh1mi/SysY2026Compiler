@@ -95,6 +95,9 @@ void Arm64CodeGen::generate() {
                     if (!no_peephole_) {
                         peepholeOptimize(machineFunc);
                     }
+                    if (dump_machine_instr_) {
+                        std::cerr << dumpMachineFunction(machineFunc);
+                    }
                     results[idx] = printMachineFunction(machineFunc);
                 }
             });
