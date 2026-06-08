@@ -169,30 +169,22 @@ bool LoopSimplify::insertPreheader(Loop *loop, Function *func) {
         if (outsideVals.empty()) continue;
 
         // Determine if all outside predecessors contributed the same value.
-        bool allSame = true;
+        // If they differ, the new preheader must merge them with its own phi;
+        // the header phi may only have one incoming edge from preheader.
+        Value *preheaderVal = outsideVals[0];
         for (size_t j = 1; j < outsideVals.size(); j++) {
-            if (outsideVals[j] != outsideVals[0]) {
-                allSame = false;
-                break;
-            }
+            if (outsideVals[j] == outsideVals[0])
+                continue;
+
+            auto *preheaderPhi = PhiInst::create_phi(phi->type_, preheader);
+            for (size_t k = 0; k < outsideVals.size(); k++)
+                preheaderPhi->addIncoming(outsideVals[k], outsideBBs[k]);
+            preheader->add_instruction_before_terminator(preheaderPhi);
+            preheaderVal = preheaderPhi;
+            break;
         }
 
-        if (allSame) {
-            // Simple case: one value from the preheader
-            phi->addIncoming(outsideVals[0], preheader);
-        } else {
-            // Multiple outside predecessors contributed different values.
-            // This is rare in well-formed SSA (would require the preheader
-            // to also have a phi). For now, conservatively add each
-            // distinct (value, preheader) pair. The preheader acts as the
-            // sole conduit, but all distinct values survive.
-            // NOTE: This may produce non-SSA semantics if two outside preds
-            // gave different values; a proper fix would insert phi(s) in the
-            // preheader itself. For the IR patterns seen in this compiler
-            // (mem2reg'd, structured loops), this path is not hit.
-            for (auto *val : outsideVals)
-                phi->addIncoming(val, preheader);
-        }
+        phi->addIncoming(preheaderVal, preheader);
     }
 
     return true;
