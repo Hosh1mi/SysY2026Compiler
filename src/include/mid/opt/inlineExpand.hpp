@@ -7,13 +7,16 @@ public:
     void execute(Module *module) override;
     std::string name() const override { return "InlineExpand"; }
 private:
-    bool canInline(CallInst *call, Function *callee, Function *caller);
+    bool canInline(CallInst *call, Function *callee, Function *caller,
+                   int recursiveBudget);
     unsigned countCallSites(Function *callee, Module *module);
     unsigned countInstructions(Function *func);
     bool isSelfRecursive(Function *func);
     bool hasNonSelfCalls(Function *func);
     bool isCallInLoop(CallInst *call);
     int estimateInlineCost(Function *func);
+    int estimateRecursiveInlineBudget(int weightedCost, bool callInLoop,
+                                      int foldBenefit);
     int weighInstruction(Instruction *inst);
     int estimateConstantFoldBenefit(CallInst *call, Function *callee);
     std::vector<CallInst*> performInline(CallInst *callInst);
