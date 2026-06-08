@@ -257,6 +257,24 @@ static void early_cse_dfs(BasicBlock *bb,
 
         // ── Call ──
         if (inst->is_call()) {
+            // Pure call CSE: result depends only on args, no side effects
+            {
+                auto *call = static_cast<CallInst*>(inst);
+                auto *callee = dynamic_cast<Function*>(
+                    call->get_operand(call->num_ops_ - 1));
+                if (callee && !callee->is_declaration() && BAA.isPure(callee)) {
+                    ExprSignature sig = compute_signature(inst, empty_vn_map);
+                    auto exist = expr_map.find(sig);
+                    if (exist != expr_map.end()) {
+                        inst->replace_all_use_with(exist->second);
+                        to_delete.push_back(inst);
+                    } else {
+                        expr_map[sig] = inst;
+                        added_sigs.push_back(sig);
+                    }
+                    continue;
+                }
+            }
             local_mem.clear();
             activeMods.push_back({inst, inst});
             for (auto si = expr_map.begin(); si != expr_map.end(); ) {
