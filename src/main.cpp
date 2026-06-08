@@ -15,6 +15,7 @@
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
+#include "include/mid/opt/loopRotate.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
@@ -178,6 +179,7 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<LICM>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
@@ -199,15 +201,17 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
 
     /* Only used for experiment */
     if (optLevel >= 2) {
-        // pm.addPass(std::make_unique<CFGSimplify>());
-        // pm.addPass(std::make_unique<Mem2Reg>());
-        // pm.addPass(std::make_unique<EarlyCSE>());
-        // pm.addPass(std::make_unique<InstCombine>());
-        // pm.addPass(std::make_unique<CFGSimplify>());
-        // pm.addPass(std::make_unique<TailRecursionEliminate>());
+        pm.addPass(std::make_unique<CFGSimplify>());
+        pm.addPass(std::make_unique<Mem2Reg>());
+        pm.addPass(std::make_unique<EarlyCSE>());
+        pm.addPass(std::make_unique<InstCombine>());
+        pm.addPass(std::make_unique<CFGSimplify>());
+        pm.addPass(std::make_unique<TailRecursionEliminate>());
+        pm.addPass(std::make_unique<LoopSimplify>());
     }
     if(optLevel >= 3){
-        // pm.addPass(std::make_unique<LoopSimplify>());
+        pm.addPass(std::make_unique<LoopRotate>());
+        pm.addPass(std::make_unique<LICM>());
     }
 }
 
