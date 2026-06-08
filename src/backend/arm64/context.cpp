@@ -44,7 +44,7 @@ void Arm64FuncContext::emitMachineInstrLine(const std::string &line, MOpcode opc
     MachineInstr inst = MachineInstr::make(line, opcode, defs, uses, latency);
     inst.setsFlags = setsFlags;
     inst.usesFlags = usesFlags;
-    inst.isBarrier = isBarrier;
+    inst.isBarrier = isBarrier && opcode != MOpcode::Cmp && opcode != MOpcode::FlagUse;
     emitMachineInstr(std::move(inst));
 }
 

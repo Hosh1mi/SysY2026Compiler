@@ -198,22 +198,23 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
     } else if (op == "str" || op == "stur" || op == "st1") {
         mi.opcode = MOpcode::Store;
         mi.mayStore = true;
-        mi.isBarrier = true;
         addUses(mi, rest);
     } else if (op == "stp") {
         mi.opcode = MOpcode::PairStore;
         mi.mayStore = true;
-        mi.isBarrier = true;
         addUses(mi, rest);
-    } else if (op == "cmp" || op == "cmn" || op == "fcmp") {
+    } else if (op == "cmp" || op == "cmn" || op == "fcmp" || op == "tst") {
         mi.opcode = MOpcode::Cmp;
         mi.setsFlags = true;
-        mi.isBarrier = true;
         addUses(mi, rest);
-    } else if (op == "cset" || op == "csel" || op == "ccmp") {
+    } else if (op == "ccmp") {
+        mi.opcode = MOpcode::FlagUse;
+        mi.setsFlags = true;
+        mi.usesFlags = true;
+        addUses(mi, rest);
+    } else if (op == "cset" || op == "csel" || op == "cneg") {
         mi.opcode = MOpcode::FlagUse;
         mi.usesFlags = true;
-        mi.isBarrier = true;
         defFirstUseRest();
     } else if (op == "b" || startsWith(op, "b.") || op == "cbz" || op == "cbnz") {
         mi.opcode = MOpcode::Branch;

@@ -68,7 +68,6 @@ void Arm64FuncContext::emitStoreRegMachine(const std::string &reg, int off) {
     auto emitStore = [&](const std::string &line, std::initializer_list<std::string> uses) {
         MachineInstr inst = MachineInstr::make(line, MOpcode::Store, {}, uses);
         inst.mayStore = true;
-        inst.isBarrier = true;
         emitMachineInstr(std::move(inst));
     };
 
@@ -128,7 +127,6 @@ void Arm64FuncContext::emitStorePairMachine(const std::string &r1, const std::st
             "\tstp " + r1 + ", " + r2 + ", [x29, #" + std::to_string(off) + "]",
             MOpcode::PairStore, {}, {r1, r2, "x29"});
         inst.mayStore = true;
-        inst.isBarrier = true;
         emitMachineInstr(std::move(inst));
     } else if (off >= -256 && off <= 255) {
         emitStoreRegMachine(r1, off);
@@ -150,7 +148,6 @@ void Arm64FuncContext::emitStorePairMachine(const std::string &r1, const std::st
             "\tstp " + r1 + ", " + r2 + ", [" + base + "]",
             MOpcode::PairStore, {}, {r1, r2, base});
         inst.mayStore = true;
-        inst.isBarrier = true;
         emitMachineInstr(std::move(inst));
     }
 }
@@ -204,7 +201,6 @@ void Arm64FuncContext::emitStoreMemMachine(const std::string &reg, const std::st
     MachineInstr inst = MachineInstr::make("\tstr " + reg + ", " + addrText,
                                            opcode, {}, uses);
     inst.mayStore = true;
-    inst.isBarrier = true;
     emitMachineInstr(std::move(inst));
 }
 

@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
 	bool flag_verify_ir    = false;
 	bool flag_no_peephole  = false;
 	bool flag_no_schedule  = false;
-	bool flag_enable_schedule = true;
+	bool flag_enable_schedule = false;
 
 	for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];

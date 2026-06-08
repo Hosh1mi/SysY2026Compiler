@@ -9,5 +9,6 @@ public:
     void schedule(MachineFunction &func) const;
 
 private:
-    std::vector<MachineInstr> scheduleSegment(const std::vector<MachineInstr> &segment) const;
+    std::vector<MachineInstr> scheduleSegment(const std::vector<MachineInstr> &segment,
+                                              bool preserveFlagLiveOut = false) const;
 };

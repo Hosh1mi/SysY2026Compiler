@@ -190,7 +190,6 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             MachineInstr st = MachineInstr::make("\tst1 {" + vs + ".4s}, [" + addr + "]",
                                                  MOpcode::Store, {}, {vs, addr});
             st.mayStore = true;
-            st.isBarrier = true;
             emitMachineInstr(std::move(st));
             break;
         }

@@ -30,10 +30,10 @@ void MachineScheduler::schedule(MachineFunction &func) const {
         std::vector<MachineInstr> scheduled;
         std::vector<MachineInstr> segment;
 
-        auto flushSegment = [&]() {
+        auto flushSegment = [&](bool preserveFlagLiveOut = false) {
             if (segment.empty())
                 return;
-            auto reordered = scheduleSegment(segment);
+            auto reordered = scheduleSegment(segment, preserveFlagLiveOut);
             scheduled.insert(scheduled.end(),
                              std::make_move_iterator(reordered.begin()),
                              std::make_move_iterator(reordered.end()));
@@ -42,7 +42,7 @@ void MachineScheduler::schedule(MachineFunction &func) const {
 
         for (auto &inst : block.instrs) {
             if (inst.isBarrier || inst.isLabelLike) {
-                flushSegment();
+                flushSegment(inst.usesFlags);
                 scheduled.push_back(std::move(inst));
             } else {
                 segment.push_back(std::move(inst));
@@ -59,12 +59,22 @@ void MachineScheduler::schedule(MachineFunction &func) const {
 // $flags; instructions that use flags are treated as using $flags.  This
 // prevents the scheduler from reordering flag users before flag setters.
 static const std::string kFlagReg = "$flags";
+static const std::string kMemoryReg = "$mem";
 
-std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<MachineInstr> &segment) const {
+std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<MachineInstr> &segment,
+                                                            bool preserveFlagLiveOut) const {
     if (segment.size() <= 1)
         return segment;
 
     std::vector<MachineInstr> instrs = segment;
+    int flagLiveOutIndex = -1;
+    if (preserveFlagLiveOut) {
+        MachineInstr liveOut;
+        liveOut.usesFlags = true;
+        liveOut.originalIndex = instrs.back().originalIndex + 1;
+        flagLiveOutIndex = static_cast<int>(instrs.size());
+        instrs.push_back(std::move(liveOut));
+    }
     const int n = static_cast<int>(instrs.size());
     std::vector<std::set<int>> succ(n);
     std::vector<std::set<int>> pred(n);
@@ -111,6 +121,13 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         if (instrs[i].usesFlags)
             processRegUse(i, kFlagReg);
 
+        // Memory operations are modeled conservatively:
+        // loads read memory; stores read and define memory. This preserves
+        // load/store and store/store order while still allowing load/load
+        // reordering inside a scheduling segment.
+        if (instrs[i].mayLoad || instrs[i].mayStore)
+            processRegUse(i, kMemoryReg);
+
         // Register defs → WAW + WAR edges
         for (const auto &reg : instrs[i].defs)
             processRegDef(i, reg);
@@ -119,6 +136,9 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         // and this setter must happen after the previous flag setter (WAW).
         if (instrs[i].setsFlags)
             processRegDef(i, kFlagReg);
+
+        if (instrs[i].mayStore)
+            processRegDef(i, kMemoryReg);
     }
 
     std::vector<int> critical(n, 0);
@@ -186,7 +206,10 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
 
     std::vector<MachineInstr> out;
     out.reserve(order.size());
-    for (int idx : order)
+    for (int idx : order) {
+        if (idx == flagLiveOutIndex)
+            continue;
         out.push_back(std::move(instrs[idx]));
+    }
     return out;
 }
