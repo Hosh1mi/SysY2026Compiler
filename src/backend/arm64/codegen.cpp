@@ -95,8 +95,7 @@ void Arm64CodeGen::generate() {
                     if (!no_peephole_) {
                         peepholeOptimize(machineFunc);
                     }
-                    std::string funcAsm = printMachineFunction(machineFunc);
-                    results[idx] = no_peephole_ ? funcAsm : peepholeOptimize(funcAsm);
+                    results[idx] = printMachineFunction(machineFunc);
                 }
             });
         }

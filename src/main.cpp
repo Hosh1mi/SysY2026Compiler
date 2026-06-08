@@ -1,7 +1,5 @@
 #include "include/frontend/ast/ast.hpp"
-#include "include/frontend/ast/astPrinter.hpp"
 
-#include "include/frontend/checker/checker.hpp"
 #include "include/frontend/parser.hpp"
 
 #include "include/mid/ir/irGen.hpp"
@@ -11,7 +9,6 @@
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
-#include "include/mid/opt/gvn.hpp"
 #include "include/mid/opt/instCombine.hpp"
 #include "include/mid/opt/sccp.hpp"
 #include "include/mid/opt/localCopyPropagation.hpp"
@@ -19,9 +16,7 @@
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
-#include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
-#include "include/mid/opt/removeRedundantPhis.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
 #include "include/mid/opt/scalarExpandedInterchange.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
@@ -33,11 +28,108 @@
 
 #include "include/backend/arm64/codegen.hpp"
 
-// ── Pipeline helper modules ──────────────────────────────────────────
-// Group common pass sequences for reusable cleanup after transforms.
+#include <cctype>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
 
-// ConstantFold → InstCombine → DeadCodeDelete
-static void make_basic_clean(PassManager &pm) {
+namespace {
+
+struct DriverOptions {
+    char *input = nullptr;
+    bool printIR = false;
+    bool printAsm = false;
+    std::string output = "-";
+    int optLevel = 0;
+    bool dumpIR = false;
+    bool verifyIR = false;
+    bool disablePeephole = false;
+    bool disableSchedule = false;
+};
+
+static bool parseOptLevel(const std::string &arg, int argc, char **argv,
+                          int &index, int &optLevel) {
+    std::string value;
+    if (arg.size() > 2) {
+        value = arg.substr(2);
+    } else if (index + 1 < argc && argv[index + 1][0] != '-') {
+        value = argv[++index];
+    } else {
+        optLevel = 1;
+        return true;
+    }
+
+    if (value.size() != 1 || !std::isdigit(static_cast<unsigned char>(value[0]))) {
+        std::cerr << "Invalid optimization level: -O" << value << "\n";
+        return false;
+    }
+    optLevel = value[0] - '0';
+    return true;
+}
+
+static bool parseArgs(int argc, char **argv, DriverOptions &options) {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "-S") {
+            options.printAsm = true;
+            options.printIR = false;
+        } else if (arg == "-c") {
+            options.printIR = true;
+            options.printAsm = false;
+        } else if (arg == "-o") {
+            if (i + 1 >= argc) {
+                std::cerr << "-o requires a filename\n";
+                return false;
+            }
+            options.output = argv[++i];
+        } else if (arg.rfind("-O", 0) == 0) {
+            if (!parseOptLevel(arg, argc, argv, i, options.optLevel))
+                return false;
+        } else if (arg == "--dump-ir") {
+            options.dumpIR = true;
+        } else if (arg == "--verify-ir") {
+            options.verifyIR = true;
+        } else if (arg == "--fno-peephole") {
+            options.disablePeephole = true;
+        } else if (arg == "--fno-schedule") {
+            options.disableSchedule = true;
+        } else if (arg == "--enable-schedule") {
+            // Compatibility flag; optimization level now owns the default.
+        } else if (!arg.empty() && arg[0] == '-') {
+            std::cerr << "Unknown option: " << arg << "\n";
+            return false;
+        } else {
+            options.input = argv[i];
+        }
+    }
+
+    if (!options.input) {
+        std::cerr << "No input file provided.\n";
+        return false;
+    }
+    return true;
+}
+
+static bool openOutput(const DriverOptions &options,
+                       std::ofstream &fout,
+                       std::ostream *&out) {
+    out = &std::cout;
+    if (options.output == "-")
+        return true;
+
+    fout.open(options.output);
+    if (!fout.is_open()) {
+        std::cerr << "failed to open output file: " << options.output << std::endl;
+        return false;
+    }
+    out = &fout;
+    return true;
+}
+
+static void addCanonicalCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
     pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
@@ -45,197 +137,123 @@ static void make_basic_clean(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
 }
 
-// DeadCodeDelete → CFGSimplify (trivial phi cleanup is inside DCE's fixed-point loop)
-static void make_cfg_clean(PassManager &pm) {
+static void addCfgCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeDelete>());
     pm.addPass(std::make_unique<CFGSimplify>());
 }
 
-// make_basic_clean + CFGSimplify + make_basic_clean (trivial phi cleanup is inside DCE)
-static void make_deep_clean(PassManager &pm) {
-    make_basic_clean(pm);
+static void addDeepCleanup(PassManager &pm) {
+    addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
-    make_basic_clean(pm);
+    addCanonicalCleanup(pm);
 }
 
-// DeadCodeDelete × 4 + CFGSimplify × 4 (aggressive post-unroll cleanup)
-static void make_unroll_clean(PassManager &pm) {
-    for (int i = 0; i < 4; i++) {
-        pm.addPass(std::make_unique<DeadCodeDelete>());
-        pm.addPass(std::make_unique<CFGSimplify>());
+static void addSsaPreparation(PassManager &pm) {
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<Mem2Reg>());
+    pm.addPass(std::make_unique<EarlyCSE>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<TailRecursionEliminate>());
+}
+
+static void addScalarNormalization(PassManager &pm) {
+    pm.addPass(std::make_unique<ScalarExpandedInterchange>());
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LocalCopyPropagation>());
+    addCanonicalCleanup(pm);
+}
+
+static void addInterproceduralAndGlobals(PassManager &pm) {
+    pm.addPass(std::make_unique<BitFuncRecognize>());
+    pm.addPass(std::make_unique<InlineExpand>());
+    pm.addPass(std::make_unique<LocalCopyPropagation>());
+    pm.addPass(std::make_unique<GlobalScalarPromotion>());
+    pm.addPass(std::make_unique<Mem2Reg>());
+    addDeepCleanup(pm);
+}
+
+static void addLoopPipeline(PassManager &pm) {
+    pm.addPass(std::make_unique<UnifyExitNodes>());
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LICM>());
+    pm.addPass(std::make_unique<LoopVectorize>());
+    pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    pm.addPass(std::make_unique<LoopRepFold>());
+    pm.addPass(std::make_unique<LoopUnroll>());
+    addDeepCleanup(pm);
+}
+
+static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
+    if (optLevel < 1)
+        return;
+
+    addSsaPreparation(pm);
+    addScalarNormalization(pm);
+    addInterproceduralAndGlobals(pm);
+    addLoopPipeline(pm);
+    addCanonicalCleanup(pm);
+    addCfgCleanup(pm);
+
+    if (optLevel >= 2) {
+        pm.addPass(std::make_unique<LoopSimplify>());
     }
 }
 
-#include <fstream>
-#include <iostream>
-#include <memory>
-#include <unistd.h>
+static void configureBackend(Arm64CodeGen &codegen, const DriverOptions &options) {
+    bool enableOptimizations = options.optLevel >= 1;
+    codegen.setEnableRegAlloc(enableOptimizations);
+    codegen.setNoPeephole(!enableOptimizations || options.disablePeephole);
+    codegen.setNoSchedule(!enableOptimizations || options.disableSchedule);
+}
+
+} // namespace
 
 extern unique_ptr<CompUnitAST> root;
 extern int yyparse();
 extern FILE *yyin;
 
 int main(int argc, char **argv) {
-	if (argc < 2) {
+    if (argc < 2) {
         std::cerr << "No input file.\n";
         return -1;
     }
 
-	char *filename = nullptr;
-	int print_ir = false;
-	int print_asm = false;
-	std::string output = "-";
-	int optLevel = 0;
-	bool flag_dump_ir      = false;
-	bool flag_verify_ir    = false;
-	bool flag_no_peephole  = false;
-	bool flag_no_schedule  = false;
-
-	for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-
-        if (arg == "-S") {
-            print_asm = true;
-            print_ir = false;
-        }
-        else if (arg == "-c") {
-            print_ir = true;
-            print_asm = false;
-        }
-        else if (arg == "-o") {
-            if (i + 1 >= argc) {
-                std::cerr << "-o requires a filename\n";
-                return -1;
-            }
-            output = argv[++i];
-        }
-        else if (arg.rfind("-O", 0) == 0) {
-            // 支持 -O1 / -O2 / -O 1
-            if (arg.size() > 2) {
-                optLevel = arg[2] - '0';
-            } else {
-                if (i + 1 < argc) {
-                    optLevel = std::stoi(argv[++i]);
-                } else {
-                    optLevel = 1; // 默认 -O == -O1
-                }
-            }
-        }
-        else if (arg == "--dump-ir") {
-            flag_dump_ir = true;
-        }
-        else if (arg == "--verify-ir") {
-            flag_verify_ir = true;
-        }
-        else if (arg == "--fno-peephole") {
-            flag_no_peephole = true;
-        }
-        else if (arg == "--fno-schedule") {
-            flag_no_schedule = true;
-        }
-        else if (arg == "--enable-schedule") {
-            // Kept for compatibility; -O1 enables scheduling by default.
-        }
-        else if (arg[0] == '-') {
-            std::cerr << "Unknown option: " << arg << "\n";
-            return -1;
-        }
-        else {
-            filename = argv[i];
-        }
-    }
-
-	if (!filename) {
-        std::cerr << "No input file provided.\n";
+    DriverOptions options;
+    if (!parseArgs(argc, argv, options))
         return -1;
-    }
 
-    yyin = fopen(filename, "r");
+    yyin = fopen(options.input, "r");
     if (!yyin) {
-        std::cerr << "Failed to open input file: " << filename << "\n";
+        std::cerr << "Failed to open input file: " << options.input << "\n";
         return -1;
     }
 
-	/* frontend */
-	// Lexer, Parser, and generate AST
-	yyparse();
+    yyparse();
 
-	/* mid */
-	// Generate IR from AST
-	GenIR genIR;
-	root->accept(genIR);
-	std::unique_ptr<Module> m = genIR.getModule();
+    GenIR genIR;
+    root->accept(genIR);
+    std::unique_ptr<Module> m = genIR.getModule();
 
-    // TODO：设计合适的Pass Pipeline
     PassManager pm;
-    pm.setDumpIR(flag_dump_ir);
-    pm.setVerifyIR(flag_verify_ir);
-	if(optLevel >= 1){
-	    pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG
-		pm.addPass(std::make_unique<Mem2Reg>());
-        pm.addPass(std::make_unique<EarlyCSE>());            // 局部公共子表达式消除
-        make_basic_clean(pm);
-        pm.addPass(std::make_unique<TailRecursionEliminate>());
-        pm.addPass(std::make_unique<ScalarExpandedInterchange>());  // 标量提升 + P-L 循环交换
-        pm.addPass(std::make_unique<Reassociate>());          // 重关联规范化
-        make_basic_clean(pm);                                 // ConstantFold + InstCombine + DCE
+    pm.setDumpIR(options.dumpIR);
+    pm.setVerifyIR(options.verifyIR);
+    buildOptimizationPipeline(pm, options.optLevel);
+    pm.run(m.get());
 
-        pm.addPass(std::make_unique<LocalCopyPropagation>()); // 局部复制传播
-        make_basic_clean(pm);
+    std::ofstream fout;
+    std::ostream *out = nullptr;
+    if (!openOutput(options, fout, out))
+        return -1;
 
-        // pm.addPass(std::make_unique<GVN>());                  // 全局值编号
-        make_basic_clean(pm);
+    if (options.printAsm) {
+        Arm64CodeGen codegen(m.get(), *out);
+        configureBackend(codegen, options);
+        codegen.generate();
+    } else if (options.printIR) {
+        *out << m->print();
+    }
 
-        pm.addPass(std::make_unique<BitFuncRecognize>());     // 位级抽象解释识别位运算仿真
-        pm.addPass(std::make_unique<InlineExpand>());         // 内联展开（SSA + 尾递归消除后）
-        pm.addPass(std::make_unique<LocalCopyPropagation>()); // 传播 CSE 产生的复制
-        pm.addPass(std::make_unique<GlobalScalarPromotion>()); // 全局标量→alloca，消除热循环中的全局 load/store
-        pm.addPass(std::make_unique<Mem2Reg>());              // 将上一步新增的 alloca 提升为 SSA 寄存器
-        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
-
-        pm.addPass(std::make_unique<UnifyExitNodes>());       // 统一返回点（方便 codegen）
-        pm.addPass(std::make_unique<CFGSimplify>());          // 化简 CFG（清理内联产生的冗余分支等）
-
-        pm.addPass(std::make_unique<LoopSimplify>());          // 循环规范化（插入 preheader）
-        // // pm.addPass(std::make_unique<SplitGEP>());          // GEP split → LICM hoist
-        pm.addPass(std::make_unique<LICM>());                 // 循环不变式外提
-        pm.addPass(std::make_unique<LoopVectorize>());        // 循环向量化
-        pm.addPass(std::make_unique<IndVarStrengthReduce>()); // 归纳变量强度削弱
-        pm.addPass(std::make_unique<LoopRepFold>());          // 循环重复折叠（消除外层计数循环）
-        pm.addPass(std::make_unique<LoopUnroll>());           // 循环展开
-        make_deep_clean(pm);                                  // basic + CFGSimplify + basic
-
-        make_basic_clean(pm);                                 // 最后再来一轮基本清理
-        make_cfg_clean(pm);                                   // 最后再来一轮 CFG 清理
-
-	}
-	// For specific pass test
-	if(optLevel >= 2){
-        pm.addPass(std::make_unique<LoopSimplify>());
-	}
-	pm.run(m.get());
-
-	std::ofstream fout;
-	std::ostream *out = &std::cout;
-	if (output != "-") {
-		fout.open(output);
-		if (!fout.is_open()) {
-			std::cerr << "failed to open output file: " << output << std::endl;
-			return -1;
-		}
-		out = &fout;
-	}
-
-	/* backend */
-	if (print_asm) {
-		Arm64CodeGen codegen(m.get(), *out);
-		codegen.setEnableRegAlloc(optLevel >= 1);
-		codegen.setNoPeephole(flag_no_peephole || optLevel < 1);
-        codegen.setNoSchedule(flag_no_schedule || optLevel < 1);
-		codegen.generate();
-	}else if (print_ir) {
-		*out << m->print();
-	}
-
-	return 0;
+    return 0;
 }
