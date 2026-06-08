@@ -295,57 +295,30 @@ std::string printMachineFunction(const MachineFunction &func) {
     return out.str();
 }
 
-MachineStreamBuf::MachineStreamBuf(MachineFunction &func) : func_(func) {
-    if (func_.blocks.empty())
-        func_.blocks.push_back({});
+std::string printMachineModule(const MachineModule &module) {
+    std::ostringstream out;
+    for (const auto &inst : module.lines)
+        out << inst.text << "\n";
+    return out.str();
 }
 
-MachineStreamBuf::~MachineStreamBuf() {
-    sync();
+void appendMachineLine(MachineModule &module, const std::string &line) {
+    MachineInstr inst = MachineInstr::raw(line);
+    inst.originalIndex = module.nextIndex++;
+    module.lines.push_back(std::move(inst));
 }
 
-int MachineStreamBuf::overflow(int ch) {
-    if (ch == traits_type::eof())
-        return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
-    append(static_cast<char>(ch));
-    return ch;
-}
-
-std::streamsize MachineStreamBuf::xsputn(const char *s, std::streamsize n) {
-    for (std::streamsize i = 0; i < n; ++i)
-        append(s[i]);
-    return n;
-}
-
-int MachineStreamBuf::sync() {
-    if (!line_.empty())
-        flushLine();
-    return 0;
-}
-
-void MachineStreamBuf::append(char ch) {
-    if (ch == '\n') {
-        flushLine();
-    } else {
-        line_.push_back(ch);
-    }
-}
-
-void MachineStreamBuf::flushLine() {
-    MachineInstr mi = parseMachineInstr(line_, lineIndex_++);
-    appendMachineInstr(func_, std::move(mi));
-    line_.clear();
+void appendMachineText(MachineModule &module, const std::string &text) {
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line))
+        appendMachineLine(module, line);
 }
 
 MachineEmitter::MachineEmitter(MachineFunction &func)
-    : func_(func), streamBuf_(func), stream_(&streamBuf_) {}
-
-std::ostream &MachineEmitter::stream() {
-    return stream_;
-}
+    : func_(func) {}
 
 void MachineEmitter::emit(MachineInstr inst) {
-    stream_.flush();
     appendMachineInstr(func_, std::move(inst));
 }
 

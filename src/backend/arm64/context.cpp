@@ -6,32 +6,19 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <iostream>
 #include <utility>
 
 // ---- Arm64FuncContext ----
 
-Arm64FuncContext::Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc)
-    : func_(f), os_(os), enableRegAlloc_(enableRegAlloc) {}
-
 Arm64FuncContext::Arm64FuncContext(Function *f, MachineEmitter &emitter, bool enableRegAlloc)
-    : func_(f), os_(emitter.stream()), machineEmitter_(&emitter),
-      enableRegAlloc_(enableRegAlloc) {}
+    : func_(f), machineEmitter_(emitter), enableRegAlloc_(enableRegAlloc) {}
 
 void Arm64FuncContext::emitMachineLine(const std::string &line) {
-    if (machineEmitter_) {
-        machineEmitter_->emitLine(line);
-    } else {
-        os_ << line << "\n";
-    }
+    machineEmitter_.emitLine(line);
 }
 
 void Arm64FuncContext::emitMachineInstr(MachineInstr inst) {
-    if (machineEmitter_) {
-        machineEmitter_->emit(std::move(inst));
-    } else {
-        os_ << inst.text << "\n";
-    }
+    machineEmitter_.emit(std::move(inst));
 }
 
 void Arm64FuncContext::emitMachineInstrLine(const std::string &line, MOpcode opcode,

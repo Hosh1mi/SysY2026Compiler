@@ -2,7 +2,6 @@
 #include "machine.hpp"
 #include "../../mid/ir/ir.hpp"
 #include <map>
-#include <ostream>
 #include <set>
 #include <utility>
 #include <vector>
@@ -11,7 +10,6 @@ class Arm64CodeGen;
 
 class Arm64FuncContext {
 public:
-    Arm64FuncContext(Function *f, std::ostream &os, bool enableRegAlloc = true);
     Arm64FuncContext(Function *f, MachineEmitter &emitter, bool enableRegAlloc = true);
     void generate();
 
@@ -115,8 +113,7 @@ private:
     const char *fcmpCond(FCmpInst::FCmpOp op);
 
     Function *func_;
-    std::ostream &os_;
-    MachineEmitter *machineEmitter_ = nullptr;
+    MachineEmitter &machineEmitter_;
     bool enableRegAlloc_ = true;
 
     std::map<Value*, int> slots_;    // Value* → SP offset (negative)

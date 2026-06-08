@@ -1,4 +1,5 @@
 #pragma once
+#include "machine.hpp"
 #include "../../mid/ir/ir.hpp"
 #include <ostream>
 
@@ -12,8 +13,7 @@ public:
     void setNoSchedule(bool v) { no_schedule_ = v; }
 
 private:
-    void emitGlobal(GlobalVariable *gv);
-    void emitFunction(Function *f);
+    void emitGlobal(MachineModule &module, GlobalVariable *gv);
     void emitExtern(Function *f);
 
     Module *m_;

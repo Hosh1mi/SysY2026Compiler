@@ -18,6 +18,8 @@
 #endif
 
 void Arm64CodeGen::generate() {
+    MachineModule module;
+
     // 1. 分类全局变量
     std::vector<GlobalVariable*> rodata, data, bss;
     for (auto gv : m_->global_list_) {
@@ -83,7 +85,6 @@ void Arm64CodeGen::generate() {
 
                     Arm64FuncContext ctx(f, emitter, enable_regalloc_);
                     ctx.generate();
-                    emitter.stream().flush();
 
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
@@ -103,31 +104,39 @@ void Arm64CodeGen::generate() {
 
     // 5. 输出 .text + 函数代码
     if (!funcs.empty()) {
-        os_ << "\t.text\n";
+        appendMachineLine(module, "\t.text");
         for (const auto &str : results) {
-            os_ << str;
+            appendMachineText(module, str);
         }
     }
 
     // 6. 输出数据段：.data -> .bss -> .section .rodata
     auto emitGroup = [&](const char* sec, const std::vector<GlobalVariable*>& gvs) {
         if (gvs.empty()) return;
-        os_ << sec << "\n";
+        appendMachineLine(module, sec);
         for (auto gv : gvs) {
-            emitGlobal(gv);
+            emitGlobal(module, gv);
         }
     };
     emitGroup("\t.data",            data);
     emitGroup("\t.bss",             bss);
     emitGroup("\t.section .rodata", rodata);
+
+    os_ << printMachineModule(module);
 }
 
-void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
+void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
     auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
 
-    os_ << "\t.global " << gv->name_ << "\n";
-    os_ << "\t.p2align 2\n";
-    os_ << gv->name_ << ":\n";
+    appendMachineLine(module, "\t.global " + gv->name_);
+    appendMachineLine(module, "\t.p2align 2");
+    appendMachineLine(module, gv->name_ + ":");
+
+    auto appendWordHex = [&](int bits) {
+        std::ostringstream line;
+        line << "\t.word 0x" << std::hex << bits;
+        appendMachineLine(module, line.str());
+    };
 
     if (auto cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
         int size = 4;
@@ -147,14 +156,14 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
             }
             size = totalElements * elemSize;
         }
-        os_ << "\t.zero " << size << "\n";
+        appendMachineLine(module, "\t.zero " + std::to_string(size));
     } else if (auto ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {
-        os_ << "\t.word " << ci->value_ << "\n";
+        appendMachineLine(module, "\t.word " + std::to_string(ci->value_));
     } else if (auto cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {
         float val = cf->value_;
         int bits;
         std::memcpy(&bits, &val, sizeof(bits));
-        os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
+        appendWordHex(bits);
     } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
         std::function<bool(Constant*)> allZero = [&](Constant *elem) -> bool {
             if (auto eci = dynamic_cast<ConstantInt*>(elem))
@@ -184,33 +193,28 @@ void Arm64CodeGen::emitGlobal(GlobalVariable *gv) {
                 elemSize = static_cast<IntegerType*>(cur)->num_bits_ / 8;
             else if (cur->tid_ == Type::FloatTyID)
                 elemSize = 4;
-            os_ << "\t.zero " << (totalElements * elemSize) << "\n";
+            appendMachineLine(module, "\t.zero " + std::to_string(totalElements * elemSize));
         } else {
             std::function<void(Constant*)> emitElem = [&](Constant *elem) {
                 if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
-                    os_ << "\t.word " << eci->value_ << "\n";
+                    appendMachineLine(module, "\t.word " + std::to_string(eci->value_));
                 } else if (auto ecf = dynamic_cast<ConstantFloat*>(elem)) {
                     float val = ecf->value_;
                     int bits;
                     std::memcpy(&bits, &val, sizeof(bits));
-                    os_ << "\t.word 0x" << std::hex << bits << std::dec << "\n";
+                    appendWordHex(bits);
                 } else if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
                     for (auto sub : eca->const_array) emitElem(sub);
                 } else if (dynamic_cast<ConstantZero*>(elem)) {
-                    os_ << "\t.word 0\n";
+                    appendMachineLine(module, "\t.word 0");
                 }
             };
             for (auto elem : ca->const_array) emitElem(elem);
         }
     }
-    os_ << "\n";
+    appendMachineLine(module, "");
 }
 
 void Arm64CodeGen::emitExtern(Function *f) {
     (void)f;
-}
-
-void Arm64CodeGen::emitFunction(Function *f) {
-    Arm64FuncContext ctx(f, os_, enable_regalloc_);
-    ctx.generate();
 }

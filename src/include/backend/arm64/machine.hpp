@@ -1,9 +1,7 @@
 #pragma once
 
 #include <initializer_list>
-#include <ostream>
 #include <set>
-#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -65,39 +63,25 @@ struct MachineFunction {
     int nextIndex = 0;
 };
 
+struct MachineModule {
+    std::vector<MachineInstr> lines;
+    int nextIndex = 0;
+};
+
 MachineInstr parseMachineInstr(const std::string &line, int originalIndex);
 std::string printMachineFunction(const MachineFunction &func);
+std::string printMachineModule(const MachineModule &module);
 void appendMachineInstr(MachineFunction &func, MachineInstr inst);
-
-class MachineStreamBuf : public std::streambuf {
-public:
-    explicit MachineStreamBuf(MachineFunction &func);
-    ~MachineStreamBuf() override;
-
-protected:
-    int overflow(int ch) override;
-    std::streamsize xsputn(const char *s, std::streamsize n) override;
-    int sync() override;
-
-private:
-    void append(char ch);
-    void flushLine();
-
-    MachineFunction &func_;
-    std::string line_;
-    int lineIndex_ = 0;
-};
+void appendMachineLine(MachineModule &module, const std::string &line);
+void appendMachineText(MachineModule &module, const std::string &text);
 
 class MachineEmitter {
 public:
     explicit MachineEmitter(MachineFunction &func);
 
-    std::ostream &stream();
     void emit(MachineInstr inst);
     void emitLine(const std::string &line);
 
 private:
     MachineFunction &func_;
-    MachineStreamBuf streamBuf_;
-    std::ostream stream_;
 };
