@@ -175,18 +175,15 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
 }
 
 static void addLoopPipeline(PassManager &pm) {
-    // pm.addPass(std::make_unique<UnifyExitNodes>());
+    pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LICM>());
-    // pm.addPass(std::make_unique<LoopVectorize>());
+    pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
-    pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopUnroll>());
     addDeepCleanup(pm);
-    pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LoopVectorize>());
 }
 
 static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
@@ -198,7 +195,6 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addInterproceduralAndGlobals(pm);
     addLoopPipeline(pm);
     addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
 
     /* Only used for experiment */

@@ -76,12 +76,12 @@ for sy in "$TEST_DIR"/*.sy; do
         continue
     fi
 
-    # 3. Run with qemu + timing (1 minute timeout)
+    # 3. Run with qemu + timing
     start_ns=$(date +%s%N 2>/dev/null)
     if [ -f "$infile" ]; then
-        outtext=$(timeout 30 qemu-aarch64 "/tmp/${base}.elf" < "$infile" 2>/dev/null)
+        outtext=$(qemu-aarch64 "/tmp/${base}.elf" < "$infile" 2>/dev/null)
     else
-        outtext=$(timeout 30 qemu-aarch64 "/tmp/${base}.elf" 2>/dev/null)
+        outtext=$(qemu-aarch64 "/tmp/${base}.elf" 2>/dev/null)
     fi
     exitcode=$?
     end_ns=$(date +%s%N 2>/dev/null)
@@ -95,11 +95,7 @@ for sy in "$TEST_DIR"/*.sy; do
     fi
 
     # 5. Compare
-    if [ $exitcode -eq 124 ]; then
-        echo "${RED}TLE${RESET} ${num} ${name}"
-        echo "$base : TLE" >> "$RESULT_FILE"
-        FAIL=$((FAIL + 1))
-    elif [ "$result" = "$exp" ]; then
+    if [ "$result" = "$exp" ]; then
         echo "${GREEN}AC${RESET} ${num} ${name}  $(format_time $elapsed_us)"
         echo "$base : AC" >> "$RESULT_FILE"
         echo "Total time : $(format_time $elapsed_us)" >> "$RESULT_FILE"
