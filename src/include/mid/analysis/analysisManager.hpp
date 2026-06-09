@@ -3,6 +3,7 @@
 #include "basicAliasAnalysis.hpp"
 #include "loopInfo.hpp"
 #include "preservedAnalyses.hpp"
+#include "rangeAnalysis.hpp"
 #include "scalarEvolution.hpp"
 
 #include <map>
@@ -14,6 +15,7 @@ public:
     BasicAliasAnalysis &getBasicAA(Module *module);
     LoopInfo &getLoopInfo(Function *func);
     ScalarEvolution &getScalarEvolution(Function *func);
+    RangeAnalysis &getRangeAnalysis(Function *func);
 
     void invalidate(Module *module, const PreservedAnalyses &pa);
     void invalidateFunction(Function *func, const PreservedAnalyses &pa);
@@ -24,6 +26,7 @@ private:
     struct FunctionCache {
         std::unique_ptr<LoopInfo> loopInfo;
         std::unique_ptr<ScalarEvolution> scalarEvolution;
+        std::unique_ptr<RangeAnalysis> rangeAnalysis;
     };
 
     void debug(const char *event, const char *analysis, const std::string &unit) const;
