@@ -656,6 +656,153 @@ static bool isControlFlowBarrier(const std::string &mnemonic) {
 	       (mnemonic.size() >= 2 && mnemonic[0] == 'b' && mnemonic[1] == '.');
 }
 
+// ── RULE: (and x, 1) == 0 → tbz / (and x, 1) != 0 → tbnz ───────
+//
+// Patterns matched:
+//   and wN, wX, #1  →  cbz wN, label    →  tbz wX, #0 label
+//   and wN, wX, #1  →  cbnz wN, label   →  tbnz wX, #0 label
+//   and wN, wX, #1  →  tst wN, wN  →  b.eq label  →  tbz wX, #0 label
+//   and wN, wX, #1  →  tst wN, wN  →  b.ne label  →  tbnz wX, #0 label
+//   and wN, wX, #1  →  cmp wN, #0  →  b.eq label  →  tbz wX, #0 label
+//   and wN, wX, #1  →  cmp wN, #0  →  b.ne label  →  tbnz wX, #0 label
+//
+// Also handles xN/xX (64-bit) registers.
+
+// Does this instruction set NZCV flags?
+static bool setsFlags(const std::string &mnemonic) {
+	if (mnemonic == "cmp" || mnemonic == "tst" ||
+	    mnemonic == "fcmps" || mnemonic == "fcmpe" ||
+	    mnemonic == "adds" || mnemonic == "subs" ||
+	    mnemonic == "ands")
+		return true;
+	// The `s` suffix on ALU instructions (adds, subs, ands) sets flags.
+	if (mnemonic.size() >= 2 && mnemonic.back() == 's')
+		return true;
+	return false;
+}
+
+static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx) {
+	ParsedLine andLine = parseLine(block.instrs[idx].text);
+	if (andLine.kind != LineKind::Instruction) return false;
+	if (andLine.mnemonic != "and") return false;
+	if (andLine.operands.size() != 3) return false;
+	if (andLine.operands[2] != "#1") return false;
+
+	const std::string &tempReg = andLine.operands[0];
+	const std::string &srcReg  = andLine.operands[1];
+	char cls = regClass(tempReg);
+	if (cls != 'w' && cls != 'x') return false;
+	if (regClass(srcReg) != cls) return false;
+
+	// Scan forward for a consumer of tempReg.
+	// We stop at barriers (calls, CF changes, writes to tempReg).
+	enum { MaxScan = 8 };
+	size_t scanEnd = std::min(idx + MaxScan, block.instrs.size());
+
+	for (size_t i = idx + 1; i < scanEnd; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction) continue;
+
+		if (isCallBarrier(line.mnemonic)) return false;
+
+		// tempReg must not be redefined before consumption
+		if (lineWritesReg(line, tempReg)) return false;
+
+		// ── Direct cbz / cbnz ──────────────────────────────────
+		bool isCbz  = (line.mnemonic == "cbz"  && line.operands.size() >= 2 &&
+		               line.operands[0] == tempReg);
+		bool isCbnz = (line.mnemonic == "cbnz" && line.operands.size() >= 2 &&
+		               line.operands[0] == tempReg);
+
+		// Bail on other control-flow barriers (unrelated cbz/cbnz, ret, b, etc.)
+		if (!isCbz && !isCbnz && isControlFlowBarrier(line.mnemonic))
+			return false;
+
+		if (isCbz || isCbnz) {
+			// Make sure tempReg isn't read by any instruction between
+			// the and and the cbz/cbnz (other than the cbz/cbnz itself).
+			bool usedElsewhere = false;
+			for (size_t j = idx + 1; j < i; ++j) {
+				ParsedLine between = parseLine(block.instrs[j].text);
+				if (between.kind != LineKind::Instruction) continue;
+				if (lineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
+			}
+			if (usedElsewhere) return false;
+
+			const std::string &label = line.operands[1];
+			std::string newMnemonic = isCbz ? "tbz" : "tbnz";
+			replaceMachineInstr(block.instrs[i],
+			                    makeMachineInsn(newMnemonic,
+			                                    {srcReg, "#0", label}));
+			block.instrs.erase(block.instrs.begin() + idx);
+			return true;
+		}
+
+		// ── tst wN, wN  or  cmp wN, #0 → b.eq / b.ne ─────────
+		bool isTst = (line.mnemonic == "tst" && line.operands.size() >= 2 &&
+		              line.operands[0] == tempReg && line.operands[1] == tempReg);
+		bool isCmpZero = (line.mnemonic == "cmp" && line.operands.size() >= 2 &&
+		                  line.operands[0] == tempReg &&
+		                  line.operands[1] == "#0");
+
+		if (!isTst && !isCmpZero) {
+			// tempReg is used by some other instruction — bail out
+			if (lineUsesReg(line, tempReg)) return false;
+			continue;
+		}
+
+		// tempReg should not be read by other instructions between and → tst/cmp
+		bool usedElsewhere = false;
+		for (size_t j = idx + 1; j < i; ++j) {
+			ParsedLine between = parseLine(block.instrs[j].text);
+			if (between.kind != LineKind::Instruction) continue;
+			if (lineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
+		}
+		if (usedElsewhere) return false;
+
+		// Now look for b.eq / b.ne immediately following (skipping non-instructions)
+		size_t branchIdx = i + 1;
+		while (branchIdx < block.instrs.size()) {
+			ParsedLine brLine = parseLine(block.instrs[branchIdx].text);
+			if (brLine.kind == LineKind::Empty || brLine.kind == LineKind::Comment) {
+				++branchIdx;
+				continue;
+			}
+			if (brLine.kind != LineKind::Instruction) return false;
+
+			// Flags must not be clobbered between tst/cmp and the branch
+			for (size_t k = i + 1; k < branchIdx; ++k) {
+				ParsedLine between = parseLine(block.instrs[k].text);
+				if (between.kind != LineKind::Instruction) continue;
+				if (setsFlags(between.mnemonic)) return false;
+				if (between.mnemonic == "b" || between.mnemonic == "bl" ||
+				    between.mnemonic == "blr" || between.mnemonic == "ret")
+					return false;
+			}
+
+			if (brLine.mnemonic == "b.eq" && brLine.operands.size() >= 1) {
+				replaceMachineInstr(block.instrs[branchIdx],
+				                    makeMachineInsn("tbz",
+				                                    {srcReg, "#0", brLine.operands[0]}));
+				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
+				block.instrs.erase(block.instrs.begin() + idx); // remove and
+				return true;
+			}
+			if (brLine.mnemonic == "b.ne" && brLine.operands.size() >= 1) {
+				replaceMachineInstr(block.instrs[branchIdx],
+				                    makeMachineInsn("tbnz",
+				                                    {srcReg, "#0", brLine.operands[0]}));
+				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
+				block.instrs.erase(block.instrs.begin() + idx); // remove and
+				return true;
+			}
+			return false;
+		}
+		return false;
+	}
+	return false;
+}
+
 static bool tryMachineRedundantAdrp(MachineBasicBlock &block, size_t idx) {
 	ParsedLine first = parseLine(block.instrs[idx].text);
 	if (first.kind != LineKind::Instruction) return false;
@@ -890,6 +1037,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineForwardMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineAndTBZ(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
