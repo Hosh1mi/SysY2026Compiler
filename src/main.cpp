@@ -5,6 +5,7 @@
 #include "include/mid/ir/irGen.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
+#include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
@@ -16,6 +17,7 @@
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
 #include "include/mid/opt/loopRotate.hpp"
+#include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
@@ -136,6 +138,7 @@ static void addCanonicalCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
     pm.addPass(std::make_unique<InstCombine>());
+    pm.addPass(std::make_unique<DeadStoreEliminate>());
     pm.addPass(std::make_unique<DeadCodeDelete>());
 }
 
@@ -175,11 +178,12 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-static void addLoopPipeline(PassManager &pm, bool withRotate = true) {
+static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopRotate>());
+    pm.addPass(std::make_unique<PhiOpSink>());
     pm.addPass(std::make_unique<LICM>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopVectorize>());
@@ -200,14 +204,13 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     addCfgCleanup(pm);
 
-    // Full pipeline with LoopRotate controlled by opt level
-    // O2: full pipeline WITHOUT LoopRotate (baseline)
-    // O3: full pipeline WITH LoopRotate
+    // Higher opt levels run a second full round to expose cleanup and loop
+    // opportunities created by inlining and canonicalization.
     if (optLevel >= 2) {
         addSsaPreparation(pm);
         addScalarNormalization(pm);
         addInterproceduralAndGlobals(pm);
-        addLoopPipeline(pm, /*withRotate=*/optLevel >= 3);
+        addLoopPipeline(pm);
         addCanonicalCleanup(pm);
         addCfgCleanup(pm);
     }

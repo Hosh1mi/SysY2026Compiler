@@ -1,6 +1,5 @@
 .DS_Store
 .git
-docs/
 build/
 prompt/
 *.o
