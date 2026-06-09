@@ -9,6 +9,7 @@
 #include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
+#include "include/mid/opt/autoMemoization.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
 #include "include/mid/opt/instCombine.hpp"
@@ -245,7 +246,7 @@ static void addLoopPipeline(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
+static void buildOptimizationPipeline(PassManager &pm, int optLevel, Module *m) {
     if (optLevel < 1)
         return;
 
@@ -265,6 +266,11 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
+    // AutoMemoization 放在所有中端 pass 之后、codegen 之前。
+    // 仅在模块确实存在候选时才加，避免对其他用例的非确定性副作用。
+    if (AutoMemoization::moduleHasAnyCandidate(m)) {
+        pm.addPass(std::make_unique<AutoMemoization>());
+    }
 
     if (optLevel >= 2) {
         
@@ -358,7 +364,7 @@ int main(int argc, char **argv) {
     PassManager pm;
     pm.setDumpIR(options.dumpIR);
     pm.setVerifyIR(options.verifyIR);
-    buildOptimizationPipeline(pm, options.optLevel);
+    buildOptimizationPipeline(pm, options.optLevel, m.get());
     pm.run(m.get());
 
     std::ofstream fout;
