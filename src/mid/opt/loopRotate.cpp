@@ -152,9 +152,9 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
         latchTerm->get_operand(0) != header)
         return false;
-    bool hasBackedgePhi = !header->instr_list_.empty() &&
-                          header->instr_list_.front()->is_phi();
-    if (!hasBackedgePhi)
+    bool hasHeaderPhi = !header->instr_list_.empty() &&
+                        header->instr_list_.front()->is_phi();
+    if (!hasHeaderPhi)
         return false;
 
     auto *headerTerm = header->get_terminator();
