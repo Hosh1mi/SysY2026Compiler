@@ -1,0 +1,7 @@
+int fun(int a){
+    int sum = 0, i = 0;
+    while(i <= a){
+        sum = sum + i;
+    }
+    return sum;
+}

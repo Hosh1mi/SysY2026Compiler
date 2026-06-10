@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeadStoreEliminate - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="reassociate.html">Reassociate</a>
+            <a class="nav-item" href="local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="licm.html">LICM</a>
+            <a class="nav-item" href="loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="sccp.html">SCCP</a>
+            <a class="nav-item" href="const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="inst-combine.html">InstCombine</a>
+            <a class="nav-item active" href="dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 清理 Pass</div>
+      <h1>DeadStoreEliminate</h1>
+      <p>死存储消除 Pass，识别并删除冗余的"加载后原样存回"模式（<code>store (load %p), %p</code>），依赖别名分析保证指针别名关系的正确性。</p>
+    </div>
+
+    <!-- ─── 概览 ─── -->
+    <h2>概览</h2>
+    <p>DeadStoreEliminate 识别一种特定的冗余存储模式：从内存位置加载一个值，然后又将该值存回同一位置。这种 store 不改变任何内存状态，可以安全删除。</p>
+
+    <h3>执行流程</h3>
+    <div class="code-label">DeadStoreEliminate::execute</div>
+<pre><code class="language-cpp">void DeadStoreEliminate::execute(Module *module) {
+    BasicAliasAnalysis AA;
+    AA.analyze(module);                // 全模块别名分析
+    for (auto *func : module-&gt;function_list_) {
+        if (!func-&gt;is_declaration())
+            runOnFunction(func, AA);   // 每个函数独立处理
+    }
+}</code></pre>
+
+    <div class="code-label">runOnFunction — 收集 + 批量删除</div>
+<pre><code class="language-cpp">bool DeadStoreEliminate::runOnFunction(Function *func,
+                                       const BasicAliasAnalysis &amp;AA) {
+    std::vector&lt;StoreInst *&gt; toDelete;
+    for (auto *bb : func-&gt;basic_blocks_)
+        for (auto *inst : bb-&gt;instr_list_)
+            if (auto *store = dynamic_cast&lt;StoreInst *&gt;(inst))
+                if (isRedundantStore(store, AA))
+                    toDelete.push_back(store);
+    for (auto *store : toDelete)
+        if (store-&gt;parent_) store-&gt;parent_-&gt;delete_instr(store);
+    if (!toDelete.empty()) func-&gt;invalidateDominatorInfo();
+    return !toDelete.empty();
+}</code></pre>
+    <p>先收集所有冗余 store，再批量删除，避免在遍历中修改指令列表。删除后失效支配树信息。</p>
+
+    <!-- ─── 冗余判定 ─── -->
+    <h2>冗余存储判定</h2>
+    <p>核心函数 <code>isRedundantStore</code> 判断一个 store 是否可以被消除。判定条件如下：</p>
+
+    <h3>模式识别</h3>
+    <p>目标模式：<code>store (load %ptr), %ptr</code>，即 store 的源操作数是一条 load 指令。</p>
+
+    <h3>五项判定条件</h3>
+    <table>
+      <thead><tr><th>#</th><th>条件</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>store 的源操作数是 LoadInst</td><td>存储的值来自内存加载</td></tr>
+        <tr><td>2</td><td>别名分析：storePtr 与 loadPtr 必须 MustAlias</td><td>确保读写的确实是同一内存位置</td></tr>
+        <tr><td>3</td><td>loadBB 支配 storeBB</td><td>保证 load 一定在 store 之前执行</td></tr>
+        <tr><td>4</td><td>同块时 load 必须在 store 之前</td><td>同块内用 instBefore 检查指令顺序</td></tr>
+        <tr><td>5</td><td>load 到 store 之间无指令修改目标指针</td><td>通过 ModRef 分析检查中间是否有 store/call 修改了 storePtr</td></tr>
+      </tbody>
+    </table>
+
+    <div class="code-label">isRedundantStore — 完整判定逻辑</div>
+<pre><code class="language-cpp">bool DeadStoreEliminate::isRedundantStore(StoreInst *store,
+                                          const BasicAliasAnalysis &amp;AA) {
+    // 1. store 的源操作数必须是 load
+    auto *load = dynamic_cast&lt;LoadInst *&gt;(store-&gt;get_operand(0));
+    if (!load) return false;
+
+    Value *storePtr = store-&gt;get_operand(1);
+    Value *loadPtr  = load-&gt;get_operand(0);
+
+    // 2. 别名分析：必须 MustAlias
+    if (AA.alias(storePtr, loadPtr) != AliasResult::MustAlias)
+        return false;
+
+    // 3. 支配关系：load 所在块必须支配 store 所在块
+    if (!func-&gt;dominates(loadBB, storeBB)) return false;
+
+    // 4. 同块顺序检查
+    if (loadBB == storeBB &amp;&amp; !instBefore(load, store)) return false;
+
+    // 5. 中间指令检查：load 到 store 的所有路径上不能有对 storePtr 的修改
+    auto fromLoad = forwardReachableFrom(loadBB);
+    auto toStore  = backwardReachableFrom(storeBB);
+    for (auto *bb : func-&gt;basic_blocks_) {
+        if (!fromLoad.count(bb) || !toStore.count(bb)) continue;
+        // 只检查 load 之后到 store 之前的指令
+        bool afterLoad = (bb != loadBB);
+        for (auto *inst : bb-&gt;instr_list_) {
+            if (inst == load)  { afterLoad = true; continue; }
+            if (inst == store) break;
+            if (!afterLoad)    continue;
+            if (isModSet(AA.getModRefInfo(inst, storePtr)))
+                return false;  // 中间有指令修改了 storePtr
+        }
+    }
+    return true;
+}</code></pre>
+
+    <h3>路径覆盖分析</h3>
+    <p>第 5 个条件需要检查从 load 到 store 的<strong>所有可能路径</strong>。实现采用双向可达性交集：</p>
+    <ul>
+      <li><code>forwardReachableFrom(loadBB)</code> — 从 load 所在块沿后继方向 BFS，得到所有可达块</li>
+      <li><code>backwardReachableFrom(storeBB)</code> — 从 store 所在块沿前驱方向 BFS，得到所有可达块</li>
+      <li>两者的<strong>交集</strong>就是所有可能位于 load 到 store 之间的基本块</li>
+    </ul>
+    <p>对交集中的每个块，只检查 load 之后（含 load 下一指令）到 store 之前（不含 store 本身）的指令。如果任何指令对 storePtr 有 Mod（写入）行为，则 store 不是冗余的。</p>
+
+    <!-- ─── 示例 ─── -->
+    <h2>示例</h2>
+
+    <h3>示例 1：简单冗余存储</h3>
+    <div class="code-label">优化前 — SysY 源码</div>
+<pre><code class="language-cpp">int g;
+void foo() {
+    int tmp = g;   // load
+    g = tmp;       // store 同一个值，冗余
+}</code></pre>
+
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">@g = global i32 0
+
+define void @foo() {
+label_entry:
+  %tmp = load i32, i32* @g   ; 从 @g 加载
+  store i32 %tmp, i32* @g     ; 存回 @g，冗余
+  ret void
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define void @foo() {
+label_entry:
+  ret void
+}</code></pre>
+    <p>load 和 store 操作同一指针 @g，中间无任何修改，store 被消除。load 随后会被 DeadCodeDelete 清理（无使用者）。</p>
+
+    <h3>示例 2：非冗余 — 中间有修改</h3>
+    <div class="code-label">不可消除的场景</div>
+<pre><code class="language-cpp">define void @bar(i32* %p) {
+label_entry:
+  %v = load i32, i32* %p
+  store i32 42, i32* %p       ; 中间修改了 %p 指向的内存
+  store i32 %v, i32* %p       ; 不是冗余！%p 已被修改
+  ret void
+}</code></pre>
+    <p>中间的 <code>store i32 42, i32* %p</code> 修改了 %p 指向的内存，因此最后的 store 不是简单的"原样存回"，不可消除。</p>
+
+    <h3>示例 3：非冗余 — 别名不确定</h3>
+    <div class="code-label">不可消除的场景</div>
+<pre><code class="language-cpp">define void @baz(i32* %p, i32* %q) {
+label_entry:
+  %v = load i32, i32* %p
+  store i32 99, i32* %q       ; 可能修改 %p（如果 %p 和 %q 别名）
+  store i32 %v, i32* %p       ; 不可消除：别名分析不确定
+  ret void
+}</code></pre>
+    <p>别名分析无法确认 %p 和 %q 不别名（不是 MustAlias），因此中间的 store 可能修改了 %p 指向的内存，保守地保留最后的 store。</p>
+
+    <h3>示例 4：跨块冗余存储</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">@g = global i32 0
+
+define void @cross_bb(i32 %cond) {
+entry:
+  %v = load i32, i32* @g       ; load 在 entry 块
+  br label %next
+
+next:                           ; entry 支配 next
+  store i32 %v, i32* @g        ; 中间无修改，冗余
+  ret void
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define void @cross_bb(i32 %cond) {
+entry:
+  %v = load i32, i32* @g
+  br label %next
+
+next:
+  ret void
+}</code></pre>
+    <p>load 在 entry 块，store 在 next 块。entry 支配 next，且两个块之间无指令修改 @g，因此 store 被消除。</p>
+
+    <!-- ─── 辅助函数 ─── -->
+    <h2>辅助函数</h2>
+    <table>
+      <thead><tr><th>函数</th><th>功能</th></tr></thead>
+      <tbody>
+        <tr><td><code>instBefore(a, b)</code></td><td>检查指令 a 是否在 b 之前（同块内线性扫描）</td></tr>
+        <tr><td><code>forwardReachableFrom(start)</code></td><td>BFS 后继方向，返回所有可达块</td></tr>
+        <tr><td><code>backwardReachableFrom(start)</code></td><td>BFS 前驱方向，返回所有可达块</td></tr>
+        <tr><td><code>AA.alias(a, b)</code></td><td>别名分析：返回 MustAlias/NoAlias/MayAlias</td></tr>
+        <tr><td><code>AA.getModRefInfo(inst, ptr)</code></td><td>查询指令对 ptr 的 Mod/Ref 行为</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── 源码位置 ─── -->
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/mid/opt/deadStoreEliminate.hpp</code> — 类定义</li>
+      <li><code>src/mid/opt/deadStoreEliminate.cpp</code> — 实现（129 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

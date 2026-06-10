@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SCCP - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="reassociate.html">Reassociate</a>
+            <a class="nav-item" href="local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="licm.html">LICM</a>
+            <a class="nav-item" href="loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item active" href="sccp.html">SCCP</a>
+            <a class="nav-item" href="const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 清理 Pass</div>
+      <h1>SCCP</h1>
+      <p>稀疏条件常量传播（Sparse Conditional Constant Propagation），同时完成常量传播与死代码分析，通过三值格上的不动点迭代推断每个 SSA 值的常量性，然后替换常量指令并折叠条件分支。</p>
+    </div>
+
+    <!-- ─── 格值模型 ─── -->
+    <h2>格值模型</h2>
+    <p>SCCP 使用三值格（Lattice）表示每个 SSA 值的已知信息：</p>
+    <table>
+      <thead><tr><th>格值</th><th>含义</th><th>典型场景</th></tr></thead>
+      <tbody>
+        <tr><td><strong>UNDEF</strong></td><td>尚未确定（可能是死代码）</td><td>初始状态；无使用者或操作数未计算</td></tr>
+        <tr><td><strong>CONSTANT</strong></td><td>编译期已知的常量值</td><td><code>add i32 2, 3</code> → CONSTANT(5)</td></tr>
+        <tr><td><strong>OVERDEF</strong></td><td>非恒定（运行时可变）</td><td>函数参数、load、call 返回值</td></tr>
+      </tbody>
+    </table>
+    <p>格值的偏序关系：UNDEF &lt; CONSTANT &lt; OVERDEF。值只能沿格向上移动（单调性保证收敛）。</p>
+
+    <h3>Meet 运算</h3>
+    <p>phi 节点使用 meet 运算合并来自不同前驱的格值：</p>
+    <div class="code-label">meet — 格值合并规则</div>
+<pre><code class="language-cpp">static LatticeValue meet(const LatticeValue &amp;a, const LatticeValue &amp;b) {
+    if (a.isOverdef() || b.isOverdef()) return LV_OVERDEF;  // 任一 OVERDEF → OVERDEF
+    if (a.isUndef()) return b;                               // UNDEF 不贡献信息
+    if (b.isUndef()) return a;
+    if (a.constVal() == b.constVal()) return a;              // 同一常量 → 保持
+    return LV_OVERDEF;                                       // 不同常量 → OVERDEF
+}</code></pre>
+
+    <!-- ─── 初始状态 ─── -->
+    <h2>初始状态</h2>
+    <div class="code-label">初始化 — 常量已知，参数 OVERDEF，其余 UNDEF</div>
+<pre><code class="language-cpp">// 所有指令初始化为 UNDEF（可能死代码或待计算）
+for (auto *bb : func-&gt;basic_blocks_)
+    for (auto *inst : bb-&gt;instr_list_)
+        lattice[inst] = LV_UNDEF;
+// 函数参数为 OVERDEF（调用者可能传任意值）
+for (auto *ci : func-&gt;arguments_)
+    lattice[ci] = LV_OVERDEF;
+// ConstantInt 操作数在 getLat() 中直接返回常量值</code></pre>
+
+    <!-- ─── 不动点传播 ─── -->
+    <h2>不动点传播</h2>
+    <p>SCCP 的核心是一个交替执行的两阶段迭代：</p>
+    <ol>
+      <li><strong>可达性分析</strong>：BFS 遍历基本块，但尊重已知常量分支——如果条件已为常量，只将确定跳转的目标块加入可达集合</li>
+      <li><strong>格值更新</strong>：对每个可达块中的每条指令，重新计算格值，若有变化则继续迭代</li>
+    </ol>
+    <p>最多迭代 10 轮，直到格值不再变化或达到上限。</p>
+
+    <h3>条件分支感知可达性</h3>
+    <div class="code-label">BFS 中的常量分支感知</div>
+<pre><code class="language-cpp">auto *br = dynamic_cast&lt;BranchInst*&gt;(t);
+if (br &amp;&amp; br-&gt;num_ops_ == 3) {  // 条件分支
+    auto cond = getLat(br-&gt;get_operand(0));
+    if (cond.isConstant()) {
+        // 条件已知为常量：只将确定方向加入可达
+        auto *taken = static_cast&lt;BasicBlock*&gt;(
+            br-&gt;get_operand(cond.constVal() ? 1 : 2));
+        reachable.insert(taken);
+    } else {
+        // 条件未知：两个方向都可达
+        for (unsigned i = 1; i &lt;= 2; i++)
+            reachable.insert(static_cast&lt;BasicBlock*&gt;(br-&gt;get_operand(i)));
+    }
+}</code></pre>
+    <p>这是 SCCP 相比普通常量传播的关键优势：不可达块中的指令不参与格值计算，其 phi 入边也被忽略，从而能发现更多常量。</p>
+
+    <h3>Phi 节点的格值计算</h3>
+    <p>phi 只对<strong>可达前驱</strong>的入边做 meet 运算：</p>
+    <div class="code-label">Phi 格值计算</div>
+<pre><code class="language-cpp">LatticeValue val = LV_UNDEF;
+for (unsigned i = 0; i &lt; phi-&gt;num_ops_; i += 2) {
+    // 只考虑来自可达块的入边
+    if (!reachable.count(static_cast&lt;BasicBlock*&gt;(phi-&gt;get_operand(i + 1))))
+        continue;
+    val = meet(val, getLat(phi-&gt;get_operand(i)));
+}</code></pre>
+
+    <!-- ─── 传输函数 ─── -->
+    <h2>传输函数</h2>
+    <p>对每条指令，根据操作类型和操作数格值计算结果格值：</p>
+
+    <h3>二元运算</h3>
+    <p>支持 add、sub、mul、sdiv、srem、and、or、xor、shl、ashr。含两个特殊优化：</p>
+    <ul>
+      <li><strong>乘零/与零</strong>：即使另一个操作数为 OVERDEF，<code>x * 0</code> 和 <code>x &amp; 0</code> 仍为 CONSTANT(0)</li>
+      <li><strong>或全一</strong>：即使另一个操作数为 OVERDEF，<code>x | -1</code> 仍为 CONSTANT(-1)</li>
+    </ul>
+    <div class="code-label">evalBinOp — 二元运算求值</div>
+<pre><code class="language-cpp">static int evalBinOp(Instruction::OpID op, int a, int b, bool &amp;valid) {
+    valid = true;
+    switch (op) {
+    case Instruction::Add:  return a + b;
+    case Instruction::Sub:  return a - b;
+    case Instruction::Mul:  return a * b;
+    case Instruction::SDiv: return b ? a / b : (valid = false, 0);
+    case Instruction::SRem: return b ? a % b : (valid = false, 0);
+    case Instruction::And:  return a &amp; b;
+    case Instruction::Or:   return a | b;
+    case Instruction::Xor:  return a ^ b;
+    case Instruction::Shl:  return a &lt;&lt; b;
+    case Instruction::AShr: return a &gt;&gt; b;
+    default: valid = false; return 0;
+    }
+}</code></pre>
+
+    <h3>整数比较 (icmp)</h3>
+    <p>当两个操作数都是常量时，直接求值比较结果，支持 eq、ne、sgt、sge、slt、sle 六种谓词。</p>
+
+    <h3>零扩展 (zext)</h3>
+    <p>操作数为常量时直接传播（零扩展不改变非负常量的值）。</p>
+
+    <h3>Select</h3>
+    <p>条件为常量时只取确定分支的值；条件未知但两个分支值相同且为常量时，结果仍为该常量。</p>
+
+    <h3>其他指令</h3>
+    <p>call、load、store、alloca 等保守地标记为 OVERDEF。</p>
+
+    <!-- ─── 应用阶段 ─── -->
+    <h2>应用阶段</h2>
+    <p>不动点收敛后，分两步将分析结果写回 IR：</p>
+
+    <h3>1. 替换常量指令</h3>
+    <p>遍历格表，将格值为 CONSTANT 的非 phi、非终止指令替换为 <code>ConstantInt</code>，并删除原指令：</p>
+    <div class="code-label">常量指令替换</div>
+<pre><code class="language-cpp">for (auto &amp;[val, lat] : lattice) {
+    if (!lat.isConstant()) continue;
+    auto *inst = dynamic_cast&lt;Instruction*&gt;(val);
+    if (!inst || inst-&gt;is_phi() || inst-&gt;isTerminator()) continue;
+    inst-&gt;replace_all_use_with(new ConstantInt(inst-&gt;type_, lat.constVal()));
+    inst-&gt;parent_-&gt;delete_instr(inst);
+}</code></pre>
+
+    <h3>2. 折叠条件分支</h3>
+    <p>如果条件分支的格值为 CONSTANT，将条件 br 替换为无条件 br，并正确清理 phi 和 CFG 边：</p>
+    <div class="code-label">条件分支折叠</div>
+<pre><code class="language-cpp">// 确定跳转方向
+auto *taken     = condLat.constVal() ? trueDest : falseDest;
+auto *nonTarget = (taken == trueDest) ? falseDest : trueDest;
+// 清理被抛弃目标的 phi 入边
+if (nonTarget != taken)
+    removeBBFromPhi(bb, nonTarget);
+// 重建 CFG 边和终止指令
+bb-&gt;remove_succ_basic_block(trueDest);
+bb-&gt;remove_succ_basic_block(falseDest);
+trueDest-&gt;remove_pre_basic_block(bb);
+falseDest-&gt;remove_pre_basic_block(bb);
+bb-&gt;delete_instr(br);
+new BranchInst(taken, bb);</code></pre>
+
+    <!-- ─── 示例 ─── -->
+    <h2>示例</h2>
+
+    <h3>示例 1：常量传播 + 死代码消除</h3>
+    <div class="code-label">优化前 — SysY 源码</div>
+<pre><code class="language-cpp">int foo() {
+    int a = 3;
+    int b = 4;
+    int c = a + b;    // 常量 7
+    int d = c * 2;    // 常量 14
+    return d;
+}</code></pre>
+
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @foo() {
+label_entry:
+  %a = add i32 0, 3
+  %b = add i32 0, 4
+  %c = add i32 %a, %b
+  %d = mul i32 %c, 2
+  ret i32 %d
+}</code></pre>
+
+    <div class="code-label">格值推断过程</div>
+<pre><code class="language-cpp">// 第 1 轮迭代：
+%a = add i32 0, 3     → CONSTANT(3)
+%b = add i32 0, 4     → CONSTANT(4)
+%c = add i32 %a, %b   → CONSTANT(7)   （%a=3, %b=4）
+%d = mul i32 %c, 2    → CONSTANT(14)  （%c=7, 2=2）
+// 第 2 轮：无变化，收敛</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @foo() {
+label_entry:
+  ret i32 14
+}</code></pre>
+    <p>所有中间计算被替换为常量 14，中间指令被删除。</p>
+
+    <h3>示例 2：条件分支折叠</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @bar() {
+label_entry:
+  %x = add i32 5, 3       ; CONSTANT(8)
+  %cmp = icmp sgt i32 %x, 4  ; CONSTANT(1)  (8 > 4)
+  br i1 %cmp, label %then, label %else
+
+then:
+  ret i32 100
+
+else:                       ; 不可达！
+  ret i32 0
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @bar() {
+label_entry:
+  br label %then          ; 条件已折叠为无条件跳转
+
+then:
+  ret i32 100
+}</code></pre>
+    <p><code>%cmp</code> 被推断为 CONSTANT(1)，条件分支被折叠，<code>else</code> 块不再可达（后续 DeadCodeDelete/CFGSimplify 会清除）。</p>
+
+    <h3>示例 3：乘零特殊优化</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @mulzero(i32 %x) {
+label_entry:
+  %a = mul i32 %x, 0      ; %x 是 OVERDEF，但乘零仍为 CONSTANT(0)
+  %b = add i32 %a, 10     ; CONSTANT(10)
+  ret i32 %b
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @mulzero(i32 %x) {
+label_entry:
+  ret i32 10
+}</code></pre>
+    <p>尽管 <code>%x</code> 是 OVERDEF（函数参数，值未知），SCCP 利用了 <code>x * 0 = 0</code> 的代数恒等式，仍然推断出 <code>%a</code> 为 CONSTANT(0)。</p>
+
+    <h3>示例 4：Phi 与可达性交互</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @phi_demo() {
+entry:
+  br i1 1, label %A, label %B
+
+A:
+  br label %merge
+
+B:                          ; 不可达（条件恒为 1）
+  br label %merge
+
+merge:
+  %r = phi i32 [ 42, %A ], [ 99, %B ]
+  ret i32 %r
+}</code></pre>
+
+    <div class="code-label">格值推断</div>
+<pre><code class="language-cpp">// B 不可达，phi 只考虑来自 A 的入边
+%r = phi i32 [ 42, %A ]    → CONSTANT(42)  （meet 仅一个值）</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @phi_demo() {
+entry:
+  br label %A
+
+A:
+  br label %merge
+
+merge:
+  ret i32 42
+}</code></pre>
+    <p>由于分支条件为常量 1，B 块不可达，phi 的 B 入边被忽略，<code>%r</code> 被推断为 42。</p>
+
+    <!-- ─── 源码位置 ─── -->
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/mid/opt/SCCP.hpp</code> — 类定义</li>
+      <li><code>src/mid/opt/SCCP.cpp</code> — 实现（285 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

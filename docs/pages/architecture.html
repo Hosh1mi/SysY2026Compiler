@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>整体架构 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+</head>
+<body>
+
+<!-- Sidebar Toggle (mobile) -->
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<!-- ===== Sidebar ===== -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <h1>SysY Compiler</h1>
+  </div>
+  <nav class="sidebar-nav">
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>项目概览</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../index.html" data-page="index">首页</a>
+        <a class="nav-item" href="quickstart.html" data-page="quickstart">快速开始</a>
+        <a class="nav-item active" href="architecture.html" data-page="architecture">整体架构</a>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>前端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="frontend/overview.html">前端概述</a>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>中端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="analysis/overview.html">总览</a>
+            <a class="nav-item" href="analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="opt/licm.html">LICM</a>
+            <a class="nav-item" href="opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="backend/branch.html">分支处理</a>
+            <a class="nav-item" href="backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 项目概览 / 整体架构</div>
+      <h1>整体架构</h1>
+      <p>编译器采用经典的三阶段架构：前端解析、中端优化、后端代码生成，通过 LLVM 风格的 SSA IR 连接各阶段。</p>
+    </div>
+
+    <!-- ===== Pipeline ===== -->
+    <h2>编译流水线</h2>
+    <p>从源文件到汇编的完整数据流：</p>
+    <pre data-lang="text"><code>.sy 源码
+  │  Flex 词法分析
+  ▼
+Token 流
+  │  Bison 语法分析
+  ▼
+AST（抽象语法树）
+  │  Checker 语义检查
+  ▼
+AST（已校验）
+  │  GenIR（Visitor 模式）
+  ▼
+SSA IR Module
+  │  PassManager（优化 Pass）
+  ▼
+优化后 SSA IR
+  │  Arm64CodeGen
+  ▼
+ARM64 汇编 (.s)</code></pre>
+
+    <div class="callout info">
+      <div class="callout-title">驱动入口</div>
+      <p><code>main.cpp</code> 负责解析命令行参数、调用 <code>yyparse()</code> 解析源码、构建 Pass 流水线、配置后端并启动代码生成。</p>
+    </div>
+
+    <!-- ===== Frontend ===== -->
+    <h2>前端</h2>
+
+    <h3>词法与语法分析</h3>
+    <p>
+      使用 <strong>Flex</strong>（<code>lexer.l</code>）定义词法规则，<strong>Bison</strong>（<code>parser.y</code>）定义语法规则。
+      Bison 解析成功后直接构建 AST 节点，全局变量 <code>root</code> 指向根节点 <code>CompUnitAST</code>。
+    </p>
+
+    <h3>AST 设计</h3>
+    <p>
+      所有 AST 节点继承自 <code>BaseAST</code>，通过 <strong>Visitor 模式</strong>实现遍历。
+      <code>Visitor</code> 纯虚基类为每种节点定义 <code>visit()</code> 方法，Checker 和 GenIR 分别实现此接口。
+    </p>
+    <pre data-lang="cpp"><code>class BaseAST {
+public:
+    virtual ~BaseAST() = default;
+    virtual void accept(Visitor &amp;v) = 0;
+};
+
+class Visitor {
+public:
+    virtual void visit(CompUnitAST &amp;) = 0;
+    virtual void visit(FuncDefAST &amp;) = 0;
+    virtual void visit(StmtAST &amp;) = 0;
+    // ... 为每种 AST 节点定义 visit()
+};</code></pre>
+
+    <!-- ===== IR ===== -->
+    <h2>中端 IR</h2>
+
+    <h3>LLVM 风格容器层级</h3>
+    <p>IR 采用四层容器结构，与 LLVM 对齐：</p>
+    <table>
+      <thead><tr><th>层级</th><th>类</th><th>职责</th></tr></thead>
+      <tbody>
+        <tr><td>顶层</td><td><code>Module</code></td><td>全局变量列表、函数列表、基本类型单例、类型缓存</td></tr>
+        <tr><td>函数</td><td><code>Function</code></td><td>基本块列表、参数列表、惰性支配树</td></tr>
+        <tr><td>基本块</td><td><code>BasicBlock</code></td><td>指令链表、CFG 前驱/后继、活跃变量分析</td></tr>
+        <tr><td>指令</td><td><code>Instruction</code></td><td>40+ 种操作码、操作数列表、use-def 链</td></tr>
+      </tbody>
+    </table>
+
+    <h3>SSA 与 Use-Def 链</h3>
+    <p>
+      所有 IR 实体继承自 <code>Value</code> 基类，维护双向 <strong>use-def 链</strong>。每个 <code>Use</code> 记录
+      "谁在哪个操作数位置引用了我"，支持 <code>replace_all_use_with()</code> 全局替换，使优化 Pass 可以增量修改 IR。
+    </p>
+    <pre data-lang="cpp"><code>class Value {
+    Type *type_;
+    std::list&lt;Use&gt; uses_;  // 谁引用了我
+public:
+    void replace_all_use_with(Value *newVal);
+    // ...
+};</code></pre>
+
+    <h3>类型系统</h3>
+    <table>
+      <thead><tr><th>类型</th><th>说明</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td><code>IntegerType</code></td><td>整数类型</td><td><code>i1</code>（布尔）、<code>i32</code></td></tr>
+        <tr><td><code>FloatType</code></td><td>浮点类型</td><td><code>float</code></td></tr>
+        <tr><td><code>ArrayType</code></td><td>数组类型</td><td><code>[10 x i32]</code></td></tr>
+        <tr><td><code>VectorType</code></td><td>向量类型</td><td><code>&lt;4 x i32&gt;</code></td></tr>
+        <tr><td><code>PointerType</code></td><td>指针类型</td><td><code>i32*</code></td></tr>
+        <tr><td><code>FunctionType</code></td><td>函数类型</td><td><code>i32 (i32, i32*)</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>指令集</h3>
+    <p>支持 40+ 种指令操作码：</p>
+    <table>
+      <thead><tr><th>类别</th><th>操作码</th></tr></thead>
+      <tbody>
+        <tr><td>终止</td><td><code>Ret</code>, <code>Br</code></td></tr>
+        <tr><td>整数运算</td><td><code>Add</code>, <code>Sub</code>, <code>Mul</code>, <code>SDiv</code>, <code>SRem</code></td></tr>
+        <tr><td>位运算</td><td><code>Shl</code>, <code>LShr</code>, <code>AShr</code>, <code>And</code>, <code>Or</code>, <code>Xor</code></td></tr>
+        <tr><td>浮点运算</td><td><code>FAdd</code>, <code>FSub</code>, <code>FMul</code>, <code>FDiv</code></td></tr>
+        <tr><td>内存</td><td><code>Alloca</code>, <code>Load</code>, <code>Store</code>, <code>GetElementPtr</code></td></tr>
+        <tr><td>比较</td><td><code>ICmp</code>（10 种谓词）, <code>FCmp</code>（16 种谓词）</td></tr>
+        <tr><td>控制/转换</td><td><code>Select</code>, <code>PHI</code>, <code>Call</code>, <code>ZExt</code>, <code>FPtoSI</code>, <code>SItoFP</code>, <code>BitCast</code></td></tr>
+        <tr><td>向量</td><td><code>InsertElement</code></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== Analysis ===== -->
+    <h2>分析模块</h2>
+    <p>分析模块为优化 Pass 提供数据支撑，由 <code>AnalysisManager</code> 统一管理缓存与失效：</p>
+    <table>
+      <thead><tr><th>分析</th><th>类</th><th>功能</th></tr></thead>
+      <tbody>
+        <tr><td>别名分析</td><td><code>BasicAliasAnalysis</code></td><td>NoAlias / MayAlias / MustAlias + ModRef 信息</td></tr>
+        <tr><td>循环信息</td><td><code>LoopInfo</code></td><td>自然循环检测、嵌套树、preheader/latches/exits、规范归纳变量</td></tr>
+        <tr><td>标量演化</td><td><code>ScalarEvolution</code></td><td>SCEV 表达式树（AddRecExpr），trip-count 计算</td></tr>
+        <tr><td>仿射分析</td><td><code>AffineAnalysis</code></td><td>将 Value 表示为仿射形式 \(c + \sum c_{iv} \cdot iv\)</td></tr>
+        <tr><td>依赖分析</td><td><code>DependenceAnalysis</code></td><td>GCD test 判断内存依赖方向向量</td></tr>
+        <tr><td>代价模型</td><td><code>CostModel</code></td><td>估算 GEP cache stride，判断 loop interchange 收益</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="callout-title">惰性计算</div>
+      <p><code>AnalysisManager</code> 按需计算分析结果，通过 <code>PreservedAnalyses</code> 位掩码实现增量失效，避免 Pass 执行时重复计算。</p>
+    </div>
+
+    <!-- ===== Optimization ===== -->
+    <h2>优化 Pass</h2>
+
+    <h3>Pass 基类与管理器</h3>
+    <pre data-lang="cpp"><code>class Pass {
+public:
+    virtual std::string name() = 0;
+    virtual void execute(Module *m) = 0;
+    virtual void execute(Module *m, AnalysisManager &amp;am) { execute(m); }
+};</code></pre>
+    <p>
+      <code>PassManager</code> 维护线性 Pass 序列，按序执行。支持 <code>--dump-ir</code> 在每个 Pass 前后输出 IR，
+      以及 <code>--verify-ir</code> 校验 IR 完整性。
+    </p>
+
+    <!-- ===== Backend ===== -->
+    <h2>后端 ARM64</h2>
+
+    <h3>代码生成流程</h3>
+    <p><code>Arm64CodeGen</code> 遍历 Module 中的全局变量和函数，为每个函数执行以下步骤：</p>
+    <table>
+      <thead><tr><th>阶段</th><th>组件</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>指令选择</td><td><code>Arm64FuncContext</code></td><td>将 SSA IR 指令翻译为 ARM64 汇编文本，分配栈槽位</td></tr>
+        <tr><td>PHI 处理</td><td><code>preparePhi()</code></td><td>在前驱块末尾插入 PHI 拷贝</td></tr>
+        <tr><td>分支融合</td><td><code>tryEmitCSel()</code></td><td>将 icmp+br 模式融合为 csel/ccmp 指令</td></tr>
+        <tr><td>寄存器分配</td><td><code>Arm64RegAlloc</code></td><td>Chaitin-Briggs 图着色，支持 phi 亲和性</td></tr>
+        <tr><td>块重排</td><td><code>reorderBlocks()</code></td><td>最大化 fallthrough，减少跳转</td></tr>
+        <tr><td>指令调度</td><td><code>MachineScheduler</code></td><td>局部调度隐藏延迟</td></tr>
+        <tr><td>Peephole</td><td><code>peepholeOptimize()</code></td><td>汇编级模式匹配优化</td></tr>
+      </tbody>
+    </table>
+
+    <h3>机器指令表示</h3>
+    <p>
+      <code>MachineInstr</code> 携带文本汇编和元数据（MOpcode 分类、defs/uses 寄存器集、latency、
+      mayLoad/mayStore/setsFlags 标志），供调度和 Peephole 使用。
+    </p>
+
+    <h3>寄存器分配</h3>
+    <p>
+      采用 <strong>Chaitin-Briggs 乐观图着色</strong>算法，按活跃区间分池（整数/浮点/NEON），
+      支持 spill cost 估算和 phi 亲和性约束。结果将 SSA Value 映射到物理寄存器（如 <code>w19</code>、<code>s8</code>、<code>v10</code>）。
+    </p>
+
+    <!-- ===== Design Patterns ===== -->
+    <h2>关键设计模式</h2>
+    <table>
+      <thead><tr><th>模式</th><th>应用</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Visitor 模式</strong></td><td>AST 遍历 — Checker 和 GenIR 通过 <code>accept(Visitor&amp;)</code> 解耦遍历逻辑</td></tr>
+        <tr><td><strong>Use-Def 链</strong></td><td>SSA IR — <code>Value</code> 基类维护双向引用，支持增量修改和全局替换</td></tr>
+        <tr><td><strong>惰性分析缓存</strong></td><td>AnalysisManager 按需计算 + 位掩码失效；Function 惰性支配树</td></tr>
+        <tr><td><strong>分阶段流水线</strong></td><td>优化 Pass 按功能分组，高优化等级多轮迭代</td></tr>
+        <tr><td><strong>文本级后端</strong></td><td>直接生成汇编文本，MachineInstr 携带元数据供后处理使用</td></tr>
+      </tbody>
+    </table>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+  });
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 860) {
+        document.querySelector('.sidebar').classList.remove('open');
+      }
+    });
+  });
+
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  renderMathInElement(document.querySelector('.content'), {
+    delimiters: [{left: '\\(', right: '\\)', display: false}, {left: '\\[', right: '\\]', display: true}],
+    throwOnError: false
+  });
+
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.innerHTML = copyIcon;
+    btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.innerHTML = checkIcon;
+        btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000);
+      });
+    });
+    pre.style.position = 'relative';
+    pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

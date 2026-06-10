@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Peephole 优化 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+<aside class="sidebar" id="sidebar"><div class="sidebar-header"><h1>SysY Compiler</h1></div><nav class="sidebar-nav">
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../../index.html">首页</a><a class="nav-item" href="../quickstart.html">快速开始</a><a class="nav-item" href="../architecture.html">整体架构</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../ir/data-structures.html">数据结构</a><a class="nav-item" href="../ir/irgen.html">IR 生成</a><a class="nav-item" href="../ir/ssa.html">SSA 形式</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../analysis/overview.html">总览</a><a class="nav-item" href="../analysis/loop-info.html">循环分析</a><a class="nav-item" href="../analysis/scev.html">标量演化</a><a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a><a class="nav-item" href="../analysis/dependence.html">依赖分析</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a><a class="nav-item" href="../opt/pipeline.html">优化流水线</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a><a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a><a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a><a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a><a class="nav-item" href="../opt/reassociate.html">Reassociate</a><a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a><a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a><a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a><a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a><a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a><a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a><a class="nav-item" href="../opt/licm.html">LICM</a><a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a><a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a><a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a><a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a><a class="nav-item" href="../opt/sccp.html">SCCP</a><a class="nav-item" href="../opt/const-fold.html">ConstantFold</a><a class="nav-item" href="../opt/inst-combine.html">InstCombine</a><a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a></div></div></div></div>
+<div class="nav-section open"><div class="nav-section-header" onclick="toggleSection(this)"><span>后端 ARM64</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>MachineInstr</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="machine-instr.html">MachineInstr</a></div></div><div class="nav-subsection open"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>汇编生成</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="codegen.html">代码生成</a><a class="nav-item" href="regalloc.html">寄存器分配</a><a class="nav-item" href="branch.html">分支处理</a><a class="nav-item" href="load-store.html">Load/Store</a><a class="nav-item" href="scheduler.html">指令调度</a><a class="nav-item active" href="peephole.html">Peephole 优化</a></div></div></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>Prompts</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a></div></div>
+</nav></aside>
+
+<main class="main"><div class="content" id="content">
+
+<div class="page-header"><div class="breadcrumb">wiki / 后端 / 汇编生成</div><h1>Peephole 优化</h1><p>peepholeOptimize 是汇编生成前的最后一道优化，在机器指令的文本表示上进行局部模式匹配与替换。它采用 fixpoint 循环反复应用 15 条优化规则，直到没有任何规则可以再触发为止。</p></div>
+
+<h2>概览</h2>
+<pre><code class="language-cpp">// src/include/backend/arm64/peephole.hpp
+void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines);</code></pre>
+<p>函数接收汇编文本行（<code>std::vector&lt;std::string&gt;</code>），在行级别进行模式匹配。每次应用规则后标记 <code>changed = true</code>，循环重新开始，直到一轮完整的扫描没有任何改变。</p>
+
+<pre><code class="language-cpp">void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i &lt; lines.size(); i++) {
+            // 依次尝试 15 条规则
+            if (tryMachineSelfMove(lines, i, changed)) continue;
+            if (tryMachineSwapMov(lines, i, changed)) continue;
+            if (tryMachineForwardMov(lines, i, changed)) continue;
+            if (tryMachineAndTBZ(lines, i, changed)) continue;
+            if (tryMachineImmediateFold(lines, i, changed)) continue;
+            // ... 其余规则 ...
+        }
+    }
+}</code></pre>
+
+<h2>解析辅助函数</h2>
+<p>由于 peephole 在文本行上操作，需要一组解析函数从汇编字符串中提取操作数信息：</p>
+<table>
+  <thead><tr><th>函数</th><th>用途</th></tr></thead>
+  <tbody>
+    <tr><td><code>parseLine(line, op, args)</code></td><td>将一行汇编拆分为操作码和操作数列表</td></tr>
+    <tr><td><code>splitOperands(str)</code></td><td>按逗号分割操作数字符串，处理嵌套括号</td></tr>
+    <tr><td><code>parseMemOp(arg, base, offset)</code></td><td>解析内存操作数 <code>[base, #offset]</code></td></tr>
+    <tr><td><code>isLabel(line)</code></td><td>判断一行是否为标签（以 <code>:</code> 结尾）</td></tr>
+    <tr><td><code>isBarrier(line)</code></td><td>判断是否为跳转/返回指令</td></tr>
+  </tbody>
+</table>
+
+<h2>15 条优化规则</h2>
+
+<h3>规则 1: tryMachineSelfMove — 自赋值消除</h3>
+<p>删除 <code>mov wN, wN</code>（源和目的相同的 mov 指令）：</p>
+<pre><code class="language-cpp">// 匹配: mov wX, wX 或 fmov sX, sX
+// 动作: 删除该行
+// 示例:
+//   mov w3, w3   → (删除)</code></pre>
+
+<h3>规则 2: tryMachineSwapMov — 交换 mov 消除</h3>
+<p>检测相邻的交换 mov 对，保留第一条：</p>
+<pre><code class="language-cpp">// 匹配: mov A, B; mov B, A
+// 动作: 删除第二条
+// 示例:
+//   mov w3, w4    →   mov w3, w4
+//   mov w4, w3    →   (删除)</code></pre>
+
+<h3>规则 3: tryMachineForwardMov — mov 前向传播</h3>
+<p>当中间 mov 的源未被修改时，跳过中间寄存器：</p>
+<pre><code class="language-cpp">// 匹配: mov tmp, src; mov dst, tmp (src 和 tmp 在两条 mov 之间未被修改)
+// 动作: 第二条改为 mov dst, src
+// 示例:
+//   mov w10, w3     →   mov w10, w3
+//   mov w4, w10     →   mov w4, w3</code></pre>
+
+<h3>规则 4: tryMachineAndTBZ — AND+CBZ → TBZ</h3>
+<p>将 <code>and + cbz/cbnz</code> 或 <code>and + cmp+b.cond</code> 合并为单条 tbz/tbnz：</p>
+<pre><code class="language-cpp">// 匹配: and wX, wY, #1; cbz wX, .L  (wX 不再被使用)
+// 动作: tbz wY, #0, .L
+// 匹配: and wX, wY, #1; cmp wX, #0; b.eq .L
+// 动作: tbz wY, #0, .L
+
+// 示例:
+//   and w10, w3, #1    →   tbz w3, #0, .L_true
+//   cbz w10, .L_true   →   (删除)</code></pre>
+
+<h3>规则 5: tryMachineImmediateFold — 立即数折叠</h3>
+<p>将 movz + add/sub + mov 序列折叠为单条立即数指令：</p>
+<pre><code class="language-cpp">// 匹配: movz wX, #IMM; add wY, wZ, wX
+// 动作: add wY, wZ, #IMM (若 IMM 在 add 立即数范围内)
+// 匹配: movz wX, #IMM; sub wY, wZ, wX
+// 动作: sub wY, wZ, #IMM
+
+// 示例:
+//   movz w10, #42      →   (删除)
+//   add w3, w4, w10    →   add w3, w4, #42</code></pre>
+
+<h3>规则 6: tryMachineFoldAddSubMov — ADD/SUB 结果折叠</h3>
+<p>当 add/sub 的结果立即被 mov 到另一寄存器时，直接在目标寄存器上执行：</p>
+<pre><code class="language-cpp">// 匹配: add wX, wY, wZ; mov wD, wX (wX 不再被使用)
+// 动作: add wD, wY, wZ
+// 示例:
+//   add w10, w3, w4    →   (删除)
+//   mov w5, w10        →   add w5, w3, w4</code></pre>
+
+<h3>规则 7: tryMachineMulAddFusion — 乘加融合</h3>
+<p>将相邻的 mul + add/sub 融合为 madd/msub/mneg：</p>
+<pre><code class="language-cpp">// 匹配: mul wX, wA, wB; add wD, wX, wC
+// 动作: madd wD, wA, wB, wC
+// 匹配: mul wX, wA, wB; sub wD, wC, wX
+// 动作: msub wD, wA, wB, wC
+// 匹配: mul wX, wA, wB; sub wD, wzr, wX
+// 动作: mneg wD, wA, wB
+
+// 示例:
+//   mul w10, w3, w4    →   (删除)
+//   add w5, w10, w6    →   madd w5, w3, w4, w6</code></pre>
+
+<h3>规则 8: tryMachineStoreLoadForward — Store-Load 前向</h3>
+<p>连续的 str + ldr 访问同一地址时，ldr 可替换为 mov：</p>
+<pre><code class="language-cpp">// 匹配: str wX, [addr]; ldr wY, [addr] (同地址)
+// 动作: ldr → mov wY, wX
+// 示例:
+//   str w3, [x29, #-8]   →   str w3, [x29, #-8]
+//   ldr w4, [x29, #-8]   →   mov w4, w3</code></pre>
+
+<h3>规则 9: tryMachineRedundantAdrp — 冗余 ADRP 消除</h3>
+<p>删除重复的 adrp + add 全局地址加载：</p>
+<pre><code class="language-cpp">// 匹配: adrp xA, sym; add xA, xA, :lo12:sym;
+//        adrp xB, sym; add xB, xB, :lo12:sym; (同一符号)
+// 动作: 删除第二组 adrp+add，将 xB 引用替换为 xA
+// 限制: 两组之间 xA 未被重新定义</code></pre>
+
+<h3>规则 10: tryMachineRedundantSubFrame — 冗余帧偏移消除</h3>
+<p>删除重复的 <code>sub x17, x29, #N</code>（帧偏移计算）：</p>
+<pre><code class="language-cpp">// 匹配: sub x17, x29, #N; ...; sub x17, x29, #N (同偏移)
+// 动作: 删除第二条 sub
+// 限制: 两条 sub 之间 x17 和 x29 未被修改</code></pre>
+
+<h3>规则 11: tryMachineZeroStore — 零值存储优化</h3>
+<p>将 <code>movz wX, #0; str wX, [addr]</code> 替换为 <code>str wzr/xzr, [addr]</code>：</p>
+<pre><code class="language-cpp">// 匹配: movz wX, #0; str wX, [addr]
+// 动作: str wzr, [addr] (32位) / str xzr, [addr] (64位)
+// 示例:
+//   movz w10, #0         →   (删除)
+//   str w10, [x29, #-8]  →   str wzr, [x29, #-8]</code></pre>
+
+<h3>规则 12: tryMachineDeadStore — 死 Store 消除</h3>
+<p>连续两次 store 到同一地址，第一次是死 store：</p>
+<pre><code class="language-cpp">// 匹配: str wX, [addr]; str wY, [addr] (同地址，中间无 load)
+// 动作: 删除第一条 str
+// 示例:
+//   str w3, [x29, #-8]   →   (删除)
+//   str w4, [x29, #-8]   →   str w4, [x29, #-8]</code></pre>
+
+<h3>规则 13: tryMachineMergeStores — 相邻 Store 合并</h3>
+<p>将两条连续的 str 合并为一条 stp：</p>
+<pre><code class="language-cpp">// 匹配: str wA, [base, #off]; str wB, [base, #off+4]
+// 动作: stp wA, wB, [base, #off]
+// 限制: 两条 str 的基址相同，偏移差正好为 4（32位）或 8（64位）
+// 示例:
+//   str w3, [x29, #-16]   →   stp w3, w4, [x29, #-16]
+//   str w4, [x29, #-12]   →   (删除)</code></pre>
+
+<h3>规则 14: tryMachineMergeLoads — 相邻 Load 合并</h3>
+<p>将两条连续的 ldr 合并为一条 ldp：</p>
+<pre><code class="language-cpp">// 匹配: ldr wA, [base, #off]; ldr wB, [base, #off+4]
+// 动作: ldp wA, wB, [base, #off]
+// 限制: 与规则 13 相同的地址连续性要求
+// 示例:
+//   ldr w3, [x29, #-16]   →   ldp w3, w4, [x29, #-16]
+//   ldr w4, [x29, #-12]   →   (删除)</code></pre>
+
+<h3>规则 15: tryMachineFallthroughBranch — Fallthrough 分支消除</h3>
+<p>如果无条件跳转的目标就是紧接着的下一个标签，删除该跳转：</p>
+<pre><code class="language-cpp">// 匹配: b .L_next; .L_next:
+// 动作: 删除 b 指令
+// 示例:
+//   b .L_end      →   (删除)
+//   .L_end:       →   .L_end:</code></pre>
+
+<h2>规则分类</h2>
+<table>
+  <thead><tr><th>类别</th><th>规则</th><th>效果</th></tr></thead>
+  <tbody>
+    <tr><td>冗余消除</td><td>1 (self-move), 2 (swap mov), 9 (redundant adrp), 10 (redundant sub)</td><td>删除不必要的指令</td></tr>
+    <tr><td>指令前向</td><td>3 (mov forward), 6 (add/sub fold)</td><td>减少中间寄存器使用</td></tr>
+    <tr><td>指令融合</td><td>4 (and+tbz), 5 (imm fold), 7 (mul+add), 13 (merge stores), 14 (merge loads)</td><td>合并为更强的指令</td></tr>
+    <tr><td>存储优化</td><td>8 (store-load forward), 11 (zero store), 12 (dead store)</td><td>减少内存访问</td></tr>
+    <tr><td>控制流</td><td>15 (fallthrough branch)</td><td>消除冗余跳转</td></tr>
+  </tbody>
+</table>
+
+<h2>Fixpoint 收敛性</h2>
+<p>每条规则要么删除指令、要么将指令替换为更简单的形式，因此：</p>
+<ul>
+  <li>指令总数单调不增</li>
+  <li>每轮至少有一条规则触发才能继续下一轮</li>
+  <li>有限指令序列保证在有限轮次内收敛</li>
+</ul>
+<p>实践中通常 2-3 轮即可达到不动点。</p>
+
+<h2>示例：多规则级联</h2>
+<pre><code class="language-cpp">// 原始序列:
+//   movz w10, #0           // 规则 11 触发
+//   str w10, [x29, #-8]
+//   str w3, [x29, #-8]     // 规则 12 触发 (dead store)
+//   mov w11, w3            // 规则 1 不触发
+//   mov w3, w11            // 规则 2 触发 (swap mov)
+
+// 第 1 轮后:
+//   str wzr, [x29, #-8]    // 规则 11 结果
+//   str w3, [x29, #-8]     // 规则 12 触发 → 删除第一条 str
+//   mov w11, w3            // 规则 2 触发 → 删除第二条 mov
+
+// 第 2 轮后 (fixpoint):
+//   str w3, [x29, #-8]
+//   mov w11, w3</code></pre>
+
+<h2>源码位置</h2>
+<table>
+  <thead><tr><th>文件</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/backend/arm64/peephole.cpp</code></td><td>peepholeOptimize()、15 条 tryMachine* 规则、解析辅助函数</td></tr>
+    <tr><td><code>src/include/backend/arm64/peephole.hpp</code></td><td>peepholeOptimize 函数声明</td></tr>
+  </tbody>
+</table>
+
+</div></main>
+<script>function toggleSection(el){el.parentElement.classList.toggle('open')}function toggleSubsection(el){el.parentElement.classList.toggle('open')}const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';document.querySelectorAll('pre').forEach(pre=>{pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});});pre.style.position='relative';pre.appendChild(btn)});</script>
+</body></html>

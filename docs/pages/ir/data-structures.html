@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>数据结构 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item active" href="data-structures.html">数据结构</a>
+            <a class="nav-item" href="irgen.html">IR 生成</a>
+            <a class="nav-item" href="ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 数据结构</div>
+      <h1>数据结构</h1>
+      <p>IR 采用 LLVM 风格的四层容器结构，所有实体均继承自 Value 基类并维护 Use-Def 链。头文件位于 <code>src/include/mid/ir/</code>。</p>
+    </div>
+
+    <!-- ===== Type ===== -->
+    <h2>Type 类型系统</h2>
+    <p>
+      <code>Type</code> 是所有 IR 类型的基类，通过 <code>TypeID</code> 枚举区分类型种类。
+      复合类型（Array/Vector/Pointer/Function）持有对元素类型的引用。
+    </p>
+    <pre data-lang="cpp"><code>class Type {
+public:
+    enum TypeID {
+        VoidTyID,      // void
+        LabelTyID,     // 基本块标签
+        IntegerTyID,   // 整数（i1 / i32）
+        FloatTyID,     // 浮点（float32）
+        FunctionTyID,  // 函数类型
+        ArrayTyID,     // 数组类型
+        VectorTyID,    // 向量（&lt;4 x i32&gt; / &lt;4 x float&gt;）
+        PointerTyID,   // 指针类型
+    };
+    TypeID tid_;
+    virtual std::string print();
+};</code></pre>
+
+    <h3>具体类型子类</h3>
+    <table>
+      <thead><tr><th>类</th><th>关键字段</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td><code>IntegerType</code></td><td><code>num_bits_</code></td><td><code>i1</code>（num_bits=1）、<code>i32</code>（num_bits=32）</td></tr>
+        <tr><td><code>ArrayType</code></td><td><code>contained_</code>, <code>num_elements_</code></td><td><code>[2 x [3 x i32]]</code></td></tr>
+        <tr><td><code>VectorType</code></td><td><code>contained_</code>, <code>num_elements_</code></td><td><code>&lt;4 x i32&gt;</code></td></tr>
+        <tr><td><code>PointerType</code></td><td><code>contained_</code></td><td><code>[2 x [3 x i32]]*</code></td></tr>
+        <tr><td><code>FunctionType</code></td><td><code>result_</code>, <code>args_</code></td><td><code>i32 (i32, i32*)</code></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== Value ===== -->
+    <h2>Value 基类与 Use-Def 链</h2>
+    <p>
+      <code>Value</code> 是所有 IR 实体（常量、指令、基本块、函数、参数等）的基类。
+      每个 Value 维护一个 <code>use_list_</code>，记录"谁在哪个操作数位置引用了我"。
+    </p>
+    <pre data-lang="cpp"><code>struct Use {
+    Value* val_;          // 使用者（某条指令）
+    unsigned int arg_no_; // 该 Value 在指令中的操作数序号
+};
+
+class Value {
+public:
+    Type* type_;
+    std::string name_;
+    std::list&lt;Use&gt; use_list_;
+
+    std::list&lt;Use&gt;::iterator add_use(Value* val, unsigned arg_no);
+    void remove_use(Value* val);
+    void replace_all_use_with(Value* new_val);
+    virtual std::string print() = 0;
+};</code></pre>
+    <p>
+      <code>replace_all_use_with()</code> 遍历 use_list_，将所有引用该 Value 的操作数替换为 new_val，
+      是优化 Pass 中最常用的 IR 修改原语之一。
+    </p>
+
+    <!-- ===== Module ===== -->
+    <h2>Module 顶层容器</h2>
+    <p>
+      <code>Module</code> 是 IR 的最顶层容器，持有全局变量列表和函数列表，并预置五个基本类型单例。
+      复合类型（Pointer/Array/Vector）通过 map 缓存，避免重复创建。
+    </p>
+    <pre data-lang="cpp"><code>class Module {
+public:
+    // 基本类型单例（构造函数中创建）
+    Type* void_ty_;          // void
+    Type* label_ty_;         // label（基本块类型）
+    IntegerType* int1_ty_;   // i1
+    IntegerType* int32_ty_;  // i32
+    Type* float32_ty_;       // float
+
+    std::vector&lt;GlobalVariable*&gt; global_list_;
+    std::vector&lt;Function*&gt; function_list_;
+
+    // 类型缓存（避免重复创建）
+    PointerType*  get_pointer_type(Type* contained);
+    ArrayType*    get_array_type(Type* contained, unsigned num_elements);
+    VectorType*   get_vector_type(Type* contained, unsigned num_elements);
+
+    void verify();  // IR 完整性校验
+};</code></pre>
+
+    <!-- ===== Function ===== -->
+    <h2>Function 与 Argument</h2>
+    <p>
+      <code>Function</code> 继承自 <code>Value</code>，持有基本块列表和参数列表。
+      构造函数根据 <code>FunctionType</code> 自动创建 <code>Argument</code> 对象。
+      无基本块的函数视为声明（<code>is_declaration()</code> 返回 true）。
+    </p>
+    <pre data-lang="cpp"><code>class Argument : public Value {
+    Function* parent_;
+    unsigned arg_no_;  // 参数序号
+};
+
+class Function : public Value {
+    std::vector&lt;BasicBlock*&gt; basic_blocks_;
+    std::vector&lt;Argument*&gt;   arguments_;
+    Module* parent_;
+    unsigned seq_cnt_;   // 命名序号计数器
+    unsigned gep_cnt_;   // GEP 独立命名计数器
+    int use_ret_cnt;     // 返回值的实际使用次数
+
+    bool is_declaration();      // 无基本块 → 仅为声明
+    Type* get_return_type();
+    BasicBlock* getRetBB();     // 获取唯一 return 基本块
+    void set_instr_name();      // 统一命名所有未命名指令
+};</code></pre>
+
+    <h3>DominatorInfo 支配树</h3>
+    <p>
+      由 Function 惰性计算并缓存，CFG 变更时自动失效。各优化 Pass 通过 <code>getDominatorInfo()</code> 复用。
+    </p>
+    <pre data-lang="cpp"><code>struct DominatorInfo {
+    bool valid = false;
+    std::map&lt;BasicBlock*, BasicBlock*&gt;             idom;        // 立即支配者
+    std::map&lt;BasicBlock*, std::set&lt;BasicBlock*&gt;&gt;   domFront;    // 支配边界
+    std::map&lt;BasicBlock*, std::vector&lt;BasicBlock*&gt;&gt; domChildren; // 支配树子节点
+    bool dominates(BasicBlock *a, BasicBlock *b) const;
+};</code></pre>
+
+    <!-- ===== BasicBlock ===== -->
+    <h2>BasicBlock 基本块</h2>
+    <p>
+      <code>BasicBlock</code> 继承自 <code>Value</code>（类型为 label），包含一条指令链表以及 CFG 前驱/后继关系。
+      指令链表使用 <code>std::list</code> 以支持高效的插入和删除操作。
+    </p>
+    <pre data-lang="cpp"><code>class BasicBlock : public Value {
+    std::list&lt;Instruction*&gt; instr_list_;  // 指令链表
+    Function* parent_;
+
+    // CFG 信息
+    std::vector&lt;BasicBlock*&gt; pre_bbs_;    // 前驱块
+    std::vector&lt;BasicBlock*&gt; succ_bbs_;   // 后继块
+
+    // 支配树信息
+    BasicBlock* idom_;                     // 立即支配者
+    std::set&lt;BasicBlock*&gt; dom_frontier_;   // 支配边界
+    std::set&lt;BasicBlock*&gt; rdom_frontier_;  // 后支配边界
+    std::set&lt;BasicBlock*&gt; rdoms_;          // 后支配集合
+
+    // 活跃变量分析
+    std::set&lt;Value*&gt; live_in;
+    std::set&lt;Value*&gt; live_out;
+};</code></pre>
+
+    <h3>指令插入方法</h3>
+    <table>
+      <thead><tr><th>方法</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>add_instruction()</code></td><td>在末尾追加</td></tr>
+        <tr><td><code>add_instruction_front()</code></td><td>在开头插入</td></tr>
+        <tr><td><code>add_instruction_before_terminator()</code></td><td>在终止指令（br/ret）之前插入</td></tr>
+        <tr><td><code>add_instruction_before_inst()</code></td><td>在指定指令之前插入</td></tr>
+        <tr><td><code>get_terminator()</code></td><td>获取末尾终止指令</td></tr>
+        <tr><td><code>delete_instr()</code></td><td>删除指令并清除 use 关系</td></tr>
+        <tr><td><code>remove_instr()</code></td><td>移出指令但保留 use 关系（用于跨 BB 移动）</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== Instruction ===== -->
+    <h2>Instruction 指令</h2>
+    <p>
+      <code>Instruction</code> 继承自 <code>Value</code>，是所有 IR 指令的基类。
+      操作数通过 <code>set_operand()</code> 设置，自动维护 Use-Def 链。
+    </p>
+
+    <h3>OpID 操作码枚举</h3>
+    <pre data-lang="cpp"><code>enum OpID {
+    Ret = 11, Br,                           // 终止指令
+    FNeg,                                   // 浮点取负
+    Add, Sub, Mul, SDiv, SRem, UDiv, URem,  // 整数二元运算
+    FAdd, FSub, FMul, FDiv,                 // 浮点二元运算
+    Shl, LShr, AShr, And, Or, Xor,           // 位运算
+    Alloca, Load, Store,                     // 内存操作
+    Select,                                  // select i1 cond, T val1, F val2
+    GetElementPtr,                           // 地址计算
+    ZExt, FPtoSI, SItoFP, BitCast, Clz,       // 类型转换 + 内建
+    InsertElement,                            // 向量元素插入
+    ICmp, FCmp, PHI, Call                    // 比较、phi、调用
+};</code></pre>
+
+    <h3>操作数管理</h3>
+    <pre data-lang="cpp"><code>class Instruction : public Value {
+    OpID op_id_;
+    unsigned num_ops_;
+    std::vector&lt;Value*&gt; operands_;                         // 操作数列表
+    std::vector&lt;std::list&lt;Use&gt;::iterator&gt; use_pos_;        // 对应 use_list 迭代器
+    BasicBlock* parent_;
+
+    void set_operand(unsigned i, Value* v);  // 设置操作数，自动维护 use-def
+    void add_operand(Value* v);              // 追加操作数（phi 动态增加入边）
+    void remove_operands(int i1, int i2);    // 删除指定范围操作数
+};</code></pre>
+    <p>
+      <code>use_pos_</code> 与 <code>operands_</code> 一一对应，存储该指令在各操作数的 use_list_ 中的迭代器位置，
+      使得删除或替换操作数时可以 O(1) 直接 erase，无需遍历。
+    </p>
+
+    <h3>指令子类</h3>
+    <table>
+      <thead><tr><th>子类</th><th>操作码</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>BinaryInst</code></td><td>Add/Sub/Mul/SDiv/SRem/FAdd/FSub/FMul/FDiv/Shl/AShr/And/Or/Xor</td><td>二元运算，2 个操作数</td></tr>
+        <tr><td><code>UnaryInst</code></td><td>FNeg/BitCast/Clz</td><td>一元运算，1 个操作数</td></tr>
+        <tr><td><code>ICmpInst</code></td><td>ICmp</td><td>整数比较，10 种谓词（EQ/NE/SGT/SGE/SLT/SLE/UGT/UGE/ULT/ULE）</td></tr>
+        <tr><td><code>FCmpInst</code></td><td>FCmp</td><td>浮点比较，16 种谓词（OEQ/OGT/OLT/UEQ/UGT/ULT 等）</td></tr>
+        <tr><td><code>SelectInst</code></td><td>Select</td><td><code>select i1 %cond, T %tv, F %fv</code>，后端映射为 csel</td></tr>
+        <tr><td><code>CallInst</code></td><td>Call</td><td>函数调用，最后一个操作数为被调用函数</td></tr>
+        <tr><td><code>BranchInst</code></td><td>Br</td><td>条件分支（3 操作数）或无条件分支（1 操作数），自动维护 CFG</td></tr>
+        <tr><td><code>ReturnInst</code></td><td>Ret</td><td>返回值或 void 返回</td></tr>
+        <tr><td><code>GetElementPtrInst</code></td><td>GetElementPtr</td><td>地址计算，自动推导返回指针类型</td></tr>
+        <tr><td><code>StoreInst</code></td><td>Store</td><td><code>store &lt;ty&gt; %val, &lt;ty&gt;* %ptr</code>，构造时 assert 类型匹配</td></tr>
+        <tr><td><code>LoadInst</code></td><td>Load</td><td><code>%val = load &lt;ty&gt;, &lt;ty&gt;* %ptr</code></td></tr>
+        <tr><td><code>AllocaInst</code></td><td>Alloca</td><td>栈分配，<code>alloca_ty_</code> 记录原始类型，返回指针类型</td></tr>
+        <tr><td><code>ZextInst</code></td><td>ZExt</td><td>i1 → i32 零扩展</td></tr>
+        <tr><td><code>FpToSiInst</code></td><td>FPtoSI</td><td>float → i32</td></tr>
+        <tr><td><code>SiToFpInst</code></td><td>SItoFP</td><td>i32 → float</td></tr>
+        <tr><td><code>Bitcast</code></td><td>BitCast</td><td>位级重解释，如 <code>[4 x [2 x i32]]* → i32*</code></td></tr>
+        <tr><td><code>InsertElementInst</code></td><td>InsertElement</td><td><code>insertelement &lt;4 x i32&gt; %vec, i32 %val, i32 %idx</code></td></tr>
+        <tr><td><code>PhiInst</code></td><td>PHI</td><td>phi 节点，偶数位为值、奇数位为来源 BB；<code>l_val_</code> 供 Mem2Reg 使用</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout info">
+      <div class="callout-title">no-insert 构造模式</div>
+      <p>
+        大多数指令子类提供一个额外的 <code>(..., bool flag)</code> 构造函数，创建指令但不自动插入到 BasicBlock。
+        调用方需手动通过 <code>add_instruction_before_inst()</code> 等方法插入，常用于跨 BB 移动或精确控制插入位置。
+      </p>
+    </div>
+
+    <!-- ===== Constant ===== -->
+    <h2>Constant 常量</h2>
+    <p><code>Constant</code> 继承自 <code>Value</code>，表示编译期已知的值，无名（<code>name == ""</code>）。</p>
+    <table>
+      <thead><tr><th>类</th><th>字段</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td><code>ConstantInt</code></td><td><code>int value_</code></td><td><code>i32 42</code></td></tr>
+        <tr><td><code>ConstantFloat</code></td><td><code>float value_</code></td><td><code>0x4057C21FC0000000</code></td></tr>
+        <tr><td><code>ConstantArray</code></td><td><code>vector&lt;Constant*&gt; const_array</code></td><td><code>[3 x i32] [i32 42, i32 11, i32 74]</code></td></tr>
+        <tr><td><code>ConstantVector</code></td><td><code>vector&lt;Constant*&gt; elements_</code></td><td><code>&lt;4 x i32&gt; &lt;0, 1, 2, 3&gt;</code></td></tr>
+        <tr><td><code>ConstantZero</code></td><td>无</td><td><code>zeroinitializer</code></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== GlobalVariable ===== -->
+    <h2>GlobalVariable 全局变量</h2>
+    <pre data-lang="cpp"><code>class GlobalVariable : public Value {
+    bool is_const_;       // 是否为常量（constant vs global）
+    Constant* init_val_;  // 初始值（可为 nullptr）
+};</code></pre>
+    <p>
+      对应 IR 中的 <code>@a = global [4 x i32] [...]</code> 或 <code>@c = constant [5 x i32] [...]</code>。
+      Value 的 type_ 为指针类型（<code>PointerType</code>），指向实际存储类型。
+    </p>
+
+    <!-- ===== IRBuilder ===== -->
+    <h2>IRStmtBuilder 构建器</h2>
+    <p>
+      <code>IRStmtBuilder</code> 是工厂类，维护当前插入点（<code>BB_</code>）和模块引用（<code>m_</code>），
+      提供 <code>create_*</code> 系列方法在当前基本块中创建各类指令。
+    </p>
+    <pre data-lang="cpp"><code>class IRStmtBuilder {
+    BasicBlock* BB_;
+    Module* m_;
+
+    BinaryInst* create_iadd(Value* v1, Value* v2);
+    ICmpInst*   create_icmp_eq(Value* v1, Value* v2);
+    BinaryInst* create_fadd(Value* v1, Value* v2);
+    CallInst*   create_call(Value* func, std::vector&lt;Value*&gt; args);
+    BranchInst* create_cond_br(Value* cond, BasicBlock* t, BasicBlock* f);
+    ReturnInst* create_ret(Value* val);
+    AllocaInst* create_alloca(Type* ty);
+    StoreInst*  create_store(Value* val, Value* ptr);
+    LoadInst*   create_load(Value* ptr);
+    GetElementPtrInst* create_gep(Value* ptr, std::vector&lt;Value*&gt; idxs);
+    ZextInst*   create_zext(Value* val, Type* ty);
+    // ... 更多 create_* 方法
+};</code></pre>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open');
+    });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.innerHTML = checkIcon; btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000);
+      });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>代码生成 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="nav-section open">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection open">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item active" href="codegen.html">代码生成</a>
+            <a class="nav-item" href="regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="branch.html">分支处理</a>
+            <a class="nav-item" href="load-store.html">Load/Store</a>
+            <a class="nav-item" href="scheduler.html">指令调度</a>
+            <a class="nav-item" href="peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 后端 / 汇编生成</div>
+      <h1>代码生成</h1>
+      <p>Arm64CodeGen 是后端的顶层入口，负责将 IR Module 翻译为 ARM64 汇编文本。整体流程包括全局变量分类、函数级并行代码生成、指令调度、Peephole 优化和最终输出。</p>
+    </div>
+
+    <h2>概览</h2>
+    <p>代码生成器 <code>Arm64CodeGen</code> 接收 IR <code>Module</code> 和输出流 <code>std::ostream</code>，经过 6 个步骤生成完整的 ARM64 汇编：</p>
+    <ol>
+      <li><strong>全局变量分类</strong> — 将全局变量分入 <code>.rodata</code>（常量）、<code>.data</code>（有初值）和 <code>.bss</code>（零初值）</li>
+      <li><strong>外部函数声明</strong> — 遍历声明函数（当前为空操作）</li>
+      <li><strong>收集非声明函数</strong> — 筛选出需要生成代码的函数</li>
+      <li><strong>并行代码生成</strong> — 使用 <code>std::thread</code> 多线程并行生成各函数的汇编</li>
+      <li><strong>输出 .text 段</strong> — 拼接所有函数代码</li>
+      <li><strong>输出数据段</strong> — 按 .data → .bss → .rodata 顺序输出全局变量</li>
+    </ol>
+
+    <h2>类定义</h2>
+    <pre><code class="language-cpp">class Arm64CodeGen {
+public:
+    Arm64CodeGen(Module *m, std::ostream &amp;os);
+    void generate();
+
+    void setNoPeephole(bool v);        // 禁用 Peephole 优化
+    void setEnableRegAlloc(bool v);    // 启用图着色寄存器分配
+    void setNoSchedule(bool v);        // 禁用指令调度
+    void setDumpMachineInstr(bool v);  // 输出 MachineInstr 调试信息
+
+private:
+    void emitGlobal(MachineModule &amp;module, GlobalVariable *gv);
+    void emitExtern(Function *f);
+
+    Module *m_;
+    std::ostream &amp;os_;
+    bool no_peephole_ = false;
+    bool enable_regalloc_ = true;
+    bool no_schedule_ = true;
+    bool dump_machine_instr_ = false;
+};</code></pre>
+
+    <h2>函数级代码生成</h2>
+    <p>每个函数的代码生成在独立线程中执行，流程如下：</p>
+    <pre><code class="language-cpp">// 每个函数的生成流水线
+MachineFunction machineFunc;
+machineFunc.name = f-&gt;name_;
+MachineEmitter emitter(machineFunc);
+
+// 1. IR → MachineInstr（通过 Arm64FuncContext）
+Arm64FuncContext ctx(f, emitter, enable_regalloc_);
+ctx.generate();
+
+// 2. 指令调度（可选，仅在启用寄存器分配时）
+if (!no_schedule_ &amp;&amp; enable_regalloc_) {
+    MachineScheduler scheduler;
+    scheduler.schedule(machineFunc);
+}
+
+// 3. Peephole 优化（可选）
+if (!no_peephole_) {
+    peepholeOptimize(machineFunc);
+}
+
+// 4. 调试输出（可选）
+if (dump_machine_instr_) {
+    std::cerr &lt;&lt; dumpMachineFunction(machineFunc);
+}
+
+// 5. 序列化为汇编文本
+results[idx] = printMachineFunction(machineFunc);</code></pre>
+
+    <h2>Arm64FuncContext 生成流程</h2>
+    <p><code>Arm64FuncContext::generate()</code> 是函数级代码生成的核心：</p>
+    <ol>
+      <li><strong>寄存器分配</strong> — 若启用，运行 <code>Arm64RegAlloc</code> 图着色分配器</li>
+      <li><strong>PHI 预处理</strong> — <code>preparePhi()</code> 收集所有 Phi 拷贝信息</li>
+      <li><strong>Prologue 生成</strong> — 栈帧建立、callee-saved 寄存器保存、参数加载</li>
+      <li><strong>块重排</strong> — <code>reorderBlocks()</code> 贪心布局，最大化 fallthrough</li>
+      <li><strong>指令发射</strong> — 逐块逐指令翻译为 MachineInstr</li>
+      <li><strong>Epilogue 生成</strong> — 恢复 callee-saved 寄存器、恢复栈帧、ret</li>
+    </ol>
+
+    <h2>Prologue 与 Epilogue</h2>
+    <h3>Prologue（emitPrologue）</h3>
+    <pre><code class="language-cpp">// 1. 为所有 SSA 值分配栈槽（预扫描）
+// 2. 计算帧大小 = align16(局部变量 + callee-saved 寄存器)
+// 3. 发射：
+//    stp x29, x30, [sp, #-16]!    // 保存帧指针和返回地址
+//    mov x29, sp                   // 建立帧指针
+//    sub sp, sp, #localSize        // 分配栈空间
+// 4. 保存 callee-saved 寄存器（stp 成对保存）
+// 5. 加载函数参数到寄存器/栈槽</code></pre>
+
+    <h3>Epilogue（emitEpilogue）</h3>
+    <pre><code class="language-cpp">// 1. 恢复 callee-saved 寄存器（ldp 成对恢复）
+// 2. add sp, sp, #localSize        // 回收栈空间
+// 3. ldp x29, x30, [sp], #16       // 恢复帧指针和返回地址
+// 4. ret                            // 返回</code></pre>
+    <p>当函数没有局部变量且没有调用（<code>needsFrame_ == false</code>）时，省略 prologue/epilogue，直接 <code>ret</code>。</p>
+
+    <h2>指令发射（emitInstruction）</h2>
+    <p><code>emitInstruction()</code> 是一个大 switch，根据 IR 指令类型生成对应的 MachineInstr。覆盖的指令类型：</p>
+    <table>
+      <thead><tr><th>IR 指令</th><th>ARM64 指令</th><th>特殊优化</th></tr></thead>
+      <tbody>
+        <tr><td>Add / Sub</td><td>add / sub</td><td>立即数合并（imm12）</td></tr>
+        <tr><td>Mul</td><td>mul</td><td>常量强度削弱（2^k, 2^k±1）；madd/msub/mneg 融合</td></tr>
+        <tr><td>SDiv</td><td>sdiv</td><td>2 的幂移位；Magic Number 优化</td></tr>
+        <tr><td>SRem</td><td>sdiv + msub</td><td>2 的幂位运算；Magic Number</td></tr>
+        <tr><td>And / Or / Xor</td><td>and / orr / eor</td><td>位掩码立即数</td></tr>
+        <tr><td>Shl / LShr / AShr</td><td>lsl / lsr / asr</td><td>立即数移位</td></tr>
+        <tr><td>FAdd / FSub / FMul / FDiv</td><td>fadd / fsub / fmul / fdiv</td><td>NEON 向量路径</td></tr>
+        <tr><td>Load / Store</td><td>ldr / str</td><td>全局变量 adrp+add；向量 ld1/st1</td></tr>
+        <tr><td>ICmp</td><td>cmp + cset</td><td>与 Br 融合为 b.cond / cbz / cbnz</td></tr>
+        <tr><td>Select</td><td>cmp + csel</td><td>直接写 w0（唯一用户为 Ret 时）</td></tr>
+        <tr><td>GEP</td><td>add / sub</td><td>常量偏移直接折叠；2 的幂移位</td></tr>
+        <tr><td>Call</td><td>bl</td><td>前 8 参数寄存器传递；栈参数对齐</td></tr>
+        <tr><td>Br</td><td>b / cbz / cbnz</td><td>ICmp+Br 融合；PHI 拷贝插入</td></tr>
+        <tr><td>Ret</td><td>b epilogue / ret</td><td>Select+Ret 直写 w0</td></tr>
+        <tr><td>ZExt / FPtoSI / SItoFP</td><td>and / fcvtzs / scvtf</td><td>—</td></tr>
+        <tr><td>BitCast</td><td>fmov</td><td>int↔float 位重解释</td></tr>
+        <tr><td>InsertElement</td><td>mov v.s[lane]</td><td>NEON 向量构造</td></tr>
+      </tbody>
+    </table>
+
+    <h2>并行代码生成</h2>
+    <p>编译器使用 <code>std::thread</code> 并行生成各函数的代码。线程数量为 <code>hardware_concurrency() - 2</code>（至少 1），在 Linux 上还会设置 CPU 亲和性避开核心 2、3：</p>
+    <pre><code class="language-cpp">unsigned numThreads = std::thread::hardware_concurrency();
+if (numThreads &lt;= 2) numThreads = 1;
+else numThreads = numThreads - 2;
+
+// 函数按 round-robin 分配到各线程
+std::vector&lt;std::vector&lt;Function*&gt;&gt; partitions(numThreads);
+for (size_t i = 0; i &lt; funcs.size(); ++i)
+    partitions[i % numThreads].push_back(funcs[i]);</code></pre>
+    <p>每个函数的生成完全独立（各自的 <code>MachineFunction</code>、<code>Arm64FuncContext</code>），结果写入预分配数组 <code>results[idx]</code>，最终按原始函数顺序拼接。</p>
+
+    <h2>全局变量输出</h2>
+    <p>全局变量按类型分入三个段，输出格式：</p>
+    <pre><code class="language-cpp">// .data 段 — 有非零初值的全局变量
+// .bss 段 — 零初值（使用 .zero 指令）
+// .section .rodata — 常量（const 修饰）
+
+// 每个变量的输出格式：
+//   .global varname
+//   .p2align 2
+//   varname:
+//   .word value        // 整数
+//   .word 0xHEX        // 浮点（IEEE 754 位表示）
+//   .zero N            // 零初值数组（N 字节）</code></pre>
+    <p>数组变量递归展开每个元素；全零数组使用 <code>.zero</code> 指令压缩。</p>
+
+    <h2>块重排（reorderBlocks）</h2>
+    <p>贪心链式布局算法，最大化 fallthrough 以减少无条件跳转：</p>
+    <ol>
+      <li>从入口块开始</li>
+      <li>优先放置条件分支的 fallthrough 目标（无 PHI 拷贝的一侧）</li>
+      <li>回溯到任意未放置的后继块</li>
+      <li>最终 fallback 到原始顺序中第一个未放置块</li>
+    </ol>
+
+    <h2>源码位置</h2>
+    <table>
+      <thead><tr><th>文件</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><code>src/include/backend/arm64/codegen.hpp</code></td><td>Arm64CodeGen 类定义</td></tr>
+        <tr><td><code>src/backend/arm64/codegen.cpp</code></td><td>generate()、emitGlobal()、并行代码生成</td></tr>
+        <tr><td><code>src/include/backend/arm64/context.hpp</code></td><td>Arm64FuncContext 完整接口</td></tr>
+        <tr><td><code>src/backend/arm64/context.cpp</code></td><td>generate()、prologue/epilogue、slot 管理、块重排</td></tr>
+        <tr><td><code>src/backend/arm64/instruction.cpp</code></td><td>emitBlock()、emitInstruction() 指令翻译</td></tr>
+      </tbody>
+    </table>
+
+  </div>
+</main>
+
+<script>
+function toggleSection(el){el.parentElement.classList.toggle('open')}
+function toggleSubsection(el){el.parentElement.classList.toggle('open')}
+const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+document.querySelectorAll('pre').forEach(pre=>{
+  pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));
+  const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';
+  btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;
+    navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});
+  });pre.style.position='relative';pre.appendChild(btn);
+});
+</script>
+</body>
+</html>

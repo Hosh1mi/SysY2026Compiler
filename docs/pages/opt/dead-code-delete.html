@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeadCodeDelete - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="reassociate.html">Reassociate</a>
+            <a class="nav-item" href="local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="licm.html">LICM</a>
+            <a class="nav-item" href="loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item active" href="dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="sccp.html">SCCP</a>
+            <a class="nav-item" href="const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 清理 Pass</div>
+      <h1>DeadCodeDelete</h1>
+      <p>死代码消除 Pass，删除无用指令、合并冗余基本块、消除平凡 phi 节点，通过不动点迭代持续清理 IR。</p>
+    </div>
+
+    <!-- ─── 概览 ─── -->
+    <h2>概览</h2>
+    <p>DeadCodeDelete 对每个函数反复执行以下三个子变换，直到不再变化（不动点）：</p>
+    <table>
+      <thead><tr><th>子变换</th><th>功能</th><th>状态</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#remove-dead-instructions">死指令删除</a></td><td>删除无使用者且无副作用的指令</td><td>主用</td></tr>
+        <tr><td><a href="#simplify-cfg">控制流简化</a></td><td>合并仅含无条件跳转且目标块仅有一个前驱的块对</td><td>主用</td></tr>
+        <tr><td><a href="#eliminate-trivial-phis">平凡 phi 消除</a></td><td>消除所有非自引用操作数相同的 phi</td><td>主用</td></tr>
+        <tr><td><a href="#remove-dead-blocks">不可达块删除</a></td><td>通过可达性分析删除不可达基本块</td><td>已禁用</td></tr>
+        <tr><td><a href="#aggressive-dce">激进死代码消除</a></td><td>从关键指令出发反向标记所有活跃指令，清除未标记指令</td><td>已禁用</td></tr>
+      </tbody>
+    </table>
+
+    <h3>执行流程</h3>
+    <div class="code-label">DeadCodeDelete::execute — 不动点迭代</div>
+<pre><code class="language-cpp">void DeadCodeDelete::execute(Module *module) {
+    for (auto func : module-&gt;function_list_) {
+        if (func-&gt;is_declaration()) continue;
+        bool changed;
+        do {
+            changed = false;
+            changed |= removeDeadInstructions(func);  // 主用
+            changed |= simplifyCFG(func);             // 主用
+            changed |= eliminateTrivialPhis(func);    // 主用
+        } while (changed);
+    }
+}</code></pre>
+    <p>三个子变换之间存在级联关系：死指令删除可能使 phi 变为平凡 phi，phi 消除后可能产生无使用者的指令，CFG 合并后可能暴露新的死代码，因此需要循环迭代直到不动点。</p>
+
+    <!-- ─── 关键指令判定 ─── -->
+    <h2>关键指令判定</h2>
+    <p>在死代码分析中，<strong>关键指令</strong>（Critical Instruction）是指具有副作用或控制流语义、不能被随意删除的指令。所有其他指令只有在"有使用者"时才被视为活跃的。</p>
+    <div class="code-label">isCriticalInstruction — 关键指令判定</div>
+<pre><code class="language-cpp">bool DeadCodeDelete::isCriticalInstruction(Instruction *inst) {
+    switch (inst-&gt;op_id_) {
+        case Instruction::Ret:    return true;  // 函数返回
+        case Instruction::Br:     return true;  // 分支跳转（控制流）
+        case Instruction::Store:  return true;  // 内存写入（副作用）
+        case Instruction::Call:   return true;  // 过程调用（可能有副作用）
+        default:                  return false;
+    }
+}</code></pre>
+    <p>add、sub、icmp、phi 等纯计算指令不属于关键指令，可以被安全删除（前提是无人使用）。</p>
+
+    <!-- ─── 死指令删除 ─── -->
+    <h2 id="remove-dead-instructions">1. 死指令删除</h2>
+    <p>扫描所有基本块的指令列表，删除<strong>无使用者且非关键</strong>的指令。这是最基础也最安全的死代码清理。</p>
+
+    <h3>算法</h3>
+    <div class="code-label">removeDeadInstructions — 单遍扫描</div>
+<pre><code class="language-cpp">bool DeadCodeDelete::removeDeadInstructions(Function *func) {
+    bool changed = false;
+    for (auto bb : func-&gt;basic_blocks_) {
+        auto &amp;instList = bb-&gt;instr_list_;
+        for (auto it = instList.begin(); it != instList.end();) {
+            Instruction *inst = *it;
+            if (inst-&gt;use_list_.empty() &amp;&amp; !isCriticalInstruction(inst)) {
+                it = instList.erase(it);
+                inst-&gt;remove_use_of_ops();  // 清理 def-use 链
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+    }
+    return changed;
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @foo(i32 %x) {
+label_entry:
+  %dead1 = add i32 %x, 1      ; 无人使用
+  %dead2 = mul i32 %dead1, 3  ; 唯一使用者 dead1 也是死代码
+  %result = add i32 %x, 10    ; 被 ret 使用
+  ret i32 %result
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @foo(i32 %x) {
+label_entry:
+  %result = add i32 %x, 10
+  ret i32 %result
+}</code></pre>
+    <p><code>%dead2</code> 首先被删除（无使用者），这使得 <code>%dead1</code> 也失去使用者，在下一轮迭代中被删除。</p>
+
+    <!-- ─── 控制流简化 ─── -->
+    <h2 id="simplify-cfg">2. 控制流简化</h2>
+    <p>合并满足条件的"透传"基本块对：当前块仅含一条无条件跳转，且目标块只有当前块一个前驱。</p>
+
+    <h3>合并条件</h3>
+    <ul>
+      <li>当前块的终止指令是无条件 <code>br</code>（单操作数）</li>
+      <li>目标块只有当前块一个前驱（<code>succ-&gt;pre_bbs_.size() == 1</code>）</li>
+      <li>目标块首条指令不是 phi（避免 phi 合并的复杂性）</li>
+    </ul>
+
+    <h3>变换过程</h3>
+    <ol>
+      <li><strong>Phi 引用替换</strong>：将函数中所有 phi 对目标块的引用替换为对当前块的引用</li>
+      <li><strong>指令移动</strong>：将目标块的所有非终止指令移动到当前块末尾</li>
+      <li><strong>终止指令移动</strong>：将目标块的终止指令移动到当前块末尾</li>
+      <li><strong>CFG 更新</strong>：当前块继承目标块的所有后继，更新前后驱关系</li>
+      <li><strong>删除目标块</strong>：从函数中移除并释放内存</li>
+    </ol>
+
+    <div class="code-label">simplifyCFG — 核心合并逻辑</div>
+<pre><code class="language-cpp">bool DeadCodeDelete::simplifyCFG(Function *func) {
+    bool changed = false;
+    bool local_changed = true;
+    while (local_changed) {
+        local_changed = false;
+        for (auto bb : func-&gt;basic_blocks_) {
+            Instruction *term = bb-&gt;get_terminator();
+            if (!term || term-&gt;op_id_ != Instruction::Br || term-&gt;num_ops_ != 1)
+                continue;
+            BasicBlock *succ = static_cast&lt;BasicBlock *&gt;(term-&gt;get_operand(0));
+            if (succ-&gt;pre_bbs_.size() != 1 ||
+                (!succ-&gt;instr_list_.empty() &amp;&amp; succ-&gt;instr_list_.front()-&gt;is_phi()))
+                continue;
+            // ... 合并逻辑 ...
+            local_changed = true; changed = true;
+            break;  // 向量被修改，重新扫描
+        }
+    }
+    return changed;
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @bar(i32 %x) {
+label_entry:
+  br label %middle          ; 无条件跳转
+
+middle:                    ; 单一前驱，无 phi
+  %a = add i32 %x, 1
+  br label %done
+
+done:
+  %b = mul i32 %a, 2
+  ret i32 %b
+}</code></pre>
+
+    <div class="code-label">优化后 — IR（合并 entry + middle）</div>
+<pre><code class="language-cpp">define i32 @bar(i32 %x) {
+label_entry:
+  %a = add i32 %x, 1
+  br label %done
+
+done:
+  %b = mul i32 %a, 2
+  ret i32 %b
+}</code></pre>
+    <p><code>middle</code> 块被合并到 <code>label_entry</code> 中。注意：由于 <code>middle</code> 没有 phi 且是唯一前驱，可以安全合并。合并后 <code>done</code> 中 phi 对 <code>middle</code> 的引用也被替换为 <code>label_entry</code>。</p>
+
+    <!-- ─── 平凡 phi 消除 ─── -->
+    <h2 id="eliminate-trivial-phis">3. 平凡 phi 消除</h2>
+    <p>当一个 phi 节点的所有<strong>非自引用</strong>操作数都指向同一个值时，该 phi 是"平凡的"，可以被该值直接替换。</p>
+
+    <h3>判定规则</h3>
+    <div class="code-label">平凡 phi 判定</div>
+<pre><code class="language-cpp">Value *common = nullptr;
+for (unsigned i = 0; i &lt; phi-&gt;num_ops_; i += 2) {
+    Value *v = phi-&gt;get_operand(i);
+    if (v == phi) continue;  // 跳过自引用
+    if (common == nullptr) {
+        common = v;
+    } else if (common != v) {
+        common = nullptr;    // 不统一，非平凡
+        break;
+    }
+}</code></pre>
+
+    <h3>级联消除</h3>
+    <p>消除一个平凡 phi 后，引用它的其他 phi 可能也变为平凡的，因此使用工作表实现级联消除：</p>
+    <div class="code-label">eliminateTrivialPhis — 工作表级联</div>
+<pre><code class="language-cpp">bool DeadCodeDelete::eliminateTrivialPhis(Function *func) {
+    std::set&lt;PhiInst *&gt; worklist;  // 初始包含所有 phi
+    // ... 收集所有 phi 到 worklist ...
+    while (!worklist.empty()) {
+        auto phi = *worklist.begin();
+        worklist.erase(worklist.begin());
+        // 检查是否为平凡 phi
+        if (common != nullptr) {
+            phi-&gt;replace_all_use_with(common);
+            phi-&gt;parent_-&gt;delete_instr(phi);
+            // 将引用此 phi 的其他 phi 重新加入工作表
+            for (auto *user : phiUsers)
+                worklist.insert(user);
+        }
+    }
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @trivial(i32 %x) {
+label_entry:
+  br i1 1, label %then, label %else
+
+then:
+  br label %merge
+
+else:
+  br label %merge
+
+merge:
+  %a = phi i32 [ %x, %then ], [ %x, %else ]  ; 两边都是 %x，平凡
+  %b = phi i32 [ %a, %then ], [ %a, %else ]  ; 两边都是 %a，平凡
+  ret i32 %b
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @trivial(i32 %x) {
+  ; phi %a 被替换为 %x
+  ; phi %b 被替换为 %x
+  ret i32 %x
+}</code></pre>
+    <p><code>%a</code> 先被消除（两个入边都是 <code>%x</code>），这使得 <code>%b</code> 的两个入边都变为 <code>%x</code>，于是 <code>%b</code> 也被级联消除。</p>
+
+    <!-- ─── 不可达块删除（已禁用） ─── -->
+    <h2 id="remove-dead-blocks">4. 不可达块删除 <span style="color:var(--text-secondary);font-size:0.7em">（已禁用）</span></h2>
+    <p>通过从入口块出发的可达性分析，找出所有不可达的基本块并删除。此功能当前在 <code>execute()</code> 中被注释掉，由 CFGSimplify 的 <code>removeDeadBlocks</code> 承担了类似职责。</p>
+
+    <h3>算法</h3>
+    <ol>
+      <li><strong>可达性分析</strong>：从入口块出发 BFS，通过终止指令中的基本块操作数遍历后继，标记所有可达块</li>
+      <li><strong>收集不可达块</strong>：遍历函数所有块，未在可达集合中的即为不可达</li>
+      <li><strong>Phi 清理</strong>：在删除前，更新后继块中 phi 对即将删除块的引用</li>
+      <li><strong>块删除</strong>：为不可达值生成零常量替换使用，清除指令，从函数中移除</li>
+    </ol>
+
+    <div class="code-label">deleteBasicBlock — 安全删除块</div>
+<pre><code class="language-cpp">void DeadCodeDelete::deleteBasicBlock(BasicBlock *bb) {
+    for (auto inst : bb-&gt;instr_list_) {
+        if (inst-&gt;type_-&gt;tid_ != Type::VoidTyID) {
+            auto *zero = new ConstantZero(inst-&gt;type_);
+            inst-&gt;replace_all_use_with(zero);  // 不可达值 → 零常量
+        }
+    }
+    for (auto inst : bb-&gt;instr_list_)
+        inst-&gt;remove_use_of_ops();
+    bb-&gt;instr_list_.clear();
+    bb-&gt;parent_-&gt;remove_bb(bb);
+    delete bb;
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">不可达块场景</div>
+<pre><code class="language-cpp">define i32 @unreachable() {
+entry:
+  ret i32 0
+
+dead_block:                ; 无前驱，不可达
+  %x = add i32 1, 2
+  ret i32 %x
+}</code></pre>
+    <p><code>dead_block</code> 没有任何前驱，从 <code>entry</code> 无法到达，将被删除。其中 <code>%x</code> 如有外部使用者，会被替换为 <code>ConstantZero</code>。</p>
+
+    <!-- ─── 激进死代码消除（已禁用） ─── -->
+    <h2 id="aggressive-dce">5. 激进死代码消除 <span style="color:var(--text-secondary);font-size:0.7em">（已禁用）</span></h2>
+    <p>采用标记-清扫策略：从所有关键指令（ret/br/store/call）出发，反向遍历操作数依赖链，标记所有可达指令为"活跃"，未标记的指令即为死代码。此功能当前在 <code>execute()</code> 中被注释掉。</p>
+
+    <h3>算法</h3>
+    <div class="code-label">aggressiveDCE — 标记-清扫</div>
+<pre><code class="language-cpp">bool DeadCodeDelete::aggressiveDCE(Function *func) {
+    std::set&lt;Instruction *&gt; live;
+    markLiveInstructions(func, live);  // 从关键指令出发标记
+    std::vector&lt;Instruction *&gt; dead_insts;
+    for (auto bb : func-&gt;basic_blocks_)
+        for (auto inst : bb-&gt;instr_list_)
+            if (live.find(inst) == live.end() &amp;&amp; !isCriticalInstruction(inst))
+                dead_insts.push_back(inst);
+    for (auto inst : dead_insts)
+        if (inst-&gt;parent_) inst-&gt;parent_-&gt;delete_instr(inst);
+    return !dead_insts.empty();
+}</code></pre>
+
+    <h3>标记过程</h3>
+    <div class="code-label">markLiveInstructions — 反向依赖遍历</div>
+<pre><code class="language-cpp">void DeadCodeDelete::markLiveInstructions(Function *func,
+    std::set&lt;Instruction *&gt; &amp;live) {
+    std::queue&lt;Instruction *&gt; worklist;
+    // 初始根集合：所有关键指令
+    for (auto bb : func-&gt;basic_blocks_)
+        for (auto inst : bb-&gt;instr_list_)
+            if (isCriticalInstruction(inst)) {
+                live.insert(inst);
+                worklist.push(inst);
+            }
+    // 反向遍历操作数依赖
+    while (!worklist.empty()) {
+        Instruction *cur = worklist.front(); worklist.pop();
+        for (unsigned i = 0; i &lt; cur-&gt;num_ops_; ++i) {
+            if (Instruction *op_inst = dynamic_cast&lt;Instruction *&gt;(cur-&gt;get_operand(i)))
+                if (live.insert(op_inst).second)
+                    worklist.push(op_inst);
+        }
+    }
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define void @adce_demo(i32 %x) {
+entry:
+  %a = add i32 %x, 1      ; 无使用者 → 死代码
+  %b = mul i32 %x, 2      ; 被 store 使用 → 活跃
+  store i32 %b, i32* @g
+  %c = sub i32 %a, 3      ; 唯一使用者 %a 是死代码 → 也是死代码
+  ret void
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define void @adce_demo(i32 %x) {
+entry:
+  %b = mul i32 %x, 2
+  store i32 %b, i32* @g
+  ret void
+}</code></pre>
+    <p>从 <code>store</code> 和 <code>ret</code> 出发反向标记：<code>store</code> → <code>%b</code> → <code>%x</code>（参数，非指令）；<code>ret</code> 无操作数。<code>%a</code> 和 <code>%c</code> 不在活跃集合中，被清除。</p>
+
+    <!-- ─── 辅助函数 ─── -->
+    <h2>辅助函数</h2>
+    <table>
+      <thead><tr><th>函数</th><th>功能</th></tr></thead>
+      <tbody>
+        <tr><td><code>isCriticalInstruction(inst)</code></td><td>判断指令是否为关键指令（ret/br/store/call）</td></tr>
+        <tr><td><code>deleteBasicBlock(bb)</code></td><td>安全删除块：为不可达值生成零常量，清理 use 链</td></tr>
+        <tr><td><code>updatePhiAfterRemoveBlock(removed)</code></td><td>删除后继块 phi 中对 removed 的入边</td></tr>
+        <tr><td><code>replacePhiUsesOfBlock(old, new)</code></td><td>将所有 phi 中 old 块的引用替换为 new 块</td></tr>
+        <tr><td><code>markLiveInstructions(func, live)</code></td><td>从关键指令出发 BFS 标记所有活跃指令</td></tr>
+        <tr><td><code>getEntryBlock(func)</code></td><td>获取函数入口块（无前驱的块）</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── 源码位置 ─── -->
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/mid/opt/deadCodeDelete.hpp</code> — 类定义</li>
+      <li><code>src/mid/opt/deadCodeDelete.cpp</code> — 实现（365 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

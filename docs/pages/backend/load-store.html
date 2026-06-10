@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Load/Store - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+<aside class="sidebar" id="sidebar"><div class="sidebar-header"><h1>SysY Compiler</h1></div><nav class="sidebar-nav">
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../../index.html">首页</a><a class="nav-item" href="../quickstart.html">快速开始</a><a class="nav-item" href="../architecture.html">整体架构</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../ir/data-structures.html">数据结构</a><a class="nav-item" href="../ir/irgen.html">IR 生成</a><a class="nav-item" href="../ir/ssa.html">SSA 形式</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../analysis/overview.html">总览</a><a class="nav-item" href="../analysis/loop-info.html">循环分析</a><a class="nav-item" href="../analysis/scev.html">标量演化</a><a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a><a class="nav-item" href="../analysis/dependence.html">依赖分析</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a><a class="nav-item" href="../opt/pipeline.html">优化流水线</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a><a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a><a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a><a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a><a class="nav-item" href="../opt/reassociate.html">Reassociate</a><a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a><a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a><a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a><a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a><a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a><a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a><a class="nav-item" href="../opt/licm.html">LICM</a><a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a><a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a><a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a><a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a><a class="nav-item" href="../opt/sccp.html">SCCP</a><a class="nav-item" href="../opt/const-fold.html">ConstantFold</a><a class="nav-item" href="../opt/inst-combine.html">InstCombine</a><a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a></div></div></div></div>
+<div class="nav-section open"><div class="nav-section-header" onclick="toggleSection(this)"><span>后端 ARM64</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>MachineInstr</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="machine-instr.html">MachineInstr</a></div></div><div class="nav-subsection open"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>汇编生成</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="codegen.html">代码生成</a><a class="nav-item" href="regalloc.html">寄存器分配</a><a class="nav-item" href="branch.html">分支处理</a><a class="nav-item active" href="load-store.html">Load/Store</a><a class="nav-item" href="scheduler.html">指令调度</a><a class="nav-item" href="peephole.html">Peephole 优化</a></div></div></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>Prompts</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a></div></div>
+</nav></aside>
+
+<main class="main"><div class="content" id="content">
+
+<div class="page-header"><div class="breadcrumb">wiki / 后端 / 汇编生成</div><h1>Load/Store</h1><p>Load/Store 子系统负责栈槽访问、临时寄存器分配、常量加载和全局地址计算。它提供了 load/store 系列 API，将 IR 值与物理寄存器之间建立桥梁。</p></div>
+
+<h2>概览</h2>
+<p>Load/Store 子系统由三部分组成：</p>
+<ul>
+  <li><strong>临时寄存器池</strong> — 管理 w10-w16（整数）、s16-s31（浮点）、v0-v7/v16-v31（NEON）的分配与释放</li>
+  <li><strong>Load 函数族</strong> — 将 IR 值加载到临时寄存器（loadInt, loadFloat, loadAddr, loadVector）</li>
+  <li><strong>Store 函数族</strong> — 将寄存器值写回栈槽或寄存器（storeInt, storeFloat, storeAddr, storeVector）</li>
+</ul>
+
+<h2>临时寄存器池</h2>
+<table>
+  <thead><tr><th>寄存器类</th><th>分配范围</th><th>回退</th><th>分配函数</th></tr></thead>
+  <tbody>
+    <tr><td>整数 (w)</td><td>w10 - w15</td><td>w16</td><td>allocIntReg()</td></tr>
+    <tr><td>地址 (x)</td><td>x10 - x15</td><td>x16</td><td>allocAddrReg()</td></tr>
+    <tr><td>浮点 (s)</td><td>s16 - s31</td><td>s16</td><td>allocFloatReg()</td></tr>
+    <tr><td>NEON (v)</td><td>v0 - v7, v16 - v31</td><td>v0</td><td>allocNEONReg()</td></tr>
+  </tbody>
+</table>
+<p>每次发射指令前调用 <code>resetRegs()</code> 将使用集合重置为预保留寄存器（由寄存器分配器确定的已分配物理寄存器），避免跨指令的寄存器泄漏。</p>
+
+<h2>栈槽访问</h2>
+<h3>emitStoreRegMachine / emitLoadRegMachine</h3>
+<p>基于 x29（帧指针）的偏移访问，支持两种寻址模式：</p>
+<pre><code class="language-cpp">// 短偏移（-256 ≤ off ≤ 255）→ 直接 ldr/str
+//   ldr w10, [x29, #-8]
+// 长偏移 → sub + ldr/str
+//   sub x17, x29, #OFFSET    // 若 offset ≤ 4095
+//   ldr w10, [x17]
+// 超长偏移 → movz + sub + ldr
+//   movz x17, #OFFSET
+//   sub x29, x17 → x17
+//   ldr w10, [x17]</code></pre>
+
+<h3>成对访问（STP/LDP）</h3>
+<p><code>emitStorePairMachine</code> / <code>emitLoadPairMachine</code> 使用 ARM64 的 stp/ldp 指令成对保存/恢复寄存器：</p>
+<table>
+  <thead><tr><th>类型</th><th>偏移范围</th><th>对齐</th></tr></thead>
+  <tbody>
+    <tr><td>32 位 (w/s)</td><td>±252</td><td>4 字节</td></tr>
+    <tr><td>64 位 (x/d)</td><td>±504</td><td>8 字节</td></tr>
+  </tbody>
+</table>
+<p>超出范围时自动退化为两条独立的 str/ldr 或 sub + stp/ldp。</p>
+
+<h2>Load 函数族</h2>
+<pre><code class="language-cpp">std::string loadInt(Value *v);    // → wN / wzr（常量为 0）
+std::string loadFloat(Value *v);  // → sN
+std::string loadAddr(Value *v);   // → xN / xzr / adrp+add（全局变量）
+std::string loadVector(Value *v); // → vN / ld1（常量向量）</code></pre>
+<p>每个 load 函数的优先级：</p>
+<ol>
+  <li><strong>常量</strong> — 直接生成常量到临时寄存器（wzr/xzr 对于 0）</li>
+  <li><strong>已分配寄存器</strong> — 直接返回物理寄存器名，标记为已使用</li>
+  <li><strong>栈槽</strong> — 分配临时寄存器，发射 ldr 指令</li>
+</ol>
+
+<h3>全局变量地址</h3>
+<p><code>loadAddr</code> 对全局变量生成 ADRP+ADD 指令对：</p>
+<pre><code class="language-cpp">// emitGlobalAddr:
+//   adrp x10, global_var
+//   add x10, x10, :lo12:global_var</code></pre>
+
+<h2>Store 函数族</h2>
+<pre><code class="language-cpp">void storeInt(Value *v, const std::string &amp;reg);
+void storeFloat(Value *v, const std::string &amp;reg);
+void storeAddr(Value *v, const std::string &amp;reg);
+void storeVector(Value *v, const std::string &amp;reg);</code></pre>
+<p>若值已分配物理寄存器，store 退化为 mov（或 fmov）。否则发射 str 到栈槽。</p>
+
+<h2>常量加载</h2>
+<h3>整数常量（emitIntConst）</h3>
+<pre><code class="language-cpp">// 使用 movz + movk 两步加载 32 位整数：
+//   movz wN, #LOW16        // 低 16 位
+//   movk wN, #HIGH16, lsl #16  // 高 16 位（仅非零时）</code></pre>
+
+<h3>浮点常量（emitFloatConst）</h3>
+<pre><code class="language-cpp">// 1. 将 IEEE 754 位表示加载到整数临时寄存器
+//   movz w10, #LOW16
+//   movk w10, #HIGH16, lsl #16
+// 2. 通过 fmov 传输到浮点寄存器
+//   fmov sN, w10</code></pre>
+
+<h2>向量 Load/Store</h2>
+<h3>loadVector</h3>
+<p>对常量向量逐 lane 构造；对栈槽中的向量使用 ldr qN（128 位加载）：</p>
+<pre><code class="language-cpp">// 常量向量：
+//   mov v0.s[0], w10
+//   mov v0.s[1], w11
+//   mov v0.s[2], w12
+//   mov v0.s[3], w13
+
+// 栈槽加载（正偏移，16 字节对齐）：
+//   ldr q0, [x29, #OFFSET]
+
+// 负偏移（ldr qN 不支持负偏移）：
+//   sub x16, x29, #ABS_OFFSET
+//   ldr q0, [x16]</code></pre>
+
+<h2>示例</h2>
+<pre><code class="language-cpp">// IR:  %r = add i32 %a, %b
+// 假设 %a 在栈槽 -8, %b 已分配 w3, %r 未分配寄存器
+
+// loadInt(%a):
+//   ldr w10, [x29, #-8]     // 从栈槽加载到临时寄存器
+// loadInt(%b):
+//   w3                       // 直接返回已分配寄存器
+
+// add:
+//   add w11, w10, w3         // 结果到另一个临时寄存器
+
+// storeInt(%r, w11):
+//   str w11, [x29, #-16]     // 写回 %r 的栈槽</code></pre>
+
+<h2>源码位置</h2>
+<table>
+  <thead><tr><th>文件</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/backend/arm64/load_store.cpp</code></td><td>寄存器池管理、load/store 函数族、常量加载、全局地址</td></tr>
+    <tr><td><code>src/include/backend/arm64/context.hpp</code></td><td>allocIntReg / allocFloatReg / allocAddrReg / allocNEONReg 接口</td></tr>
+  </tbody>
+</table>
+
+</div></main>
+<script>function toggleSection(el){el.parentElement.classList.toggle('open')}function toggleSubsection(el){el.parentElement.classList.toggle('open')}const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';document.querySelectorAll('pre').forEach(pre=>{pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});});pre.style.position='relative';pre.appendChild(btn)});</script>
+</body></html>

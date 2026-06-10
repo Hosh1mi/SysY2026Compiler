@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IR 生成 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="data-structures.html">数据结构</a>
+            <a class="nav-item active" href="irgen.html">IR 生成</a>
+            <a class="nav-item" href="ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / IR 生成</div>
+      <h1>IR 生成（GenIR）</h1>
+      <p>
+        <code>GenIR</code> 继承自 <code>Visitor</code> 接口，遍历 AST 并逐节点发射 IR 指令。
+        头文件 <code>src/include/mid/ir/irGen.hpp</code>，实现 <code>src/mid/ir/irGen.cpp</code>。
+      </p>
+    </div>
+
+    <!-- ===== GenIR 类结构 ===== -->
+    <h2>类结构</h2>
+    <p>
+      <code>GenIR</code> 实现 <code>Visitor</code> 接口的 23 个 <code>visit</code> 方法，
+      每个方法对应一种 AST 节点类型。核心成员：
+    </p>
+    <pre data-lang="cpp"><code>class GenIR: public Visitor {
+public:
+    IRStmtBuilder *builder;              // 指令构建器（维护插入点）
+    Scope scope;                         // 作用域符号表
+    std::unique_ptr&lt;Module&gt; module;      // IR 顶层模块
+
+    // 23 个 visit 方法覆盖全部 AST 节点
+    void visit(CompUnitAST &amp;ast) override;
+    void visit(DeclDefAST &amp;ast) override;
+    void visit(DeclAST &amp;ast) override;
+    void visit(DefAST &amp;ast) override;
+    void visit(InitValAST &amp;ast) override;
+    void visit(FuncDefAST &amp;ast) override;
+    void visit(FuncFParamAST &amp;ast) override;
+    void visit(BlockAST &amp;ast) override;
+    void visit(BlockItemAST &amp;ast) override;
+    void visit(StmtAST &amp;ast) override;
+    void visit(ReturnStmtAST &amp;ast) override;
+    void visit(SelectStmtAST &amp;ast) override;
+    void visit(IterationStmtAST &amp;ast) override;
+    void visit(AddExpAST &amp;ast) override;
+    void visit(LValAST &amp;ast) override;
+    void visit(MulExpAST &amp;ast) override;
+    void visit(UnaryExpAST &amp;ast) override;
+    void visit(PrimaryExpAST &amp;ast) override;
+    void visit(CallAST &amp;ast) override;
+    void visit(NumberAST &amp;ast) override;
+    void visit(RelExpAST &amp;ast) override;
+    void visit(EqExpAST &amp;ast) override;
+    void visit(LAndExpAST &amp;ast) override;
+    void visit(LOrExpAST &amp;ast) override;
+};</code></pre>
+
+    <h3>全局状态变量</h3>
+    <p>
+      IR 生成过程依赖一组文件级全局变量在各 <code>visit</code> 方法之间传递上下文：
+    </p>
+    <table>
+      <thead><tr><th>变量</th><th>类型</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><code>recentVal</code></td><td><code>Value*</code></td><td>最近一次表达式的计算结果，所有 visit 方法通过它传递值</td></tr>
+        <tr><td><code>curType</code></td><td><code>Type*</code></td><td>当前声明的类型（INT32_T / FLOAT_T）</td></tr>
+        <tr><td><code>isConst</code></td><td><code>bool</code></td><td>当前声明是否为 const</td></tr>
+        <tr><td><code>useConst</code></td><td><code>bool</code></td><td>是否处于常量折叠模式（全局初始值/数组维度）</td></tr>
+        <tr><td><code>currentFunction</code></td><td><code>Function*</code></td><td>当前正在生成的函数</td></tr>
+        <tr><td><code>retAlloca</code></td><td><code>Value*</code></td><td>函数返回值的 alloca 地址</td></tr>
+        <tr><td><code>retBB</code></td><td><code>BasicBlock*</code></td><td>函数统一返回块</td></tr>
+        <tr><td><code>whileCondBB</code></td><td><code>BasicBlock*</code></td><td>当前 while 的条件块（continue 跳转目标）</td></tr>
+        <tr><td><code>whileFalseBB</code></td><td><code>BasicBlock*</code></td><td>当前 while 的退出块（break 跳转目标）</td></tr>
+        <tr><td><code>trueBB / falseBB</code></td><td><code>BasicBlock*</code></td><td>if/while 的真/假分支目标块</td></tr>
+        <tr><td><code>has_br</code></td><td><code>bool</code></td><td>当前 BB 是否已发射终止指令（br/ret），后续指令跳过</td></tr>
+        <tr><td><code>requireLVal</code></td><td><code>bool</code></td><td>LVal 是否需要返回地址（赋值左值）而非加载值</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== Scope 符号表 ===== -->
+    <h2>Scope 符号表</h2>
+    <p>
+      <code>Scope</code> 类实现词法作用域，用 <code>vector&lt;map&lt;string, Value*&gt;&gt;</code> 栈结构。
+      进入块时 <code>enter()</code> 压入空 map，退出时 <code>exit()</code> 弹出。
+      查找时从栈顶向栈底遍历，实现变量遮蔽。
+    </p>
+    <pre data-lang="cpp"><code>class Scope {
+public:
+    void enter() { symbol.push_back({}); }
+    void exit()  { symbol.pop_back(); }
+    bool in_global() { return symbol.size() == 1; }
+
+    // 返回 true 表示成功，false 表示名字已存在
+    bool push(std::string name, Value *val);
+
+    // 从内向外查找，找不到返回 nullptr
+    Value* find(std::string name);
+
+private:
+    std::vector&lt;std::map&lt;std::string, Value *&gt;&gt; symbol;
+};</code></pre>
+    <p>
+      <code>in_global()</code> 判断当前是否在全局作用域（仅一层 map），决定变量声明走
+      <code>GlobalVariable</code> 路径还是 <code>AllocaInst</code> 路径。
+    </p>
+
+    <!-- ===== 构造与库函数注册 ===== -->
+    <h2>构造与库函数注册</h2>
+    <p>
+      <code>GenIR</code> 构造函数创建空 <code>Module</code>，并注册 SysY 运行时库函数到全局作用域：
+    </p>
+    <table>
+      <thead><tr><th>函数名</th><th>签名</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><code>getint</code></td><td><code>i32 ()</code></td><td>读入一个整数</td></tr>
+        <tr><td><code>getfloat</code></td><td><code>float ()</code></td><td>读入一个浮点数</td></tr>
+        <tr><td><code>getch</code></td><td><code>i32 ()</code></td><td>读入一个字符</td></tr>
+        <tr><td><code>getarray</code></td><td><code>i32 (i32*)</code></td><td>读入整数数组</td></tr>
+        <tr><td><code>getfarray</code></td><td><code>i32 (float*)</code></td><td>读入浮点数组</td></tr>
+        <tr><td><code>putint</code></td><td><code>void (i32)</code></td><td>输出整数</td></tr>
+        <tr><td><code>putfloat</code></td><td><code>void (float)</code></td><td>输出浮点数</td></tr>
+        <tr><td><code>putch</code></td><td><code>void (i32)</code></td><td>输出字符</td></tr>
+        <tr><td><code>putarray</code></td><td><code>void (i32, i32*)</code></td><td>输出整数数组</td></tr>
+        <tr><td><code>putfarray</code></td><td><code>void (i32, float*)</code></td><td>输出浮点数组</td></tr>
+        <tr><td><code>_sysy_starttime</code></td><td><code>void (i32)</code></td><td>计时开始（行号参数）</td></tr>
+        <tr><td><code>_sysy_stoptime</code></td><td><code>void (i32)</code></td><td>计时结束</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===== 变量声明 ===== -->
+    <h2>变量声明（DefAST）</h2>
+    <p>
+      <code>visit(DefAST)</code> 根据 <code>scope.in_global()</code> 分流到全局或局部路径：
+    </p>
+
+    <h3>全局变量</h3>
+    <p>
+      全局标量通过 <code>GlobalVariable</code> 创建，初始值为编译期常量。
+      全局 const 若为单值，直接存入符号表而不创建 <code>GlobalVariable</code>。
+    </p>
+    <pre data-lang="cpp"><code>// 无初始化全局变量 → 默认初始化为 0
+GlobalVariable* var = new GlobalVariable(varName, module.get(), curType, false, CONST_INT(0));
+scope.push(varName, var);
+
+// 全局 const 单值 → 直接存符号表
+if (isConst) scope.push(varName, recentVal);</code></pre>
+
+    <h3>全局数组</h3>
+    <p>
+      全局数组使用 <code>globalInit()</code> 递归构建 <code>ConstantArray</code> 嵌套结构。
+      大括号嵌套的对齐由 <code>mergeElements()</code> 和 <code>finalMerge()</code> 处理，
+      不足部分以 <code>ConstantZero</code> 填充。
+    </p>
+
+    <h3>局部变量</h3>
+    <p>
+      局部标量通过 <code>builder-&gt;create_alloca()</code> 在当前 BB 中分配栈空间，
+      常量直接存入符号表不分配 alloca。
+    </p>
+    <pre data-lang="cpp"><code>// 局部变量
+AllocaInst *varAlloca = builder-&gt;create_alloca(curType);
+varAlloca-&gt;name_ = varName;
+scope.push(varName, varAlloca);
+builder-&gt;create_store(recentVal, varAlloca);  // 有初始化时 store
+
+// 局部 const → 不分配 alloca
+scope.push(varName, recentVal);</code></pre>
+
+    <h3>局部数组</h3>
+    <p>
+      局部数组通过 <code>create_alloca(arrayTy)</code> 分配，然后逐元素清零。
+      对于元素数超过 256 的大数组，生成 IR 循环清零以避免百万级指令导致编译超时：
+    </p>
+    <pre data-lang="cpp"><code>// 大数组（elemCnt &gt; 256）：生成循环清零
+if (elemCnt &gt; 256) {
+    auto idxAlloca = builder-&gt;create_alloca(INT32_T);
+    builder-&gt;create_store(CONST_INT(0), idxAlloca);
+    builder-&gt;create_br(zeroCondBB);
+    // zeroCondBB: idx &lt; elemCnt ? → zeroBodyBB / zeroEndBB
+    // zeroBodyBB: i32P[idx] = 0; idx++; br zeroCondBB
+    // zeroEndBB: 继续后续初始化
+} else {
+    // 小数组：展开为逐元素 store
+    for (int i = 0; i &lt; elemCnt; i++) {
+        auto gep = builder-&gt;create_gep(i32P, {CONST_INT(i)});
+        builder-&gt;create_store(CONST_INT(0), gep);
+    }
+}</code></pre>
+    <p>
+      初始化赋值通过 <code>localInit()</code> 递归处理嵌套大括号结构，
+      按 <code>dimensionsCnt</code>（各维度累计元素数）对齐写入。
+    </p>
+
+    <!-- ===== 函数定义 ===== -->
+    <h2>函数定义（FuncDefAST）</h2>
+    <p>
+      函数定义生成统一的四段结构：entry 块 → 函数体 → retBB（统一返回）。
+    </p>
+    <pre data-lang="cpp"><code>void GenIR::visit(FuncDefAST &amp;ast) {
+    // 1. 收集参数类型和名称
+    for (auto &amp;funcFParam : ast.funcFParamList) funcFParam-&gt;accept(*this);
+    auto funTy = new FunctionType(retType, params);
+    auto func = new Function(funTy, *ast.id, module.get());
+    scope.push(*ast.id, func);  // 在进入新作用域之前注册
+    scope.enter();
+
+    // 2. 创建 entry 块，先 alloca 所有参数，再 store
+    auto bb = new BasicBlock(module.get(), "label_entry", func);
+    builder-&gt;BB_ = bb;
+    for (int i = 0; i &lt; paramNames.size(); i++) {
+        auto alloc = builder-&gt;create_alloca(params[i]);
+        scope.push(paramNames[i], alloc);
+    }
+    for (int i = 0; i &lt; paramNames.size(); i++) {
+        builder-&gt;create_store(args[i], scope.find(paramNames[i]));
+    }
+
+    // 3. 创建统一返回块 retBB
+    retBB = new BasicBlock(module.get(), "label_ret", func);
+    retAlloca = builder-&gt;create_alloca(retType);  // 返回值存储
+    // retBB 中的指令：load retAlloca → ret
+
+    // 4. 生成函数体
+    builder-&gt;BB_ = bb;
+    ast.block-&gt;accept(*this);
+    if (!builder-&gt;BB_-&gt;get_terminator()) builder-&gt;create_br(retBB);
+}</code></pre>
+
+    <h3>返回块优化</h3>
+    <p>
+      若 retBB 仅有一个前驱且该前驱无条件跳转到 retBB，则合并两个块：
+      将 retBB 的指令移入前驱块，消除冗余的 <code>store → load</code> 对。
+    </p>
+
+    <!-- ===== 控制流 ===== -->
+    <h2>控制流生成</h2>
+
+    <h3>if 语句（SelectStmt）</h3>
+    <p>生成三分支结构：<code>trueBB</code>、<code>falseBB</code>（或 <code>elseBB</code>）、<code>nextIf</code>。</p>
+    <pre data-lang="cpp"><code>void GenIR::visit(SelectStmtAST &amp;ast) {
+    trueBB  = new BasicBlock(..., "label_if_then_");
+    falseBB = new BasicBlock(..., "label_if_else_");
+    nextIf  = ast.elseStmt ? new BasicBlock(..., "label_if_end_") : falseBB;
+
+    ast.cond-&gt;accept(*this);
+    // 非 i1 类型需要与 0 比较
+    if (recentVal-&gt;type_ == INT32_T)
+        recentVal = builder-&gt;create_icmp_ne(recentVal, CONST_INT(0));
+    builder-&gt;create_cond_br(recentVal, trueBB, falseBB);
+
+    builder-&gt;BB_ = trueBB;
+    ast.ifStmt-&gt;accept(*this);
+    if (!builder-&gt;BB_-&gt;get_terminator()) builder-&gt;create_br(nextIf);
+
+    if (ast.elseStmt) {
+        builder-&gt;BB_ = falseBB;
+        ast.elseStmt-&gt;accept(*this);
+        if (!builder-&gt;BB_-&gt;get_terminator()) builder-&gt;create_br(nextIf);
+    }
+    builder-&gt;BB_ = nextIf;
+}</code></pre>
+
+    <h3>while 语句（IterationStmt）</h3>
+    <p>生成三块循环结构：<code>whileCondBB</code> → <code>trueBB</code>（循环体）→ 回跳 <code>whileCondBB</code> / 退出 <code>falseBB</code>。</p>
+    <pre data-lang="cpp"><code>void GenIR::visit(IterationStmtAST &amp;ast) {
+    whileCondBB = new BasicBlock(..., "label_while_cond_");
+    trueBB      = new BasicBlock(..., "label_while_body_");
+    falseBB     = new BasicBlock(..., "label_while_end_");
+    whileFalseBB = falseBB;  // break 跳转到此
+
+    builder-&gt;create_br(whileCondBB);
+    builder-&gt;BB_ = whileCondBB;
+    ast.cond-&gt;accept(*this);
+    builder-&gt;create_cond_br(cond, trueBB, falseBB);
+
+    builder-&gt;BB_ = trueBB;
+    ast.stmt-&gt;accept(*this);
+    if (!builder-&gt;BB_-&gt;get_terminator()) builder-&gt;create_br(whileCondBB);
+
+    builder-&gt;BB_ = falseBB;  // 继续循环后续代码
+}</code></pre>
+    <p>
+      <code>break</code> 发射 <code>br whileFalseBB</code>，<code>continue</code> 发射 <code>br whileCondBB</code>。
+      嵌套循环通过保存/恢复 <code>whileCondBB</code>、<code>whileFalseBB</code>、<code>trueBB</code>、<code>falseBB</code> 实现。
+    </p>
+
+    <!-- ===== 表达式 ===== -->
+    <h2>表达式生成</h2>
+
+    <h3>常量折叠</h3>
+    <p>
+      当 <code>useConst</code> 为 true 时（全局初始值计算），二元运算直接在 C++ 层面完成，
+      不发射 IR 指令。结果存入 <code>recentVal</code> 作为 <code>ConstantInt</code> 或 <code>ConstantFloat</code>。
+    </p>
+
+    <h3>类型自动转换</h3>
+    <p>
+      <code>checkCalType(Value*[])</code> 处理混合类型运算：i1 零扩展为 i32，
+      i32 与 float 混合时 i32 转为 float（<code>create_sitofp</code>）。
+    </p>
+
+    <h3>LVal 左值/右值</h3>
+    <p>
+      <code>visit(LValAST)</code> 根据 <code>requireLVal</code> 标志决定行为：
+    </p>
+    <table>
+      <thead><tr><th>场景</th><th>行为</th></tr></thead>
+      <tbody>
+        <tr><td>赋值左侧</td><td><code>requireLVal = true</code>，返回指针（<code>create_gep</code>）</td></tr>
+        <tr><td>读取右值</td><td>发射 <code>create_load</code></td></tr>
+        <tr><td>传数组参数</td><td>返回首地址指针（<code>create_gep(ptr, {0, 0})</code>）</td></tr>
+        <tr><td>局部常量</td><td>直接返回 Value，不发射 load</td></tr>
+        <tr><td>全局常量数组</td><td>在 <code>ConstantArray</code> 上逐层下标查找</td></tr>
+      </tbody>
+    </table>
+
+    <h3>短路求值</h3>
+    <p>
+      逻辑与（<code>&amp;&amp;</code>）和逻辑或（<code>||</code>）通过条件分支实现短路：
+    </p>
+    <pre data-lang="cpp"><code>// LAndExp: a &amp;&amp; b
+// 求值 a → icmp_ne a, 0 → cond_br(trueBB, falseBB)
+// trueBB: 求值 b（只有 a 为真时才执行）
+void GenIR::visit(LAndExpAST &amp;ast) {
+    auto tempTrue = trueBB;
+    trueBB = new BasicBlock(..., "label_and_");
+    ast.lAndExp-&gt;accept(*this);
+    builder-&gt;create_cond_br(recentVal, trueBB, falseBB);
+    builder-&gt;BB_ = trueBB;
+    trueBB = tempTrue;  // 还原
+    ast.eqExp-&gt;accept(*this);
+}
+
+// LOrExp: a || b（结构对称，跳到 falseBB 继续求值）</code></pre>
+
+    <h3>函数调用</h3>
+    <p>
+      <code>visit(CallAST)</code> 将 C 宏名 <code>starttime</code>/<code>stoptime</code> 映射为
+      <code>_sysy_starttime</code>/<code>_sysy_stoptime</code>，并在无实参时自动注入行号参数。
+      实参与形参类型不匹配时插入 <code>sitofp</code>/<code>fptosi</code> 转换。
+    </p>
+
+    <!-- ===== Return ===== -->
+    <h2>返回语句（ReturnStmt）</h2>
+    <p>
+      所有 return 语句统一跳转到 <code>retBB</code>。返回值先 store 到 <code>retAlloca</code>，
+      retBB 中再 load 并 ret。这样函数始终只有一个出口，简化后续优化。
+    </p>
+    <pre data-lang="cpp"><code>void GenIR::visit(ReturnStmtAST &amp;ast) {
+    if (ast.exp == nullptr) {
+        builder-&gt;create_br(retBB);  // void return
+    } else {
+        ast.exp-&gt;accept(*this);
+        // 类型转换后 store 到 retAlloca
+        builder-&gt;create_store(recentVal, retAlloca);
+        builder-&gt;create_br(retBB);
+    }
+    has_br = true;  // 标记当前 BB 已有终止指令
+}</code></pre>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open');
+    });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.innerHTML = checkIcon; btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000);
+      });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

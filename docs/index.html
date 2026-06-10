@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="style.css" />
+
+</head>
+<body>
+
+<!-- Sidebar Toggle (mobile) -->
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<!-- ===== Sidebar ===== -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <h1>SysY Compiler</h1>
+  </div>
+  <nav class="sidebar-nav">
+
+    <!-- 1. 项目概览 -->
+    <div class="nav-section open">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>项目概览</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item active" href="index.html" data-page="index">首页</a>
+        <a class="nav-item" href="pages/quickstart.html" data-page="quickstart">快速开始</a>
+        <a class="nav-item" href="pages/architecture.html" data-page="architecture">整体架构</a>
+      </div>
+    </div>
+
+    <!-- 2. 前端 -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>前端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="pages/frontend/overview.html">前端概述</a>
+      </div>
+    </div>
+
+    <!-- 3. 中端 IR -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>中端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection open">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pages/ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="pages/ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="pages/ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pages/analysis/overview.html">总览</a>
+            <a class="nav-item" href="pages/analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="pages/analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="pages/analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="pages/analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>优化 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pages/opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pages/opt/pipeline.html">优化流水线</a>
+            <a class="nav-item" href="pages/opt/ssa-prep.html">SSA 准备</a>
+            <a class="nav-item" href="pages/opt/scalar.html">标量优化</a>
+            <a class="nav-item" href="pages/opt/interprocedural.html">过程间优化</a>
+            <a class="nav-item" href="pages/opt/loop.html">循环优化</a>
+            <a class="nav-item" href="pages/opt/cleanup.html">清理 Pass</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. 后端 -->
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pages/backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pages/backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="pages/backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="pages/backend/branch.html">分支处理</a>
+            <a class="nav-item" href="pages/backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="pages/backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="pages/backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="pages/prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="pages/prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+  <div class="content" id="content">
+
+    <!-- Page Header -->
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 首页</div>
+      <h1>SysY Compiler Wiki</h1>
+      <p>一个面向 SysY 语言的编译器，支持前端解析、中端优化和 ARM64 后端代码生成。</p>
+    </div>
+
+    <!-- Overview -->
+    <h2>项目简介</h2>
+    <p>
+      本项目是一个 <strong>SysY 语言编译器</strong>，采用经典的三阶段编译器架构，将 SysY（C 语言子集）源代码编译为
+      <strong>AArch64 (ARM64) 汇编</strong>。使用 <strong>C++17</strong> 编写，Flex/Bison 完成词法与语法分析，
+      自研 SSA 形式中间表示 (IR) 承载 25 个优化 Pass，最终通过后端生成高效的机器指令。
+    </p>
+
+    <div class="callout info">
+      <div class="callout-title">技术栈</div>
+      <p>C++17 · Flex · Bison · CMake · AArch64 · SSA IR · Docker</p>
+    </div>
+
+  </div>
+</main>
+
+<script>
+  // Toggle sidebar section
+  function toggleSection(header) {
+    header.parentElement.classList.toggle('open');
+  }
+  function toggleSubsection(header) {
+    header.parentElement.classList.toggle('open');
+  }
+
+  // Highlight active nav item
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+  });
+
+  // Close sidebar on mobile after nav click
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 860) {
+        document.querySelector('.sidebar').classList.remove('open');
+      }
+    });
+  });
+
+</script>
+</body>
+</html>

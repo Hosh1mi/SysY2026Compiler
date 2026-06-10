@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>依赖分析 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="overview.html">总览</a>
+            <a class="nav-item" href="loop-info.html">循环分析</a>
+            <a class="nav-item" href="scev.html">标量演化</a>
+            <a class="nav-item" href="alias-analysis.html">别名分析</a>
+            <a class="nav-item active" href="dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 分析 / 依赖分析</div>
+      <h1>依赖分析</h1>
+      <p>
+        依赖分析判断两次内存访问之间是否存在数据依赖，以及依赖的方向。
+        它是循环交换（loop interchange）、向量化等变换的正确性基础。
+      </p>
+    </div>
+
+    <h2>三个协作模块</h2>
+    <p>依赖分析由三个模块协作完成：</p>
+    <table>
+      <thead><tr><th>模块</th><th>职责</th><th>输出</th></tr></thead>
+      <tbody>
+        <tr><td>AffineAnalysis</td><td>把 Value 表达为关于规范 IV 的仿射表达式</td><td>\(c_0 + \sum c_i \cdot iv_i\)</td></tr>
+        <tr><td>DependenceAnalysis</td><td>对访问对做 GCD test，求方向向量</td><td><code>direction[i] ∈ {=, &lt;, &gt;, *}</code></td></tr>
+        <tr><td>CostModel</td><td>估算 GEP 在某 IV 上的字节 stride</td><td><code>strideAlong(gep, iv)</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>AffineAnalysis — 仿射表达式</h2>
+    <p>
+      将 IR 中的 Value 表达成关于循环归纳变量的仿射形式 \(c_0 + \sum c_i \cdot iv_i\)。
+      支持常数、规范 IV、加减法、常数乘法。
+    </p>
+    <h3>示例：二维数组索引</h3>
+    <pre data-lang="cpp"><code>// 源代码
+int a[100][100];
+for (int i = 0; i &lt; 100; i++)
+    for (int j = 0; j &lt; 100; j++)
+        a[i][j] = a[i][j-1] + 1;</code></pre>
+    <p>GEP 的两个索引对应的仿射表达式：</p>
+    <pre><code>// a[i][j] 的 GEP 索引
+idx₀ = i        →  AffineExpr { constant=0, coeffs={iv_i: 1} }
+idx₁ = j        →  AffineExpr { constant=0, coeffs={iv_j: 1} }
+
+// a[i][j-1] 的 GEP 索引
+idx₀ = i        →  AffineExpr { constant=0, coeffs={iv_i: 1} }
+idx₁ = j - 1    →  AffineExpr { constant=-1, coeffs={iv_j: 1} }</code></pre>
+
+    <h3>接口</h3>
+    <pre data-lang="cpp"><code>class AffineExpr {
+    int                      constant = 0;
+    std::map&lt;PhiInst *, int&gt; coeffs;   // iv → coefficient
+    bool                     valid    = true;
+
+    bool isConstant() const;
+    int  coeffOf(PhiInst *iv) const;
+};
+
+class AffineAnalysis {
+    AffineExpr analyze(Value *v);  // 主入口
+};</code></pre>
+
+    <h2>DependenceAnalysis — 方向向量</h2>
+    <p>
+      对一对内存访问 (acc1, acc2)，在共同嵌套的循环中求方向向量。
+      方向 <code>direction[i]</code> 描述从 acc1 到 acc2 在第 i 层循环的迭代方向关系。
+    </p>
+    <table>
+      <thead><tr><th>方向</th><th>含义</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td><code>=</code></td><td>同一迭代中访问</td><td><code>a[i] = a[i] + 1</code></td></tr>
+        <tr><td><code>&lt;</code></td><td>acc1 在更早的迭代</td><td><code>a[i] = a[i-1] + 1</code>（流依赖）</td></tr>
+        <tr><td><code>&gt;</code></td><td>acc1 在更晚的迭代</td><td><code>a[i-1] = a[i] + 1</code>（反依赖）</td></tr>
+        <tr><td><code>*</code></td><td>无法精确判断</td><td>非仿射索引，保守返回</td></tr>
+      </tbody>
+    </table>
+
+    <h3>GCD Test</h3>
+    <p>
+      对每一维索引计算差值 \(\text{diff} = c_{\text{const}} + \sum c_{iv} \cdot iv\)。
+      若 <code>gcd(c_iv)</code> 不整除 <code>c_const</code>，则该维无依赖 → 整对独立。
+    </p>
+    <pre data-lang="cpp"><code>// 示例：a[i][j] vs a[i][j-1]
+// 维 0: diff = i - i = 0              → direction[0] = '='
+// 维 1: diff = j - (j-1) = 1          → 常数 1 ≠ 0
+//        gcd() = 0 不整除 1 → 无依赖？不对，这里 diff 是纯常数 1
+//        纯常数非零 → direction[1] 可判定：acc1 的 j 总在 acc2 的 j-1 之后 → '>'
+// 方向向量: (=, &gt;)  — 反依赖，i 同层，j 方向相反</code></pre>
+
+    <h3>接口与结果</h3>
+    <pre data-lang="cpp"><code>struct Result {
+    bool             aliased  = false;            // 可能命中同一地址？
+    bool             provably_independent = false; // 已证明无依赖
+    std::vector&lt;Dir&gt; direction;                  // 每层方向（最外在前）
+    std::vector&lt;Loop *&gt; commonLoops;             // 共同嵌套的循环
+};
+
+class DependenceAnalysis {
+    Result test(Instruction *acc1, Instruction *acc2);
+    bool isInterchangeLegal(Loop *outer, Loop *inner,
+                            const std::vector&lt;Instruction *&gt; &amp;accesses);
+};</code></pre>
+
+    <h2>完整示例：循环交换判定</h2>
+    <pre data-lang="cpp"><code>// 源代码：行优先遍历
+int a[N][N];
+for (int i = 0; i &lt; N; i++)        // outer
+    for (int j = 0; j &lt; N; j++)    // inner
+        a[j][i] = a[j][i-1] + 1;   // 注意：按列访问，cache 不友好</code></pre>
+    <p>分析 <code>a[j][i]</code>（store）与 <code>a[j][i-1]</code>（load）：</p>
+    <pre><code>// AffineAnalysis:
+//   store idx₀ = j  → {iv_j: 1}        load idx₀ = j   → {iv_j: 1}
+//   store idx₁ = i  → {iv_i: 1}        load idx₁ = i-1 → {iv_i: 1, constant: -1}
+
+// DependenceAnalysis:
+//   维 0 (j): diff = j - j = 0          → direction[0] = '='
+//   维 1 (i): diff = i - (i-1) = 1      → direction[1] = '&gt;' (纯常数非零)
+//   方向向量: (=, &gt;)
+
+// isInterchangeLegal(outer=i, inner=j):
+//   direction = (=, &gt;)
+//   交换后变为 (&gt;, =)，原始依赖方向被反转？
+//   检查：原 (pos_outer, pos_inner) = (0,1)，方向 (=, &gt;)
+//         交换后方向向量变为 (&gt;, =)
+//         第一维出现 '&gt;' → 依赖被反转 → 交换不合法！</code></pre>
+    <p>结论：这个循环不能交换。因为原始代码存在 i 方向的反依赖。</p>
+
+    <h2>CostModel — Cache 代价估算</h2>
+    <p>
+      当循环交换合法时，CostModel 估算交换前后的 cache 友好度变化。
+      对每个 GEP 计算内层 IV 步进 1 时的字节 stride。
+    </p>
+    <pre data-lang="cpp"><code>// 行优先数组 int a[100][100]，元素 4 字节
+// a[i][j]：内层 j 步进 1 → stride = 4 字节（连续访问 ✓）
+// a[j][i]：内层 j 步进 1 → stride = 400 字节（跨行访问 ✗）
+
+class CostModel {
+    long strideAlong(GetElementPtrInst *gep, PhiInst *iv);
+    long totalStride(const std::vector&lt;GetElementPtrInst *&gt; &amp;geps, PhiInst *iv);
+};
+
+// 循环交换收益 = Σ [stride_before(acc) - stride_after(acc)]
+// gain &gt; 0 → 交换后内层 stride 更小 → cache 更友好</code></pre>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  renderMathInElement(document.querySelector('.content'), {
+    delimiters: [{left: '\\(', right: '\\)', display: false}, {left: '\\[', right: '\\]', display: true}],
+    throwOnError: false
+  });
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

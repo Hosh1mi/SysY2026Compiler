@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MachineInstr - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="nav-section open">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection open">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item active" href="machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="codegen.html">代码生成</a>
+            <a class="nav-item" href="regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="branch.html">分支处理</a>
+            <a class="nav-item" href="load-store.html">Load/Store</a>
+            <a class="nav-item" href="scheduler.html">指令调度</a>
+            <a class="nav-item" href="peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 后端</div>
+      <h1>MachineInstr</h1>
+      <p>后端机器指令抽象层，将汇编文本解析为结构化指令对象，携带寄存器定义/使用、延迟、副作用等元数据，为寄存器分配、指令调度和 Peephole 优化提供统一接口。</p>
+    </div>
+
+    <h2>概览</h2>
+    <p>MachineInstr 是后端代码生成的核心数据结构。它不是传统意义上的"机器指令"（二进制编码），而是汇编文本的结构化表示——每条指令保留原始文本（<code>text</code>），同时附带解析出的操作码分类（<code>MOpcode</code>）、寄存器定义/使用集合、延迟估计和副作用标记。这使得后续的寄存器分配器、指令调度器和 Peephole 优化器能够在结构化数据上工作，而不需要反复解析文本。</p>
+
+    <h2>操作码分类（MOpcode）</h2>
+    <p><code>MOpcode</code> 是一个枚举类型，将 ARM64 汇编指令分为 18 个大类：</p>
+    <table>
+      <tr><th>枚举值</th><th>含义</th><th>典型指令</th></tr>
+      <tr><td>Unknown</td><td>未识别</td><td>回退分类</td></tr>
+      <tr><td>Label</td><td>标签</td><td><code>foo_0:</code></td></tr>
+      <tr><td>Directive</td><td>伪指令</td><td><code>.text</code>, <code>.word</code>, <code>.global</code></td></tr>
+      <tr><td>Comment</td><td>注释</td><td><code>// comment</code></td></tr>
+      <tr><td>Mov</td><td>数据移动</td><td><code>mov</code>, <code>movz</code>, <code>movk</code>, <code>sxtw</code>, <code>fmov</code></td></tr>
+      <tr><td>Alu</td><td>算术/逻辑</td><td><code>add</code>, <code>sub</code>, <code>and</code>, <code>orr</code>, <code>eor</code>, <code>lsl</code>, <code>asr</code></td></tr>
+      <tr><td>Mul</td><td>乘法</td><td><code>mul</code>, <code>madd</code>, <code>msub</code>, <code>mneg</code></td></tr>
+      <tr><td>Div</td><td>除法</td><td><code>sdiv</code>, <code>udiv</code>, <code>fdiv</code></td></tr>
+      <tr><td>Load</td><td>加载</td><td><code>ldr</code>, <code>ldur</code>, <code>ld1</code></td></tr>
+      <tr><td>Store</td><td>存储</td><td><code>str</code>, <code>stur</code>, <code>st1</code></td></tr>
+      <tr><td>PairLoad</td><td>对加载</td><td><code>ldp</code></td></tr>
+      <tr><td>PairStore</td><td>对存储</td><td><code>stp</code></td></tr>
+      <tr><td>Cmp</td><td>比较（设置标志）</td><td><code>cmp</code>, <code>cmn</code>, <code>fcmp</code>, <code>tst</code></td></tr>
+      <tr><td>FlagUse</td><td>标志使用</td><td><code>cset</code>, <code>csel</code>, <code>cneg</code>, <code>ccmp</code></td></tr>
+      <tr><td>Branch</td><td>分支</td><td><code>b</code>, <code>b.cond</code>, <code>cbz</code>, <code>cbnz</code></td></tr>
+      <tr><td>Call</td><td>调用</td><td><code>bl</code></td></tr>
+      <tr><td>Ret</td><td>返回</td><td><code>ret</code></td></tr>
+      <tr><td>Adr</td><td>地址加载</td><td><code>adrp</code>, <code>adr</code></td></tr>
+      <tr><td>Neon</td><td>NEON 向量</td><td><code>add v0.4s, ...</code></td></tr>
+    </table>
+
+    <h2>数据结构</h2>
+
+    <h3>MachineInstr</h3>
+    <p>单条机器指令的结构化表示，携带以下元数据：</p>
+    <div class="code-label">machine.hpp</div>
+<pre><code class="language-cpp">struct MachineInstr {
+    std::string text;              // 原始汇编文本，如 "\tadd w10, w11, w12"
+    std::string opcodeText;        // 操作码文本，如 "add"
+    MOpcode opcode = MOpcode::Unknown;
+
+    std::set&lt;std::string&gt; defs;    // 定义（写入）的寄存器集合
+    std::set&lt;std::string&gt; uses;    // 使用（读取）的寄存器集合
+
+    bool mayLoad = false;          // 是否可能加载内存
+    bool mayStore = false;         // 是否可能存储内存
+    bool setsFlags = false;        // 是否设置条件标志（cmp, tst）
+    bool usesFlags = false;        // 是否使用条件标志（cset, csel, b.cond）
+    bool isCall = false;           // 是否为函数调用
+    bool isBarrier = false;        // 是否为屏障（不可移动/不可删除）
+    bool isLabelLike = false;      // 是否为标签/伪指令/注释
+    int latency = 1;               // 延迟估计（时钟周期）
+    int originalIndex = 0;         // 在函数中的原始顺序号
+};</code></pre>
+
+    <h3>延迟模型</h3>
+    <p>延迟估计用于指令调度器决定指令的重排顺序：</p>
+    <table>
+      <tr><th>指令类别</th><th>延迟</th><th>说明</th></tr>
+      <tr><td>ALU（add, sub, and...）</td><td>1</td><td>单周期执行</td></tr>
+      <tr><td>Mov（mov, sxtw...）</td><td>1</td><td>寄存器间搬运</td></tr>
+      <tr><td>整数乘法（mul, madd...）</td><td>3</td><td>多周期流水线</td></tr>
+      <tr><td>浮点乘法（fmul）</td><td>5</td><td>浮点流水线更长</td></tr>
+      <tr><td>Load（ldr, ldp...）</td><td>4</td><td>访存延迟</td></tr>
+      <tr><td>浮点运算（fadd, fsub, fneg）</td><td>4</td><td>浮点 ALU</td></tr>
+      <tr><td>除法（sdiv, fdiv）</td><td>12</td><td>最慢指令</td></tr>
+    </table>
+
+    <h3>寄存器归一化</h3>
+    <p>解析时会将 ARM64 寄存器名归一化为内部名称，方便 defs/uses 分析：</p>
+    <ul>
+      <li><code>w10</code> / <code>x10</code> &rarr; <code>r10</code>（整数寄存器，w/x 共享物理寄存器）</li>
+      <li><code>s5</code> / <code>d5</code> / <code>v5</code> &rarr; <code>v5</code>（浮点/向量寄存器，s/d/v 共享）</li>
+      <li><code>wzr</code> / <code>xzr</code> &rarr; <code>zr</code>（零寄存器，不参与 defs/uses）</li>
+      <li><code>sp</code> 保持不变</li>
+    </ul>
+    <p>归一化确保了 <code>add w10, w11, w12</code> 和 <code>add x10, x11, x12</code> 产生相同的 defs={r10}, uses={r11, r12}。</p>
+
+    <h3>操作数解析</h3>
+    <p>采用"第一个操作数为 def，其余为 use"的规则（<code>defFirstUseRest</code>）：</p>
+    <div class="code-label">add w10, w11, w12</div>
+<pre><code class="language-cpp">defs = {r10}    // 第一个操作数是目标寄存器
+uses = {r11, r12} // 其余操作数是源寄存器</code></pre>
+    <p>特殊指令有定制规则：</p>
+    <ul>
+      <li><strong>Load</strong>（ldr）：第一个操作数 def，地址操作数 use</li>
+      <li><strong>Store</strong>（str）：所有操作数都是 use（没有寄存器被写入）</li>
+      <li><strong>PairLoad</strong>（ldp）：前两个操作数 def，第三个 use</li>
+      <li><strong>Cmp</strong>：无 def，所有操作数 use，setsFlags=true</li>
+      <li><strong>movk</strong>：目标寄存器同时是 def 和 use（部分写入）</li>
+      <li><strong>Call / Ret / Branch</strong>：isBarrier=true，不参与重排</li>
+    </ul>
+
+    <h3>Barrier 标记</h3>
+    <p>以下指令被标记为 Barrier，调度器和 Peephole 优化器不可跨越或移动它们：</p>
+    <ul>
+      <li>标签（Label）、伪指令（Directive）、注释（Comment）</li>
+      <li>分支（Branch）、调用（Call）、返回（Ret）</li>
+      <li>涉及 SP（栈指针）或 x30（链接寄存器）的指令</li>
+    </ul>
+
+    <h3>MachineBasicBlock / MachineFunction / MachineModule</h3>
+    <p>三级层次结构组织整个程序的机器指令：</p>
+    <div class="code-label">machine.hpp</div>
+<pre><code class="language-cpp">struct MachineBasicBlock {
+    std::string label;                    // 块标签，如 "func_0:"
+    std::vector&lt;MachineInstr&gt; instrs;     // 块内指令序列
+};
+
+struct MachineFunction {
+    std::string name;                     // 函数名
+    std::vector&lt;MachineBasicBlock&gt; blocks; // 基本块列表
+    int nextIndex = 0;                    // 指令序号计数器
+};
+
+struct MachineModule {
+    std::vector&lt;MachineInstr&gt; lines;      // 模块级指令（全局变量、段声明等）
+    int nextIndex = 0;
+};</code></pre>
+    <p><code>appendMachineInstr</code> 自动按标签分割基本块：遇到 Label 类型指令时，如果当前块已有指令，则创建新块。</p>
+
+    <h2>指令构造</h2>
+    <h3>parseMachineInstr（从文本解析）</h3>
+    <p>解析一行汇编文本，自动分类操作码、提取寄存器、设置标志：</p>
+    <div class="code-label">示例</div>
+<pre><code class="language-cpp">// 输入: "\tadd w10, w11, w12"
+// 输出:
+//   text = "\tadd w10, w11, w12"
+//   opcodeText = "add"
+//   opcode = MOpcode::Alu
+//   defs = {r10}, uses = {r11, r12}
+//   latency = 1
+
+// 输入: "\tldr w10, [x29, #-8]"
+// 输出:
+//   text = "\tldr w10, [x29, #-8]"
+//   opcodeText = "ldr"
+//   opcode = MOpcode::Load
+//   defs = {r10}, uses = {r29}
+//   mayLoad = true, latency = 4</code></pre>
+
+    <h3>MachineInstr::make（手动构造）</h3>
+    <p>用于 codegen 阶段直接构造指令，跳过文本解析：</p>
+    <div class="code-label">示例</div>
+<pre><code class="language-cpp">MachineInstr mi = MachineInstr::make(
+    "\tmadd w10, w8, w16, w11",
+    MOpcode::Mul,
+    /*defs=*/ {"w10"},
+    /*uses=*/ {"w8", "w16", "w11"},
+    /*latency=*/ 3
+);</code></pre>
+
+    <h2>MachineEmitter</h2>
+    <p>指令发射器，为 <code>Arm64FuncContext</code> 提供统一的指令发射接口：</p>
+    <div class="code-label">machine.hpp</div>
+<pre><code class="language-cpp">class MachineEmitter {
+public:
+    explicit MachineEmitter(MachineFunction &func);
+    void emit(MachineInstr inst);            // 发射结构化指令
+    void emitLine(const std::string &line);  // 发射文本行（自动解析）
+};</code></pre>
+    <p><code>Arm64FuncContext</code> 通过 MachineEmitter 向 MachineFunction 中追加指令。codegen 过程中的所有 <code>emitXxxMachine</code> 方法最终都调用 emitter 的 <code>emit</code>。</p>
+
+    <h2>Dump 调试输出</h2>
+    <p>启用 <code>--dump-machine-instr</code> 选项时，<code>dumpMachineFunction</code> 输出完整的结构化调试信息：</p>
+    <div class="code-label">dump 输出示例</div>
+<pre><code class="language-cpp">=== MachineFunction: main ===
+  BB0 [main_0:] (15 instrs)
+    [0] Alu | text="	add w10, w11, w12" defs={r10} uses={r11, r12} lat=1
+    [1] Load | text="	ldr w13, [x29, #-8]" defs={r13} uses={r29} lat=4 LOAD
+    [2] Cmp | text="	cmp w10, w13" defs={} uses={r10, r13} lat=1 SETS_FLAGS
+    [3] Branch | text="	b.lt main_2" defs={} uses={} lat=1 BARRIER USES_FLAGS
+    ...</code></pre>
+    <p>每行显示指令序号、操作码分类、原始文本、defs/uses 集合、延迟、以及所有副作用标志（LOAD/STORE/SETS_FLAGS/USES_FLAGS/CALL/BARRIER/LABEL_LIKE）。</p>
+
+    <h2>代码生成流水线</h2>
+    <p>MachineInstr 在后端代码生成中的完整流转：</p>
+    <ol>
+      <li><strong>IR &rarr; MachineFunction</strong>：<code>Arm64FuncContext::generate()</code> 遍历 IR 指令，通过 <code>MachineEmitter</code> 发射 MachineInstr</li>
+      <li><strong>指令调度</strong>：<code>MachineScheduler</code> 读取 defs/uses/latency/barrier 信息，重排指令以隐藏延迟</li>
+      <li><strong>Peephole 优化</strong>：<code>peepholeOptimize</code> 在 MachineFunction 上做模式匹配和替换</li>
+      <li><strong>MachineFunction &rarr; 文本</strong>：<code>printMachineFunction</code> 将每条指令的 <code>text</code> 字段拼接输出</li>
+    </ol>
+
+    <h2>示例</h2>
+    <h3>从 IR Add 指令到 MachineInstr</h3>
+    <p>中端 IR 的 <code>%r = add i32 %a, %b</code> 经过 codegen 生成：</p>
+    <div class="code-label">codegen 过程</div>
+<pre><code class="language-cpp">// 1. 寄存器分配器已为 %a 分配 w11，%b 分配 w12，%r 分配 w10
+// 2. emitInstruction(Add) 调用 emitMachineInstrLine:
+emitMachineInstrLine(
+    "\tadd w10, w11, w12",     // 汇编文本
+    MOpcode::Alu,              // 操作码分类
+    /*defs=*/ {"w10"},         // 定义寄存器
+    /*uses=*/ {"w11", "w12"},  // 使用寄存器
+    /*latency=*/ 1             // 延迟
+);
+// 3. 内部调用 MachineInstr::make，归一化寄存器名后存入 MachineBasicBlock
+//    defs = {r10}, uses = {r11, r12}</code></pre>
+
+    <h3>常量乘法强度削弱</h3>
+    <p><code>%r = mul i32 %a, 3</code> 被优化为移位加法：</p>
+<pre><code class="language-cpp">// 原始 IR:  %r = mul i32 %a, 3
+// codegen 识别 factor=3 是 2^1+1 形式，生成：
+//   add w10, w11, w11, lsl #1    (即 a + a*2 = a*3)
+// 对应 MachineInstr:
+//   opcode = MOpcode::Alu
+//   defs = {r10}, uses = {r11}
+//   latency = 1
+// 比通用 mul 指令（latency=3）快 3 倍</code></pre>
+
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/backend/arm64/machine.hpp</code> — 数据结构定义（89 行）</li>
+      <li><code>src/backend/arm64/machine.cpp</code> — 解析、构造、打印实现（394 行）</li>
+      <li><code>src/include/backend/arm64/context.hpp</code> — Arm64FuncContext 接口（149 行）</li>
+      <li><code>src/include/backend/arm64/codegen.hpp</code> — Arm64CodeGen 入口（27 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

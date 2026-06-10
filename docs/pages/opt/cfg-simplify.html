@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFGSimplify - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item active" href="cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="reassociate.html">Reassociate</a>
+            <a class="nav-item" href="local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="licm.html">LICM</a>
+            <a class="nav-item" href="loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="sccp.html">SCCP</a>
+            <a class="nav-item" href="const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / SSA 准备</div>
+      <h1>CFGSimplify</h1>
+      <p>控制流图简化 Pass，通过多种局部变换减少基本块数量和冗余分支，为后续 SSA 相关 Pass 提供更干净的 CFG。</p>
+    </div>
+
+    <!-- ─── 概览 ─── -->
+    <h2>概览</h2>
+    <p>CFGSimplify 对每个函数反复执行以下四个子变换，直到不再变化（不动点）：</p>
+    <table>
+      <thead><tr><th>子变换</th><th>功能</th><th>触发条件</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#diamond-to-select">Diamond → Select</a></td><td>将 if-else 菱形结构折叠为 select 指令</td><td>条件分支的两个目标汇合到同一块，且 phi 可替换</td></tr>
+        <tr><td><a href="#fold-constant-branch">常量分支折叠</a></td><td>将条件为常量的 br 变为无条件跳转</td><td>br 的条件操作数是 ConstantInt</td></tr>
+        <tr><td><a href="#merge-empty-block">空块合并</a></td><td>消除仅含无条件跳转的中间基本块</td><td>块内只有一条无条件 br 指令</td></tr>
+        <tr><td><a href="#remove-dead-blocks">不可达块删除</a></td><td>删除无前驱的非入口块</td><td>非入口块且 pre_bbs_ 为空</td></tr>
+      </tbody>
+    </table>
+
+    <h3>执行流程</h3>
+    <div class="code-label">CFGSimplify::execute — 不动点迭代</div>
+<pre><code class="language-cpp">void CFGSimplify::execute(Module *module) {
+    for (auto *func : module-&gt;function_list_) {
+        if (func-&gt;is_declaration()) continue;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            changed |= convertDiamondsToSelect(func);
+            changed |= foldConstantBranches(func);
+            std::vector&lt;BasicBlock *&gt; bbs(func-&gt;basic_blocks_.begin(),
+                                          func-&gt;basic_blocks_.end());
+            for (auto *bb : bbs)
+                if (bb-&gt;parent_ == func)
+                    changed |= mergeEmptyBlock(bb);
+            removeDeadBlocks(func);
+        }
+    }
+}</code></pre>
+    <p>每个子变换都可能暴露新的简化机会：例如常量分支折叠后产生空块，空块合并后产生不可达块，因此需要循环迭代直到不动点。</p>
+
+    <!-- ─── Diamond → Select ─── -->
+    <h2 id="diamond-to-select">1. Diamond → Select 转换</h2>
+    <p>识别 if-else 菱形控制流模式，将分支 + phi 替换为无分支的 <code>select</code> 指令。支持三种模式：</p>
+
+    <h3>Pattern A：双边中间块</h3>
+    <p>两个分支路径都有中间块，最终汇合到同一个 merge 块：</p>
+    <div class="code-label">Pattern A 结构</div>
+<pre><code class="language-cpp">// condBB → trueBB → mergeBB
+// condBB → falseBB → mergeBB
+// trueBB 和 falseBB 都只有一条无条件 br 到 mergeBB</code></pre>
+
+    <h3>Pattern B：If-then（仅 true 路径有中间块）</h3>
+    <div class="code-label">Pattern B 结构</div>
+<pre><code class="language-cpp">// condBB → trueBB → mergeBB (= falseBB)
+// falseBB 本身就是 merge 块</code></pre>
+
+    <h3>Pattern C：If-else（仅 false 路径有中间块）</h3>
+    <div class="code-label">Pattern C 结构</div>
+<pre><code class="language-cpp">// condBB → falseBB → mergeBB (= trueBB)
+// trueBB 本身就是 merge 块</code></pre>
+
+    <h3>变换过程</h3>
+    <p>变换分五步完成：</p>
+    <ol>
+      <li><strong>模式识别</strong>：检查 condBB 的终止指令是否为条件 br，条件是否为 icmp 且仅被 br 使用一次</li>
+      <li><strong>中间指令克隆</strong>：将中间块的指令（必须是安全的纯计算指令）克隆到 condBB 中 br 之前</li>
+      <li><strong>创建 select</strong>：用 <code>select icmp, trueVal, falseVal</code> 替代分支</li>
+      <li><strong>更新 phi</strong>：如果 phi 只有 2 个前驱，直接用 select 替换 phi；否则原地更新 phi 的入边</li>
+      <li><strong>替换分支</strong>：删除 condBB 的条件 br，改为无条件跳转到 mergeBB</li>
+    </ol>
+
+    <h4>安全性检查</h4>
+    <p>中间块的指令必须满足"可推测执行"条件，即无论条件真假都安全执行：</p>
+    <div class="code-label">isSafeToSpeculate — 不允许的指令类型</div>
+<pre><code class="language-cpp">static bool isSafeToSpeculate(Instruction *inst) {
+    if (inst-&gt;is_load())  return false;   // 可能触发段错误
+    if (inst-&gt;is_store()) return false;   // 副作用
+    if (inst-&gt;is_call())  return false;   // 副作用
+    if (inst-&gt;is_div())   return false;   // 可能除零
+    if (inst-&gt;is_rem())   return false;   // 可能除零
+    if (inst-&gt;is_ret())   return false;   // 终止指令
+    if (inst-&gt;is_br())    return false;   // 终止指令
+    return true;  // add, sub, mul, icmp, select 等安全
+}</code></pre>
+
+    <h4>Merge 块下沉</h4>
+    <p>当 merge 块仅剩 ret 指令且所有 phi 都已无使用者时，可将 ret 下沉到 condBB，消除多余跳转：</p>
+    <div class="code-label">Merge 块下沉示例</div>
+<pre><code class="language-cpp">// 下沉前：condBB → br mergeBB; mergeBB → ret %sel
+// 下沉后：condBB → ret %sel （mergeBB 被删除）</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — SysY 源码</div>
+<pre><code class="language-cpp">int max(int a, int b) {
+    int result;
+    if (a &gt; b)
+        result = a;
+    else
+        result = b;
+    return result;
+}</code></pre>
+
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @max(i32 %a, i32 %b) {
+label_entry:
+  %cmp = icmp sgt i32 %a, %b
+  br i1 %cmp, label %then, label %else
+
+then:
+  br label %merge
+
+else:
+  br label %merge
+
+merge:
+  %result = phi i32 [ %a, %then ], [ %b, %else ]
+  ret i32 %result
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @max(i32 %a, i32 %b) {
+label_entry:
+  %cmp = icmp sgt i32 %a, %b
+  %result = select i1 %cmp, i32 %a, i32 %b
+  ret i32 %result
+}</code></pre>
+    <p>两个中间块 <code>then</code> 和 <code>else</code> 被消除，phi 被 select 替换，控制流从三分支变为直线代码。</p>
+
+    <!-- ─── 常量分支折叠 ─── -->
+    <h2 id="fold-constant-branch">2. 常量分支折叠</h2>
+    <p>当条件分支的条件操作数在编译期已知为常量时，将条件 br 替换为无条件 br，跳转到确定的目标块。</p>
+
+    <h3>变换过程</h3>
+    <ol>
+      <li>遍历所有基本块的终止指令</li>
+      <li>如果是三操作数 br（条件分支），检查条件操作数是否为 <code>ConstantInt</code></li>
+      <li>根据常量值选择目标块：非零跳 true 分支，零跳 false 分支</li>
+      <li>调用 <code>replaceBranchWithUncond</code>：
+        <ul>
+          <li>清理被抛弃目标块中引用此块的 phi 入边</li>
+          <li>移除两条旧 CFG 边</li>
+          <li>删除条件 br，创建无条件 br</li>
+        </ul>
+      </li>
+    </ol>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — SysY 源码</div>
+<pre><code class="language-cpp">int foo() {
+    int x;
+    if (1)       // 条件恒为真
+        x = 42;
+    else
+        x = 0;
+    return x;
+}</code></pre>
+
+    <div class="code-label">优化前 — IR（常量传播后）</div>
+<pre><code class="language-cpp">define i32 @foo() {
+label_entry:
+  br i1 1, label %then, label %else
+
+then:
+  br label %merge
+
+else:
+  br label %merge
+
+merge:
+  %x = phi i32 [ 42, %then ], [ 0, %else ]
+  ret i32 %x
+}</code></pre>
+
+    <div class="code-label">常量分支折叠后 — IR</div>
+<pre><code class="language-cpp">define i32 @foo() {
+label_entry:
+  br label %then          ; 无条件跳转到 then
+
+then:
+  br label %merge
+
+else:                      ; 不可达，后续会被删除
+  br label %merge
+
+merge:
+  %x = phi i32 [ 42, %then ]   ; else 入边已被清除
+  ret i32 %x
+}</code></pre>
+    <p><code>else</code> 块变为不可达，会在后续的<a href="#remove-dead-blocks">不可达块删除</a>中被清除。随后<a href="#merge-empty-block">空块合并</a>会进一步将 <code>then</code> 合并掉。</p>
+
+    <!-- ─── 空块合并 ─── -->
+    <h2 id="merge-empty-block">3. 空块合并</h2>
+    <p>消除仅包含一条无条件跳转的"透传"基本块，将其前驱直接连接到目标块。</p>
+
+    <h3>前置条件</h3>
+    <p>一个基本块必须同时满足以下所有条件才能被合并：</p>
+    <ul>
+      <li>不是函数入口块</li>
+      <li>块内恰好只有一条指令（即终止指令本身）</li>
+      <li>该指令是无条件 <code>br</code>（单操作数）</li>
+      <li>不是自环（目标不是自身）</li>
+      <li>没有前驱同时已经是目标块的前驱（避免 phi 歧义）</li>
+    </ul>
+
+    <h3>变换过程</h3>
+    <ol>
+      <li><strong>Phi 修复</strong>：如果目标块有 phi 节点，将被合并块的入边重定向到其所有前驱</li>
+      <li><strong>前驱重定向</strong>：将所有前驱的分支目标从被合并块改为目标块（支持无条件 br 和条件 br）</li>
+      <li><strong>删除空块</strong>：清除指令并从函数中移除</li>
+    </ol>
+
+    <h3>边界情况处理</h3>
+    <h4>无前驱块</h4>
+    <p>如果被合并块没有前驱（如 TailRecursionEliminate 产生的孤立 preheader），需额外检查目标块的 phi 是否引用此块。若引用则不能合并，否则 phi 入边会丢失。</p>
+
+    <h4>共享前驱检查</h4>
+    <p>如果某个前驱 <code>P</code> 既指向被合并块 <code>B</code>，又直接指向目标块 <code>T</code>，合并后 <code>P</code> 会在 <code>T</code> 的 phi 中产生两条入边，且两条入边的值可能不同，造成语义歧义。此时跳过合并。</p>
+
+    <h3>示例</h3>
+    <div class="code-label">优化前 — IR</div>
+<pre><code class="language-cpp">define i32 @bar(i32 %x) {
+label_entry:
+  %cmp = icmp sgt i32 %x, 0
+  br i1 %cmp, label %mid, label %done
+
+mid:                       ; 空块，仅含无条件跳转
+  br label %done
+
+done:
+  %r = phi i32 [ 1, %mid ], [ 0, %label_entry ]
+  ret i32 %r
+}</code></pre>
+
+    <div class="code-label">优化后 — IR</div>
+<pre><code class="language-cpp">define i32 @bar(i32 %x) {
+label_entry:
+  %cmp = icmp sgt i32 %x, 0
+  br i1 %cmp, label %done, label %done   ; mid 被跳过
+
+done:
+  %r = phi i32 [ 1, %label_entry ], [ 0, %label_entry ]  ; mid→label_entry
+  ret i32 %r
+}</code></pre>
+    <p><code>mid</code> 块被消除，phi 中原本 <code>[1, %mid]</code> 的入边被重定向为 <code>[1, %label_entry]</code>（mid 的唯一前驱）。</p>
+
+    <!-- ─── 不可达块删除 ─── -->
+    <h2 id="remove-dead-blocks">4. 不可达块删除</h2>
+    <p>删除所有从入口块不可达的基本块。使用工作表算法级联传播：删除一个块后，如果其后继块失去最后一个前驱，也变为不可达。</p>
+
+    <h3>算法</h3>
+    <div class="code-label">removeDeadBlocks — 工作表级联删除</div>
+<pre><code class="language-cpp">static void removeDeadBlocks(Function *func) {
+    auto *entry = getEntryBlock(func);
+    std::queue&lt;BasicBlock *&gt; worklist;
+    // 初始：收集所有无前驱的非入口块
+    for (auto *bb : func-&gt;basic_blocks_)
+        if (bb != entry &amp;&amp; bb-&gt;pre_bbs_.empty())
+            worklist.push(bb);
+    while (!worklist.empty()) {
+        auto *bb = worklist.front(); worklist.pop();
+        auto succs = bb-&gt;succ_bbs_;
+        for (auto *succ : succs) {
+            removeBBFromPhi(bb, succ);         // 清除 phi 入边
+            succ-&gt;remove_pre_basic_block(bb);  // 移除前驱
+            if (succ != entry &amp;&amp; succ-&gt;pre_bbs_.empty())
+                worklist.push(succ);           // 级联：后继也变为不可达
+        }
+        // 删除块及其指令
+        for (auto *inst : bb-&gt;instr_list_) bb-&gt;delete_instr(inst);
+        bb-&gt;parent_-&gt;remove_bb(bb);
+    }
+}</code></pre>
+
+    <h3>示例</h3>
+    <div class="code-label">常量分支折叠后产生的不可达块</div>
+<pre><code class="language-cpp">; 常量分支折叠后，else 块不再有任何前驱
+define i32 @foo() {
+label_entry:
+  br label %then
+
+then:
+  br label %merge
+
+else:                      ; 无前驱 → 不可达
+  br label %merge
+
+merge:
+  %x = phi i32 [ 42, %then ]
+  ret i32 %x
+}</code></pre>
+
+    <div class="code-label">不可达块删除后</div>
+<pre><code class="language-cpp">define i32 @foo() {
+label_entry:
+  br label %then
+
+then:
+  br label %merge
+
+merge:
+  %x = phi i32 [ 42, %then ]
+  ret i32 %x
+}</code></pre>
+    <p><code>else</code> 块被级联删除，其对 <code>merge</code> 的 phi 入边也被清除。</p>
+
+    <!-- ─── 辅助函数 ─── -->
+    <h2>辅助函数</h2>
+    <table>
+      <thead><tr><th>函数</th><th>功能</th></tr></thead>
+      <tbody>
+        <tr><td><code>removeBBFromPhi(dead, succ)</code></td><td>在 succ 的所有 phi 中删除指向 dead 的入边对</td></tr>
+        <tr><td><code>replaceBranchWithUncond(bb, target)</code></td><td>将条件 br 替换为无条件 br，清理被抛弃目标的 phi 和 CFG 边</td></tr>
+        <tr><td><code>redirectUncondBr(pred, old, new)</code></td><td>重定向无条件 br 的目标，维护 CFG</td></tr>
+        <tr><td><code>redirectCondBr(pred, idx, old, new)</code></td><td>重定向条件 br 的某个分支目标</td></tr>
+        <tr><td><code>updatePhis(target, dead, preds)</code></td><td>将目标块 phi 中 dead 的入边重定向到 dead 的前驱列表</td></tr>
+        <tr><td><code>isSafeToSpeculate(inst)</code></td><td>判断指令是否可安全推测执行（用于 diamond→select）</td></tr>
+        <tr><td><code>tryCloneBlock(instrs, bb, insertBefore, vm)</code></td><td>将中间块指令克隆到 condBB，返回 false 表示不安全</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── 源码位置 ─── -->
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/mid/opt/CFGSimplify.hpp</code> — 类定义</li>
+      <li><code>src/mid/opt/CFGSimplify.cpp</code> — 实现（514 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  renderMathInElement(document.querySelector('.content'), {
+    delimiters: [{left: '\\(', right: '\\)', display: false}, {left: '\\[', right: '\\]', display: true}],
+    throwOnError: false
+  });
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

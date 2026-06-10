@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>寄存器分配 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../../index.html">首页</a><a class="nav-item" href="../quickstart.html">快速开始</a><a class="nav-item" href="../architecture.html">整体架构</a></div></div>
+    <div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div></div>
+    <div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items">
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../ir/data-structures.html">数据结构</a><a class="nav-item" href="../ir/irgen.html">IR 生成</a><a class="nav-item" href="../ir/ssa.html">SSA 形式</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../analysis/overview.html">总览</a><a class="nav-item" href="../analysis/loop-info.html">循环分析</a><a class="nav-item" href="../analysis/scev.html">标量演化</a><a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a><a class="nav-item" href="../analysis/dependence.html">依赖分析</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a><a class="nav-item" href="../opt/pipeline.html">优化流水线</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a><a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a><a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a><a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a><a class="nav-item" href="../opt/reassociate.html">Reassociate</a><a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a><a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a><a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a><a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a><a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a><a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a><a class="nav-item" href="../opt/licm.html">LICM</a><a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a><a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a><a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a><a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a></div></div>
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a><a class="nav-item" href="../opt/sccp.html">SCCP</a><a class="nav-item" href="../opt/const-fold.html">ConstantFold</a><a class="nav-item" href="../opt/inst-combine.html">InstCombine</a><a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a></div></div>
+    </div></div>
+    <div class="nav-section open"><div class="nav-section-header" onclick="toggleSection(this)"><span>后端 ARM64</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items">
+      <div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>MachineInstr</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="machine-instr.html">MachineInstr</a></div></div>
+      <div class="nav-subsection open"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>汇编生成</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="codegen.html">代码生成</a><a class="nav-item active" href="regalloc.html">寄存器分配</a><a class="nav-item" href="branch.html">分支处理</a><a class="nav-item" href="load-store.html">Load/Store</a><a class="nav-item" href="scheduler.html">指令调度</a><a class="nav-item" href="peephole.html">Peephole 优化</a></div></div>
+    </div></div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 后端 / 汇编生成</div>
+      <h1>寄存器分配</h1>
+      <p>基于 Chaitin-Briggs 乐观图着色算法的寄存器分配器。将 SSA Value 映射到 ARM64 物理寄存器，通过活跃区间分析、干扰图构建和溢出代价启发式，最小化栈槽访问。</p>
+    </div>
+
+    <h2>概览</h2>
+    <p><code>Arm64RegAlloc</code> 接收 IR <code>Function*</code>，经过 10 个阶段产出 <code>Value* → 物理寄存器名</code> 的映射。未分配到寄存器的值留在栈槽中，由 Load/Store 子系统处理。</p>
+
+    <h2>算法阶段</h2>
+
+    <h3>1. RPO 块序与前驱映射</h3>
+    <p>对基本块进行 DFS 后序遍历并反转，得到逆后序（RPO）。这个顺序保证了活跃变量分析的收敛速度。同时构建每个块的前驱列表。</p>
+
+    <h3>2. Leaf 函数参数预着色</h3>
+    <p>对于不包含 Call 指令的 leaf 函数，参数可以预着色到对应的 ABI 寄存器：</p>
+    <pre><code class="language-cpp">// 整数参数 → w0~w7（或 x0~x7 对于指针）
+// 浮点参数 → s0~s7
+// 前 8 个同类参数可直接预着色
+if (isLeaf) {
+    int intArgIdx = 0, floatArgIdx = 0;
+    for (auto arg : func_-&gt;arguments_) {
+        if (isAllocatableFloatValue(arg-&gt;type_)) {
+            if (floatArgIdx &lt; 8)
+                assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
+        } else {
+            if (intArgIdx &lt; 8)
+                assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+        }
+    }
+}</code></pre>
+
+    <h3>3. 颜色→物理寄存器映射</h3>
+    <p>根据函数是否为 leaf，选择不同的寄存器优先级策略：</p>
+    <table>
+      <thead><tr><th>寄存器类</th><th>Leaf 函数优先级</th><th>非 Leaf 函数优先级</th></tr></thead>
+      <tbody>
+        <tr><td>整数 (w/x)</td><td>caller-saved 优先 (0-7, 9)，然后 callee-saved (19-28)</td><td>r9 优先，然后 caller (0-7)，然后 callee (19-28)</td></tr>
+        <tr><td>浮点 (s)</td><td>caller-saved 优先 (0-7, 16)，然后 callee-saved (8-15)</td><td>caller (0-7) 优先，r16，然后 callee (8-15)</td></tr>
+        <tr><td>NEON (v)</td><td colspan="2">v8-v15（callee-saved 范围）</td></tr>
+      </tbody>
+    </table>
+    <p>预着色寄存器从可用颜色池中移除。crossesCall 的值强制分配到 callee-saved 寄存器。</p>
+
+    <h3>4. 指令编号与活跃区间构建</h3>
+    <p>遍历 RPO 序列中的每条指令，递增全局编号 <code>idx</code>。记录每个值的定义位置（<code>defPos</code>）和最后使用位置（<code>lastUse</code>）。</p>
+    <p>特殊处理：Select 指令会延长其 ICmp 操作数的活跃范围；ICmp+Select 融合模式跳过 ICmp 的独立分配。</p>
+
+    <h3>5. 活跃变量分析</h3>
+    <p>标准迭代数据流分析：</p>
+    <ul>
+      <li><strong>PHI 处理</strong> — PHI 操作数在对应前驱块的 LiveOut 中额外加入（<code>phiOut</code>）</li>
+      <li><strong>传递方程</strong> — <code>LiveOut(bb) = ∪ LiveIn(succ)</code>；<code>LiveIn = use ∪ (LiveOut - def)</code></li>
+      <li><strong>crossesCall 检测</strong> — 反向扫描每个块，若值在 Call 后仍然活跃，标记为 <code>crossesCall</code></li>
+    </ul>
+
+    <h3>6. 支配树与循环深度</h3>
+    <p>通过迭代支配算法计算每个块的支配集。检测回边（<code>bb 支配 succ</code>）以计算循环嵌套深度，用于溢出代价加权。</p>
+
+    <h3>7. PHI 亲和性</h3>
+    <p>构建 PHI 节点的操作数与结果之间的亲和关系。具有亲和关系的值倾向于分配相同颜色，减少 PHI 拷贝的 mov 指令：</p>
+    <pre><code class="language-cpp">for (auto phi : bb-&gt;instr_list_) {
+    for (int i = 0; i &lt; phi-&gt;num_ops_; i += 2) {
+        auto val = phi-&gt;get_operand(i);
+        phiAffinity[phi].insert(val);
+        phiAffinity[val].insert(phi);
+    }
+}</code></pre>
+
+    <h3>8. 溢出代价计算</h3>
+    <p>每个值的溢出代价 = 各使用点所在循环深度的 <code>20^depth</code> 之和。循环越深，溢出代价越高，越倾向于保留在寄存器中。PHI 亲和组内取最大代价统一。</p>
+
+    <h3>9. 图着色（Chaitin-Briggs）</h3>
+    <p>将活跃区间按寄存器类分为整数/浮点/NEON 三个池，分别着色：</p>
+    <pre><code class="language-cpp">void colorPool(pool, colorToReg, isFloat, callerSaved, spillCost, phiAffinity) {
+    // Simplify: 反复移除度数 &lt; K 的节点入栈
+    // 若无低度节点，选择 spillCost / (degree+1) 最小的节点作为潜在溢出
+    // Select: 逆序出栈，选择不与邻居冲突的颜色
+    //   - 优先选择 PHI 伙伴的颜色（亲和性偏向）
+    //   - crossesCall 值跳过 caller-saved 颜色
+}</code></pre>
+
+    <h2>干扰图构建</h2>
+    <p>活跃区间按起始位置排序后，两两检查是否重叠（<code>sorted[j].start &lt; sorted[i].end</code>）。重叠的区间之间存在干扰边，不能分配相同颜色。</p>
+
+    <h2>示例</h2>
+    <h3>简单循环中的寄存器分配</h3>
+    <pre><code class="language-cpp">// IR:
+//   %sum = phi i32 [0, %entry], [%next, %loop]
+//   %i = phi i32 [0, %entry], [%i1, %loop]
+//   %next = add i32 %sum, %i
+//   %i1 = add i32 %i, 1
+//   %cmp = icmp slt i32 %i1, 100
+//   br i1 %cmp, %loop, %exit
+
+// 寄存器分配后（leaf 函数，无 callee-saved 需求）：
+//   %sum → w2, %i → w3, %next → w2（与 %sum 复用，活跃区间不重叠）
+//   %i1 → w4, %cmp → 不分配（与 Br 融合）</code></pre>
+
+    <h2>源码位置</h2>
+    <table>
+      <thead><tr><th>文件</th><th>内容</th></tr></thead>
+      <tbody>
+        <tr><td><code>src/include/backend/arm64/regalloc.hpp</code></td><td>Arm64RegAlloc 类定义、Interval 结构</td></tr>
+        <tr><td><code>src/backend/arm64/regalloc.cpp</code></td><td>allocate()、colorPool()、活跃分析、干扰图、图着色</td></tr>
+      </tbody>
+    </table>
+
+  </div>
+</main>
+
+<script>
+function toggleSection(el){el.parentElement.classList.toggle('open')}
+function toggleSubsection(el){el.parentElement.classList.toggle('open')}
+const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+document.querySelectorAll('pre').forEach(pre=>{
+  pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));
+  const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';
+  btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;
+    navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});
+  });pre.style.position='relative';pre.appendChild(btn);
+});
+</script>
+</body>
+</html>

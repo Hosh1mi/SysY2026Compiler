@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InstCombine - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="reassociate.html">Reassociate</a>
+            <a class="nav-item" href="local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="licm.html">LICM</a>
+            <a class="nav-item" href="loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="sccp.html">SCCP</a>
+            <a class="nav-item" href="const-fold.html">ConstantFold</a>
+            <a class="nav-item active" href="inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 中端 / 清理 Pass</div>
+      <h1>InstCombine</h1>
+      <p>指令组合与代数简化 Pass，采用工作表驱动的 Visitor 架构，对每条指令尝试代数恒等式、常量折叠、强度削弱等局部变换，直到不动点。</p>
+    </div>
+
+    <!-- ─── 架构 ─── -->
+    <h2>架构</h2>
+    <h3>工作表驱动</h3>
+    <p>所有指令初始入队，逐个弹出并由对应 Visitor 尝试简化。若替换发生：</p>
+    <ol>
+      <li>原指令的<strong>使用者</strong>重新入队（新操作数可能触发进一步简化）</li>
+      <li>替换结果本身若是指令也入队</li>
+      <li>原指令的<strong>操作数</strong>尝试下沉（<code>trySinkInstruction</code>），若下沉成功也入队</li>
+    </ol>
+    <p>终止指令（br/ret）不参与简化。</p>
+
+    <h3>指令下沉</h3>
+    <p>当指令替换导致某操作数仅剩一个使用者，且该使用者在不同基本块时，尝试将操作数下沉到使用者前面。安全性条件：使用者所在块必须以下沉指令所在块为唯一前驱（保证支配关系）。</p>
+    <p>仅对纯计算指令（add/sub/mul/div/rem/shift/and/or/xor/zext/fneg 等）执行下沉，load/store/call 永不移动。</p>
+
+    <h3>文件组织</h3>
+    <table>
+      <thead><tr><th>文件</th><th>Visitor</th></tr></thead>
+      <tbody>
+        <tr><td><code>instCombine.cpp</code></td><td>主循环 + trySinkInstruction</td></tr>
+        <tr><td><code>instCombineAddSub.cpp</code></td><td>visitAdd, visitSub, visitFAdd, visitFSub, visitFNeg</td></tr>
+        <tr><td><code>instCombineMulDivRem.cpp</code></td><td>visitMul, visitSDiv, visitSRem, visitFMul, visitFDiv</td></tr>
+        <tr><td><code>instCombineShifts.cpp</code></td><td>visitShl, visitLShr, visitAShr</td></tr>
+        <tr><td><code>instCombineBitwise.cpp</code></td><td>visitAnd, visitOr, visitXor</td></tr>
+        <tr><td><code>instCombineCmpSelect.cpp</code></td><td>visitICmp, visitSelect</td></tr>
+        <tr><td><code>instCombineCompares.cpp</code></td><td>foldICmpAddSub</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── 通用规则模式 ─── -->
+    <h2>通用规则模式</h2>
+    <p>大部分算术指令共享以下通用规则模式（以二元运算 <code>op x, y</code> 为例）：</p>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><strong>常量折叠</strong>：op C1, C2 → C3</td><td><code>add 3, 5 → 8</code></td></tr>
+        <tr><td>2</td><td><strong>常量右移</strong>：op C, x → op x, C</td><td><code>add 5, %x → add %x, 5</code></td></tr>
+        <tr><td>3</td><td><strong>单位元</strong>：op x, identity → x</td><td><code>add %x, 0 → %x</code></td></tr>
+        <tr><td>4</td><td><strong>再结合</strong>：op (op x, C1), C2 → op x, op(C1,C2)</td><td><code>add (add %x,3), 5 → add %x, 8</code></td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── Add/Sub ─── -->
+    <h2>加减法 (Add/Sub)</h2>
+    <h3>visitAdd 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1–4</td><td>通用规则（见上表）</td><td></td></tr>
+        <tr><td>5</td><td><strong>移位融合</strong>：x + (x &lt;&lt; k) → mul x, 2<sup>k</sup>+1</td><td><code>add %x, (shl %x, 2) → mul %x, 5</code></td></tr>
+        <tr><td>6</td><td><strong>加法转 OR</strong>：add x, C → or x, C（当 x &amp; C == 0）</td><td><code>add (shl %x,8), 3 → or (shl %x,8), 3</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>visitSub 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1–2</td><td>常量折叠 + 单位元 x-0</td><td></td></tr>
+        <tr><td>3</td><td><strong>自消</strong>：x - x → 0</td><td></td></tr>
+        <tr><td>4</td><td><strong>再结合</strong>：(add x, C1) - C2 → add x, C1-C2</td><td><code>sub (add %x,10), 3 → add %x, 7</code></td></tr>
+        <tr><td>5</td><td><strong>再结合</strong>：(sub x, C1) - C2 → sub x, C1+C2</td><td><code>sub (sub %x,3), 5 → sub %x, 8</code></td></tr>
+        <tr><td>6</td><td><strong>移位融合</strong>：(x &lt;&lt; k) - x → mul x, 2<sup>k</sup>-1</td><td><code>sub (shl %x,3), %x → mul %x, 7</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>浮点加减法</h3>
+    <p>visitFAdd/visitFSub/visitFNeg 支持类似的常量折叠、单位元和自消规则，并包含浮点特有变换：</p>
+    <table>
+      <thead><tr><th>Visitor</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>visitFAdd</td><td>fneg(x) + fneg(y) → fneg(x+y)</td><td></td></tr>
+        <tr><td>visitFSub</td><td>fsub x, fneg(y) → fadd x, y</td><td></td></tr>
+        <tr><td>visitFSub</td><td>fsub 0.0, x → fneg x</td><td></td></tr>
+        <tr><td>visitFNeg</td><td>fneg(fneg(x)) → x</td><td></td></tr>
+        <tr><td>visitFNeg</td><td>fneg(fsub(x,y)) → fsub(y,x)</td><td></td></tr>
+      </tbody>
+    </table>
+
+    <h3>示例：移位融合</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t1 = shl i32 %x, 3    ; x * 8
+  %t2 = add i32 %x, %t1  ; x + 8x = 9x</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %t2 = mul i32 %x, 9    ; 后端可发射 add w0,w0,w0,lsl #3</code></pre>
+
+    <!-- ─── Mul/Div/Rem ─── -->
+    <h2>乘除法 (Mul/Div/Rem)</h2>
+    <h3>visitMul 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1–5</td><td>常量折叠 + 右移 + 单位元 x*1 + 零元 x*0 + 再结合</td><td></td></tr>
+        <tr><td>6</td><td><strong>加减融合</strong>：当 mul x, 2<sup>k</sup> 的唯一使用者是 add/sub 且涉及同一 x，融合为 mul x, 2<sup>k</sup>±1</td><td></td></tr>
+        <tr><td>7</td><td><strong>强度削弱</strong>：mul x, 2<sup>k</sup> → shl x, k</td><td><code>mul %x, 8 → shl %x, 3</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>visitSDiv 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>常量折叠（除零保护）</td><td></td></tr>
+        <tr><td>2</td><td>单位元：x / 1 → x</td><td></td></tr>
+        <tr><td>3</td><td>零被除数：0 / x → 0</td><td></td></tr>
+        <tr><td>4</td><td>x / -1 → sub 0, x（取负）</td><td></td></tr>
+        <tr><td>5</td><td><strong>强度削弱</strong>：sdiv x, 2<sup>k</sup> → ashr x, k（当 x≥0 或 x 是 2<sup>k</sup> 的倍数）</td><td><code>sdiv %x, 4 → ashr %x, 2</code></td></tr>
+        <tr><td>6</td><td>变量除数证明为 2<sup>k</sup>：sdiv x, pow2_var → ashr x, k</td><td></td></tr>
+        <tr><td>7</td><td>变量除数证明为 2 的幂（k 未知）：sdiv x, pow2 → ashr x, (31 - clz(y))</td><td></td></tr>
+      </tbody>
+    </table>
+
+    <h3>visitSRem 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1–3</td><td>常量折叠 + x%1→0 + 0%x→0</td><td></td></tr>
+        <tr><td>4a</td><td><strong>取模转位运算</strong>：srem x, 2<sup>k</sup> → and x, 2<sup>k</sup>-1（当唯一使用者是 icmp eq/ne 0）</td><td></td></tr>
+        <tr><td>4b</td><td>srem x, 2<sup>k</sup> → and x, 2<sup>k</sup>-1（当 x≥0 或 x 是 2<sup>k</sup> 的倍数）</td><td><code>srem %x, 8 → and %x, 7</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>浮点乘除</h3>
+    <p>visitFMul/visitFDiv 支持常量折叠、单位元（x*1.0, x/1.0）、零元（x*0.0→0.0）和零被除数（0.0/x→0.0）。</p>
+
+    <h3>示例：乘法强度削弱</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t = mul i32 %x, 16</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %t = shl i32 %x, 4</code></pre>
+
+    <h3>示例：乘法加减融合</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t1 = mul i32 %x, 4   ; x * 4
+  %t2 = add i32 %x, %t1  ; x + 4x = 5x</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %t2 = mul i32 %x, 5    ; 融合为单条乘法</code></pre>
+
+    <!-- ─── Shifts ─── -->
+    <h2>移位 (Shl/LShr/AShr)</h2>
+    <p>三种移位指令共享相同的规则结构：</p>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>常量折叠</td><td>注意 overshift：C &gt;= bitwidth 时 shl/lshr 结果为 0，ashr 填充符号位</td></tr>
+        <tr><td>3</td><td>单位元：x shift 0 → x</td><td></td></tr>
+        <tr><td>4</td><td>超移位：x shift C (C ≥ bitwidth)</td><td>shl/lshr → 0；ashr → x >> (bits-1)</td></tr>
+        <tr><td>5</td><td>冗余移位：(x shift C1) shift C2 → x shift (C1+C2)</td><td>仅当 C1+C2 &lt; bitwidth 时安全</td></tr>
+      </tbody>
+    </table>
+    <p><strong>注意</strong>：移位不可交换，不做常量右移规范化。</p>
+
+    <h3>示例：冗余移位合并</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t1 = shl i32 %x, 2
+  %t2 = shl i32 %t1, 3</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %t2 = shl i32 %x, 5</code></pre>
+
+    <!-- ─── Bitwise ─── -->
+    <h2>位运算 (And/Or/Xor)</h2>
+    <table>
+      <thead><tr><th>#</th><th>And</th><th>Or</th><th>Xor</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td colspan="3">常量折叠</td></tr>
+        <tr><td>2</td><td colspan="3">常量右移</td></tr>
+        <tr><td>3</td><td>x &amp; -1 → x</td><td>x | 0 → x</td><td>x ^ 0 → x</td></tr>
+        <tr><td>4</td><td>x &amp; 0 → 0</td><td>x | -1 → -1</td><td>x ^ x → 0</td></tr>
+        <tr><td>5</td><td>x &amp; x → x</td><td>x | x → x</td><td></td></tr>
+        <tr><td>6</td><td colspan="3">再结合：(x op C1) op C2 → x op (C1 op C2)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>示例：位运算再结合</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t1 = and i32 %x, 255   ; 取低 8 位
+  %t2 = and i32 %t1, 15   ; 再取低 4 位</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %t2 = and i32 %x, 15    ; 255 &amp; 15 = 15</code></pre>
+
+    <!-- ─── ICmp/Select ─── -->
+    <h2>比较与选择 (ICmp/Select)</h2>
+    <h3>visitICmp 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>常量折叠：icmp pred C1, C2 → true/false</td><td><code>icmp sgt 5, 3 → 1</code></td></tr>
+        <tr><td>2</td><td><strong>常量右移 + 谓词交换</strong>：icmp pred C, x → icmp swapped_pred x, C</td><td><code>icmp sgt 10, %x → icmp slt %x, 10</code></td></tr>
+        <tr><td>3</td><td><strong>自比较</strong>：x == x → 1, x &lt; x → 0 等</td><td></td></tr>
+        <tr><td>4</td><td><strong>加减折叠</strong>：foldICmpAddSub（见下文）</td><td></td></tr>
+      </tbody>
+    </table>
+
+    <h4>foldICmpAddSub — 比较中的加减消除</h4>
+    <p>两类模式：</p>
+    <table>
+      <thead><tr><th>类别</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>A: 谓词调整</td><td>icmp sle (add x, 1), y → icmp slt x, y</td><td><code>icmp sle (add %x,1), %y → icmp slt %x, %y</code></td></tr>
+        <tr><td>A: 谓词调整</td><td>icmp sgt (sub x, 1), y → icmp sge x, y</td><td></td></tr>
+        <tr><td>B: 常量折叠</td><td>icmp eq (add x, C1), C2 → icmp eq x, C2-C1</td><td><code>icmp eq (add %x,5), 10 → icmp eq %x, 5</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>visitSelect 规则</h3>
+    <table>
+      <thead><tr><th>#</th><th>规则</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>常量条件：select 1, x, y → x</td><td></td></tr>
+        <tr><td>2</td><td>双臂相同：select c, x, x → x</td><td></td></tr>
+        <tr><td>3</td><td>布尔规范化：select c, 1, 0 → zext c</td><td><code>select %c, 1, 0 → zext %c</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>示例：谓词交换 + 常量右移</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %cmp = icmp sgt i32 10, %x  ; 常量在左边</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %cmp = icmp slt i32 %x, 10  ; 常量移到右边，谓词取反</code></pre>
+
+    <h3>示例：加减折叠</h3>
+    <div class="code-label">优化前</div>
+<pre><code class="language-cpp">  %t = add i32 %x, 1
+  %cmp = icmp sle i32 %t, %y   ; x+1 &lt;= y</code></pre>
+    <div class="code-label">优化后</div>
+<pre><code class="language-cpp">  %cmp = icmp slt i32 %x, %y   ; 等价于 x &lt; y</code></pre>
+
+    <!-- ─── 辅助分析 ─── -->
+    <h2>辅助分析函数</h2>
+    <p>以下辅助函数提供更丰富的值域信息，使规则能处理更复杂的场景：</p>
+    <table>
+      <thead><tr><th>函数</th><th>功能</th><th>使用者</th></tr></thead>
+      <tbody>
+        <tr><td><code>isPowerOfTwo(v)</code></td><td>判断整数是否为 2 的幂</td><td>visitMul, visitSDiv, visitSRem</td></tr>
+        <tr><td><code>isKnownNonNegative(x)</code></td><td>判断值是否非负（符号分析）</td><td>visitSDiv, visitSRem</td></tr>
+        <tr><td><code>isKnownMultipleOf(x, k, bb)</code></td><td>判断值是否为 2<sup>k</sup> 的倍数</td><td>visitAdd, visitSDiv, visitSRem</td></tr>
+        <tr><td><code>isKnownPowerOfTwo(y, k)</code></td><td>判断变量是否可证明为 2<sup>k</sup></td><td>visitSDiv</td></tr>
+        <tr><td><code>isProvenPowerOfTwo(y)</code></td><td>判断变量是否可证明为 2 的幂（k 未知）</td><td>visitSDiv</td></tr>
+        <tr><td><code>getSwappedPredicate(op)</code></td><td>交换比较谓词（SGT↔SLT, SGE↔SLE）</td><td>visitICmp, foldICmpAddSub</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ─── 源码位置 ─── -->
+    <h2>源码位置</h2>
+    <ul>
+      <li><code>src/include/mid/opt/instCombine.hpp</code> — 类定义</li>
+      <li><code>src/mid/transform/instCombine/</code> — 实现（7 个文件，~1400 行）</li>
+    </ul>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => { if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open'); });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => { btn.innerHTML = checkIcon; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000); });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

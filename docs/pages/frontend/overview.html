@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>前端 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+</head>
+<body>
+
+<!-- Sidebar Toggle (mobile) -->
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+  </svg>
+</button>
+
+<!-- ===== Sidebar ===== -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-header"><h1>SysY Compiler</h1></div>
+  <nav class="sidebar-nav">
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>项目概览</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="../../index.html">首页</a>
+        <a class="nav-item" href="../quickstart.html">快速开始</a>
+        <a class="nav-item" href="../architecture.html">整体架构</a>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>前端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item active" href="overview.html">前端概述</a>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>中端</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>IR</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../ir/data-structures.html">数据结构</a>
+            <a class="nav-item" href="../ir/irgen.html">IR 生成</a>
+            <a class="nav-item" href="../ir/ssa.html">SSA 形式</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>分析</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../analysis/overview.html">总览</a>
+            <a class="nav-item" href="../analysis/loop-info.html">循环分析</a>
+            <a class="nav-item" href="../analysis/scev.html">标量演化</a>
+            <a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a>
+            <a class="nav-item" href="../analysis/dependence.html">依赖分析</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>Pass 管理</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a>
+            <a class="nav-item" href="../opt/pipeline.html">优化流水线</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>SSA 准备</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a>
+            <a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a>
+            <a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a>
+            <a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>标量优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a>
+            <a class="nav-item" href="../opt/reassociate.html">Reassociate</a>
+            <a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>过程间优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a>
+            <a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a>
+            <a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>循环优化</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a>
+            <a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a>
+            <a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a>
+            <a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a>
+            <a class="nav-item" href="../opt/licm.html">LICM</a>
+            <a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a>
+            <a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a>
+            <a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a>
+            <a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>清理 Pass</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a>
+            <a class="nav-item" href="../opt/sccp.html">SCCP</a>
+            <a class="nav-item" href="../opt/const-fold.html">ConstantFold</a>
+            <a class="nav-item" href="../opt/inst-combine.html">InstCombine</a>
+            <a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+        <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>后端 ARM64</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>MachineInstr</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a>
+          </div>
+        </div>
+        <div class="nav-subsection">
+          <div class="nav-subsection-header" onclick="toggleSubsection(this)">
+            <span>汇编生成</span>
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="nav-subsection-items">
+            <a class="nav-item" href="../backend/codegen.html">代码生成</a>
+            <a class="nav-item" href="../backend/regalloc.html">寄存器分配</a>
+            <a class="nav-item" href="../backend/branch.html">分支处理</a>
+            <a class="nav-item" href="../backend/load-store.html">Load/Store</a>
+            <a class="nav-item" href="../backend/scheduler.html">指令调度</a>
+            <a class="nav-item" href="../backend/peephole.html">Peephole 优化</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompts -->
+    <div class="nav-section">
+      <div class="nav-section-header" onclick="toggleSection(this)">
+        <span>Prompts</span>
+        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>
+      <div class="nav-section-items">
+        <a class="nav-item" href="prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="prompts/new-feat.html">New-Feat</a>
+      </div>
+    </div>
+
+  </nav>
+</aside>
+
+<!-- ===== Main Content ===== -->
+<main class="main">
+  <div class="content" id="content">
+
+    <div class="page-header">
+      <div class="breadcrumb">wiki / 前端 / 概述</div>
+      <h1>前端</h1>
+      <p>Flex 词法分析 + Bison 语法分析 → AST → GenIR（Visitor 模式）→ SSA IR。</p>
+    </div>
+
+    <!-- ===== Lexer ===== -->
+    <h2>词法分析</h2>
+    <p>
+      词法分析器由 <strong>Flex</strong> 生成（<code>src/frontend/lexer.l</code>），负责将源文件转换为 Token 流。
+      同时追踪行号和列号（<code>yylloc</code>），用于错误定位。
+    </p>
+
+    <h3>Token 分类</h3>
+    <table>
+      <thead><tr><th>类别</th><th>示例</th></tr></thead>
+      <tbody>
+        <tr><td>关键字</td><td><code>int</code> <code>float</code> <code>void</code> <code>const</code> <code>return</code> <code>if</code> <code>else</code> <code>while</code> <code>break</code> <code>continue</code></td></tr>
+        <tr><td>标识符</td><td><code>[A-Za-z_][A-Za-z0-9_]*</code></td></tr>
+        <tr><td>整数字面量</td><td>十进制、十六进制（<code>0x1F</code>）、八进制（<code>077</code>）</td></tr>
+        <tr><td>浮点字面量</td><td>十进制浮点、十六进制浮点（<code>0x1.Fp3</code>）</td></tr>
+        <tr><td>运算符</td><td><code>+</code> <code>-</code> <code>*</code> <code>/</code> <code>%</code> <code>&gt;=</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>&amp;&amp;</code> <code>||</code> <code>!</code></td></tr>
+        <tr><td>注释</td><td><code>// ...</code>（单行）、<code>/* ... */</code>（多行），直接丢弃</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout tip">
+      <div class="callout-title">调试模式</div>
+      <p>编译时定义 <code>-DDEBUG_LEXER</code>，lexer 会将每个 Token 输出到 stderr，包含名称、文本和位置信息。</p>
+    </div>
+
+    <!-- ===== Parser ===== -->
+    <h2>语法分析</h2>
+    <p>
+      语法分析器由 <strong>Bison</strong> 生成（<code>src/frontend/parser.y</code>），采用 LALR(1) 解析。
+      解析过程中直接构建 AST 节点，解析完成后全局变量 <code>root</code> 指向根节点 <code>CompUnitAST</code>。
+    </p>
+    <p>SysY 语法结构：</p>
+    <pre data-lang="text"><code>CompUnit  → (Decl | FuncDef)*
+Decl      → ('int' | 'float') ['const'] Def (',' Def)* ';'
+FuncDef   → ('int' | 'float' | 'void') ID '(' [FuncFParams] ')' Block
+Block     → '{' BlockItem* '}'
+Stmt      → LVal '=' Exp ';'
+          | [Exp] ';'
+          | 'if' '(' Cond ')' Stmt ['else' Stmt]
+          | 'while' '(' Cond ')' Stmt
+          | 'break' ';' | 'continue' ';'
+          | 'return' [Exp] ';'
+          | Block</code></pre>
+
+    <!-- ===== AST ===== -->
+    <h2>AST 设计</h2>
+    <p>
+      所有节点继承自 <code>BaseAST</code>，通过 <strong>Visitor 模式</strong>解耦遍历逻辑。
+      <code>Checker</code>（语义检查）和 <code>GenIR</code>（IR 生成）各自实现 <code>Visitor</code> 接口，
+      无需修改 AST 节点本身。
+    </p>
+
+    <h3>节点层次</h3>
+    <table>
+      <thead><tr><th>类别</th><th>节点类</th></tr></thead>
+      <tbody>
+        <tr><td>顶层</td><td><code>CompUnitAST</code></td></tr>
+        <tr><td>声明/定义</td><td><code>DeclAST</code> <code>DefAST</code> <code>InitValAST</code> <code>FuncDefAST</code> <code>FuncFParamAST</code></td></tr>
+        <tr><td>语句</td><td><code>StmtAST</code>（STYPE 枚举区分类型）<code>BlockAST</code> <code>ReturnStmtAST</code></td></tr>
+        <tr><td>表达式</td><td><code>AddExpAST</code> <code>MulExpAST</code> <code>UnaryExpAST</code> <code>PrimaryExpAST</code> <code>LValAST</code> <code>NumberAST</code> <code>CallAST</code></td></tr>
+        <tr><td>比较/逻辑</td><td><code>RelExpAST</code> <code>EqExpAST</code> <code>LAndExpAST</code> <code>LOrExpAST</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>语句类型枚举</h3>
+    <pre data-lang="cpp"><code>enum STYPE { SEMI, ASS, EXP, CONT, BRE, RET, BLK, SEL, ITER };
+// SEMI=空语句  ASS=赋值  EXP=表达式  CONT=continue  BRE=break
+// RET=return   BLK=块    SEL=if选择  ITER=while循环</code></pre>
+
+    <h3>类型枚举</h3>
+    <pre data-lang="cpp"><code>enum TYPE { TYPE_VOID, TYPE_INT, TYPE_FLOAT, TYPE_BOOL };</code></pre>
+
+    <!-- ===== Future: Vector Type ===== -->
+    <h2>扩展：向量类型支持（计划中）</h2>
+    <p>
+      后续计划为 SysY 语言添加 <strong>向量类型</strong>（类似 C++ 的 <code>std::vector</code>），
+      需要贯穿整个编译流水线。新类型的添加路径如下：
+    </p>
+    <pre data-lang="text"><code>前端
+  lexer.l       新增 vec 关键字 Token
+  parser.y      扩展类型声明语法：vec&lt;int&gt; v;
+  ast.hpp       新增 VecTypeAST 节点，TYPE 枚举加入 TYPE_VEC
+
+IR
+  type.hpp      新增 VecElemType（区别于固定长度 VectorType）
+  irGen         处理 vec 的 push_back / pop_back / size / [] 操作
+  instruction   新增或复用 GetElementPtr + 动态扩容 Call
+
+优化
+  Pass          向量化 Pass 需要识别 VecElemType 并跳过或特殊处理
+
+后端
+  codegen       vec 操作翻译为堆内存调用（malloc/realloc）或 NEON 指令（固定长度情况）</code></pre>
+
+    <div class="callout info">
+      <div class="callout-title">关键挑战</div>
+      <p>
+        动态向量需要在 IR 层插入运行时的 <code>malloc</code>/<code>realloc</code> 调用，
+        并在后端生成对应的函数调用汇编；固定长度向量则可以直接映射到 NEON <code>&lt;4 x i32&gt;</code> 向量寄存器，
+        由 <code>LoopVectorize</code> 优化 Pass 利用。
+      </p>
+    </div>
+
+  </div>
+</main>
+
+<script>
+  function toggleSection(header) { header.parentElement.classList.toggle('open'); }
+  function toggleSubsection(header) { header.parentElement.classList.toggle('open'); }
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+    item.addEventListener('click', () => {
+      if (window.innerWidth <= 860) document.querySelector('.sidebar').classList.remove('open');
+    });
+  });
+  hljs.highlightAll();
+  // Auto-expand sidebar to show active item
+  (function() {
+    var active = document.querySelector('.nav-item.active');
+    if (!active) return;
+    var sub = active.closest('.nav-subsection');
+    if (sub) sub.classList.add('open');
+    var sec = active.closest('.nav-section');
+    if (sec) sec.classList.add('open');
+  })();
+
+  const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
+  document.querySelectorAll('pre').forEach(pre => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.innerHTML = copyIcon; btn.title = '复制代码';
+    btn.addEventListener('click', () => {
+      const code = pre.querySelector('code')?.textContent || pre.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.innerHTML = checkIcon; btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = copyIcon; btn.classList.remove('copied'); }, 2000);
+      });
+    });
+    pre.style.position = 'relative'; pre.appendChild(btn);
+  });
+</script>
+</body>
+</html>

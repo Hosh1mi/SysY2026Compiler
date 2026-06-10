@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>指令调度 - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+</head>
+<body>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+<aside class="sidebar" id="sidebar"><div class="sidebar-header"><h1>SysY Compiler</h1></div><nav class="sidebar-nav">
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../../index.html">首页</a><a class="nav-item" href="../quickstart.html">快速开始</a><a class="nav-item" href="../architecture.html">整体架构</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../ir/data-structures.html">数据结构</a><a class="nav-item" href="../ir/irgen.html">IR 生成</a><a class="nav-item" href="../ir/ssa.html">SSA 形式</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../analysis/overview.html">总览</a><a class="nav-item" href="../analysis/loop-info.html">循环分析</a><a class="nav-item" href="../analysis/scev.html">标量演化</a><a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a><a class="nav-item" href="../analysis/dependence.html">依赖分析</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a><a class="nav-item" href="../opt/pipeline.html">优化流水线</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a><a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a><a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a><a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a><a class="nav-item" href="../opt/reassociate.html">Reassociate</a><a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a><a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a><a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a><a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a><a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a><a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a><a class="nav-item" href="../opt/licm.html">LICM</a><a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a><a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a><a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a><a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a><a class="nav-item" href="../opt/sccp.html">SCCP</a><a class="nav-item" href="../opt/const-fold.html">ConstantFold</a><a class="nav-item" href="../opt/inst-combine.html">InstCombine</a><a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a></div></div></div></div>
+<div class="nav-section open"><div class="nav-section-header" onclick="toggleSection(this)"><span>后端 ARM64</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>MachineInstr</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="machine-instr.html">MachineInstr</a></div></div><div class="nav-subsection open"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>汇编生成</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="codegen.html">代码生成</a><a class="nav-item" href="regalloc.html">寄存器分配</a><a class="nav-item" href="branch.html">分支处理</a><a class="nav-item" href="load-store.html">Load/Store</a><a class="nav-item active" href="scheduler.html">指令调度</a><a class="nav-item" href="peephole.html">Peephole 优化</a></div></div></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>Prompts</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../prompts/bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="../prompts/new-feat.html">New-Feat</a></div></div>
+</nav></aside>
+
+<main class="main"><div class="content" id="content">
+
+<div class="page-header"><div class="breadcrumb">wiki / 后端 / 汇编生成</div><h1>指令调度</h1><p>MachineScheduler 在寄存器分配之后、Peephole 优化之前运行，通过 segment-based list scheduling 重排基本块内的机器指令，利用指令级并行性（ILP）减少流水线停顿。</p></div>
+
+<h2>概览</h2>
+<p>调度器采用经典的 <strong>List Scheduling</strong> 算法，以基本块内的"segment"为单位进行局部调度：</p>
+<ol>
+  <li>按 barrier / label 将指令序列切分为多个 segment</li>
+  <li>对每个 segment 构建依赖图（DAG）</li>
+  <li>计算每条指令的关键路径长度作为优先级</li>
+  <li>按优先级从就绪队列中选取指令发射</li>
+</ol>
+
+<h2>类定义</h2>
+<pre><code class="language-cpp">// src/include/backend/arm64/scheduler.hpp
+class MachineScheduler {
+public:
+    void schedule(MachineFunction &amp;func);
+private:
+    struct Dep { int from; int to; };  // 依赖边
+    void scheduleSegment(std::vector&lt;MachineInstr*&gt; &amp;instrs);
+};</code></pre>
+
+<h2>Segment 分割</h2>
+<p><code>schedule()</code> 遍历函数中所有基本块的指令，以 <strong>barrier 指令</strong>（branch、ret、bl）和 <strong>label</strong> 为界将指令序列切分为 segment：</p>
+<pre><code class="language-cpp">void MachineScheduler::schedule(MachineFunction &amp;func) {
+    for (auto &amp;bb : func.blocks) {
+        // 收集所有指令
+        std::vector&lt;MachineInstr*&gt; allInstrs;
+        for (auto &amp;instr : bb.instrs)
+            allInstrs.push_back(instr.get());
+
+        // 按 barrier/label 切分
+        std::vector&lt;MachineInstr*&gt; segment;
+        for (auto *instr : allInstrs) {
+            if (instr-&gt;isBarrier() || instr-&gt;isLabel()) {
+                if (!segment.empty()) {
+                    scheduleSegment(segment);  // 调度当前段
+                    result.insert(result.end(), segment.begin(), segment.end());
+                    segment.clear();
+                }
+                result.push_back(instr);  // barrier/label 原样保留
+            } else {
+                segment.push_back(instr);
+            }
+        }
+        // 处理最后一个 segment
+    }
+}</code></pre>
+<p>barrier 和 label 不参与调度，保证控制流的正确性。</p>
+
+<h2>依赖图构建</h2>
+<p><code>scheduleSegment</code> 首先构建指令之间的依赖关系 DAG。三种依赖类型：</p>
+<table>
+  <thead><tr><th>类型</th><th>含义</th><th>检测方式</th></tr></thead>
+  <tbody>
+    <tr><td><strong>RAW</strong>（Read After Write）</td><td>j 读取 i 定义的值</td><td>i.defs ∩ j.uses ≠ ∅</td></tr>
+    <tr><td><strong>WAW</strong>（Write After Write）</td><td>i 和 j 定义同一寄存器</td><td>i.defs ∩ j.defs ≠ ∅</td></tr>
+    <tr><td><strong>WAR</strong>（Write After Read）</td><td>j 写入 i 读取的寄存器</td><td>i.uses ∩ j.defs ≠ ∅</td></tr>
+  </tbody>
+</table>
+
+<h3>虚拟寄存器</h3>
+<p>为了正确处理隐式依赖，引入两个虚拟寄存器：</p>
+<ul>
+  <li><strong><code>$flags</code></strong> — 条件标志寄存器。所有 <code>cmp</code>、<code>tst</code> 等设置标志的指令 def <code>$flags</code>；所有条件分支（b.cond、csel、ccmp）use <code>$flags</code></li>
+  <li><strong><code>$mem</code></strong> — 内存序虚拟寄存器。所有 mayLoad/mayStore 指令同时 def 和 use <code>$mem</code>，确保内存操作之间的全序关系</li>
+</ul>
+
+<pre><code class="language-cpp">// 依赖图构建核心逻辑
+for (int i = 0; i &lt; n; i++) {
+    for (int j = i + 1; j &lt; n; j++) {
+        auto &amp;ai = instrs[i], &amp;aj = instrs[j];
+        // 检查 ai → aj 是否存在 RAW / WAW / WAR
+        bool raw = hasIntersection(ai.defs, aj.uses);
+        bool waw = hasIntersection(ai.defs, aj.defs);
+        bool war = hasIntersection(ai.uses, aj.defs);
+        if (raw || waw || war) {
+            deps.push_back({i, j});  // i → j 有依赖
+            adj[i].push_back(j);
+        }
+    }
+}</code></pre>
+
+<h2>关键路径优先级</h2>
+<p>从依赖图反向（从后往前）计算每条指令的 <strong>关键路径长度</strong>（Critical Path），作为调度优先级：</p>
+<pre><code class="language-cpp">// 反向计算关键路径长度
+// cp[i] = latency(i) + max{cp[j] | i → j ∈ deps}
+std::vector&lt;int&gt; cp(n, 0);
+for (int i = n - 1; i &gt;= 0; i--) {
+    cp[i] = latency(instrs[i]);  // 指令延迟
+    for (int j : adj[i])
+        cp[i] = std::max(cp[i], latency(instrs[i]) + cp[j]);
+}</code></pre>
+<p>典型延迟值：</p>
+<table>
+  <thead><tr><th>指令类型</th><th>延迟</th></tr></thead>
+  <tbody>
+    <tr><td>整数 ALU（add, sub, and, orr...）</td><td>1</td></tr>
+    <tr><td>整数乘法（mul, madd）</td><td>3</td></tr>
+    <tr><td>整数除法（sdiv, udiv）</td><td>12</td></tr>
+    <tr><td>Load（ldr, ldp）</td><td>4</td></tr>
+    <tr><td>浮点运算（fadd, fmul, fdiv）</td><td>4 / 4 / 12</td></tr>
+    <tr><td>其他</td><td>1</td></tr>
+  </tbody>
+</table>
+
+<h2>List Scheduling</h2>
+<p>调度算法维护一个 <strong>就绪队列</strong>（所有前驱已发射的指令），每步从中选取优先级最高的指令发射：</p>
+<pre><code class="language-cpp">// List Scheduling 核心
+std::vector&lt;int&gt; inDegree(n, 0);
+// ... 计算入度 ...
+
+auto ready = [&amp;](int idx) { return inDegree[idx] == 0; };
+std::vector&lt;int&gt; scheduled;
+
+for (int step = 0; step &lt; n; step++) {
+    // 从就绪队列中选取优先级最高的指令
+    int best = -1;
+    for (int i = 0; i &lt; n; i++) {
+        if (!scheduled_set.count(i) &amp;&amp; ready(i)) {
+            if (best == -1 || compare(i, best, cp, instrs, scheduled))
+                best = i;
+        }
+    }
+    // 发射 best，更新后继入度
+    scheduled.push_back(best);
+    scheduled_set.insert(best);
+    for (int j : adj[best]) {
+        if (--inDegree[j] == 0) { /* j 进入就绪队列 */ }
+    }
+}</code></pre>
+
+<h3>选取策略（优先级排序）</h3>
+<p>当多条指令同时就绪时，按以下优先级选取：</p>
+<ol>
+  <li><strong>Load-Use Hazard 避免</strong> — 如果前一条指令是 load 且当前候选使用该 load 的结果，则降低优先级（延迟 4 个周期）</li>
+  <li><strong>关键路径长度</strong> — cp 值越大越优先</li>
+  <li><strong>指令延迟</strong> — 延迟越大的指令越早发射，以隐藏延迟</li>
+  <li><strong>原始顺序</strong> — 以上均相同时保持原序</li>
+</ol>
+
+<h3>Load-Use Hazard 检测</h3>
+<pre><code class="language-cpp">// candidateHasLoadUseHazard: 检查候选指令是否与前一条有 load-use 冲突
+bool MachineScheduler::candidateHasLoadUseHazard(
+    MachineInstr *candidate, MachineInstr *lastScheduled) {
+    if (!lastScheduled || !lastScheduled-&gt;mayLoad)
+        return false;
+    // 前一条是 load，且 candidate 使用该 load 的定义
+    return !candidate-&gt;uses.empty() &amp;&amp;
+           hasIntersection(lastScheduled-&gt;defs, candidate-&gt;uses);
+}</code></pre>
+<p>当检测到 load-use hazard 时，调度器会优先选择其他就绪指令，让 load 结果有更多时间到达寄存器文件，减少流水线气泡。</p>
+
+<h2>调度示例</h2>
+<pre><code class="language-cpp">// 调度前：
+//   ldr w10, [x29, #-8]    // (1) load a
+//   add w11, w10, w3       // (2) a + b  ← load-use hazard!
+//   mul w12, w4, w5        // (3) c * d
+//   add w13, w12, w6       // (4) result + e
+
+// 调度后（避免 load-use，提前 mul）：
+//   ldr w10, [x29, #-8]    // (1) load a
+//   mul w12, w4, w5        // (3) c * d  ← 填充 load 延迟
+//   add w11, w10, w3       // (2) a + b  ← load 结果已就绪
+//   add w13, w12, w6       // (4) result + e</code></pre>
+
+<h2>源码位置</h2>
+<table>
+  <thead><tr><th>文件</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/backend/arm64/scheduler.cpp</code></td><td>schedule()、scheduleSegment()、依赖图构建、关键路径计算、list scheduling</td></tr>
+    <tr><td><code>src/include/backend/arm64/scheduler.hpp</code></td><td>MachineScheduler 类定义</td></tr>
+  </tbody>
+</table>
+
+</div></main>
+<script>function toggleSection(el){el.parentElement.classList.toggle('open')}function toggleSubsection(el){el.parentElement.classList.toggle('open')}const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';document.querySelectorAll('pre').forEach(pre=>{pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});});pre.style.position='relative';pre.appendChild(btn)});</script>
+</body></html>

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bug-Fixing Prompt - SysY Compiler Wiki</title>
+  <link rel="stylesheet" href="../../style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/markdown.min.js"></script>
+</head>
+<body>
+<button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+<aside class="sidebar" id="sidebar"><div class="sidebar-header"><h1>SysY Compiler</h1></div><nav class="sidebar-nav">
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>项目概览</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../../index.html">首页</a><a class="nav-item" href="../quickstart.html">快速开始</a><a class="nav-item" href="../architecture.html">整体架构</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>前端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item" href="../frontend/overview.html">前端概述</a></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>中端</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>IR</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../ir/data-structures.html">数据结构</a><a class="nav-item" href="../ir/irgen.html">IR 生成</a><a class="nav-item" href="../ir/ssa.html">SSA 形式</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>分析</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../analysis/overview.html">总览</a><a class="nav-item" href="../analysis/loop-info.html">循环分析</a><a class="nav-item" href="../analysis/scev.html">标量演化</a><a class="nav-item" href="../analysis/alias-analysis.html">别名分析</a><a class="nav-item" href="../analysis/dependence.html">依赖分析</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>Pass 管理</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/pass-manager.html">Pass 管理器</a><a class="nav-item" href="../opt/pipeline.html">优化流水线</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>SSA 准备</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/cfg-simplify.html">CFGSimplify</a><a class="nav-item" href="../opt/mem2reg.html">Mem2Reg</a><a class="nav-item" href="../opt/early-cse.html">EarlyCSE</a><a class="nav-item" href="../opt/tail-recursion.html">TailRecursionEliminate</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>标量优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/scalar-expanded-interchange.html">ScalarExpandedInterchange</a><a class="nav-item" href="../opt/reassociate.html">Reassociate</a><a class="nav-item" href="../opt/local-copy-propagation.html">LocalCopyPropagation</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>过程间优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/bit-func-recognize.html">BitFuncRecognize</a><a class="nav-item" href="../opt/inline-expand.html">InlineExpand</a><a class="nav-item" href="../opt/global-scalar-promotion.html">GlobalScalarPromotion</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>循环优化</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/unify-exit-nodes.html">UnifyExitNodes</a><a class="nav-item" href="../opt/loop-simplify.html">LoopSimplify</a><a class="nav-item" href="../opt/loop-rotate.html">LoopRotate</a><a class="nav-item" href="../opt/phi-op-sink.html">PhiOpSink</a><a class="nav-item" href="../opt/licm.html">LICM</a><a class="nav-item" href="../opt/loop-vectorize.html">LoopVectorize</a><a class="nav-item" href="../opt/ind-var-strength-reduce.html">IndVarStrengthReduce</a><a class="nav-item" href="../opt/loop-rep-fold.html">LoopRepFold</a><a class="nav-item" href="../opt/loop-unroll.html">LoopUnroll</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>清理 Pass</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../opt/dead-code-delete.html">DeadCodeDelete</a><a class="nav-item" href="../opt/sccp.html">SCCP</a><a class="nav-item" href="../opt/const-fold.html">ConstantFold</a><a class="nav-item" href="../opt/inst-combine.html">InstCombine</a><a class="nav-item" href="../opt/dead-store-eliminate.html">DeadStoreEliminate</a></div></div></div></div>
+<div class="nav-section"><div class="nav-section-header" onclick="toggleSection(this)"><span>后端 ARM64</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>MachineInstr</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../backend/machine-instr.html">MachineInstr</a></div></div><div class="nav-subsection"><div class="nav-subsection-header" onclick="toggleSubsection(this)"><span>汇编生成</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-subsection-items"><a class="nav-item" href="../backend/codegen.html">代码生成</a><a class="nav-item" href="../backend/regalloc.html">寄存器分配</a><a class="nav-item" href="../backend/branch.html">分支处理</a><a class="nav-item" href="../backend/load-store.html">Load/Store</a><a class="nav-item" href="../backend/scheduler.html">指令调度</a><a class="nav-item" href="../backend/peephole.html">Peephole 优化</a></div></div></div></div>
+<div class="nav-section open"><div class="nav-section-header" onclick="toggleSection(this)"><span>Prompts</span><svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg></div><div class="nav-section-items"><a class="nav-item active" href="bug-fixing.html">Bug-Fixing</a><a class="nav-item" href="new-feat.html">New-Feat</a></div></div>
+</nav></aside>
+
+<main class="main"><div class="content" id="content">
+
+<div class="page-header"><div class="breadcrumb">wiki / Prompts</div><h1>Bug-Fixing Prompt 模板</h1><p>用于编译器调试与性能分析场景的结构化 Prompt 模板。复制模板，填入具体信息后发送给 AI 助手。</p></div>
+
+<h2>使用方式</h2>
+<ol>
+  <li>点击代码块右上角的 Copy 按钮复制模板</li>
+  <li>将 <code>{{占位符}}</code> 替换为实际信息</li>
+  <li>发送给 AI 助手</li>
+</ol>
+
+<h2>模板</h2>
+<pre><code class="language-markdown"># Bug 修复请求
+
+## 1. 症状描述
+
+**错误类型**: {{编译错误 / 运行时错误 / 错误输出 / 性能退化}}
+**错误信息**:
+```
+{{粘贴完整的错误信息或 diff 输出}}
+```
+
+**测试用例**: `/test/performance/{{name}}.sy`
+**预期输入**: `/test/performance/{{name}}.in`
+**预期输出**: `/test/performance/{{name}}.out`
+**原性能**: {{粘贴 test/results/ 下对应的 .txt 结果，或留空}}
+
+## 2. 复现步骤
+
+```bash
+# 查找正在运行的 Docker 容器
+docker ps -a
+
+# 进入容器（不要使用 qemu）
+docker exec -it {{container_id}} /bin/bash
+
+# 编译（调试选项参考 README.md）
+cd /workspace &amp;&amp; mkdir -p build &amp;&amp; cd build
+cmake .. -DCMAKE_BUILD_TYPE=Debug &amp;&amp; make -j$(nproc)
+
+# 运行全量测试（测试输出已包含计时，无需单独计时）
+cd /workspace/test
+bash arm_functional.sh   # 功能测试
+bash arm_performance.sh  # 性能测试（不要使用 final 版本）
+```
+
+## 3. 期望行为
+
+- **正确性优先**：若改动仅影响 -O1 开启才会触发的优化，只需运行 `arm_performance.sh` 并保证全部通过
+- **性能退化判断**：若出现性能退步，先确认是否符合预期行为（如 Pass 语义变更），再具体分析退化原因
+- **计时波动**：Docker 容器环境不稳定，时间波动属正常现象，不必过度关注微小差异
+- **目标架构**：Cortex-A53 CPU，本机无法模拟，需自行判断何种优化利好 A53（如短流水线、低延迟指令、减少分支预测失败等）
+
+请提供：
+1. **根因分析** — Bug 产生的根本原因
+2. **最小修复方案** — 具体的代码修改（文件路径 + diff）
+3. **影响评估** — 修复可能影响的其他测试</code></pre>
+
+<h2>填写指南</h2>
+
+<h3>第 1 节：症状描述</h3>
+<p>测试用例统一使用 <code>/test/performance/{name}.sy</code> 路径格式。预期输入/输出分别对应同目录下的 <code>.in</code> 和 <code>.out</code> 文件。原性能栏粘贴 <code>test/results/</code> 下带时间戳的 <code>.txt</code> 文件内容，用于对比退化幅度。</p>
+
+<h3>第 2 节：复现步骤</h3>
+<p>始终使用已运行的 Docker 容器（<code>docker exec</code>），不要启动新容器或使用 qemu 模拟。编译器的调试选项（如 <code>--dump-ir</code>、<code>--emit-ir</code> 等）请参考项目 <code>README.md</code>。全量测试脚本位于 <code>/test</code> 目录，使用 <code>arm_</code> 前缀的脚本（<code>arm_functional.sh</code>、<code>arm_performance.sh</code>），不要使用 <code>final</code> 后缀的版本。测试脚本输出中已包含每个用例的计时信息。</p>
+
+<h3>第 3 节：期望行为</h3>
+<p>Cortex-A53 是顺序执行的 ARMv8 核心，偏好短依赖链、低延迟指令和紧凑的代码体积。在分析性能影响时，应结合 A53 的流水线特征判断优化是否有效，而非仅依据本机 x86 测试结果。</p>
+
+<h2>变体模板</h2>
+
+<h3>精简版（适用于简单 Bug）</h3>
+<pre><code class="language-markdown"># Bug 修复
+
+**测试用例**: `/test/performance/{{name}}.sy`
+**问题**: {{一句话描述}}
+**错误信息**: `{{error message}}`
+
+请在当前运行的 Docker 容器中复现并给出最小修复。
+正确性优先，修复后运行 `arm_performance.sh` 确认全部通过。</code></pre>
+
+<h3>性能退化版</h3>
+<pre><code class="language-markdown"># 性能退化分析
+
+**测试用例**: `/test/performance/{{name}}.sy`
+**原性能**: {{粘贴 test/results/ 下 .txt 结果}}
+**现性能**: {{粘贴当前测试结果}}
+**引入范围**: `git log {{commit_old}}..{{commit_new}} --oneline`
+
+目标架构 Cortex-A53，请分析哪次提交引入了退化，
+判断是否符合预期行为，并给出修复建议。</code></pre>
+
+</div></main>
+<script>function toggleSection(el){el.parentElement.classList.toggle('open')}function toggleSubsection(el){el.parentElement.classList.toggle('open')}const copyIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';const checkIcon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';document.querySelectorAll('pre').forEach(pre=>{pre.querySelector('code')&&hljs.highlightElement(pre.querySelector('code'));const btn=document.createElement('button');btn.className='copy-btn';btn.innerHTML=copyIcon;btn.title='复制代码';btn.addEventListener('click',()=>{const code=pre.querySelector('code')?.textContent||pre.textContent;navigator.clipboard.writeText(code).then(()=>{btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(()=>{btn.innerHTML=copyIcon;btn.classList.remove('copied')},2000)});});pre.style.position='relative';pre.appendChild(btn)});</script>
+</body></html>
