@@ -294,6 +294,53 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
             user->set_operand(idx, exitPhi);
     }
 
+    // exitSucc 若是某个祖先循环的 header，preExit/latchExit 就把原来
+    // 经此处的一条回边变成了两条，破坏祖先循环的单 latch 规范形（L1）。
+    // 把两条边汇入统一回边块再跳 exitSucc，保持回边数不变。
+    for (Loop *anc = loop->parent; anc; anc = anc->parent) {
+        if (anc->header != exitSucc)
+            continue;
+        auto *merge = new BasicBlock(func->parent_,
+                                     exitSucc->name_ + ".backedge", func);
+        placeBlockBefore(func, merge, exitSucc);
+        new BranchInst(exitSucc, merge);
+        for (auto *inst : exitSucc->instr_list_) {
+            if (!inst->is_phi()) break;
+            auto *phi = static_cast<PhiInst *>(inst);
+            int idxPre = -1, idxLatch = -1;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) == preExit)   idxPre = (int)i;
+                if (phi->get_operand(i + 1) == latchExit) idxLatch = (int)i;
+            }
+            if (idxPre < 0 || idxLatch < 0)
+                continue;
+            Value *vPre = phi->get_operand(idxPre);
+            Value *vLatch = phi->get_operand(idxLatch);
+            Value *merged = vPre;
+            if (vPre != vLatch) {
+                auto *mPhi = PhiInst::create_phi(phi->type_, merge);
+                mPhi->addIncoming(vPre, preExit);
+                mPhi->addIncoming(vLatch, latchExit);
+                merge->add_instruction_front(mPhi);
+                merged = mPhi;
+            }
+            phi->remove_operands(std::max(idxPre, idxLatch),
+                                 std::max(idxPre, idxLatch) + 1);
+            phi->remove_operands(std::min(idxPre, idxLatch),
+                                 std::min(idxPre, idxLatch) + 1);
+            phi->addIncoming(merged, merge);
+        }
+        for (auto *src : {preExit, latchExit}) {
+            auto *term = src->get_terminator();
+            term->set_operand(0, merge);
+            src->remove_succ_basic_block(exitSucc);
+            exitSucc->remove_pre_basic_block(src);
+            src->add_succ_basic_block(merge);
+            merge->add_pre_basic_block(src);
+        }
+        break;
+    }
+
     for (auto *inst : continueSucc->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
