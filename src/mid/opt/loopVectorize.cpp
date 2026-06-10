@@ -498,11 +498,6 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         if (!inst->is_phi()) break;
         if (inst == iv.phi) continue;
         auto *phi = static_cast<PhiInst*>(inst);
-        if (phi->type_->tid_ == Type::PointerTyID) continue; // pointer phi: OK
-        // Integer non-IV phi: check whether it's a constant-offset pattern
-        //   e.g.  %idx = phi [0], [add %idx, 1]
-        // or an accumulator:
-        //   e.g.  %sum = phi [0], [add %sum, %product]
         Value *latchVal = nullptr;
         for (unsigned i = 0; i < phi->num_ops_; i += 2) {
             if (loop.blocks.count(static_cast<BasicBlock*>(phi->get_operand(i + 1)))) {
@@ -511,12 +506,37 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         }
         if (!latchVal) { return false; }
         auto *update = dynamic_cast<Instruction*>(latchVal);
+        if (phi->type_->tid_ == Type::PointerTyID) {
+            // Pointer phi：更新必须是 gep(phi, 常量)（常量元素步长）
+            auto *gep = dynamic_cast<GetElementPtrInst*>(update);
+            if (!gep || gep->get_operand(0) != phi || gep->num_ops_ != 2 ||
+                !dynamic_cast<ConstantInt*>(gep->get_operand(1))) { return false; }
+            continue;
+        }
+        // Integer non-IV phi: check whether it's a constant-offset pattern
+        //   e.g.  %idx = phi [0], [add %idx, 1]
+        // or an accumulator:
+        //   e.g.  %sum = phi [0], [add %sum, %product]
         if (!update || (!update->is_add() && !update->is_sub())) { return false; }
         // Must be add/sub phi, constant  (not add phi, variable)
         Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
         bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
                        (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
         if (!isConst) { return false; }
+    }
+
+    // 5b. live-out 限制：循环内定义、循环外使用的值只允许是 header phi。
+    //     header phi（IV/aux）经 remPhi/remAux 与 afterLoop 合流 phi 接力；
+    //     其他值在余数循环零次执行时没有定义，无法保证支配性。
+    for (auto bb : loop.blocks) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_phi() && inst->parent_ == loop.header) continue;
+            for (const auto &u : inst->use_list_) {
+                auto *user = dynamic_cast<Instruction*>(u.val_);
+                if (user && user->parent_ && !loop.blocks.count(user->parent_))
+                    return false;
+            }
+        }
     }
 
     // 6. Find memory accesses with unit stride
@@ -1471,6 +1491,17 @@ void LoopVectorize::emitVectorizedLoop(
                     break;
                 }
             }
+        }
+    }
+
+    // origLatch 不再是 origHeader 的前驱，删除 header phi 中来自它的残留
+    // incoming（该值现在经由 remPhi 从 remHeader 流入）
+    for (auto inst : origHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst*>(inst);
+        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+            if (phi->get_operand(i + 1) == origLatch)
+                phi->remove_operands(i, i + 1);
         }
     }
 
