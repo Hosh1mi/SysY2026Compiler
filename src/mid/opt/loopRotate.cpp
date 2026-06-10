@@ -132,6 +132,12 @@ BasicBlock *LoopRotate::splitExitEdge(Function *func, BasicBlock *pred,
 bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     if (!loop || !loop->header || !loop->preheader)
         return false;
+    // 规范归纳变量循环（trip count 可由 SCEV 推导）交给下游
+    // LoopVectorize/IndVarStrengthReduce/LoopUnroll 处理：它们匹配的是
+    // 未旋转的 while 形态，旋转反而使其失配（mm 类测试明显退化）。
+    // 只旋转 SCEV 算不出 trip count 的循环。
+    if (loop->hasCanonicalIV())
+        return false;
     BasicBlock *header = loop->header;
     BasicBlock *preheader = loop->preheader;
     BasicBlock *latch = loop->singleLatch();
@@ -146,15 +152,8 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
         latchTerm->get_operand(0) != header)
         return false;
-    bool hasBackedgePhi = false;
-    for (auto *inst : latch->instr_list_) {
-        if (inst->is_phi()) {
-            hasBackedgePhi = true;
-            break;
-        }
-        if (!inst->is_phi())
-            break;
-    }
+    bool hasBackedgePhi = !header->instr_list_.empty() &&
+                          header->instr_list_.front()->is_phi();
     if (!hasBackedgePhi)
         return false;
 
@@ -197,6 +196,9 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     for (auto *inst : headerInsts)
         headerDefs.insert(inst);
 
+    bool headerIsOnlyExiting =
+        loop->exiting.size() == 1 && loop->exiting[0] == header;
+    std::set<PhiInst *> phisNeedingExitPhi;
     for (auto *phi : headerPhis) {
         for (auto &use : phi->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
@@ -205,6 +207,12 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
                 continue;
             if (loop->isInLoop(user->parent_))
                 continue;
+            // 循环外的非 phi 使用：当 header 是唯一 exiting 块时，exitSucc
+            // 支配所有循环外使用点，可用新建的 exit phi 接管
+            if (!user->is_phi() && headerIsOnlyExiting) {
+                phisNeedingExitPhi.insert(phi);
+                continue;
+            }
             return false;
         }
     }
@@ -266,6 +274,24 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
             phi->addIncoming(latchVal, latchExit);
             break;
         }
+    }
+
+    for (auto *phi : headerPhis) {
+        if (!phisNeedingExitPhi.count(phi))
+            continue;
+        auto *exitPhi = PhiInst::create_phi(phi->type_, exitSucc);
+        exitPhi->addIncoming(remapValue(phi, preMap), preExit);
+        exitPhi->addIncoming(remapValue(phi, latchMap), latchExit);
+        exitSucc->add_instruction_front(exitPhi);
+        std::vector<std::pair<Instruction *, unsigned>> redirects;
+        for (auto &use : phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || user->is_phi()) continue;
+            if (loop->isInLoop(user->parent_)) continue;
+            redirects.emplace_back(user, use.arg_no_);
+        }
+        for (auto &[user, idx] : redirects)
+            user->set_operand(idx, exitPhi);
     }
 
     for (auto *inst : continueSucc->instr_list_) {

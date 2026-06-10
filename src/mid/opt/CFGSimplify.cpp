@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <queue>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -194,29 +195,47 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
     return false;
 }
 
-// 删除不可达块（无前驱的非入口块）
+// 删除从入口不可达的块。按可达性计算而非仅看前驱是否为空：
+// 不可达的自环/环（如 SCCP 折叠分支后留下的死循环体）前驱非空，
+// 仅靠"无前驱"判断永远删不掉，其 phi 还会被后续 pass 收缩成自引用指令。
 static void removeDeadBlocks(Function *func) {
     auto *entry = getEntryBlock(func);
-    std::queue<BasicBlock *> worklist;
-    for (auto *bb : func->basic_blocks_) {
-        if (bb != entry && bb->pre_bbs_.empty()) {
-            worklist.push(bb);
-        }
-    }
+    if (!entry) return;
 
+    // 可达性沿 terminator 的基本块操作数传播，不走 succ_bbs_：
+    // 个别 pass 改写分支目标时遗漏维护 succ/pre 链表，terminator 才是事实。
+    std::set<BasicBlock *> reachable;
+    std::queue<BasicBlock *> worklist;
+    reachable.insert(entry);
+    worklist.push(entry);
     while (!worklist.empty()) {
         auto *bb = worklist.front();
         worklist.pop();
-
-        // 修改后继块的前驱列表，并检查后继是否变成不可达
-        auto succs = bb->succ_bbs_; // 拷贝
-        for (auto *succ : succs) {
-            // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
-            removeBBFromPhi(bb, succ);
-
-            succ->remove_pre_basic_block(bb);
-            if (succ != entry && succ->pre_bbs_.empty()) {
+        auto *term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+            if (succ && reachable.insert(succ).second)
                 worklist.push(succ);
+        }
+    }
+
+    std::vector<BasicBlock *> dead;
+    for (auto *bb : func->basic_blocks_) {
+        if (!reachable.count(bb))
+            dead.push_back(bb);
+    }
+
+    for (auto *bb : dead) {
+        // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
+        auto *term = bb->get_terminator();
+        if (term) {
+            for (unsigned i = 0; i < term->num_ops_; ++i) {
+                auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+                if (succ && reachable.count(succ)) {
+                    removeBBFromPhi(bb, succ);
+                    succ->remove_pre_basic_block(bb);
+                }
             }
         }
 
@@ -225,6 +244,24 @@ static void removeDeadBlocks(Function *func) {
         for (auto *instr : instrs) {
             bb->delete_instr(instr);
         }
+    }
+
+    // 清掉存活块中残留的指向死块的链接，再统一移除死块。
+    // 死块自身的链表先清空，避免 remove_bb 解引用其中可能已失效的指针。
+    std::set<BasicBlock *> deadSet(dead.begin(), dead.end());
+    for (auto *bb : func->basic_blocks_) {
+        if (deadSet.count(bb)) continue;
+        auto isDead = [&](BasicBlock *b) { return deadSet.count(b) > 0; };
+        bb->pre_bbs_.erase(
+            std::remove_if(bb->pre_bbs_.begin(), bb->pre_bbs_.end(), isDead),
+            bb->pre_bbs_.end());
+        bb->succ_bbs_.erase(
+            std::remove_if(bb->succ_bbs_.begin(), bb->succ_bbs_.end(), isDead),
+            bb->succ_bbs_.end());
+    }
+    for (auto *bb : dead) {
+        bb->pre_bbs_.clear();
+        bb->succ_bbs_.clear();
         bb->parent_->remove_bb(bb);
     }
 }

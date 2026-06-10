@@ -1489,6 +1489,8 @@ void LoopVectorize::emitVectorizedLoop(
                 term->use_pos_[i]  = afterLoop->add_use(term, i);
                 succ->remove_pre_basic_block(bb);
                 afterLoop->add_pre_basic_block(bb);
+                bb->remove_succ_basic_block(origExit);
+                bb->add_succ_basic_block(afterLoop);
             }
         }
     }

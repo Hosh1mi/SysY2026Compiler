@@ -1,5 +1,6 @@
 #include "../../include/mid/opt/sccp.hpp"
 #include "../../include/mid/ir/instruction.hpp"
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <queue>
@@ -16,6 +17,73 @@ static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
             if (phi->get_operand(i) == deadBlock)
                 phi->remove_operands(i - 1, i);
         }
+    }
+}
+
+// 折叠分支后，被切断的子图（含自环/环）从入口不可达。必须立即删除：
+// 留下的不可达循环体的 phi 会被后续 pass 收缩成自引用指令，
+// 使 InstCombine 等基于"def 链有限"假设的改写无法终止。
+static void removeUnreachableBlocks(Function *func) {
+    if (func->basic_blocks_.empty()) return;
+    auto *entry = func->basic_blocks_.front();
+
+    // 可达性沿 terminator 的基本块操作数传播，不走 succ_bbs_：
+    // 个别 pass 改写分支目标时遗漏维护 succ/pre 链表，terminator 才是事实。
+    std::set<BasicBlock *> reachable;
+    std::queue<BasicBlock *> worklist;
+    reachable.insert(entry);
+    worklist.push(entry);
+    while (!worklist.empty()) {
+        auto *bb = worklist.front();
+        worklist.pop();
+        auto *term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+            if (succ && reachable.insert(succ).second)
+                worklist.push(succ);
+        }
+    }
+
+    std::vector<BasicBlock *> dead;
+    for (auto *bb : func->basic_blocks_) {
+        if (!reachable.count(bb))
+            dead.push_back(bb);
+    }
+
+    for (auto *bb : dead) {
+        auto *term = bb->get_terminator();
+        if (term) {
+            for (unsigned i = 0; i < term->num_ops_; ++i) {
+                auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+                if (succ && reachable.count(succ)) {
+                    removeBBFromPhi(bb, succ);
+                    succ->remove_pre_basic_block(bb);
+                }
+            }
+        }
+        std::vector<Instruction *> instrs(bb->instr_list_.begin(), bb->instr_list_.end());
+        for (auto *instr : instrs)
+            bb->delete_instr(instr);
+    }
+
+    // 清掉存活块中残留的指向死块的链接，再统一移除死块。
+    // 死块自身的链表先清空，避免 remove_bb 解引用其中可能已失效的指针。
+    std::set<BasicBlock *> deadSet(dead.begin(), dead.end());
+    for (auto *bb : func->basic_blocks_) {
+        if (deadSet.count(bb)) continue;
+        auto isDead = [&](BasicBlock *b) { return deadSet.count(b) > 0; };
+        bb->pre_bbs_.erase(
+            std::remove_if(bb->pre_bbs_.begin(), bb->pre_bbs_.end(), isDead),
+            bb->pre_bbs_.end());
+        bb->succ_bbs_.erase(
+            std::remove_if(bb->succ_bbs_.begin(), bb->succ_bbs_.end(), isDead),
+            bb->succ_bbs_.end());
+    }
+    for (auto *bb : dead) {
+        bb->pre_bbs_.clear();
+        bb->succ_bbs_.clear();
+        func->remove_bb(bb);
     }
 }
 
@@ -266,6 +334,9 @@ bool SCCP::runOnFunction(Function *func) {
         changed2 = true;
         brFolded++;
     }
+
+    if (brFolded > 0)
+        removeUnreachableBlocks(func);
 
 
 #ifdef SCCP_DEBUG

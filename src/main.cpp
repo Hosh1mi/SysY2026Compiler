@@ -207,12 +207,12 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     // Higher opt levels run a second full round to expose cleanup and loop
     // opportunities created by inlining and canonicalization.
     if (optLevel >= 2) {
-        addSsaPreparation(pm);
-        addScalarNormalization(pm);
-        addInterproceduralAndGlobals(pm);
-        addLoopPipeline(pm);
-        addCanonicalCleanup(pm);
-        addCfgCleanup(pm);
+        // addSsaPreparation(pm);
+        // addScalarNormalization(pm);
+        // addInterproceduralAndGlobals(pm);
+        // addLoopPipeline(pm);
+        // addCanonicalCleanup(pm);
+        // addCfgCleanup(pm);
     }
 }
 
