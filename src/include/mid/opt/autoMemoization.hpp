@@ -9,7 +9,12 @@ class Argument;
 
 // 通用记忆化：将 (纯 + 自递归 + i32 参数) 模式的函数自动加上结果缓存。
 // 入口处按参数查表，命中即返回；出口处将结果写回。
-// 表大小由 IR 中数组维度静态推导，无法推导时使用保守默认值。
+//
+// 两条变换路径：
+//   ① 数组路径（transform）：bound 可推导且乘积 ≤ ARRAY_PRODUCT_LIMIT 时
+//      使用多维全局数组，单次查表 = 1 次内存访问，最快。
+//   ② 哈希路径（transformHash）：bound 推不出或过大时使用固定大小直接映射
+//      哈希表，槽内存 key 做碰撞比较，永不破坏正确性。
 class AutoMemoization : public Pass {
 public:
     void execute(Module *module) override;
@@ -28,12 +33,30 @@ public:
 private:
     static constexpr unsigned MAX_ARGS = 2;
     static constexpr unsigned MIN_SELF_CALLS = 2;
-    static constexpr unsigned DEFAULT_BOUND = 1024;
     static constexpr unsigned BOUND_MARGIN = 5;
     static constexpr unsigned MAX_BOUND = 16384;
+    // 单参数推不出 bound 时的本地兜底（如 knapsack 的 w：不作为 GEP 下标，
+    // 但实际取值通常很小）。最终是否走数组路径，仍由总乘积 ≤ ARRAY_PRODUCT_LIMIT
+    // 决定；本兜底不会让 BSS 失控。
+    static constexpr unsigned DEFAULT_BOUND = 1024;
+
+    // ── 哈希兜底参数（推不出 bound 或 bound 乘积过大时启用）──
+    // 64K 槽 × {valid + keys + val}：单函数最多约 1 MB BSS。
+    // 槽数按 A53 L2（1 MB 共享，有效约 512 KB）选取，热点子集可驻 L2；
+    // 碰撞只导致"少缓存一次"，不会破坏正确性（槽内存 key 用于比较）。
+    static constexpr unsigned HASH_BITS = 16;
+    static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
+    static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
+
+    // 数组路径乘积上限：超过则改走哈希。
+    // 1.5M 元素 × i32 × 2 张表（flag+val）= 12 MB BSS 上限。
+    // 选取理由：knapsack 现行 product ≈ 0.98M，留余量但不浪费 BSS。
+    static constexpr unsigned ARRAY_PRODUCT_LIMIT = 1500000;
 
     bool isCandidate(Function *f, BasicAliasAnalysis &baa,
                      unsigned &selfCallCount, unsigned &externalCallCount);
+    bool functionReadsMemory(Function *f);
     unsigned deriveArgBound(Function *f, Argument *arg);
     void transform(Function *f, const std::vector<unsigned> &bounds);
+    void transformHash(Function *f);
 };

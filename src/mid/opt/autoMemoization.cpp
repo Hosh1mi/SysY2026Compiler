@@ -51,35 +51,49 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
     BasicAliasAnalysis &baa = AM.getBasicAA(module);
 
     // 先收集候选，再统一变换；避免在遍历 function_list_ 时插入全局变量影响遍历
-    std::vector<Function *> candidates;
-    std::vector<std::vector<unsigned>> boundsList;
+    std::vector<Function *> arrayFuncs;
+    std::vector<std::vector<unsigned>> arrayBoundsList;
+    std::vector<Function *> hashFuncs;
 
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
         unsigned selfCalls = 0, externalCalls = 0;
         if (!isCandidate(func, baa, selfCalls, externalCalls)) continue;
         if (selfCalls < MIN_SELF_CALLS) continue;
-        if (externalCalls != 1) continue;  // 单调用点：杜绝跨调用缓存失效
 
+        // 推导每个形参的 bound；推不出时用 DEFAULT_BOUND 兜底（仅作为单参数
+        // 本地默认，不会让 BSS 失控——最终是否走数组仍由总乘积阈值决定）
         std::vector<unsigned> bounds;
         bounds.reserve(func->arguments_.size());
+        uint64_t product = 1;
         for (auto arg : func->arguments_) {
             unsigned b = deriveArgBound(func, arg);
             if (b == 0) b = DEFAULT_BOUND;
             else b = std::min<unsigned>(b + BOUND_MARGIN, MAX_BOUND);
+            product *= b;
             bounds.push_back(b);
         }
-        candidates.push_back(func);
-        boundsList.push_back(std::move(bounds));
+
+        // 数组路径：总元素数 ≤ ARRAY_PRODUCT_LIMIT，BSS 严格可控
+        // 否则切换到固定大小哈希，避免静态数组爆炸
+        if (product <= ARRAY_PRODUCT_LIMIT) {
+            arrayFuncs.push_back(func);
+            arrayBoundsList.push_back(std::move(bounds));
+        } else {
+            hashFuncs.push_back(func);
+        }
     }
 
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        transform(candidates[i], boundsList[i]);
+    for (size_t i = 0; i < arrayFuncs.size(); ++i) {
+        transform(arrayFuncs[i], arrayBoundsList[i]);
+    }
+    for (auto func : hashFuncs) {
+        transformHash(func);
     }
 
     // 没有命中任何候选时，IR 完全未变；保留分析结果避免下游 pass 重算导致
     // 决策变动（实测会影响 huffman 之类用例的 codegen 质量）
-    if (candidates.empty()) return PreservedAnalyses::all();
+    if (arrayFuncs.empty() && hashFuncs.empty()) return PreservedAnalyses::all();
     return PreservedAnalyses::none();
 }
 
@@ -90,7 +104,14 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
 //   2. 1 ~ MAX_ARGS 个 i32 形参
 //   3. 无 store（自身无副作用），且所有非自调用 callee 都是 pure
 //   4. 至少 MIN_SELF_CALLS 个自调用（保证记忆化收益）
-//   5. 唯一非递归调用点（杜绝跨调用语义不变性问题）
+//   5. 调用点要求：
+//      - 函数体含 load（依赖全局/堆内存）：externalCallCount 必须 == 1
+//        理由：调用之间外部代码可能修改函数读取的全局，多调用点缓存会
+//        返回旧值。举例：int g; int f(int n){return n+g;}
+//                      g=10; f(5);  // 缓存 f(5)=15
+//                      g=20; f(5);  // 期望 25，但命中缓存返回 15 → WA
+//      - 函数体无 load（真 readnone）：externalCallCount >= 1 即可
+//        理由：返回值仅依赖形参，跨调用点缓存语义安全。
 
 bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
                                    unsigned &selfCallCount,
@@ -126,7 +147,27 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
         if (user->parent_ && user->parent_->parent_ != f) externalCallCount++;
     }
 
+    if (externalCallCount == 0) return false;
+
+    // 读全局的函数：限制单调用点；纯输入函数：允许多调用点
+    bool readsMem = functionReadsMemory(f);
+    if (readsMem && externalCallCount != 1) return false;
+
     return true;
+}
+
+// 函数是否含任何 LoadInst。
+//
+// 经过 mem2reg 后，标量 alloca 已被提升为 SSA；剩余 load 几乎都是从全局
+// 数组（GEP from GlobalVariable）读取。由于候选函数只允许 i32 形参（无指
+// 针参数），函数内的 load 不会通过形参间接读到调用方传入的内存。
+//
+// 因此 "any load present" 是 "函数返回值依赖全局内存状态" 的稳健保守近似。
+bool AutoMemoization::functionReadsMemory(Function *f) {
+    for (auto bb : f->basic_blocks_)
+        for (auto inst : bb->instr_list_)
+            if (inst->is_load()) return true;
+    return false;
 }
 
 // ── 参数上界推导 ─────────────────────────────────────────────────────────
@@ -319,6 +360,152 @@ void AutoMemoization::transform(Function *f,
 
         // finalRetBB: retVal 由 retBB 支配，可直接复用
         builder->set_insert_point(finalRetBB);
+        builder->create_ret(retVal);
+    }
+
+    f->set_instr_name();
+    f->invalidateDominatorInfo();
+    delete builder;
+}
+
+// ── 变换（哈希路径）：固定大小直接映射哈希缓存 ────────────────────────────
+//
+// 适用于"bound 推不出"或"bound 乘积过大"的场景，避免静态数组方案的 BSS
+// 爆炸 / 兜底 DEFAULT_BOUND 半推半就的问题。
+//
+// 槽布局（flat [HASH_SLOTS * slotFields x i32]）：
+//   slot k 起始偏移 = k * slotFields
+//   [base + 0]:           valid (0 = 空)
+//   [base + 1 ... +nArgs]: key0, key1, ... （用于碰撞检测）
+//   [base + 1 + nArgs]:    val
+//
+// 哈希式：
+//   1 arg : idx = (arg0 * P1) & MASK
+//   2 args: idx = (arg0 * P1) ^ (arg1 * P2) & MASK
+//   P1=0x45D9F3B, P2=0x119DE1F3 为正向 i32 素数，避免 C++ 端 UB
+//
+// CFG 结构（TRE 之后）：
+//   newEntry → checkKey → hit → ret cached
+//             ↓          ↓
+//           oldEntry ← (valid==0 或任一 key 不匹配)
+//                  ... → retBB → store{keys, val, valid=1} → ret retVal
+
+void AutoMemoization::transformHash(Function *f) {
+    Module *m = f->parent_;
+    auto i32 = m->int32_ty_;
+    unsigned nArgs = f->arguments_.size();
+    unsigned slotFields = 1 + nArgs + 1;           // valid + keys + val
+    unsigned totalI32 = HASH_SLOTS * slotFields;
+
+    // 哈希乘子：正向 i32 素数；IR 层 Mul 的溢出是 well-defined 模 2^32 行为
+    static constexpr int P1 = 0x45D9F3B;
+    static constexpr int P2 = 0x119DE1F3;
+
+    Type *arrTy = m->get_array_type(i32, totalI32);
+    auto *hashGV = new GlobalVariable("__memo_hash_" + f->name_, m, arrTy,
+                                       false, new ConstantZero(arrTy));
+
+    BasicBlock *oldEntry = f->basic_blocks_.front();
+    if (oldEntry->name_ == "label_entry") oldEntry->name_ = "label_entry_uncached";
+
+    auto *newEntry  = new BasicBlock(m, "label_entry", f);
+    auto *checkKey  = new BasicBlock(m, "memo_check_key", f);
+    auto *hitBB     = new BasicBlock(m, "memo_hit", f);
+
+    auto &bbs = f->basic_blocks_;
+    auto pull = [&](BasicBlock *bb) {
+        bbs.erase(std::remove(bbs.begin(), bbs.end(), bb), bbs.end());
+    };
+    pull(newEntry); pull(checkKey); pull(hitBB);
+    bbs.insert(bbs.begin(), {newEntry, checkKey, hitBB});
+
+    auto *builder = new IRStmtBuilder(newEntry, m);
+
+    // 计算 idx 与 base：可在多个 BB 重用，封装成 lambda
+    auto computeBase = [&](BasicBlock *bb) -> Value * {
+        Value *hashVal = nullptr;
+        for (unsigned i = 0; i < nArgs; ++i) {
+            int p = (i == 0) ? P1 : P2;
+            auto *mul = new BinaryInst(i32, Instruction::Mul,
+                                       f->arguments_[i],
+                                       new ConstantInt(i32, p), bb);
+            if (!hashVal) hashVal = mul;
+            else hashVal = new BinaryInst(i32, Instruction::Xor, hashVal, mul, bb);
+        }
+        auto *idx = new BinaryInst(i32, Instruction::And, hashVal,
+                                    new ConstantInt(i32, static_cast<int>(HASH_MASK)), bb);
+        // slot base = idx * slotFields
+        return new BinaryInst(i32, Instruction::Mul, idx,
+                              new ConstantInt(i32, static_cast<int>(slotFields)), bb);
+    };
+
+    auto gepSlot = [&](Value *base, unsigned fieldIdx, BasicBlock *bb) -> Value * {
+        Value *off = base;
+        if (fieldIdx != 0) {
+            off = new BinaryInst(i32, Instruction::Add, base,
+                                  new ConstantInt(i32, static_cast<int>(fieldIdx)), bb);
+        }
+        std::vector<Value *> idxs = { new ConstantInt(i32, 0), off };
+        return new GetElementPtrInst(hashGV, idxs, bb);
+    };
+
+    // ── newEntry: 计算 base，load valid，分流 ──
+    Value *base = computeBase(newEntry);
+    Value *vPtr = gepSlot(base, 0, newEntry);
+    builder->set_insert_point(newEntry);
+    auto validVal = builder->create_load(vPtr);
+    auto isValid = builder->create_icmp_ne(validVal, new ConstantInt(i32, 0));
+    builder->create_cond_br(isValid, checkKey, oldEntry);
+
+    // ── checkKey: 比较每个 key，全相等才命中 ──
+    Value *baseCK = computeBase(checkKey);
+    Value *allEq = nullptr;
+    for (unsigned i = 0; i < nArgs; ++i) {
+        Value *kPtr = gepSlot(baseCK, 1 + i, checkKey);
+        auto *load = new LoadInst(kPtr, checkKey);
+        auto *eq = new ICmpInst(ICmpInst::ICMP_EQ, load, f->arguments_[i], checkKey);
+        if (!allEq) allEq = eq;
+        else allEq = new BinaryInst(m->int1_ty_, Instruction::And, allEq, eq, checkKey);
+    }
+    builder->set_insert_point(checkKey);
+    builder->create_cond_br(allEq, hitBB, oldEntry);
+
+    // ── hitBB: load val 返回 ──
+    Value *baseHit = computeBase(hitBB);
+    Value *valPtrHit = gepSlot(baseHit, 1 + nArgs, hitBB);
+    builder->set_insert_point(hitBB);
+    auto cached = builder->create_load(valPtrHit);
+    builder->create_ret(cached);
+
+    // ── 改写所有返回点：store keys + val + valid=1，再 ret ──
+    std::vector<std::pair<BasicBlock *, ReturnInst *>> retSites;
+    for (auto bb : f->basic_blocks_) {
+        if (bb == newEntry || bb == checkKey || bb == hitBB) continue;
+        auto term = bb->get_terminator();
+        if (term && term->is_ret() && term->num_ops_ > 0)
+            retSites.push_back({bb, static_cast<ReturnInst *>(term)});
+    }
+
+    for (auto &site : retSites) {
+        BasicBlock *retBB = site.first;
+        ReturnInst *retInst = site.second;
+        Value *retVal = retInst->get_operand(0);
+
+        retBB->delete_instr(retInst);
+
+        Value *baseRet = computeBase(retBB);
+
+        builder->set_insert_point(retBB);
+        // 先写 keys 和 val，最后才置 valid（后置写顺序仅风格选择，单线程无影响）
+        for (unsigned i = 0; i < nArgs; ++i) {
+            Value *kPtr = gepSlot(baseRet, 1 + i, retBB);
+            builder->create_store(f->arguments_[i], kPtr);
+        }
+        Value *vPtrRet = gepSlot(baseRet, 1 + nArgs, retBB);
+        builder->create_store(retVal, vPtrRet);
+        Value *validPtrRet = gepSlot(baseRet, 0, retBB);
+        builder->create_store(new ConstantInt(i32, 1), validPtrRet);
+
         builder->create_ret(retVal);
     }
 
