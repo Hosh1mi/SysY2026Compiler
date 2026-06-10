@@ -1,6 +1,7 @@
 #include "../../include/backend/arm64/peephole.hpp"
 #include <cctype>
 #include <cstdlib>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1008,6 +1009,155 @@ static bool nextVisibleIsLabel(const MachineFunction &func,
 	return false;
 }
 
+// 分支指令的跳转目标操作数下标（目标总是最后一个操作数）；非分支返回 -1。
+// 注意 "bl" 是调用不是分支。
+static int branchTargetOperandIndex(const ParsedLine &line) {
+	const std::string &m = line.mnemonic;
+	if (m == "b" && line.operands.size() == 1) return 0;
+	if (m.size() > 2 && m.compare(0, 2, "b.") == 0 && line.operands.size() == 1)
+		return 0;
+	if ((m == "cbz" || m == "cbnz") && line.operands.size() == 2) return 1;
+	if ((m == "tbz" || m == "tbnz") && line.operands.size() == 3) return 2;
+	return -1;
+}
+
+// 找到函数内名为 target 的 label 后第一条会被执行的指令
+// （跳过空行/注释/连续 label——顺序执行会穿过它们）；找不到或遇到
+// directive 等不可分析内容返回 false。
+static bool findFirstInstrAfterLabel(const MachineFunction &func,
+                                     const std::string &target,
+                                     size_t &outBlock, size_t &outInstr) {
+	bool seen = false;
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		const auto &instrs = func.blocks[b].instrs;
+		for (size_t i = 0; i < instrs.size(); ++i) {
+			ParsedLine line = parseLine(instrs[i].text);
+			if (!seen) {
+				if (line.kind == LineKind::Label && labelName(instrs[i]) == target)
+					seen = true;
+				continue;
+			}
+			if (line.kind == LineKind::Empty || line.kind == LineKind::Comment ||
+			    line.kind == LineKind::Label)
+				continue;
+			if (line.kind != LineKind::Instruction)
+				return false;
+			outBlock = b;
+			outInstr = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+// 沿 forwarder 链（label 处第一条指令是无条件 b）解析出最终跳转目标；
+// 遇环返回空串。
+static std::string resolveForwardTarget(const MachineFunction &func,
+                                        std::string target) {
+	std::set<std::string> visited;
+	while (visited.insert(target).second) {
+		size_t b = 0, i = 0;
+		if (!findFirstInstrAfterLabel(func, target, b, i))
+			return target;
+		ParsedLine line = parseLine(func.blocks[b].instrs[i].text);
+		if (line.mnemonic != "b" || line.operands.size() != 1)
+			return target;
+		target = line.operands[0];
+	}
+	return "";
+}
+
+// 跳转链折叠：分支目标若是只含一条无条件 b 的 forwarder 块，直接改跳最终目标。
+//   b.eq .Ledge_1        →  b.eq real_target
+//   .Ledge_1: b real_target
+static bool tryMachineBranchThreading(MachineFunction &func,
+                                      size_t blockIdx,
+                                      size_t instrIdx) {
+	auto &inst = func.blocks[blockIdx].instrs[instrIdx];
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction) return false;
+	int ti = branchTargetOperandIndex(line);
+	if (ti < 0) return false;
+	const std::string target = line.operands[ti];
+	std::string finalTarget = resolveForwardTarget(func, target);
+	if (finalTarget.empty() || finalTarget == target) return false;
+
+	size_t pos = inst.text.rfind(target);
+	if (pos == std::string::npos) return false;
+	inst.text = inst.text.substr(0, pos) + finalTarget +
+	            inst.text.substr(pos + target.size());
+	return true;
+}
+
+// 清理跳转链折叠后遗留的不可达 forwarder 残块：
+// label 是函数内部标签、未被函数内任何操作数引用、前一条可见指令是
+// 无条件 b/ret（无 fallthrough 进入）、其后紧跟一条无条件 b 时，
+// 删除该 label 与这条 b。
+static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
+                                          size_t blockIdx,
+                                          size_t instrIdx) {
+	auto &block = func.blocks[blockIdx];
+	ParsedLine labelLine = parseLine(block.instrs[instrIdx].text);
+	if (labelLine.kind != LineKind::Label) return false;
+	std::string label = labelName(block.instrs[instrIdx]);
+	if (label.empty() || label == func.name) return false;
+	// 仅处理本函数生成的内部标签，避免触碰任何可能被外部引用的符号
+	if (label.compare(0, 2, ".L") != 0 &&
+	    (label.size() <= func.name.size() + 1 ||
+	     label.compare(0, func.name.size() + 1, func.name + "_") != 0))
+		return false;
+
+	// 函数内任何指令的任何操作数都不得引用该 label
+	for (const auto &bb : func.blocks) {
+		for (const auto &other : bb.instrs) {
+			ParsedLine l = parseLine(other.text);
+			if (l.kind != LineKind::Instruction) continue;
+			for (const auto &op : l.operands)
+				if (op == label) return false;
+		}
+	}
+
+	// 前一条可见指令必须是无条件 b 或 ret（否则存在 fallthrough 进入）
+	{
+		bool ok = false;
+		for (size_t b = blockIdx + 1; b-- > 0;) {
+			const auto &instrs = func.blocks[b].instrs;
+			size_t start = (b == blockIdx) ? instrIdx : instrs.size();
+			for (size_t i = start; i-- > 0;) {
+				ParsedLine l = parseLine(instrs[i].text);
+				if (l.kind == LineKind::Empty || l.kind == LineKind::Comment)
+					continue;
+				if (l.kind == LineKind::Instruction &&
+				    ((l.mnemonic == "b" && l.operands.size() == 1) ||
+				     l.mnemonic == "ret"))
+					ok = true;
+				goto prevChecked;
+			}
+		}
+	prevChecked:
+		if (!ok) return false;
+	}
+
+	// 其后第一条可见行必须就是无条件 b（中间不允许有其他 label）
+	size_t bIdx = blockIdx, iIdx = instrIdx + 1;
+	for (; bIdx < func.blocks.size(); ++bIdx, iIdx = 0) {
+		auto &instrs = func.blocks[bIdx].instrs;
+		for (; iIdx < instrs.size(); ++iIdx) {
+			ParsedLine l = parseLine(instrs[iIdx].text);
+			if (l.kind == LineKind::Empty || l.kind == LineKind::Comment)
+				continue;
+			if (l.kind == LineKind::Instruction && l.mnemonic == "b" &&
+			    l.operands.size() == 1) {
+				func.blocks[bIdx].instrs.erase(func.blocks[bIdx].instrs.begin() + iIdx);
+				block.instrs.erase(block.instrs.begin() + instrIdx);
+				return true;
+			}
+			return false;
+		}
+	}
+	return false;
+}
+
 static bool tryMachineFallthroughBranch(MachineFunction &func,
                                         size_t blockIdx,
                                         size_t instrIdx) {
@@ -1085,6 +1235,14 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineFallthroughBranch(func, b, i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineBranchThreading(func, b, i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineRemoveDeadForwarder(func, b, i)) {
 					changed = true;
 					break;
 				}

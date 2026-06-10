@@ -220,10 +220,27 @@ void Arm64FuncContext::reorderBlocks() {
             if (next) {
                 current = next;
             } else {
-                // Fall back: pick the first unplaced block in original order
+                // Fall back: 优先选"链头"——不是任何未放置块的 preferred 目标
+                // 的块。否则会先放下合流块本身，使它前驱的无条件跳转永远无法
+                // 变成 fallthrough（如循环体小块 → backedge 合流块）。
+                BasicBlock *head = nullptr;
                 for (auto bb : func_->basic_blocks_) {
-                    if (!placed.count(bb)) { current = bb; break; }
+                    if (placed.count(bb)) continue;
+                    bool isPreferredTarget = false;
+                    for (auto &kv : preferred) {
+                        if (kv.second == bb && !placed.count(kv.first)) {
+                            isPreferredTarget = true;
+                            break;
+                        }
+                    }
+                    if (!isPreferredTarget) { head = bb; break; }
                 }
+                if (!head) {
+                    for (auto bb : func_->basic_blocks_) {
+                        if (!placed.count(bb)) { head = bb; break; }
+                    }
+                }
+                current = head;
             }
         }
         order.push_back(current);
