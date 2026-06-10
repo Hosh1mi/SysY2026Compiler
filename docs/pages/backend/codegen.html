@@ -231,6 +231,10 @@ if (dump_machine_instr_) {
 results[idx] = printMachineFunction(machineFunc);</code></pre>
 
     <h2>Arm64FuncContext 生成流程</h2>
+    <p>进入逐函数生成前，<code>Arm64CodeGen::generate()</code> 先调用
+    <code>rebuildCfgLinks()</code> 按 terminator 重建所有块的 <code>pre_bbs_/succ_bbs_</code>
+    链表——中端个别 pass 改写分支目标时会遗漏维护这两个链表，而后端的活跃性分析依赖它们，
+    陈旧/缺失的边会导致错误的寄存器分配。</p>
     <p><code>Arm64FuncContext::generate()</code> 是函数级代码生成的核心：</p>
     <ol>
       <li><strong>寄存器分配</strong> — 若启用，运行 <code>Arm64RegAlloc</code> 图着色分配器</li>
@@ -251,6 +255,10 @@ results[idx] = printMachineFunction(machineFunc);</code></pre>
 //    sub sp, sp, #localSize        // 分配栈空间
 // 4. 保存 callee-saved 寄存器（stp 成对保存）
 // 5. 加载函数参数到寄存器/栈槽</code></pre>
+    <p><strong>参数加载是一组并行拷贝</strong>：某个参数分配到的目标寄存器可能正是后续参数
+    的入参寄存器（如 arg2 分配到 w3，而 arg3 经 w3 传入）。实现上先把所有需要落栈的参数
+    spill（此时入参寄存器还保有原值），再按"目标不挡未读源"的顺序发射 mov；出现拷贝环
+    时从栈槽重载打破。逐参数立即发射 mov 会提前覆盖未读取的入参，是隐蔽的错误来源。</p>
 
     <h3>Epilogue（emitEpilogue）</h3>
     <pre><code class="language-cpp">// 1. 恢复 callee-saved 寄存器（ldp 成对恢复）
@@ -317,7 +325,9 @@ for (size_t i = 0; i &lt; funcs.size(); ++i)
       <li>从入口块开始</li>
       <li>优先放置条件分支的 fallthrough 目标（无 PHI 拷贝的一侧）</li>
       <li>回溯到任意未放置的后继块</li>
-      <li>最终 fallback 到原始顺序中第一个未放置块</li>
+      <li>最终 fallback 优先选<strong>链头</strong>——不是任何未放置块的 preferred 目标
+        的块。否则会先放下合流块本身，使它前驱的无条件跳转永远无法变成 fallthrough
+        （典型如循环体小块 → backedge 合流块）；无链头时取原始顺序第一个未放置块</li>
     </ol>
 
     <h2>源码位置</h2>

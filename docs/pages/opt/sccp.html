@@ -306,7 +306,7 @@ for (unsigned i = 0; i &lt; phi-&gt;num_ops_; i += 2) {
 
     <!-- ─── 应用阶段 ─── -->
     <h2>应用阶段</h2>
-    <p>不动点收敛后，分两步将分析结果写回 IR：</p>
+    <p>不动点收敛后，分三步将分析结果写回 IR：</p>
 
     <h3>1. 替换常量指令</h3>
     <p>遍历格表，将格值为 CONSTANT 的非 phi、非终止指令替换为 <code>ConstantInt</code>，并删除原指令：</p>
@@ -335,6 +335,15 @@ trueDest-&gt;remove_pre_basic_block(bb);
 falseDest-&gt;remove_pre_basic_block(bb);
 bb-&gt;delete_instr(br);
 new BranchInst(taken, bb);</code></pre>
+
+    <h3>3. 删除不可达块（removeUnreachableBlocks）</h3>
+    <p>折叠分支后，被切断的子图（包括<strong>不可达的自环/环</strong>，仅看前驱是否为空
+    发现不了它们）从入口不可达，必须立即删除。否则残留的不可达循环体的 phi 会被后续
+    pass 收缩成自引用指令（如 <code>%v = sub %v, 5</code>），使 InstCombine 等基于
+    "def 链有限"假设的改写无法终止（实测表现为 OOM）。</p>
+    <p>可达性沿 <strong>terminator 的基本块操作数</strong>传播而非 <code>succ_bbs_</code>
+    链表——个别 pass 改写分支目标时会遗漏维护 pred/succ 链表，terminator 才是事实来源。
+    删除时先清理存活块中指向死块的链接与 phi 入边，再统一 <code>remove_bb</code>。</p>
 
     <!-- ─── 示例 ─── -->
     <h2>示例</h2>

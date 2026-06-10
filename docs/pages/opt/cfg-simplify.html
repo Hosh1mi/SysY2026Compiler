@@ -202,7 +202,7 @@
         <tr><td><a href="#diamond-to-select">Diamond → Select</a></td><td>将 if-else 菱形结构折叠为 select 指令</td><td>条件分支的两个目标汇合到同一块，且 phi 可替换</td></tr>
         <tr><td><a href="#fold-constant-branch">常量分支折叠</a></td><td>将条件为常量的 br 变为无条件跳转</td><td>br 的条件操作数是 ConstantInt</td></tr>
         <tr><td><a href="#merge-empty-block">空块合并</a></td><td>消除仅含无条件跳转的中间基本块</td><td>块内只有一条无条件 br 指令</td></tr>
-        <tr><td><a href="#remove-dead-blocks">不可达块删除</a></td><td>删除无前驱的非入口块</td><td>非入口块且 pre_bbs_ 为空</td></tr>
+        <tr><td><a href="#remove-dead-blocks">不可达块删除</a></td><td>删除从入口不可达的块（含不可达环）</td><td>入口 BFS（沿 terminator）不可达</td></tr>
       </tbody>
     </table>
 
@@ -434,30 +434,21 @@ done:
 
     <!-- ─── 不可达块删除 ─── -->
     <h2 id="remove-dead-blocks">4. 不可达块删除</h2>
-    <p>删除所有从入口块不可达的基本块。使用工作表算法级联传播：删除一个块后，如果其后继块失去最后一个前驱，也变为不可达。</p>
+    <p>删除所有从入口块不可达的基本块。按<strong>可达性</strong>计算而非仅看前驱是否为空：
+    不可达的自环/环（如 SCCP 折叠分支后留下的死循环体）前驱非空，仅靠"无前驱"级联永远
+    删不掉，其 phi 还会被后续 pass 收缩成自引用指令，导致 InstCombine 等无法终止。</p>
 
     <h3>算法</h3>
-    <div class="code-label">removeDeadBlocks — 工作表级联删除</div>
+    <div class="code-label">removeDeadBlocks — 基于可达性的删除</div>
 <pre><code class="language-cpp">static void removeDeadBlocks(Function *func) {
-    auto *entry = getEntryBlock(func);
-    std::queue&lt;BasicBlock *&gt; worklist;
-    // 初始：收集所有无前驱的非入口块
-    for (auto *bb : func-&gt;basic_blocks_)
-        if (bb != entry &amp;&amp; bb-&gt;pre_bbs_.empty())
-            worklist.push(bb);
-    while (!worklist.empty()) {
-        auto *bb = worklist.front(); worklist.pop();
-        auto succs = bb-&gt;succ_bbs_;
-        for (auto *succ : succs) {
-            removeBBFromPhi(bb, succ);         // 清除 phi 入边
-            succ-&gt;remove_pre_basic_block(bb);  // 移除前驱
-            if (succ != entry &amp;&amp; succ-&gt;pre_bbs_.empty())
-                worklist.push(succ);           // 级联：后继也变为不可达
-        }
-        // 删除块及其指令
-        for (auto *inst : bb-&gt;instr_list_) bb-&gt;delete_instr(inst);
-        bb-&gt;parent_-&gt;remove_bb(bb);
-    }
+    // 1. 从入口 BFS 求可达集。沿 terminator 的基本块操作数传播，
+    //    不走 succ_bbs_：个别 pass 改写分支目标时遗漏维护链表，
+    //    terminator 才是事实来源。
+    // 2. 收集不可达块；对每个死块，按其 terminator 找到仍可达的
+    //    后继，清除 phi 入边并解除前驱链接。
+    // 3. 清掉存活块中残留的指向死块的 pre/succ 链接；死块自身的
+    //    链表先清空（避免 remove_bb 解引用其中可能已失效的指针），
+    //    再统一 remove_bb。
 }</code></pre>
 
     <h3>示例</h3>

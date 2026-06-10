@@ -57,7 +57,7 @@
     <div class="page-header">
       <div class="breadcrumb">wiki / 后端 / 汇编生成</div>
       <h1>寄存器分配</h1>
-      <p>基于 Chaitin-Briggs 乐观图着色算法的寄存器分配器。将 SSA Value 映射到 ARM64 物理寄存器，通过活跃区间分析、干扰图构建和溢出代价启发式，最小化栈槽访问。</p>
+      <p>基于 Chaitin-Briggs 乐观图着色算法的寄存器分配器。将 SSA Value 映射到 ARM64 物理寄存器，通过活跃区间分析、干扰图构建、phi 合并（coalescing）和溢出代价启发式，最小化栈槽访问与 phi 拷贝。</p>
     </div>
 
     <h2>概览</h2>
@@ -114,7 +114,7 @@ if (isLeaf) {
     <p>通过迭代支配算法计算每个块的支配集。检测回边（<code>bb 支配 succ</code>）以计算循环嵌套深度，用于溢出代价加权。</p>
 
     <h3>7. PHI 亲和性</h3>
-    <p>构建 PHI 节点的操作数与结果之间的亲和关系。具有亲和关系的值倾向于分配相同颜色，减少 PHI 拷贝的 mov 指令：</p>
+    <p>构建 PHI 节点的操作数与结果之间的亲和关系。亲和对在着色阶段有两级利用：优先<strong>合并</strong>为同一着色节点（见第 9 节），合并失败时退化为<strong>同色偏好</strong>。两者都用于消除 PHI 拷贝的 mov 指令：</p>
     <pre><code class="language-cpp">for (auto phi : bb-&gt;instr_list_) {
     for (int i = 0; i &lt; phi-&gt;num_ops_; i += 2) {
         auto val = phi-&gt;get_operand(i);
@@ -126,15 +126,26 @@ if (isLeaf) {
     <h3>8. 溢出代价计算</h3>
     <p>每个值的溢出代价 = 各使用点所在循环深度的 <code>20^depth</code> 之和。循环越深，溢出代价越高，越倾向于保留在寄存器中。PHI 亲和组内取最大代价统一。</p>
 
-    <h3>9. 图着色（Chaitin-Briggs）</h3>
+    <h3>9. 图着色（Chaitin-Briggs + phi coalescing）</h3>
     <p>将活跃区间按寄存器类分为整数/浮点/NEON 三个池，分别着色：</p>
     <pre><code class="language-cpp">void colorPool(pool, colorToReg, isFloat, callerSaved, spillCost, phiAffinity) {
+    // 构图后、Simplify 前：phi coalescing（Briggs 保守准则）
+    //   用 union-find 把 phi 相连且无干扰边的节点合并成单节点；
+    //   仅当合并节点的高度数（>=K）邻居 &lt; K 时才合并，保证不增加 spill。
+    //   crossesCall 取或、溢出代价取最大。
     // Simplify: 反复移除度数 &lt; K 的节点入栈
     // 若无低度节点，选择 spillCost / (degree+1) 最小的节点作为潜在溢出
     // Select: 逆序出栈，选择不与邻居冲突的颜色
-    //   - 优先选择 PHI 伙伴的颜色（亲和性偏向）
+    //   - 未合并的 PHI 伙伴仍优先选其颜色（亲和性偏向，伙伴经 union-find 解析）
     //   - crossesCall 值跳过 caller-saved 颜色
+    // 登记: 每个原始值取其合并代表元的颜色，寄存器名按值自身类型（w/x 同号）
 }</code></pre>
+    <p>合并后 phi 拷贝在发射时退化为 <code>mov w6, w6</code> 自搬移，由 peephole 的
+    <code>tryMachineSelfMove</code> 删除。正确性有两层保障：活跃区间凸包不重叠是真实
+    活跃不重叠的保守超集，合并不会造成同寄存器冲突；拷贝发射端
+    <code>emitPhiCopies</code> 本身具备并行拷贝语义（拓扑排序 + 成环回退 scratch
+    批处理），撞号与拷贝环都能正确处理。典型收益：紧凑循环（如 Collatz 链）中
+    循环携带变量原地更新，phi 搬移全部消失。</p>
 
     <h2>干扰图构建</h2>
     <p>活跃区间按起始位置排序后，两两检查是否重叠（<code>sorted[j].start &lt; sorted[i].end</code>）。重叠的区间之间存在干扰边，不能分配相同颜色。</p>

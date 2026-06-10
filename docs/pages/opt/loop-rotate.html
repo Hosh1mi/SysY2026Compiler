@@ -193,13 +193,33 @@
     <h2>概览</h2>
     <p>LoopRotate 将经典的“先判断后执行”循环转换为“先执行后判断”的形式。具体做法是将 header 块的指令分别克隆到 preheader（首次迭代前）和 latch（后续迭代前），然后将条件分支下移到 latch，从而消除 header 块。</p>
 
+    <h2>适用条件</h2>
+    <ul>
+      <li><strong>不旋转规范归纳变量循环</strong>：<code>loop-&gt;hasCanonicalIV()</code> 的循环
+        （init=0、step=+1、SLT 比较，trip count 可由 SCEV 推导）交给下游
+        LoopVectorize / IndVarStrengthReduce / LoopUnroll 处理——它们匹配的是未旋转的
+        while 形态，旋转反而使其失配（mm 类测试明显退化）。只旋转 SCEV 算不出
+        trip count 的循环（如 <code>while (a &gt;= b) a -= b;</code>）。</li>
+      <li>header 必须以 phi 开头（有跨回边的循环携带值），且 header 中非 phi 指令仅限
+        Binary/Unary/ICmp（可安全克隆）。</li>
+      <li>唯一 latch、preheader 无条件跳入 header、循环内后继的唯一前驱是 header。</li>
+      <li>header phi 在循环外的使用：exit 块中的 phi 直接重写；<strong>非 phi 使用</strong>
+        （如 <code>ret %sum</code>）仅当 header 是唯一 exiting 块时允许——此时 exitSucc
+        支配所有循环外使用点，可新建 exit phi
+        <code>%v = phi [preVal, preExit], [latchVal, latchExit]</code> 接管这些使用。</li>
+    </ul>
+
     <h2>变换过程</h2>
     <h3>rotateLoop</h3>
     <ol>
       <li><strong>preheader 克隆</strong>：将 header 中的非 phi 指令克隆到 preheader（首次迭代前的执行）</li>
       <li><strong>latch 克隆</strong>：将 header 中的非 phi 指令克隆到 latch 的回边跳转前（后续迭代前的执行）</li>
-      <li><strong>条件分支下移</strong>：header 的条件分支移动到 latch，直接控制是否继续循环</li>
-      <li><strong>header 块消除</strong>：原 header 块被绕过，循环不再有独立的 header</li>
+      <li><strong>出口边拆分</strong>：preheader/latch 到 exitSucc 各建一个中间块
+        （<code>splitExitEdge</code>），exit 块的 phi 改从两个新前驱取值；
+        循环外的非 phi 使用由新建的 exit phi 接管</li>
+      <li><strong>条件分支下移</strong>：header 的条件分支移动到 latch，直接控制是否继续循环；
+        header phi 整体迁移到循环体首块</li>
+      <li><strong>header 块消除</strong>：原 header 块被绕过并删除，循环不再有独立的 header</li>
     </ol>
 
     <div class="code-label">旋转前</div>
@@ -233,7 +253,7 @@ latch:
 
     <h2>源码位置</h2>
     <ul>
-      <li><code>src/mid/opt/loopRotate.cpp</code> — 实现（313 行）</li>
+      <li><code>src/mid/opt/loopRotate.cpp</code> — 实现</li>
     </ul>
 
   </div>

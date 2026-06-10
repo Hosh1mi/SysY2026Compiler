@@ -21,7 +21,7 @@
 
 <main class="main"><div class="content" id="content">
 
-<div class="page-header"><div class="breadcrumb">wiki / 后端 / 汇编生成</div><h1>Peephole 优化</h1><p>peepholeOptimize 是汇编生成前的最后一道优化，在机器指令的文本表示上进行局部模式匹配与替换。它采用 fixpoint 循环反复应用 15 条优化规则，直到没有任何规则可以再触发为止。</p></div>
+<div class="page-header"><div class="breadcrumb">wiki / 后端 / 汇编生成</div><h1>Peephole 优化</h1><p>peepholeOptimize 是汇编生成前的最后一道优化，在机器指令的文本表示上进行局部模式匹配与替换。它采用 fixpoint 循环反复应用 17 条优化规则，直到没有任何规则可以再触发为止。</p></div>
 
 <h2>概览</h2>
 <pre><code class="language-cpp">// src/include/backend/arm64/peephole.hpp
@@ -33,7 +33,7 @@ void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines);</code></pre>
     while (changed) {
         changed = false;
         for (size_t i = 0; i &lt; lines.size(); i++) {
-            // 依次尝试 15 条规则
+            // 依次尝试 17 条规则
             if (tryMachineSelfMove(lines, i, changed)) continue;
             if (tryMachineSwapMov(lines, i, changed)) continue;
             if (tryMachineForwardMov(lines, i, changed)) continue;
@@ -57,7 +57,7 @@ void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines);</code></pre>
   </tbody>
 </table>
 
-<h2>15 条优化规则</h2>
+<h2>17 条优化规则</h2>
 
 <h3>规则 1: tryMachineSelfMove — 自赋值消除</h3>
 <p>删除 <code>mov wN, wN</code>（源和目的相同的 mov 指令）：</p>
@@ -188,6 +188,24 @@ void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines);</code></pre>
 //   b .L_end      →   (删除)
 //   .L_end:       →   .L_end:</code></pre>
 
+<h3>规则 16: tryMachineBranchThreading — 跳转链折叠</h3>
+<p>分支目标若是只含一条无条件 <code>b</code> 的 forwarder 块，将分支直接改跳最终目标。
+适用于 <code>b</code> / <code>b.cond</code> / <code>cbz/cbnz</code> / <code>tbz/tbnz</code>；
+沿 forwarder 链多级穿透（<code>resolveForwardTarget</code>），遇环放弃：</p>
+<pre><code class="language-cpp">// 匹配: b.eq .Ledge_1   且   .Ledge_1: b real_target
+// 动作: b.eq real_target
+// 示例（LoopRotate 的 splitExitEdge 常产生此类残块）:
+//   b.eq .Lmain_edge_1        →   b.eq main_label_42
+//   .Lmain_edge_1:
+//       b main_label_42</code></pre>
+
+<h3>规则 17: tryMachineRemoveDeadForwarder — 不可达 forwarder 残块清理</h3>
+<p>跳转链折叠后遗留的 forwarder 块若不可达，删除其 label 与 <code>b</code>。
+三个保守前提：label 是函数内部标签（<code>.L*</code> 或 <code>函数名_*</code>）、
+函数内无任何操作数引用它、前一条可见指令是 <code>b</code>/<code>ret</code>（无 fallthrough 进入）：</p>
+<pre><code class="language-cpp">// 匹配: (前一条为 b/ret) .Ledge_1: b target   且 .Ledge_1 无引用
+// 动作: 删除 label 与 b 两行</code></pre>
+
 <h2>规则分类</h2>
 <table>
   <thead><tr><th>类别</th><th>规则</th><th>效果</th></tr></thead>
@@ -196,7 +214,7 @@ void peepholeOptimize(std::vector&lt;std::string&gt; &amp;lines);</code></pre>
     <tr><td>指令前向</td><td>3 (mov forward), 6 (add/sub fold)</td><td>减少中间寄存器使用</td></tr>
     <tr><td>指令融合</td><td>4 (and+tbz), 5 (imm fold), 7 (mul+add), 13 (merge stores), 14 (merge loads)</td><td>合并为更强的指令</td></tr>
     <tr><td>存储优化</td><td>8 (store-load forward), 11 (zero store), 12 (dead store)</td><td>减少内存访问</td></tr>
-    <tr><td>控制流</td><td>15 (fallthrough branch)</td><td>消除冗余跳转</td></tr>
+    <tr><td>控制流</td><td>15 (fallthrough branch), 16 (branch threading), 17 (dead forwarder)</td><td>消除冗余跳转与残块</td></tr>
   </tbody>
 </table>
 
