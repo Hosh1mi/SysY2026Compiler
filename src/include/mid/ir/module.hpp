@@ -29,6 +29,7 @@ public:
     }
     virtual std::string print();
     void verify();  // IR 完整性验证（use-def链、SSA、基本块结构等）
+    void verify(const std::string& context);  // 带上下文（如 pass 名）的版本
     void add_global_variable(GlobalVariable* g) { global_list_.push_back(g); }
     void add_function(Function* f) { function_list_.push_back(f); }
 
