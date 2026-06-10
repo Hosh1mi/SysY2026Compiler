@@ -59,8 +59,77 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
+    // ---- Phi coalescing（Briggs 保守准则）----
+    // 把 phi 相连且不冲突的活跃区间在着色前合并成一个节点，使 phi 拷贝
+    // 退化为自搬移（由 peephole 删除）。Briggs 准则保证合并后的节点
+    // 高度数邻居 < K，不会让图变得更难着色，因此不会引入新的 spill。
+    // 正确性依赖两点：区间凸包不重叠 ⇒ 真实活跃区间不重叠；phi 拷贝
+    // 发射端（emitPhiCopies）本身具备并行拷贝语义，撞号/成环均能处理。
+    std::map<Value*, Value*> ufParent;
+    std::function<Value*(Value*)> ufFind = [&](Value *v) -> Value* {
+        auto it = ufParent.find(v);
+        if (it == ufParent.end()) return v;
+        Value *root = ufFind(it->second);
+        ufParent[v] = root;
+        return root;
+    };
+
+    std::map<Value*, double> cost;
+    for (auto &iv : sorted) {
+        auto it = spillCost.find(iv.value);
+        cost[iv.value] = (it != spillCost.end()) ? it->second : 1.0;
+    }
+
+    std::vector<std::pair<Value*, Value*>> affEdges;
+    for (auto &iv : sorted) {
+        auto it = phiAffinity.find(iv.value);
+        if (it == phiAffinity.end()) continue;
+        for (auto *p : it->second) {
+            if (iv.value < p && intervalForValue.count(p))
+                affEdges.push_back({iv.value, p});
+        }
+    }
+
+    bool mergedAny = true;
+    while (mergedAny) {
+        mergedAny = false;
+        for (auto &e : affEdges) {
+            Value *a = ufFind(e.first);
+            Value *b = ufFind(e.second);
+            if (a == b) continue;
+            if (adj[a].count(b)) continue;  // 冲突，不能共用寄存器
+
+            // Briggs：合并节点的"高度数（>=K）邻居"个数必须 < K
+            std::set<Value*> nbrs = adj[a];
+            nbrs.insert(adj[b].begin(), adj[b].end());
+            nbrs.erase(a);
+            nbrs.erase(b);
+            int highDegree = 0;
+            for (auto *n : nbrs) {
+                int d = (int)adj[n].size();
+                if (adj[n].count(a) && adj[n].count(b)) d--;  // 合并后只算一个邻居
+                if (d >= K) highDegree++;
+            }
+            if (highDegree >= K) continue;
+
+            // 把 b 并入 a
+            for (auto *n : adj[b]) {
+                adj[n].erase(b);
+                adj[n].insert(a);
+                adj[a].insert(n);
+            }
+            adj.erase(b);
+            adj[a].erase(a);
+            ufParent[b] = a;
+            intervalForValue[a].crossesCall =
+                intervalForValue[a].crossesCall || intervalForValue[b].crossesCall;
+            cost[a] = std::max(cost[a], cost[b]);
+            mergedAny = true;
+        }
+    }
+
     std::set<Value*> worklist;
-    for (auto &iv : sorted) worklist.insert(iv.value);
+    for (auto &kv : adj) worklist.insert(kv.first);
     std::vector<Value*> stack;
     std::set<Value*> potentialSpills;
 
@@ -86,9 +155,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                 int degree = 0;
                 for (auto n : adj[v])
                     if (worklist.count(n)) degree++;
-                auto sc = spillCost.find(v);
-                double cost = (sc != spillCost.end() ? sc->second : 1.0) / (degree + 1);
-                if (cost < bestCost) { bestCost = cost; best = v; }
+                double c = cost[v] / (degree + 1);
+                if (c < bestCost) { bestCost = c; best = v; }
             }
             stack.push_back(best);
             worklist.erase(best);
@@ -117,10 +185,11 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
 
         int color = -1;
         // Biased: prefer color of already-colored phi partners
+        // （没能合并的 affinity 对仍可通过同色偏好消除拷贝）
         auto affIt = phiAffinity.find(v);
         if (affIt != phiAffinity.end()) {
             for (auto partner : affIt->second) {
-                auto pc = colors.find(partner);
+                auto pc = colors.find(ufFind(partner));
                 if (pc != colors.end() &&
                     colorAllowed(pc->second) &&
                     !neighborColors.count(pc->second)) {
@@ -140,17 +209,21 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // Record assignments
-    for (auto &kv : colors) {
-        int regNo = colorToReg[kv.second];
+    // Record assignments：每个原始值取其合并代表元的颜色，
+    // 寄存器名按值自身的类型决定（w/x 同号同寄存器）
+    for (auto &iv : sorted) {
+        Value *v = iv.value;
+        auto it = colors.find(ufFind(v));
+        if (it == colors.end()) continue;
+        int regNo = colorToReg[it->second];
         if (isFloat) {
-            assignedRegs_[kv.first] = "s" + std::to_string(regNo);
-        } else if (isAllocatableNEONValue(kv.first->type_)) {
-            assignedRegs_[kv.first] = "v" + std::to_string(regNo);
-        } else if (isAllocatablePtrValue(kv.first->type_)) {
-            assignedRegs_[kv.first] = "x" + std::to_string(regNo);
+            assignedRegs_[v] = "s" + std::to_string(regNo);
+        } else if (isAllocatableNEONValue(v->type_)) {
+            assignedRegs_[v] = "v" + std::to_string(regNo);
+        } else if (isAllocatablePtrValue(v->type_)) {
+            assignedRegs_[v] = "x" + std::to_string(regNo);
         } else {
-            assignedRegs_[kv.first] = "w" + std::to_string(regNo);
+            assignedRegs_[v] = "w" + std::to_string(regNo);
         }
     }
 }
