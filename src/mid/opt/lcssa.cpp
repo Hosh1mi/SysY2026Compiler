@@ -54,9 +54,10 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
     bool changed = false;
 
     // 快照指令清单：改写过程会新增 exit phi（exit 在循环外，不影响），
-    // 但稳妥起见不在遍历容器时修改它
+    // 但稳妥起见不在遍历容器时修改它。用确定序 blocksOrdered——
+    // 快照顺序决定 exit phi 的插入顺序，指针序会跨进程漂移。
     std::vector<Instruction *> insts;
-    for (auto *bb : loop->blocks)
+    for (auto *bb : loop->blocksOrdered)
         for (auto *inst : bb->instr_list_)
             insts.push_back(inst);
 
@@ -81,16 +82,27 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
         if (outsideUses.empty())
             continue;
 
-        // 2. 在被 def 支配的 exit 块插入 lcssa phi（每值缓存复用）
-        std::map<BasicBlock *, PhiInst *> exitPhi;
+        // 2. 在被 def 支配的 exit 块插入 lcssa phi（每值缓存复用）。
+        //    有序 vector 而非 map：步骤 3 按此顺序为 use 挑支配 phi，
+        //    多个候选同时支配时选择必须确定（exits 已是 RPO 序）。
+        std::vector<std::pair<BasicBlock *, PhiInst *>> exitPhi;
         for (auto *exit : loop->exits) {
             if (!LI.dominates(inst->parent_, exit))
+                continue;
+            // 防御：非 dedicated exit（存在循环外前驱）时，"每前驱入边都是
+            // 该循环值"不成立，插 phi 即错译。LoopSimplify 保证 dedicated，
+            // 但这里不依赖调度顺序，违例直接跳过该 exit。
+            bool dedicated = true;
+            for (auto *pred : exit->pre_bbs_) {
+                if (!loop->isInLoop(pred)) { dedicated = false; break; }
+            }
+            if (!dedicated)
                 continue;
             auto *phi = PhiInst::create_phi(inst->type_, exit);
             for (auto *pred : exit->pre_bbs_)
                 phi->addIncoming(inst, pred);
             exit->add_instruction_front(phi);
-            exitPhi[exit] = phi;
+            exitPhi.emplace_back(exit, phi);
         }
         if (exitPhi.empty())
             continue;

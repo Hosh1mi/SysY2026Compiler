@@ -2,6 +2,7 @@
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 
 void LoopRotate::execute(Module *module) {
@@ -136,7 +137,8 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     // LoopVectorize/IndVarStrengthReduce/LoopUnroll 处理：它们匹配的是
     // 未旋转的 while 形态，旋转反而使其失配（mm 类测试明显退化）。
     // 只旋转 SCEV 算不出 trip count 的循环。
-    if (loop->hasCanonicalIV())
+    // EXP_ROTATE_IV=1 放开此门槛（do-while unroll 就位后的 A/B 实验）。
+    if (loop->hasCanonicalIV() && !std::getenv("EXP_ROTATE_IV"))
         return false;
     BasicBlock *header = loop->header;
     BasicBlock *preheader = loop->preheader;

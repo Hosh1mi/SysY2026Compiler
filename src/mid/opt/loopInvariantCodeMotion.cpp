@@ -140,6 +140,14 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
         inst->is_store() || inst->is_alloca())
         return false;
 
+    // 投机安全性说明（平台契约，勿删）：本 pass 不区分"保证执行"，
+    // 循环零次执行时外提指令也会跑。这依赖两个目标事实：
+    //   1. AArch64 的 sdiv 除零不陷阱（结果 0），srem 由 sdiv+msub 合成；
+    //   2. SysY 数组都是静态分配，load 总是可解引用（越界本身是 UB）。
+    // 若未来移植到 div 会陷阱的目标，div/rem/load/纯 call 的外提必须补
+    // isGuaranteedToExecute（指令块支配所有 exiting 块）+ 真 preheader
+    //（单后继）检查——旋转后 LoopInfo 的 preheader 是双后继 guard。
+
     if (inst->is_call()) {
         if (inst->is_void()) return false;
         auto *call = static_cast<CallInst *>(inst);
@@ -238,8 +246,11 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE,
     while (progress) {
         progress = false;
 
+        // 收集与外提两阶段必须同序遍历（保证 def 先于 use 外提），且必须
+        // 用确定序 blocksOrdered——指针序会让 preheader 中外提指令的顺序
+        // 跨进程漂移（中端不确定性来源之一）。
         std::set<Instruction*> toHoist;
-        for (auto bb : loop.blocks) {
+        for (auto bb : loop.blocksOrdered) {
             for (auto inst : bb->instr_list_) {
                 if (!isSafeToHoist(inst, loop, *BAA)) continue;
 
@@ -259,7 +270,7 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE,
 
         if (toHoist.empty()) break;
 
-        for (auto bb : loop.blocks) {
+        for (auto bb : loop.blocksOrdered) {
             auto it = bb->instr_list_.begin();
             while (it != bb->instr_list_.end()) {
                 Instruction *inst = *it;

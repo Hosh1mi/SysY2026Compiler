@@ -1,7 +1,10 @@
 #include "../../include/mid/opt/loopRepFold.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
+#include <iostream>
+#include <set>
 
 // ── 辅助检查 ────────────────────────────────────────────────────────────────
 
@@ -118,31 +121,82 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module) {
     if (!total_init || !total_latch) return false;
     if (!isLoopInvariant(total_init, loop.blocks)) return false;
 
-    // 6b. total_latch 不能依赖计数 IV（每次迭代增量必须相同）
+    // 6b. 折叠公式 init + (total_latch_1 - init) * N 成立的充分条件：
+    //     total_latch 作为 total_phi 的函数必须恰为 total_phi + C，且 C 每圈
+    //     恒定。数据流上要求 total_latch 沿"累加链"可达 total_phi：
+    //       acc := total_phi | phi(全部入边均为 acc) | acc ± q（q 与 IV/total
+    //       无数据依赖）
+    //     phi 汇合允许（路径间增量不同时由下面的控制检查兜底）；总和系数
+    //     不为 1（如 t+t）或经"选择"引入非 acc 值（如 phi[total, x]）即拒绝。
+    //     控制流上要求：除本循环 header 外，循环内所有条件分支的条件都不
+    //     依赖计数 IV——否则路径选择随圈变化，增量不再恒定。
+    //     （唯一的跨圈状态只有 r_phi/total_phi 两个 header phi；条件无法
+    //     依赖 total_phi——那是非 phi 使用，已被检查 5 拒绝。）
     {
-        std::set<Value *> visited;
-        std::function<bool(Value *)> dependsOnIV = [&](Value *v) -> bool {
-            if (v == r_phi) return true;
-            if (!visited.insert(v).second) return false;
+        std::set<Value *> indepVisited;
+        std::function<bool(Value *)> indepOfIV = [&](Value *v) -> bool {
+            if (v == r_phi || v == total_phi) return false;
             auto *inst = dynamic_cast<Instruction *>(v);
-            if (!inst) return false;
-            if (!loop.blocks.count(inst->parent_)) return false;
+            if (!inst) return true;
+            if (!loop.blocks.count(inst->parent_)) return true;
+            if (!indepVisited.insert(v).second) return true;
             for (unsigned i = 0; i < inst->num_ops_; i++)
-                if (dependsOnIV(inst->get_operand(i))) return true;
+                if (!indepOfIV(inst->get_operand(i))) return false;
+            return true;
+        };
+
+        std::set<Value *> accVisited;
+        std::function<bool(Value *)> isAcc = [&](Value *v) -> bool {
+            if (v == total_phi) return true;
+            auto *inst = dynamic_cast<Instruction *>(v);
+            if (!inst || !loop.blocks.count(inst->parent_)) return false;
+            if (!accVisited.insert(v).second) return true; // 环上节点正在验证
+            if (inst->is_phi()) {
+                auto *phi = static_cast<PhiInst *>(inst);
+                for (unsigned i = 0; i < phi->num_ops_; i += 2)
+                    if (!isAcc(phi->get_operand(i))) return false;
+                return true;
+            }
+            auto *bin = dynamic_cast<BinaryInst *>(inst);
+            if (!bin) return false;
+            Value *lhs = bin->get_operand(0);
+            Value *rhs = bin->get_operand(1);
+            if (bin->is_add())
+                return (isAcc(lhs) && indepOfIV(rhs)) ||
+                       (isAcc(rhs) && indepOfIV(lhs));
+            if (bin->is_sub())
+                return isAcc(lhs) && indepOfIV(rhs);
             return false;
         };
-        if (dependsOnIV(total_latch)) return false;
+        if (!isAcc(total_latch)) return false;
+
+        for (auto *bb : loop.blocks) {
+            if (bb == loop.header) continue;
+            auto *t = bb->get_terminator();
+            if (t && t->is_br() && t->num_ops_ == 3 &&
+                !indepOfIV(t->get_operand(0)))
+                return false;
+        }
+    }
+
+    // 6c. 折叠会拆掉回边并让循环只走一遍：除 total_phi 外，循环内任何值
+    //     （含 r_phi）被循环外使用时，其"终值"在折叠后都是错的 → bail。
+    //     total_phi 的循环外使用由 7d 统一改写到出口 phi。
+    for (auto *bb : loop.blocks) {
+        for (auto *inst : bb->instr_list_) {
+            if (inst == total_phi) continue;
+            for (auto &use : inst->use_list_) {
+                auto *user = dynamic_cast<Instruction *>(use.val_);
+                if (user && user->parent_ && !loop.blocks.count(user->parent_))
+                    return false;
+            }
+        }
     }
 
     // ────────────────────────── 变换开始 ──────────────────────────────────
-    {
-        FILE *f = fopen("/tmp/repfold_debug.txt", "a");
-        if (f) {
-            fprintf(f, "[LoopRepFold] folding loop header=%s in func=%s\n",
-                    loop.header->name_.c_str(), loop.header->parent_->name_.c_str());
-            fclose(f);
-        }
-    }
+    if (std::getenv("DEBUG_LOOP_REPFOLD"))
+        std::cerr << "[LoopRepFold] fold func=" << loop.header->parent_->name_
+                  << " header=" << loop.header->name_ << "\n";
     auto *int_ty = total_phi->type_;
 
     // 7a. 在 latch 中（terminator 之前）插入 total_final 计算
@@ -193,30 +247,34 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module) {
     removeIncoming(r_phi,     latch);
     removeIncoming(total_phi, latch);
 
-    // 7d. 在 loop_exit 插入 phi 处理出口值，并替换 total_phi 的使用
-    //     v_total = phi [total_phi, header], [total_final, latch]
+    // 7d. 在 loop_exit 插入 phi 处理出口值，并替换 total_phi 的全部循环外
+    //     使用：v_total = phi [total_phi, header], [total_final, latch]。
+    //     header 是唯一 exiting 块且 loop_exit 是专用出口 ⇒ 任何从循环到
+    //     循环外的路径必经 loop_exit ⇒ exit_phi 支配所有循环外使用点
+    //     （不限于 loop_exit 块内，远处的使用同样必须改写——折叠后
+    //     total_phi 本身收缩为 init，留着不改写就是错值）。
     {
-        bool used_in_exit = false;
+        bool used_outside = false;
         for (auto &use : total_phi->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
-            if (user && user->parent_ == loop_exit) {
-                used_in_exit = true;
+            if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
+                used_outside = true;
                 break;
             }
         }
 
-        if (used_in_exit) {
+        if (used_outside) {
             std::vector<Value *>      phi_vals = {total_phi, total_final};
             std::vector<BasicBlock *> phi_bbs  = {loop.header, latch};
             auto *exit_phi = new PhiInst(Instruction::PHI, phi_vals, phi_bbs,
                                          int_ty, loop_exit);
             loop_exit->add_instruction_front(exit_phi);
 
-            // 收集并替换 loop_exit 中 total_phi 的使用
             std::vector<std::pair<Instruction *, unsigned>> to_replace;
             for (auto &use : total_phi->use_list_) {
                 auto *user = dynamic_cast<Instruction *>(use.val_);
-                if (user && user->parent_ == loop_exit && user != exit_phi)
+                if (user && user->parent_ && user != exit_phi &&
+                    !loop.blocks.count(user->parent_))
                     to_replace.push_back({user, use.arg_no_});
             }
             for (auto &[user, arg_no] : to_replace)

@@ -559,7 +559,8 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
         };
         std::vector<GEPCandidate> candidates;
 
-        for (auto bb : loop.blocks) {
+        // 确定序遍历：候选顺序决定 preheader 中 initGEP 的产出顺序
+        for (auto bb : loop.blocksOrdered) {
             for (auto inst : bb->instr_list_) {
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
