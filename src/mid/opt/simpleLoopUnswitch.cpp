@@ -153,6 +153,14 @@ Instruction *SimpleLoopUnswitch::cloneInst(
 }
 
 bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
+    // ── 收益门槛：仅最内层循环 ─────────────────────────────────────────
+    // 切外层会克隆整个嵌套（01_mm3 实测：round2 对 mm 外层循环 unswitch,
+    // 33 指令的双层嵌套翻倍 → 寄存器压力/I-cache，中位数 +35%）；
+    // 收益案例（conv2d -25%）全部来自单层循环。外层 if(mode) 包大嵌套的
+    // 形态留给收益模型完善后再放开。
+    if (!loop.children.empty())
+        return false;
+
     // ── 结构前置：真 preheader（单后继无条件 br 到 header）─────────────
     BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;

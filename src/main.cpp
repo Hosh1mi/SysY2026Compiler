@@ -203,8 +203,8 @@ static void addLoopPipeline(PassManager &pm) {
     // 多处正确性问题（克隆引用余数循环的 phi、步长假设、live-out 在
     // 余数循环零次执行时未定义），已确认错译 h_functional/30_many_dimensions
     // （2026-06-11 复测仍错译：-O1 输出 0，期望 351799）。
-    // 待 plan.md 阶段 5 加固后重新启用。
-    // pm.addPass(std::make_unique<LoopVectorize>());
+    // 阶段 5.1 加固中（2026-06-11 起重新启用，错译修复见 loopVectorize.cpp）。
+    pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());

@@ -1,0 +1,37 @@
+// NEON 发射测试:每个循环对应一种向量形态,asm 断言见 test 脚本。
+// L1: int add → add v.4s;L2: int sub → sub v.4s;L3: int mul → mul v.4s
+// L4: 常量 splat(a[i]+5)→ dup/movi + add .4s
+// L5: 纯拷贝(无 binop,VECTOR_IR 无法打包,预期标量)
+// L6: float(已知不向量化,预期无 .4s)
+int a[256];
+int b[256];
+int c[256];
+float fa[256];
+float fc[256];
+int main() {
+    int n = getint();
+    int i = 0;
+    while (i < n) { a[i] = i * 7 % 13; b[i] = i % 11; i = i + 1; }
+
+    i = 0;
+    while (i < n) { c[i] = a[i] + b[i]; i = i + 1; }   // L1 add
+    putint(c[n - 1]); putch(10);
+    i = 0;
+    while (i < n) { c[i] = a[i] - b[i]; i = i + 1; }   // L2 sub
+    putint(c[n - 1]); putch(10);
+    i = 0;
+    while (i < n) { c[i] = a[i] * b[i]; i = i + 1; }   // L3 mul
+    putint(c[n - 1]); putch(10);
+    i = 0;
+    while (i < n) { c[i] = a[i] + 5; i = i + 1; }      // L4 splat
+    putint(c[n - 1]); putch(10);
+    i = 0;
+    while (i < n) { c[i] = a[i]; i = i + 1; }          // L5 copy
+    putint(c[n - 1]); putch(10);
+    i = 0;
+    while (i < n) { fa[i] = i; i = i + 1; }
+    i = 0;
+    while (i < n) { fc[i] = fa[i] + fa[i]; i = i + 1; } // L6 float
+    putfloat(fc[n - 1]); putch(10);
+    return 0;
+}

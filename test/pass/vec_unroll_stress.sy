@@ -1,0 +1,85 @@
+// 5.1 压力集:循环形态 × 数据类型 × 访存模式,oracle = gcc -O0。
+// 入参 n 控制 trip(测 0/1/边界/余数);每段后 putint/putfloat 校验。
+int a[100];
+int b[100];
+int c[100];
+float fa[100];
+float fb[100];
+
+int main() {
+    int n = getint();
+    int i = 0;
+
+    // S1: 元素级数组写(向量化主目标),trip = n
+    i = 0;
+    while (i < n) { a[i] = i * 3 + 1; i = i + 1; }
+    i = 0;
+    while (i < n) { b[i] = a[i] * 2 - i; i = i + 1; }
+    int s = 0;
+    i = 0;
+    while (i < n) { s = s + b[i]; i = i + 1; }   // S2: 归约(禁向量化,需正确)
+    putint(s); putch(10);
+
+    // S3: c[i] = a[i] + b[i](双 load 一 store)
+    i = 0;
+    while (i < n) { c[i] = a[i] + b[i]; i = i + 1; }
+    putint(c[0]); putch(10);
+    if (n > 1) { putint(c[n - 1]); putch(10); }
+
+    // S4: 计数器 aux phi 写数组(30_many_dimensions 形,已禁向量化)
+    int cnt = 7;
+    i = 0;
+    while (i < n) { a[i] = cnt; cnt = cnt + 1; i = i + 1; }
+    putint(cnt); putch(10);
+    if (n > 0) { putint(a[n - 1]); putch(10); }
+
+    // S5: 多出口(break 形)
+    i = 0;
+    s = 0;
+    while (i < n) {
+        if (a[i] > n + 3) break;
+        s = s + a[i];
+        i = i + 1;
+    }
+    putint(s); putch(10);
+
+    // S6: 间接下标(禁向量化,需正确)
+    i = 0;
+    while (i < n) { b[i] = i % 10; i = i + 1; }
+    i = 0;
+    s = 0;
+    while (i < n) { s = s + a[b[i]]; i = i + 1; }
+    putint(s); putch(10);
+
+    // S7: 非单位步长 i+=2
+    i = 0;
+    while (i < n) { c[i] = i; i = i + 2; }
+    putint(c[0]); putch(10);
+
+    // S8: 递减循环
+    i = n - 1;
+    s = 0;
+    while (i >= 0) { s = s + a[i]; i = i - 1; }
+    putint(s); putch(10);
+
+    // S9: 嵌套,内层可向量化
+    i = 0;
+    while (i < n) {
+        int j = 0;
+        while (j < n) { c[j] = a[j] + i; j = j + 1; }
+        i = i + 1;
+    }
+    if (n > 0) { putint(c[n - 1]); putch(10); }
+
+    // S10: float 元素级 + float 归约
+    i = 0;
+    while (i < n) { fa[i] = i; i = i + 1; }
+    i = 0;
+    while (i < n) { fb[i] = fa[i] * 2.5; i = i + 1; }
+    float fs = 0;
+    i = 0;
+    while (i < n) { fs = fs + fb[i]; i = i + 1; }
+    putfloat(fs); putch(10);
+
+    return 0;
+}

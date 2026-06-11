@@ -433,11 +433,14 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     InductionVar iv;
     if (!findInductionVar(loop, iv)) { return false; }
 
-    // 5. Check for non-IV phis (accumulators, pointer phis from LICM, etc.).
-    //    Pointer phis are handled by gep(phi, j) in headerNonIVPhis.
-    //    Integer phis with a constant-offset update (add/sub phi, c) are
-    //    handled by add(phi, j).  Accumulator phis ("sum += product") are
-    //    rejected — they need cross-copy chaining which isn't implemented.
+    // 5. 非 IV header phi 限制（5.1 收紧，2026-06-11）：
+    //    - 整型 aux phi 一律拒绝。lane 映射 add(phi, j) 假设步长 +1，且
+    //      余数循环没有 aux 接力 phi（注释里的 remAux 从未实现）——aux 在
+    //      余数循环会从初值重启，错译 30_many_dimensions（计数器写数组）。
+    //      完整 aux phi 链（带步长的 lane 偏移 + vec 回边 ×W + remAux +
+    //      afterLoop 合流）见 plan 5.1 待办。
+    //    - 指针 phi 仅允许 gep(phi, 1)（单位元素步长）：lane 映射
+    //      gep(phi, j) 同样假设步长 1。
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         if (inst == iv.phi) continue;
@@ -451,22 +454,14 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         if (!latchVal) { return false; }
         auto *update = dynamic_cast<Instruction*>(latchVal);
         if (phi->type_->tid_ == Type::PointerTyID) {
-            // Pointer phi：更新必须是 gep(phi, 常量)（常量元素步长）
             auto *gep = dynamic_cast<GetElementPtrInst*>(update);
-            if (!gep || gep->get_operand(0) != phi || gep->num_ops_ != 2 ||
-                !dynamic_cast<ConstantInt*>(gep->get_operand(1))) { return false; }
+            if (!gep || gep->get_operand(0) != phi || gep->num_ops_ != 2)
+                return false;
+            auto *stride = dynamic_cast<ConstantInt*>(gep->get_operand(1));
+            if (!stride || stride->value_ != 1) { return false; }
             continue;
         }
-        // Integer non-IV phi: check whether it's a constant-offset pattern
-        //   e.g.  %idx = phi [0], [add %idx, 1]
-        // or an accumulator:
-        //   e.g.  %sum = phi [0], [add %sum, %product]
-        if (!update || (!update->is_add() && !update->is_sub())) { return false; }
-        // Must be add/sub phi, constant  (not add phi, variable)
-        Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
-        bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
-                       (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
-        if (!isConst) { return false; }
+        return false; // 整型 aux phi：见上
     }
 
     // 5b. live-out 限制：循环内定义、循环外使用的值只允许是 header phi。
@@ -508,6 +503,11 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         return false;
     }
 
+    // 无 store 的循环（如 03_sort 的查找循环）没有可打包的向量目标
+    //（VECTOR_IR 以 store 组为锚），产物是 4 倍标量展开、零 NEON。
+    // 实测这种"变相展开"对 sort 家族有 ~5% 收益（中位数 495ms vs
+    // 拒绝后 522ms），故保留；asm 里见不到 .4s 是预期行为，不是 bug。
+
     // 8. Find the trip count bound from the comparison instruction
     //    We need to know the loop bound to determine if strip-mining is viable
     //    For now, we'll emit both vectorized loop and remainder loop
@@ -533,6 +533,14 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
                 }
             }
         }
+    }
+
+    // 临时二分开关：限制成功向量化的次数,用于定位错译点
+    if (const char *lim = std::getenv("DEBUG_LOOP_VECTORIZE_LIMIT")) {
+        static int vecCount = 0;
+        if (vecCount >= atoi(lim))
+            return false;
+        vecCount++;
     }
 
     if (std::getenv("DEBUG_LOOP_VECTORIZE"))
