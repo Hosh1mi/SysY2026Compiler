@@ -5,8 +5,6 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
-#include <map>
-#include <queue>
 
 void LICM::execute(Module *module) {
     AnalysisManager AM;
@@ -14,57 +12,14 @@ void LICM::execute(Module *module) {
 }
 
 PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
+    bool changed = false;
     for (auto func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func, AM);
+            changed |= runOnFunction(func, AM);
     }
-    return PreservedAnalyses::none();
-}
-
-// ── Loop detection ─────────────────────────────────────────────────────────
-
-std::vector<LICM::Loop> LICM::findLoops(Function *func) {
-    // 相同 header 的多条回边属于同一个 loop。若每条回边各自形成独立 loop，
-    // 其不完整的 body 会让 getPreheader 认为有多个"外部前驱"而返回 nullptr，
-    // 导致 LICM 静默跳过整个循环。
-    std::map<BasicBlock*, Loop> headerToLoop;
-    auto &idom = domInfo_->idom;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!idom.count(succ)) continue;
-            if (!domInfo_->dominates(succ, bb)) continue;
-
-            auto &loop = headerToLoop[succ];
-            loop.header = succ;
-            if (!loop.latch) loop.latch = bb;
-
-            loop.blocks.insert(succ);
-            std::queue<BasicBlock*> wl;
-            wl.push(bb);
-            while (!wl.empty()) {
-                auto cur = wl.front(); wl.pop();
-                if (!loop.blocks.insert(cur).second) continue;
-                for (auto pred : cur->pre_bbs_)
-                    if (!loop.blocks.count(pred)) wl.push(pred);
-            }
-        }
-    }
-
-    std::vector<Loop> loops;
-    for (auto &kv : headerToLoop)
-        loops.push_back(std::move(kv.second));
-    return loops;
-}
-
-BasicBlock *LICM::getPreheader(const Loop &loop) {
-    BasicBlock *pre = nullptr;
-    for (auto pred : loop.header->pre_bbs_) {
-        if (loop.blocks.count(pred)) continue;
-        if (pre) return nullptr;
-        pre = pred;
-    }
-    return pre;
+    // 未改动 ⇒ all()（4.2 收敛判定）；改动时函数级失效已在内部完成，
+    // 这里保守再报 none()
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
@@ -149,7 +104,7 @@ static void debugHoistedInst(Instruction *inst, BasicBlock *loopHeader,
 
 bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
                         const std::set<Instruction*>& toHoist, const Loop *loop,
-                        ScalarEvolution *SE, ::Loop *analysisLoop) {
+                        ScalarEvolution *SE) {
     bool available = false;
     if (dynamic_cast<Constant*>(val) ||
         dynamic_cast<GlobalVariable*>(val) ||
@@ -171,11 +126,11 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
     if (!available)
         return false;
 
-    if (SE && analysisLoop) {
+    if (SE && loop) {
         const SCEV *s = SE->getSCEV(val);
         if (s && s->kind() != SCEVKind::CouldNotCompute &&
-            SE->isLoopInvariant(s, analysisLoop)) {
-            debugSCEVInvariant(val, loop ? loop->header : nullptr, s);
+            SE->isLoopInvariant(s, const_cast<Loop *>(loop))) {
+            debugSCEVInvariant(val, loop->header, s);
         }
     }
 
@@ -187,6 +142,14 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
         inst->is_store() || inst->is_alloca())
         return false;
+
+    // 投机安全性说明（平台契约，勿删）：本 pass 不区分"保证执行"，
+    // 循环零次执行时外提指令也会跑。这依赖两个目标事实：
+    //   1. AArch64 的 sdiv 除零不陷阱（结果 0），srem 由 sdiv+msub 合成；
+    //   2. SysY 数组都是静态分配，load 总是可解引用（越界本身是 UB）。
+    // 若未来移植到 div 会陷阱的目标，div/rem/load/纯 call 的外提必须补
+    // isGuaranteedToExecute（指令块支配所有 exiting 块）+ 真 preheader
+    //（单后继）检查——旋转后 LoopInfo 的 preheader 是双后继 guard。
 
     if (inst->is_call()) {
         if (inst->is_void()) return false;
@@ -212,9 +175,9 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
-bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop,
+bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE,
                      const BasicAliasAnalysis *BAA) {
-    BasicBlock *preheader = getPreheader(loop);
+    BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
     if (!BAA) return false;
 
@@ -286,8 +249,11 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
     while (progress) {
         progress = false;
 
+        // 收集与外提两阶段必须同序遍历（保证 def 先于 use 外提），且必须
+        // 用确定序 blocksOrdered——指针序会让 preheader 中外提指令的顺序
+        // 跨进程漂移（中端不确定性来源之一）。
         std::set<Instruction*> toHoist;
-        for (auto bb : loop.blocks) {
+        for (auto bb : loop.blocksOrdered) {
             for (auto inst : bb->instr_list_) {
                 if (!isSafeToHoist(inst, loop, *BAA)) continue;
 
@@ -296,7 +262,7 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
                                                         : inst->num_ops_;
                 for (unsigned i = 0; i < operandLimit; i++) {
                     if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist,
-                                     &loop, SE, analysisLoop)) {
+                                     &loop, SE)) {
                         allInvariant = false;
                         break;
                     }
@@ -307,7 +273,7 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
 
         if (toHoist.empty()) break;
 
-        for (auto bb : loop.blocks) {
+        for (auto bb : loop.blocksOrdered) {
             auto it = bb->instr_list_.begin();
             while (it != bb->instr_list_.end()) {
                 Instruction *inst = *it;
@@ -339,7 +305,8 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
     return changed;
 }
 
-void LICM::eliminateSinglePredPhis(Function *func) {
+bool LICM::eliminateSinglePredPhis(Function *func) {
+    bool anyChanged = false;
     bool changed = true;
     while (changed) {
         changed = false;
@@ -353,13 +320,19 @@ void LICM::eliminateSinglePredPhis(Function *func) {
                 phi->replace_all_use_with(incoming);
                 bb->delete_instr(phi);
                 changed = true;
+                anyChanged = true;
                 it = bb->instr_list_.begin();
             }
         }
     }
+    return anyChanged;
 }
 
 bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
+    // 单 latch 是 LoopSimplify 的后置条件；多 latch 时"来自 latch 的入边"
+    // 不唯一，保守跳过
+    BasicBlock *latch = loop.singleLatch();
+    if (!latch) return false;
     bool anyChanged = false;
     bool changed = true;
     while (changed) {
@@ -376,7 +349,7 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 Value *inc_bb  = phi->get_operand(i + 1);
                 Value *inc_val = phi->get_operand(i);
-                if (inc_bb == loop.latch) {
+                if (inc_bb == latch) {
                     if (inc_val != phi) self_loop = false;
                 } else {
                     if (!non_latch_val) non_latch_val = inc_val;
@@ -403,37 +376,49 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     return anyChanged;
 }
 
-void LICM::runOnFunction(Function *func, AnalysisManager &AM) {
-    if (func->basic_blocks_.empty()) return;
+bool LICM::runOnFunction(Function *func, AnalysisManager &AM) {
+    if (func->basic_blocks_.empty()) return false;
 
-    eliminateSinglePredPhis(func);
+    bool anyChanged = eliminateSinglePredPhis(func);
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
-
-    std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-        return a.blocks.size() < b.blocks.size();
-    });
-
-    for (auto &loop : loops) {
+    // 由内向外处理。本 pass 不改 CFG，但 changed 后会失效 AM 缓存的
+    // LoopInfo，Loop* 不能跨失效持有——先收集稳定的 header 列表，
+    // 每轮按 header 重查当前 LoopInfo。
+    std::vector<BasicBlock *> headers;
+    {
         LoopInfo &LI = AM.getLoopInfo(func);
-        ScalarEvolution &SE = AM.getScalarEvolution(func);
-        BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
+        std::sort(loops.begin(), loops.end(), [](Loop *a, Loop *b) {
+            return a->depth > b->depth;
+        });
+        for (auto *l : loops)
+            headers.push_back(l->header);
+    }
 
-        ::Loop *analysisLoop = nullptr;
-        for (auto &ownedLoop : LI.allLoops()) {
-            if (ownedLoop->header == loop.header) {
-                analysisLoop = ownedLoop.get();
+    for (auto *header : headers) {
+        LoopInfo &LI = AM.getLoopInfo(func);
+        Loop *loop = nullptr;
+        for (auto &l : LI.allLoops()) {
+            if (l->header == header) {
+                loop = l.get();
                 break;
             }
         }
+        if (!loop) continue;
 
-        bool changed = runOnLoop(loop, &SE, analysisLoop, &BAA);
-        bool phiChanged = eliminateTrivialHeaderPhis(loop);
+        ScalarEvolution &SE = AM.getScalarEvolution(func);
+        BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
+
+        bool changed = runOnLoop(*loop, &SE, &BAA);
+        bool phiChanged = eliminateTrivialHeaderPhis(*loop);
         if (changed || phiChanged) {
+            anyChanged = true;
             PreservedAnalyses pa;
             pa.preserveBasicAA();
             AM.invalidateFunction(func, pa);
         }
     }
+    return anyChanged;
 }

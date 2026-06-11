@@ -195,29 +195,47 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
     return false;
 }
 
-// 删除不可达块（无前驱的非入口块）
+// 删除从入口不可达的块。按可达性计算而非仅看前驱是否为空：
+// 不可达的自环/环（如 SCCP 折叠分支后留下的死循环体）前驱非空，
+// 仅靠"无前驱"判断永远删不掉，其 phi 还会被后续 pass 收缩成自引用指令。
 static void removeDeadBlocks(Function *func) {
     auto *entry = getEntryBlock(func);
-    std::queue<BasicBlock *> worklist;
-    for (auto *bb : func->basic_blocks_) {
-        if (bb != entry && bb->pre_bbs_.empty()) {
-            worklist.push(bb);
-        }
-    }
+    if (!entry) return;
 
+    // 可达性沿 terminator 的基本块操作数传播，不走 succ_bbs_：
+    // 个别 pass 改写分支目标时遗漏维护 succ/pre 链表，terminator 才是事实。
+    std::set<BasicBlock *> reachable;
+    std::queue<BasicBlock *> worklist;
+    reachable.insert(entry);
+    worklist.push(entry);
     while (!worklist.empty()) {
         auto *bb = worklist.front();
         worklist.pop();
-
-        // 修改后继块的前驱列表，并检查后继是否变成不可达
-        auto succs = bb->succ_bbs_; // 拷贝
-        for (auto *succ : succs) {
-            // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
-            removeBBFromPhi(bb, succ);
-
-            succ->remove_pre_basic_block(bb);
-            if (succ != entry && succ->pre_bbs_.empty()) {
+        auto *term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+            if (succ && reachable.insert(succ).second)
                 worklist.push(succ);
+        }
+    }
+
+    std::vector<BasicBlock *> dead;
+    for (auto *bb : func->basic_blocks_) {
+        if (!reachable.count(bb))
+            dead.push_back(bb);
+    }
+
+    for (auto *bb : dead) {
+        // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
+        auto *term = bb->get_terminator();
+        if (term) {
+            for (unsigned i = 0; i < term->num_ops_; ++i) {
+                auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+                if (succ && reachable.count(succ)) {
+                    removeBBFromPhi(bb, succ);
+                    succ->remove_pre_basic_block(bb);
+                }
             }
         }
 
@@ -226,6 +244,24 @@ static void removeDeadBlocks(Function *func) {
         for (auto *instr : instrs) {
             bb->delete_instr(instr);
         }
+    }
+
+    // 清掉存活块中残留的指向死块的链接，再统一移除死块。
+    // 死块自身的链表先清空，避免 remove_bb 解引用其中可能已失效的指针。
+    std::set<BasicBlock *> deadSet(dead.begin(), dead.end());
+    for (auto *bb : func->basic_blocks_) {
+        if (deadSet.count(bb)) continue;
+        auto isDead = [&](BasicBlock *b) { return deadSet.count(b) > 0; };
+        bb->pre_bbs_.erase(
+            std::remove_if(bb->pre_bbs_.begin(), bb->pre_bbs_.end(), isDead),
+            bb->pre_bbs_.end());
+        bb->succ_bbs_.erase(
+            std::remove_if(bb->succ_bbs_.begin(), bb->succ_bbs_.end(), isDead),
+            bb->succ_bbs_.end());
+    }
+    for (auto *bb : dead) {
+        bb->pre_bbs_.clear();
+        bb->succ_bbs_.clear();
         bb->parent_->remove_bb(bb);
     }
 }
@@ -672,9 +708,12 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
             continue;
         }
 
-        // ── Find phi in mergeBB ──
-        PhiInst *phi = nullptr;
-        Value *trueVal = nullptr, *falseVal = nullptr;
+        // ── Find phis in mergeBB ──
+        // mergeBB 的所有 phi 都必须能转成 select，否则任何一个被遗漏的
+        // phi 在 inter 块删除后就会缺少来自 bb 的入边（错译）。
+        std::vector<PhiInst*> phis;
+        std::vector<Value*>   trueVals, falseVals;
+        bool allConvertible = true;
 
         for (auto *i : mergeBB->instr_list_) {
             if (!i->is_phi()) break;
@@ -688,12 +727,10 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
                 if (pattern == PAT_B && pred == bb) vF = val;
                 if (pattern == PAT_C && pred == bb) vT = val;
             }
-            if (!vT || !vF) continue;
-            phi = p; trueVal = vT; falseVal = vF;
-            break;
+            if (!vT || !vF || p->num_ops_ < 4) { allConvertible = false; break; }
+            phis.push_back(p); trueVals.push_back(vT); falseVals.push_back(vF);
         }
-        if (!phi || !trueVal || !falseVal) continue;
-        if (phi->num_ops_ < 4) continue;
+        if (!allConvertible || phis.empty()) continue;
 
         // ── Clone intermediate blocks' instructions into condBB ──
         std::unordered_map<Value*, Value*> valMapT, valMapF;
@@ -703,32 +740,43 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         if (!tryCloneBlock(trueInstrs,  bb, term, valMapT)) continue;
         if (!tryCloneBlock(falseInstrs, bb, term, valMapF)) continue;
 
-        Value *trueOperand  = valMapT.count(trueVal)  ? valMapT[trueVal]  : trueVal;
-        Value *falseOperand = valMapF.count(falseVal) ? valMapF[falseVal] : falseVal;
+        // ── Create one select per phi ──
+        std::vector<SelectInst*> sels;
+        for (size_t pi = 0; pi < phis.size(); ++pi) {
+            Value *trueVal  = trueVals[pi];
+            Value *falseVal = falseVals[pi];
+            Value *trueOperand  = valMapT.count(trueVal)  ? valMapT[trueVal]  : trueVal;
+            Value *falseOperand = valMapF.count(falseVal) ? valMapF[falseVal] : falseVal;
+            auto *sel = new SelectInst(icmp, trueOperand, falseOperand, trueOperand->type_);
+            bb->add_instruction_before_inst(sel, term);
+            sels.push_back(sel);
+        }
 
-        // ── Create select ──
-        auto *sel = new SelectInst(icmp, trueOperand, falseOperand, trueOperand->type_);
-        bb->add_instruction_before_inst(sel, term);
-
-        // ── Update phi ──
-        if (phi->num_ops_ == 4) {
-            // 2-pred diamond: phi can be fully replaced by the select.
-            phi->replace_all_use_with(sel);
-        } else {
-            // Multi-pred phi (&&/|| pattern): update in place.
-            for (auto *ib : {interTrueBB, interFalseBB}) {
-                if (!ib) continue;
-                for (int k = (int)phi->num_ops_ - 1; k >= 0; k -= 2) {
-                    if (phi->get_operand(k) == ib)
-                        phi->remove_operands(k - 1, k);
-                }
-            }
-            if (pattern == PAT_B || pattern == PAT_C) {
-                for (int k = 1; k < (int)phi->num_ops_; k += 2) {
-                    if (phi->get_operand(k) == bb) { phi->set_operand(k - 1, sel); break; }
-                }
+        // ── Update phis ──
+        for (size_t pi = 0; pi < phis.size(); ++pi) {
+            PhiInst *phi = phis[pi];
+            SelectInst *sel = sels[pi];
+            if (phi->num_ops_ == 4) {
+                // 2-pred diamond: phi can be fully replaced by the select.
+                // 替换后立即删除，避免留下入边集合与前驱不一致的僵尸 phi。
+                phi->replace_all_use_with(sel);
+                mergeBB->delete_instr(phi);
             } else {
-                phi->addIncoming(sel, bb);
+                // Multi-pred phi (&&/|| pattern): update in place.
+                for (auto *ib : {interTrueBB, interFalseBB}) {
+                    if (!ib) continue;
+                    for (int k = (int)phi->num_ops_ - 1; k >= 0; k -= 2) {
+                        if (phi->get_operand(k) == ib)
+                            phi->remove_operands(k - 1, k);
+                    }
+                }
+                if (pattern == PAT_B || pattern == PAT_C) {
+                    for (int k = 1; k < (int)phi->num_ops_; k += 2) {
+                        if (phi->get_operand(k) == bb) { phi->set_operand(k - 1, sel); break; }
+                    }
+                } else {
+                    phi->addIncoming(sel, bb);
+                }
             }
         }
 
@@ -741,16 +789,18 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         }
 
         // Optionally sink mergeBB into condBB when it was the sole target.
+        // 被 ret 引用的 phi 在替换后 ret 直接持有对应 select，
+        // 因此用 ret 的实际操作数重建，而不是假定某个特定 select。
         auto *mt = mergeBB->get_terminator();
         bool sinkMerge = false;
-        if (phi->use_list_.empty() && mt && mt->is_ret() &&
+        if (mt && mt->is_ret() && mt->num_ops_ == 1 &&
             mergeBB != getEntryBlock(func) && mergeBB->pre_bbs_.empty()) {
             bool allPhisDead = true;
             for (auto *instr : mergeBB->instr_list_) {
                 if (instr == mt) break;
                 if (!instr->is_phi() || !instr->use_list_.empty()) { allPhisDead = false; break; }
             }
-            if (allPhisDead) { new ReturnInst(sel, bb); sinkMerge = true; }
+            if (allPhisDead) { new ReturnInst(mt->get_operand(0), bb); sinkMerge = true; }
         }
         if (!sinkMerge) { bb->succ_bbs_.push_back(mergeBB); new BranchInst(mergeBB, bb); }
 

@@ -1,12 +1,15 @@
 #pragma once
 #include "../ir/ir.hpp"
 #include "../analysis/basicAliasAnalysis.hpp"
+#include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
-#include <map>
 #include <set>
 #include <vector>
 #include <unordered_map>
 
+// LoopVectorize（pipeline 中暂停用，见 main.cpp / plan 阶段 5）。
+// 循环结构统一来自 LoopInfo（plan 阶段 3.1）：latch/exit 经
+// singleLatch()/singleExit() 推导。
 class LoopVectorize : public Pass {
 public:
     void execute(Module *module) override;
@@ -14,15 +17,6 @@ public:
     std::string name() const override { return "LoopVectorize"; }
 
 private:
-    // ── Loop representation ─────────────────────────────────────────────
-    struct Loop {
-        BasicBlock *header;
-        BasicBlock *latch;
-        BasicBlock *preheader;        // single predecessor outside the loop
-        BasicBlock *exitBB;           // unique exit block
-        std::set<BasicBlock*> blocks; // all blocks in the loop
-    };
-
     // ── Induction variable ──────────────────────────────────────────────
     struct InductionVar {
         PhiInst      *phi;             // header phi
@@ -44,9 +38,6 @@ private:
     // ── Per-function driver ────────────────────────────────────────────
     void runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
 
-    // ── Loop detection ─────────────────────────────────────────────────
-    std::vector<Loop> findLoops(Function *func);
-
     // ── Loop analysis helpers ──────────────────────────────────────────
     bool findInductionVar(const Loop &loop, InductionVar &iv);
     bool analyzeStrideAccesses(const Loop &loop, const InductionVar &iv,
@@ -67,7 +58,4 @@ private:
                             const std::vector<MemAccess> &stores,
                             int vecWidth,
                             Function *func, Module *module);
-
-    // ── Dominator state ────────────────────────────────────────────────
-    DominatorInfo *domInfo_ = nullptr;
 };

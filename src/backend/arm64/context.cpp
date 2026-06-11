@@ -220,10 +220,27 @@ void Arm64FuncContext::reorderBlocks() {
             if (next) {
                 current = next;
             } else {
-                // Fall back: pick the first unplaced block in original order
+                // Fall back: 优先选"链头"——不是任何未放置块的 preferred 目标
+                // 的块。否则会先放下合流块本身，使它前驱的无条件跳转永远无法
+                // 变成 fallthrough（如循环体小块 → backedge 合流块）。
+                BasicBlock *head = nullptr;
                 for (auto bb : func_->basic_blocks_) {
-                    if (!placed.count(bb)) { current = bb; break; }
+                    if (placed.count(bb)) continue;
+                    bool isPreferredTarget = false;
+                    for (auto &kv : preferred) {
+                        if (kv.second == bb && !placed.count(kv.first)) {
+                            isPreferredTarget = true;
+                            break;
+                        }
+                    }
+                    if (!isPreferredTarget) { head = bb; break; }
                 }
+                if (!head) {
+                    for (auto bb : func_->basic_blocks_) {
+                        if (!placed.count(bb)) { head = bb; break; }
+                    }
+                }
+                current = head;
             }
         }
         order.push_back(current);
@@ -373,9 +390,21 @@ void Arm64FuncContext::emitPrologue() {
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
+   // 入参搬移是一组并行拷贝：某个参数分配到的目标寄存器可能正是后续参数的
+   // 入参寄存器（如 arg2 分配到 w3，而 arg3 经 w3 传入），不能边遍历边发射
+   // mov。先把所有需要落栈的参数 spill（此时入参寄存器还保有原值），再按
+   // "目标不挡未读源"的顺序发射 mov；出现拷贝环时从栈槽重载打破。
    int intRegIdx = 0;     // x0-x7 / w0-w7
    int floatRegIdx = 0;   // s0-s7
    int stackOffset = 0;   // stack argument offset (relative to x29+16)
+
+   struct ArgMove {
+       std::string dst;
+       std::string src;    // 空串表示只能从栈槽重载（栈传参）
+       int slot;
+       bool isFloat;
+   };
+   std::vector<ArgMove> argMoves;
 
    for (auto arg : func_->arguments_) {
         if (isFloat(arg->type_)) {
@@ -388,7 +417,7 @@ void Arm64FuncContext::emitPrologue() {
                     } else {
                         int slot = getSlot(arg);
                         emitStoreRegMachine(src, slot);
-                        emitMoveMachine(dst, src, "fmov");
+                        argMoves.push_back({dst, src, slot, true});
                     }
                 } else {
                     int slot = getSlot(arg);
@@ -406,7 +435,7 @@ void Arm64FuncContext::emitPrologue() {
                 emitStoreRegMachine("s17", slot);
                 if (hasAssignedReg(arg)) {
                     std::string dst = assignedReg(arg);
-                    emitMoveMachine(dst, "s17", "fmov");
+                    argMoves.push_back({dst, "", slot, true});
                 }
                 stackOffset += 8;
             }
@@ -424,7 +453,7 @@ void Arm64FuncContext::emitPrologue() {
                     } else {
                         int slot = getSlot(arg);
                         emitStoreRegMachine(reg, slot);
-                        emitMoveMachine(dst, reg);
+                        argMoves.push_back({dst, reg, slot, false});
                     }
                 } else {
                     int slot = getSlot(arg);
@@ -444,15 +473,47 @@ void Arm64FuncContext::emitPrologue() {
                     bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
                                 arg->type_->tid_ == Type::ArrayTyID);
                     std::string dst = assignedReg(arg, isPtr);
-                    if (isPtr) {
-                        if (dst != "x17") emitMoveMachine(dst, "x17");
-                    } else {
-                        // dst 形如 "w24"，从 x17 取出低 32 位
-                        emitMoveMachine(dst, "w17");
-                    }
+                    argMoves.push_back({dst, "", slot, false});
                 }
                 stackOffset += 8;
             }
+        }
+    }
+
+    // 物理寄存器编号（w3/x3 同号同寄存器；s/d 同理），用于冲突判断
+    auto regId = [](const std::string &r) -> std::string {
+        if (r.empty()) return "";
+        char c = r[0];
+        return ((c == 'w' || c == 'x') ? "i" : "f") + r.substr(1);
+    };
+    while (!argMoves.empty()) {
+        bool progress = false;
+        for (size_t i = 0; i < argMoves.size(); ++i) {
+            std::string dstId = regId(argMoves[i].dst);
+            bool blocksPendingSrc = false;
+            for (size_t j = 0; j < argMoves.size(); ++j) {
+                if (j != i && !argMoves[j].src.empty() &&
+                    regId(argMoves[j].src) == dstId) {
+                    blocksPendingSrc = true;
+                    break;
+                }
+            }
+            if (blocksPendingSrc)
+                continue;
+            if (argMoves[i].src.empty())
+                emitLoadRegMachine(argMoves[i].dst, argMoves[i].slot);
+            else if (argMoves[i].isFloat)
+                emitMoveMachine(argMoves[i].dst, argMoves[i].src, "fmov");
+            else
+                emitMoveMachine(argMoves[i].dst, argMoves[i].src);
+            argMoves.erase(argMoves.begin() + i);
+            progress = true;
+            break;
+        }
+        if (!progress) {
+            // 拷贝环（如 arg0→w1 且 arg1→w0）：spill 阶段已保存原值，从栈槽重载
+            emitLoadRegMachine(argMoves.front().dst, argMoves.front().slot);
+            argMoves.erase(argMoves.begin());
         }
     }
 }

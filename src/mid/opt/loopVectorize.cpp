@@ -54,66 +54,6 @@ PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
 }
 
 // =====================================================================
-// 循环检测
-// =====================================================================
-
-std::vector<LoopVectorize::Loop> LoopVectorize::findLoops(Function *func) {
-    std::vector<Loop> loops;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            // back edge: bb -> succ  and  succ dominates bb
-            if (!domInfo_->dominates(succ, bb)) continue;
-            if (bb == succ) continue; // skip self-loop for now
-
-            Loop loop;
-            loop.header = succ;
-            loop.latch  = bb;
-
-            // Collect loop body by reverse traversal
-            loop.blocks.insert(succ);
-            if (bb != succ) {
-                std::queue<BasicBlock*> wl;
-                wl.push(bb);
-                while (!wl.empty()) {
-                    auto cur = wl.front(); wl.pop();
-                    if (!loop.blocks.insert(cur).second) continue;
-                    for (auto pred : cur->pre_bbs_)
-                        if (!loop.blocks.count(pred)) wl.push(pred);
-                }
-            }
-
-            // Find preheader (single predecessor outside the loop)
-            loop.preheader = nullptr;
-            for (auto pred : loop.header->pre_bbs_) {
-                if (!loop.blocks.count(pred)) {
-                    if (loop.preheader) { loop.preheader = nullptr; break; }
-                    loop.preheader = pred;
-                }
-            }
-
-            // Find unique exit block
-            loop.exitBB = nullptr;
-            for (auto b : loop.blocks) {
-                for (auto succExit : b->succ_bbs_) {
-                    if (!loop.blocks.count(succExit)) {
-                        if (loop.exitBB && loop.exitBB != succExit) {
-                            loop.exitBB = nullptr; // multiple exits
-                        } else {
-                            loop.exitBB = succExit;
-                        }
-                    }
-                }
-            }
-
-            loops.push_back(std::move(loop));
-        }
-    }
-
-    return loops;
-}
-
-// =====================================================================
 // 循环不变值判断
 // =====================================================================
 
@@ -479,8 +419,12 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     // 1. Loop must have a preheader
     if (!loop.preheader) { return false; }
 
+    // 1b. 单 latch 且非自环（旧手写检测逐回边 + 跳自环，等价约束）
+    if (!loop.singleLatch() || loop.singleLatch() == loop.header)
+        return false;
+
     // 2. Loop must have a unique exit
-    if (!loop.exitBB) { return false; }
+    if (!loop.singleExit()) { return false; }
 
     // 3. Loop should be small (single block or simple 2-block: header+latch)
     if (loop.blocks.size() > 2) { /* no log — too many outer loops */ return false; }
@@ -489,20 +433,18 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     InductionVar iv;
     if (!findInductionVar(loop, iv)) { return false; }
 
-    // 5. Check for non-IV phis (accumulators, pointer phis from LICM, etc.).
-    //    Pointer phis are handled by gep(phi, j) in headerNonIVPhis.
-    //    Integer phis with a constant-offset update (add/sub phi, c) are
-    //    handled by add(phi, j).  Accumulator phis ("sum += product") are
-    //    rejected — they need cross-copy chaining which isn't implemented.
+    // 5. 非 IV header phi 限制（5.1 收紧，2026-06-11）：
+    //    - 整型 aux phi 一律拒绝。lane 映射 add(phi, j) 假设步长 +1，且
+    //      余数循环没有 aux 接力 phi（注释里的 remAux 从未实现）——aux 在
+    //      余数循环会从初值重启，错译 30_many_dimensions（计数器写数组）。
+    //      完整 aux phi 链（带步长的 lane 偏移 + vec 回边 ×W + remAux +
+    //      afterLoop 合流）见 plan 5.1 待办。
+    //    - 指针 phi 仅允许 gep(phi, 1)（单位元素步长）：lane 映射
+    //      gep(phi, j) 同样假设步长 1。
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         if (inst == iv.phi) continue;
         auto *phi = static_cast<PhiInst*>(inst);
-        if (phi->type_->tid_ == Type::PointerTyID) continue; // pointer phi: OK
-        // Integer non-IV phi: check whether it's a constant-offset pattern
-        //   e.g.  %idx = phi [0], [add %idx, 1]
-        // or an accumulator:
-        //   e.g.  %sum = phi [0], [add %sum, %product]
         Value *latchVal = nullptr;
         for (unsigned i = 0; i < phi->num_ops_; i += 2) {
             if (loop.blocks.count(static_cast<BasicBlock*>(phi->get_operand(i + 1)))) {
@@ -511,12 +453,29 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         }
         if (!latchVal) { return false; }
         auto *update = dynamic_cast<Instruction*>(latchVal);
-        if (!update || (!update->is_add() && !update->is_sub())) { return false; }
-        // Must be add/sub phi, constant  (not add phi, variable)
-        Value *op0 = update->get_operand(0), *op1 = update->get_operand(1);
-        bool isConst = (op0 == phi && dynamic_cast<ConstantInt*>(op1)) ||
-                       (update->is_add() && op1 == phi && dynamic_cast<ConstantInt*>(op0));
-        if (!isConst) { return false; }
+        if (phi->type_->tid_ == Type::PointerTyID) {
+            auto *gep = dynamic_cast<GetElementPtrInst*>(update);
+            if (!gep || gep->get_operand(0) != phi || gep->num_ops_ != 2)
+                return false;
+            auto *stride = dynamic_cast<ConstantInt*>(gep->get_operand(1));
+            if (!stride || stride->value_ != 1) { return false; }
+            continue;
+        }
+        return false; // 整型 aux phi：见上
+    }
+
+    // 5b. live-out 限制：循环内定义、循环外使用的值只允许是 header phi。
+    //     header phi（IV/aux）经 remPhi/remAux 与 afterLoop 合流 phi 接力；
+    //     其他值在余数循环零次执行时没有定义，无法保证支配性。
+    for (auto bb : loop.blocks) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_phi() && inst->parent_ == loop.header) continue;
+            for (const auto &u : inst->use_list_) {
+                auto *user = dynamic_cast<Instruction*>(u.val_);
+                if (user && user->parent_ && !loop.blocks.count(user->parent_))
+                    return false;
+            }
+        }
     }
 
     // 6. Find memory accesses with unit stride
@@ -544,6 +503,11 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         return false;
     }
 
+    // 无 store 的循环（如 03_sort 的查找循环）没有可打包的向量目标
+    //（VECTOR_IR 以 store 组为锚），产物是 4 倍标量展开、零 NEON。
+    // 实测这种"变相展开"对 sort 家族有 ~5% 收益（中位数 495ms vs
+    // 拒绝后 522ms），故保留；asm 里见不到 .4s 是预期行为，不是 bug。
+
     // 8. Find the trip count bound from the comparison instruction
     //    We need to know the loop bound to determine if strip-mining is viable
     //    For now, we'll emit both vectorized loop and remainder loop
@@ -570,6 +534,20 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
             }
         }
     }
+
+    // 临时二分开关：限制成功向量化的次数,用于定位错译点
+    if (const char *lim = std::getenv("DEBUG_LOOP_VECTORIZE_LIMIT")) {
+        static int vecCount = 0;
+        if (vecCount >= atoi(lim))
+            return false;
+        vecCount++;
+    }
+
+    if (std::getenv("DEBUG_LOOP_VECTORIZE"))
+        std::cerr << "[LoopVectorize] func=" << func->name_
+                  << " header=" << loop.header->name_
+                  << " loads=" << loads.size()
+                  << " stores=" << stores.size() << "\n";
 
     emitVectorizedLoop(loop, iv, loads, stores, VECTORIZE_FACTOR, func, func->parent_);
     return true;
@@ -654,8 +632,8 @@ void LoopVectorize::emitVectorizedLoop(
 {
     BasicBlock *preheader  = loop.preheader;
     BasicBlock *origHeader = loop.header;
-    BasicBlock *origLatch  = loop.latch;
-    BasicBlock *origExit   = loop.exitBB;
+    BasicBlock *origLatch  = loop.singleLatch();
+    BasicBlock *origExit   = loop.singleExit();
 
     // We only handle the case where the loop header has a conditional branch
     // that exits to origExit when the condition is false, and goes to the
@@ -1474,6 +1452,17 @@ void LoopVectorize::emitVectorizedLoop(
         }
     }
 
+    // origLatch 不再是 origHeader 的前驱，删除 header phi 中来自它的残留
+    // incoming（该值现在经由 remPhi 从 remHeader 流入）
+    for (auto inst : origHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst*>(inst);
+        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+            if (phi->get_operand(i + 1) == origLatch)
+                phi->remove_operands(i, i + 1);
+        }
+    }
+
     // Collect loop blocks that actually branch to origExit (their successor edges
     // are rewired to afterLoop below; phis in origExit need their incoming BBs
     // updated from those blocks → afterLoop, otherwise SSA breaks).
@@ -1489,6 +1478,8 @@ void LoopVectorize::emitVectorizedLoop(
                 term->use_pos_[i]  = afterLoop->add_use(term, i);
                 succ->remove_pre_basic_block(bb);
                 afterLoop->add_pre_basic_block(bb);
+                bb->remove_succ_basic_block(origExit);
+                bb->add_succ_basic_block(afterLoop);
             }
         }
     }
@@ -1521,24 +1512,25 @@ void LoopVectorize::emitVectorizedLoop(
 void LoopVectorize::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
-
+    // 变换改 CFG，成功一次就重新分析 LoopInfo 再扫（与旧重启逻辑一致）
     bool changed = true;
     for (int iter = 0; iter < 5 && changed; iter++) {
         changed = false;
-        std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-            return a.blocks.size() < b.blocks.size();
+
+        LoopInfo LI;
+        LI.analyze(func);
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
+        std::sort(loops.begin(), loops.end(), [](Loop *a, Loop *b) {
+            return a->blocks.size() < b->blocks.size();
         });
 
-        for (auto &loop : loops) {
-            if (tryVectorize(loop, func, func->parent_, BAA)) {
+        for (auto *loop : loops) {
+            if (tryVectorize(*loop, func, func->parent_, BAA)) {
                 changed = true;
-                // 变换修改了 CFG，失效并重新计算支配信息
                 func->invalidateDominatorInfo();
-                domInfo_ = &func->getDominatorInfo();
-                loops = findLoops(func);
-                break; // restart iteration
+                break; // restart with fresh LoopInfo
             }
         }
     }
