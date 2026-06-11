@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/peephole.hpp"
 #include "../../include/backend/arm64/context.hpp"
 #include "../../include/backend/arm64/machine.hpp"
+#include "../../include/backend/arm64/machineDCE.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <cstring>
@@ -93,7 +94,9 @@ void Arm64CodeGen::generate() {
                         scheduler.schedule(machineFunc);
                     }
                     if (!no_peephole_) {
+                        machineDCE(machineFunc);
                         peepholeOptimize(machineFunc);
+                        machineDCE(machineFunc);
                     }
                     if (dump_machine_instr_) {
                         std::cerr << dumpMachineFunction(machineFunc);
