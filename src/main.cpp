@@ -16,6 +16,7 @@
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
+#include "include/mid/opt/lcssa.hpp"
 #include "include/mid/opt/loopRotate.hpp"
 #include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
@@ -182,6 +183,7 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<PhiOpSink>());
     pm.addPass(std::make_unique<LICM>());

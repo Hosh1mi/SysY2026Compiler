@@ -24,6 +24,8 @@ void PassManager::run(Module *module) {
             const std::string &n = pass->name();
             if (n == "LoopSimplify")
                 verifyLoops(module, /*level=*/2, "after " + n, /*warnOnly=*/true);
+            else if (n == "LCSSA")
+                verifyLoops(module, /*level=*/3, "after " + n, /*warnOnly=*/true);
             else if (n == "LoopRotate")
                 verifyLoops(module, /*level=*/1, "after " + n, /*warnOnly=*/true);
         }
