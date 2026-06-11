@@ -390,7 +390,7 @@ void AutoMemoization::transform(Function *f,
 //           oldEntry ← (valid==0 或任一 key 不匹配)
 //                  ... → retBB → store{keys, val, valid=1} → ret retVal
 
-void AutoMemoization::transformHash(Function *f) {
+/* static */ void AutoMemoization::transformHash(Function *f) {
     Module *m = f->parent_;
     auto i32 = m->int32_ty_;
     unsigned nArgs = f->arguments_.size();

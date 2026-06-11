@@ -30,6 +30,15 @@ public:
     // 模块无候选时直接不加 pass，pipeline 与原状完全一致。
     static bool moduleHasAnyCandidate(Module *m);
 
+    // 哈希记忆化的核心变换；公开以便 AccumElim 等 pass 在 pipeline 早期
+    // 直接对刚生成的 aux 函数加缓存（绕过 array/hash 选路决策）。
+    static void transformHash(Function *f);
+
+    // ── 哈希参数 / 槽布局常量；公开以便共享同一槽格式 ──
+    static constexpr unsigned HASH_BITS = 16;
+    static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
+    static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
+
 private:
     static constexpr unsigned MAX_ARGS = 2;
     static constexpr unsigned MIN_SELF_CALLS = 2;
@@ -39,14 +48,6 @@ private:
     // 但实际取值通常很小）。最终是否走数组路径，仍由总乘积 ≤ ARRAY_PRODUCT_LIMIT
     // 决定；本兜底不会让 BSS 失控。
     static constexpr unsigned DEFAULT_BOUND = 1024;
-
-    // ── 哈希兜底参数（推不出 bound 或 bound 乘积过大时启用）──
-    // 64K 槽 × {valid + keys + val}：单函数最多约 1 MB BSS。
-    // 槽数按 A53 L2（1 MB 共享，有效约 512 KB）选取，热点子集可驻 L2；
-    // 碰撞只导致"少缓存一次"，不会破坏正确性（槽内存 key 用于比较）。
-    static constexpr unsigned HASH_BITS = 16;
-    static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
-    static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
 
     // 数组路径乘积上限：超过则改走哈希。
     // 1.5M 元素 × i32 × 2 张表（flag+val）= 12 MB BSS 上限。
@@ -58,5 +59,4 @@ private:
     bool functionReadsMemory(Function *f);
     unsigned deriveArgBound(Function *f, Argument *arg);
     void transform(Function *f, const std::vector<unsigned> &bounds);
-    void transformHash(Function *f);
 };
