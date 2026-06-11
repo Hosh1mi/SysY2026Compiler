@@ -60,6 +60,10 @@ bool isCompleteIntSplatInsertChain(Instruction *inst, int &value) {
     return true;
 }
 
+bool canUseMoviSplat(int value) {
+    return value == 0 || (value > 0 && value <= 255);
+}
+
 bool isSplatInsertChainIntermediate(Instruction *inst) {
     auto *user = singleInsertElementUser(inst);
     if (!user) return false;
@@ -68,12 +72,9 @@ bool isSplatInsertChainIntermediate(Instruction *inst) {
     while (auto *next = singleInsertElementUser(terminal))
         terminal = next;
 
-    int ignored = 0;
-    return isCompleteIntSplatInsertChain(terminal, ignored);
-}
-
-bool canUseMoviSplat(int value) {
-    return value == 0 || (value > 0 && value <= 255);
+    int value = 0;
+    return isCompleteIntSplatInsertChain(terminal, value) &&
+           canUseMoviSplat(value);
 }
 
 } // namespace
