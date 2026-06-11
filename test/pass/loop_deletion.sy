@@ -1,0 +1,35 @@
+// LoopDeletion: 死循环(结果未用、无副作用、可证终止)应被整体删除。
+// 预期:-O1 下两个死循环(含嵌套)消失,输出 45;
+//       DEBUG_LOOP_DELETION=1 可见两条 delete 日志。
+int main() {
+    int i = 0;
+    int s = 0;
+    int n = getint();
+
+    int t = 0;
+    i = 0;
+    while (i < 1000000) {
+        t = t + i;
+        i = i + 1;
+    }
+
+    i = 0;
+    while (i < n) {
+        s = s + i;
+        i = i + 1;
+    }
+
+    int u = 0;
+    i = 0;
+    while (i < 1000) {
+        int j = 0;
+        while (j < 1000) {
+            u = u + j;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    putint(s);
+    return 0;
+}

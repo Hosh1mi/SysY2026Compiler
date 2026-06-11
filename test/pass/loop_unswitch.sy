@@ -1,0 +1,23 @@
+// SimpleLoopUnswitch: 循环不变条件 mode 的分支应外提,循环克隆为真/假两版。
+// 分支体含 store,确保不会先被 diamond→select 吃掉。
+// 预期:DEBUG_LOOP_UNSWITCH=1 可见 unswitch 日志;两种 mode 输出正确。
+int a[64];
+int b[64];
+int main() {
+    int n = getint();
+    int mode = getint();
+    int s = 0;
+    int i = 0;
+    while (i < n) {
+        if (mode == 1) {
+            a[i] = i * 2;
+            s = s + a[i];
+        } else {
+            b[i] = i + 1;
+            s = s + b[i];
+        }
+        i = i + 1;
+    }
+    putint(s);
+    return 0;
+}

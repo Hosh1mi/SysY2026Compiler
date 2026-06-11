@@ -17,9 +17,11 @@
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
 #include "include/mid/opt/lcssa.hpp"
+#include "include/mid/opt/simpleLoopUnswitch.hpp"
 #include "include/mid/opt/loopRotate.hpp"
 #include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
 #include "include/mid/opt/scalarExpandedInterchange.hpp"
@@ -184,10 +186,14 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
+    // unswitch 在 LCSSA 维持窗口内：出口值改写完全依赖 exit phi
+    pm.addPass(std::make_unique<SimpleLoopUnswitch>());
     pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<PhiOpSink>());
     pm.addPass(std::make_unique<LICM>());
     addCanonicalCleanup(pm);
+    // 死循环删除放清理之后：DCE 把循环计算的值清成"未使用"后才暴露机会
+    pm.addPass(std::make_unique<LoopDeletion>());
     // LoopVectorize 暂时停用：标量展开对非 IV 循环携带 phi 的处理有
     // 多处正确性问题（克隆引用余数循环的 phi、步长假设、live-out 在
     // 余数循环零次执行时未定义），已确认错译 h_functional/30_many_dimensions
