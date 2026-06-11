@@ -186,6 +186,38 @@ void Arm64FuncContext::emitLoadPairMachine(const std::string &r1, const std::str
     }
 }
 
+void Arm64FuncContext::emitStoreRegSPMachine(const std::string &reg, int off) {
+    MachineInstr inst = MachineInstr::make(
+        "\tstr " + reg + ", [sp, #" + std::to_string(off) + "]",
+        MOpcode::Store, {}, {reg, "sp"});
+    inst.mayStore = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitLoadRegSPMachine(const std::string &reg, int off) {
+    MachineInstr inst = MachineInstr::make(
+        "\tldr " + reg + ", [sp, #" + std::to_string(off) + "]",
+        MOpcode::Load, {reg}, {"sp"}, 4);
+    inst.mayLoad = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitStorePairSPMachine(const std::string &r1, const std::string &r2, int off) {
+    MachineInstr inst = MachineInstr::make(
+        "\tstp " + r1 + ", " + r2 + ", [sp, #" + std::to_string(off) + "]",
+        MOpcode::PairStore, {}, {r1, r2, "sp"});
+    inst.mayStore = true;
+    emitMachineInstr(std::move(inst));
+}
+
+void Arm64FuncContext::emitLoadPairSPMachine(const std::string &r1, const std::string &r2, int off) {
+    MachineInstr inst = MachineInstr::make(
+        "\tldp " + r1 + ", " + r2 + ", [sp, #" + std::to_string(off) + "]",
+        MOpcode::PairLoad, {r1, r2}, {"sp"}, 4);
+    inst.mayLoad = true;
+    emitMachineInstr(std::move(inst));
+}
+
 void Arm64FuncContext::emitLoadMemMachine(const std::string &reg, const std::string &addrText,
                                           std::initializer_list<std::string> uses,
                                           MOpcode opcode, int latency) {

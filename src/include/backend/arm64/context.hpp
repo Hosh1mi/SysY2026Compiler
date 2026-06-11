@@ -27,6 +27,10 @@ private:
     void emitStoreRegMachine(const std::string &reg, int off);
     void emitLoadPairMachine(const std::string &r1, const std::string &r2, int off);
     void emitStorePairMachine(const std::string &r1, const std::string &r2, int off);
+    void emitLoadRegSPMachine(const std::string &reg, int off);
+    void emitStoreRegSPMachine(const std::string &reg, int off);
+    void emitLoadPairSPMachine(const std::string &r1, const std::string &r2, int off);
+    void emitStorePairSPMachine(const std::string &r1, const std::string &r2, int off);
     void emitLoadMemMachine(const std::string &reg, const std::string &addrText,
                             std::initializer_list<std::string> uses,
                             MOpcode opcode = MOpcode::Load, int latency = 4);

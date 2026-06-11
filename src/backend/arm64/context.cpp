@@ -338,7 +338,6 @@ void Arm64FuncContext::emitPrologue() {
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
     int localSize = align16(prologueFrameSize_ + savedRegBytes);
-    int saveOffset = -prologueFrameSize_;
 
     // Determine whether the function has any call instructions.
     bool hasCalls = false;
@@ -362,30 +361,37 @@ void Arm64FuncContext::emitPrologue() {
         }
     }
 
+    int saveOffset = 0;
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {
-            saveOffset -= 16;
-            emitStorePairMachine("x" + std::to_string(savedIntRegs[i+1]),
-                                 "x" + std::to_string(savedIntRegs[i]), saveOffset);
+            emitStorePairSPMachine("x" + std::to_string(savedIntRegs[i+1]),
+                                   "x" + std::to_string(savedIntRegs[i]), saveOffset);
+            saveOffset += 16;
         } else {
-            saveOffset -= 8;
-            emitStoreRegMachine("x" + std::to_string(savedIntRegs[i]), saveOffset);
+            emitStoreRegSPMachine("x" + std::to_string(savedIntRegs[i]), saveOffset);
+            saveOffset += 8;
         }
     }
     for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
         if (i + 1 < savedFloatRegs.size()) {
-            saveOffset -= 16;
-            emitStorePairMachine("d" + std::to_string(savedFloatRegs[i+1]),
-                                 "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            emitStorePairSPMachine("d" + std::to_string(savedFloatRegs[i+1]),
+                                   "d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            saveOffset += 16;
         } else {
-            saveOffset -= 8;
-            emitStoreRegMachine("d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            emitStoreRegSPMachine("d" + std::to_string(savedFloatRegs[i]), saveOffset);
+            saveOffset += 8;
         }
     }
     // AAPCS64 only requires callees to preserve the low 64 bits of v8-v15.
-    for (int r : savedNEONRegs) {
-        saveOffset -= 8;
-        emitStoreRegMachine("d" + std::to_string(r), saveOffset);
+    for (size_t i = 0; i < savedNEONRegs.size(); i += 2) {
+        if (i + 1 < savedNEONRegs.size()) {
+            emitStorePairSPMachine("d" + std::to_string(savedNEONRegs[i]),
+                                   "d" + std::to_string(savedNEONRegs[i+1]), saveOffset);
+            saveOffset += 16;
+        } else {
+            emitStoreRegSPMachine("d" + std::to_string(savedNEONRegs[i]), saveOffset);
+            saveOffset += 8;
+        }
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
@@ -531,32 +537,38 @@ void Arm64FuncContext::emitEpilogue() {
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
     int localSize = align16(prologueFrameSize_ + savedRegBytes);
-    int restoreOffset = -prologueFrameSize_;
 
+    int restoreOffset = 0;
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
         if (i + 1 < savedIntRegs.size()) {
-            restoreOffset -= 16;
-            emitLoadPairMachine("x" + std::to_string(savedIntRegs[i+1]),
-                                "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            emitLoadPairSPMachine("x" + std::to_string(savedIntRegs[i+1]),
+                                  "x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            restoreOffset += 16;
         } else {
-            restoreOffset -= 8;
-            emitLoadRegMachine("x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            emitLoadRegSPMachine("x" + std::to_string(savedIntRegs[i]), restoreOffset);
+            restoreOffset += 8;
         }
     }
     for (size_t i = 0; i < savedFloatRegs.size(); i += 2) {
         if (i + 1 < savedFloatRegs.size()) {
-            restoreOffset -= 16;
-            emitLoadPairMachine("d" + std::to_string(savedFloatRegs[i+1]),
-                                "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            emitLoadPairSPMachine("d" + std::to_string(savedFloatRegs[i+1]),
+                                  "d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            restoreOffset += 16;
         } else {
-            restoreOffset -= 8;
-            emitLoadRegMachine("d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            emitLoadRegSPMachine("d" + std::to_string(savedFloatRegs[i]), restoreOffset);
+            restoreOffset += 8;
         }
     }
     // Match the prologue: restore only the ABI-preserved low 64 bits.
-    for (int r : savedNEONRegs) {
-        restoreOffset -= 8;
-        emitLoadRegMachine("d" + std::to_string(r), restoreOffset);
+    for (size_t i = 0; i < savedNEONRegs.size(); i += 2) {
+        if (i + 1 < savedNEONRegs.size()) {
+            emitLoadPairSPMachine("d" + std::to_string(savedNEONRegs[i]),
+                                  "d" + std::to_string(savedNEONRegs[i+1]), restoreOffset);
+            restoreOffset += 16;
+        } else {
+            emitLoadRegSPMachine("d" + std::to_string(savedNEONRegs[i]), restoreOffset);
+            restoreOffset += 8;
+        }
     }
 
     if (localSize > 0) {
