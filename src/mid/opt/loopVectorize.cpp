@@ -54,66 +54,6 @@ PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
 }
 
 // =====================================================================
-// 循环检测
-// =====================================================================
-
-std::vector<LoopVectorize::Loop> LoopVectorize::findLoops(Function *func) {
-    std::vector<Loop> loops;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            // back edge: bb -> succ  and  succ dominates bb
-            if (!domInfo_->dominates(succ, bb)) continue;
-            if (bb == succ) continue; // skip self-loop for now
-
-            Loop loop;
-            loop.header = succ;
-            loop.latch  = bb;
-
-            // Collect loop body by reverse traversal
-            loop.blocks.insert(succ);
-            if (bb != succ) {
-                std::queue<BasicBlock*> wl;
-                wl.push(bb);
-                while (!wl.empty()) {
-                    auto cur = wl.front(); wl.pop();
-                    if (!loop.blocks.insert(cur).second) continue;
-                    for (auto pred : cur->pre_bbs_)
-                        if (!loop.blocks.count(pred)) wl.push(pred);
-                }
-            }
-
-            // Find preheader (single predecessor outside the loop)
-            loop.preheader = nullptr;
-            for (auto pred : loop.header->pre_bbs_) {
-                if (!loop.blocks.count(pred)) {
-                    if (loop.preheader) { loop.preheader = nullptr; break; }
-                    loop.preheader = pred;
-                }
-            }
-
-            // Find unique exit block
-            loop.exitBB = nullptr;
-            for (auto b : loop.blocks) {
-                for (auto succExit : b->succ_bbs_) {
-                    if (!loop.blocks.count(succExit)) {
-                        if (loop.exitBB && loop.exitBB != succExit) {
-                            loop.exitBB = nullptr; // multiple exits
-                        } else {
-                            loop.exitBB = succExit;
-                        }
-                    }
-                }
-            }
-
-            loops.push_back(std::move(loop));
-        }
-    }
-
-    return loops;
-}
-
-// =====================================================================
 // 循环不变值判断
 // =====================================================================
 
@@ -479,8 +419,12 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     // 1. Loop must have a preheader
     if (!loop.preheader) { return false; }
 
+    // 1b. 单 latch 且非自环（旧手写检测逐回边 + 跳自环，等价约束）
+    if (!loop.singleLatch() || loop.singleLatch() == loop.header)
+        return false;
+
     // 2. Loop must have a unique exit
-    if (!loop.exitBB) { return false; }
+    if (!loop.singleExit()) { return false; }
 
     // 3. Loop should be small (single block or simple 2-block: header+latch)
     if (loop.blocks.size() > 2) { /* no log — too many outer loops */ return false; }
@@ -591,6 +535,12 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         }
     }
 
+    if (std::getenv("DEBUG_LOOP_VECTORIZE"))
+        std::cerr << "[LoopVectorize] func=" << func->name_
+                  << " header=" << loop.header->name_
+                  << " loads=" << loads.size()
+                  << " stores=" << stores.size() << "\n";
+
     emitVectorizedLoop(loop, iv, loads, stores, VECTORIZE_FACTOR, func, func->parent_);
     return true;
 }
@@ -674,8 +624,8 @@ void LoopVectorize::emitVectorizedLoop(
 {
     BasicBlock *preheader  = loop.preheader;
     BasicBlock *origHeader = loop.header;
-    BasicBlock *origLatch  = loop.latch;
-    BasicBlock *origExit   = loop.exitBB;
+    BasicBlock *origLatch  = loop.singleLatch();
+    BasicBlock *origExit   = loop.singleExit();
 
     // We only handle the case where the loop header has a conditional branch
     // that exits to origExit when the condition is false, and goes to the
@@ -1554,24 +1504,25 @@ void LoopVectorize::emitVectorizedLoop(
 void LoopVectorize::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
-
+    // 变换改 CFG，成功一次就重新分析 LoopInfo 再扫（与旧重启逻辑一致）
     bool changed = true;
     for (int iter = 0; iter < 5 && changed; iter++) {
         changed = false;
-        std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-            return a.blocks.size() < b.blocks.size();
+
+        LoopInfo LI;
+        LI.analyze(func);
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
+        std::sort(loops.begin(), loops.end(), [](Loop *a, Loop *b) {
+            return a->blocks.size() < b->blocks.size();
         });
 
-        for (auto &loop : loops) {
-            if (tryVectorize(loop, func, func->parent_, BAA)) {
+        for (auto *loop : loops) {
+            if (tryVectorize(*loop, func, func->parent_, BAA)) {
                 changed = true;
-                // 变换修改了 CFG，失效并重新计算支配信息
                 func->invalidateDominatorInfo();
-                domInfo_ = &func->getDominatorInfo();
-                loops = findLoops(func);
-                break; // restart iteration
+                break; // restart with fresh LoopInfo
             }
         }
     }
