@@ -365,6 +365,32 @@ void Arm64FuncContext::storeAddr(Value *v, const std::string &reg) {
 
 std::string Arm64FuncContext::loadVector(Value *v) {
     if (auto *cv = dynamic_cast<ConstantVector*>(v)) {
+        auto sameIntLane = [&]() -> ConstantInt* {
+            if (cv->elements_.empty()) return nullptr;
+            auto *first = dynamic_cast<ConstantInt*>(cv->elements_[0]);
+            if (!first) return nullptr;
+            for (auto *elem : cv->elements_) {
+                auto *ci = dynamic_cast<ConstantInt*>(elem);
+                if (!ci || ci->value_ != first->value_) return nullptr;
+            }
+            return first;
+        };
+
+        if (auto *splat = sameIntLane()) {
+            std::string rd = allocNEONReg();
+            int value = splat->value_;
+            if (value == 0) {
+                emitRawAluMachine("\tmovi " + rd + ".4s, #0",
+                                  rd, {}, MOpcode::Neon);
+                return rd;
+            }
+            if (value > 0 && value <= 255) {
+                emitRawAluMachine("\tmovi " + rd + ".4s, #" + std::to_string(value),
+                                  rd, {}, MOpcode::Neon);
+                return rd;
+            }
+        }
+
         // Materialize constant vector directly: mov into each lane.
         // mov v.s[lane] requires a W register; float constants need fmov first.
         std::string rd = allocNEONReg();

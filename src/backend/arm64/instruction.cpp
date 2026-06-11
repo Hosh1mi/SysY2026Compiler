@@ -11,6 +11,73 @@
 #include <set>
 #include <vector>
 
+namespace {
+
+InsertElementInst *singleInsertElementUser(Instruction *inst) {
+    if (!inst || inst->use_list_.size() != 1) return nullptr;
+    return dynamic_cast<InsertElementInst*>(inst->use_list_.front().val_);
+}
+
+bool isCompleteIntSplatInsertChain(Instruction *inst, int &value) {
+    auto *insert = dynamic_cast<InsertElementInst*>(inst);
+    if (!insert) return false;
+
+    auto *vecTy = dynamic_cast<VectorType*>(insert->type_);
+    if (!vecTy || vecTy->num_elements_ != 4 ||
+        vecTy->contained_->tid_ != Type::IntegerTyID) {
+        return false;
+    }
+
+    bool seen[4] = {false, false, false, false};
+    bool haveValue = false;
+    int commonValue = 0;
+
+    while (insert) {
+        auto *idx = dynamic_cast<ConstantInt*>(insert->get_operand(2));
+        auto *elem = dynamic_cast<ConstantInt*>(insert->get_operand(1));
+        if (!idx || !elem || idx->value_ < 0 || idx->value_ >= 4)
+            return false;
+        if (seen[idx->value_])
+            return false;
+        seen[idx->value_] = true;
+
+        if (!haveValue) {
+            commonValue = elem->value_;
+            haveValue = true;
+        } else if (commonValue != elem->value_) {
+            return false;
+        }
+
+        auto *baseInst = dynamic_cast<InsertElementInst*>(insert->get_operand(0));
+        if (!baseInst) break;
+        insert = baseInst;
+    }
+
+    for (bool laneSeen : seen)
+        if (!laneSeen) return false;
+
+    value = commonValue;
+    return true;
+}
+
+bool isSplatInsertChainIntermediate(Instruction *inst) {
+    auto *user = singleInsertElementUser(inst);
+    if (!user) return false;
+
+    Instruction *terminal = user;
+    while (auto *next = singleInsertElementUser(terminal))
+        terminal = next;
+
+    int ignored = 0;
+    return isCompleteIntSplatInsertChain(terminal, ignored);
+}
+
+bool canUseMoviSplat(int value) {
+    return value == 0 || (value > 0 && value <= 255);
+}
+
+} // namespace
+
 void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     if (blockSkipped_.count(bb)) return;
 
@@ -821,6 +888,19 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- InsertElement ----
     case Instruction::InsertElement: {
+        if (isSplatInsertChainIntermediate(inst))
+            break;
+
+        int splatValue = 0;
+        if (isCompleteIntSplatInsertChain(inst, splatValue) &&
+            canUseMoviSplat(splatValue)) {
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            emitRawAluMachine("\tmovi " + rd + ".4s, #" + std::to_string(splatValue),
+                              rd, {}, MOpcode::Neon);
+            if (!hasAssignedReg(inst)) storeVector(inst, rd);
+            break;
+        }
+
         auto *vec = inst->get_operand(0);
         auto *val = inst->get_operand(1);
         auto *idx = inst->get_operand(2);
