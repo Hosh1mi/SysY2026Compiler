@@ -1121,23 +1121,36 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                             emitBinaryMachine("sub", addr, addr, "x17");
                     }
                 }
-            }else {
+            } else {
                 std::string idxReg = loadInt(idx);
-                std::string scaled = allocAddrReg();
-                // 符号扩展索引到64位
-                emitMoveMachine(scaled, idxReg, "sxtw");
-                freeIntReg(idxReg);
-    
+                auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
+                auto log2Int = [](int n) {
+                    int shift = 0;
+                    while ((1 << shift) < n) shift++;
+                    return shift;
+                };
+
                 if (elemSize > 1) {
-                    auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
                     if (isPowerOfTwo(elemSize)) {
-                        int shift = 0;
-                        while ((1 << shift) < elemSize) shift++;
-                        emitRawAluMachine("\tadd " + addr + ", " + addr + ", " + scaled
-                                          + ", lsl #" + std::to_string(shift),
-                                          addr, {addr, scaled});
-                        freeAddrReg(scaled);
+                        int shift = log2Int(elemSize);
+                        if (shift <= 4) {
+                            std::string ext = "sxtw";
+                            if (shift > 0)
+                                ext += " #" + std::to_string(shift);
+                            emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
+                                              + idxReg + ", " + ext,
+                                              addr, {addr, idxReg});
+                        } else {
+                            std::string scaled = allocAddrReg();
+                            emitMoveMachine(scaled, idxReg, "sxtw");
+                            emitRawAluMachine("\tadd " + addr + ", " + addr + ", " + scaled
+                                              + ", lsl #" + std::to_string(shift),
+                                              addr, {addr, scaled});
+                            freeAddrReg(scaled);
+                        }
                     } else {
+                        std::string scaled = allocAddrReg();
+                        emitMoveMachine(scaled, idxReg, "sxtw");
                         std::string elemReg = allocAddrReg();
                         emitIntConst(elemSize, elemReg);
                         emitBinaryMachine("mul", scaled, scaled, elemReg, MOpcode::Mul, 3);
@@ -1146,9 +1159,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         freeAddrReg(scaled);  // scaled 可以释放了，因为结果已累加到 addr
                     }
                 } else {
-                    emitBinaryMachine("add", addr, addr, scaled);
-                    freeAddrReg(scaled);
+                    emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
+                                      + idxReg + ", sxtw",
+                                      addr, {addr, idxReg});
                 }
+                freeIntReg(idxReg);
             }
         }
         if (!useAssignedAddr)
