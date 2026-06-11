@@ -5,8 +5,6 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
-#include <map>
-#include <queue>
 
 void LICM::execute(Module *module) {
     AnalysisManager AM;
@@ -19,52 +17,6 @@ PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
             runOnFunction(func, AM);
     }
     return PreservedAnalyses::none();
-}
-
-// ── Loop detection ─────────────────────────────────────────────────────────
-
-std::vector<LICM::Loop> LICM::findLoops(Function *func) {
-    // 相同 header 的多条回边属于同一个 loop。若每条回边各自形成独立 loop，
-    // 其不完整的 body 会让 getPreheader 认为有多个"外部前驱"而返回 nullptr，
-    // 导致 LICM 静默跳过整个循环。
-    std::map<BasicBlock*, Loop> headerToLoop;
-    auto &idom = domInfo_->idom;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!idom.count(succ)) continue;
-            if (!domInfo_->dominates(succ, bb)) continue;
-
-            auto &loop = headerToLoop[succ];
-            loop.header = succ;
-            if (!loop.latch) loop.latch = bb;
-
-            loop.blocks.insert(succ);
-            std::queue<BasicBlock*> wl;
-            wl.push(bb);
-            while (!wl.empty()) {
-                auto cur = wl.front(); wl.pop();
-                if (!loop.blocks.insert(cur).second) continue;
-                for (auto pred : cur->pre_bbs_)
-                    if (!loop.blocks.count(pred)) wl.push(pred);
-            }
-        }
-    }
-
-    std::vector<Loop> loops;
-    for (auto &kv : headerToLoop)
-        loops.push_back(std::move(kv.second));
-    return loops;
-}
-
-BasicBlock *LICM::getPreheader(const Loop &loop) {
-    BasicBlock *pre = nullptr;
-    for (auto pred : loop.header->pre_bbs_) {
-        if (loop.blocks.count(pred)) continue;
-        if (pre) return nullptr;
-        pre = pred;
-    }
-    return pre;
 }
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
@@ -149,7 +101,7 @@ static void debugHoistedInst(Instruction *inst, BasicBlock *loopHeader,
 
 bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
                         const std::set<Instruction*>& toHoist, const Loop *loop,
-                        ScalarEvolution *SE, ::Loop *analysisLoop) {
+                        ScalarEvolution *SE) {
     bool available = false;
     if (dynamic_cast<Constant*>(val) ||
         dynamic_cast<GlobalVariable*>(val) ||
@@ -171,11 +123,11 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
     if (!available)
         return false;
 
-    if (SE && analysisLoop) {
+    if (SE && loop) {
         const SCEV *s = SE->getSCEV(val);
         if (s && s->kind() != SCEVKind::CouldNotCompute &&
-            SE->isLoopInvariant(s, analysisLoop)) {
-            debugSCEVInvariant(val, loop ? loop->header : nullptr, s);
+            SE->isLoopInvariant(s, const_cast<Loop *>(loop))) {
+            debugSCEVInvariant(val, loop->header, s);
         }
     }
 
@@ -212,9 +164,9 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
-bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop,
+bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE,
                      const BasicAliasAnalysis *BAA) {
-    BasicBlock *preheader = getPreheader(loop);
+    BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
     if (!BAA) return false;
 
@@ -296,7 +248,7 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE, ::Loop *analysisLoop
                                                         : inst->num_ops_;
                 for (unsigned i = 0; i < operandLimit; i++) {
                     if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist,
-                                     &loop, SE, analysisLoop)) {
+                                     &loop, SE)) {
                         allInvariant = false;
                         break;
                     }
@@ -360,6 +312,10 @@ void LICM::eliminateSinglePredPhis(Function *func) {
 }
 
 bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
+    // 单 latch 是 LoopSimplify 的后置条件；多 latch 时"来自 latch 的入边"
+    // 不唯一，保守跳过
+    BasicBlock *latch = loop.singleLatch();
+    if (!latch) return false;
     bool anyChanged = false;
     bool changed = true;
     while (changed) {
@@ -376,7 +332,7 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 Value *inc_bb  = phi->get_operand(i + 1);
                 Value *inc_val = phi->get_operand(i);
-                if (inc_bb == loop.latch) {
+                if (inc_bb == latch) {
                     if (inc_val != phi) self_loop = false;
                 } else {
                     if (!non_latch_val) non_latch_val = inc_val;
@@ -408,28 +364,38 @@ void LICM::runOnFunction(Function *func, AnalysisManager &AM) {
 
     eliminateSinglePredPhis(func);
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
-
-    std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-        return a.blocks.size() < b.blocks.size();
-    });
-
-    for (auto &loop : loops) {
+    // 由内向外处理。本 pass 不改 CFG，但 changed 后会失效 AM 缓存的
+    // LoopInfo，Loop* 不能跨失效持有——先收集稳定的 header 列表，
+    // 每轮按 header 重查当前 LoopInfo。
+    std::vector<BasicBlock *> headers;
+    {
         LoopInfo &LI = AM.getLoopInfo(func);
-        ScalarEvolution &SE = AM.getScalarEvolution(func);
-        BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
+        std::sort(loops.begin(), loops.end(), [](Loop *a, Loop *b) {
+            return a->depth > b->depth;
+        });
+        for (auto *l : loops)
+            headers.push_back(l->header);
+    }
 
-        ::Loop *analysisLoop = nullptr;
-        for (auto &ownedLoop : LI.allLoops()) {
-            if (ownedLoop->header == loop.header) {
-                analysisLoop = ownedLoop.get();
+    for (auto *header : headers) {
+        LoopInfo &LI = AM.getLoopInfo(func);
+        Loop *loop = nullptr;
+        for (auto &l : LI.allLoops()) {
+            if (l->header == header) {
+                loop = l.get();
                 break;
             }
         }
+        if (!loop) continue;
 
-        bool changed = runOnLoop(loop, &SE, analysisLoop, &BAA);
-        bool phiChanged = eliminateTrivialHeaderPhis(loop);
+        ScalarEvolution &SE = AM.getScalarEvolution(func);
+        BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
+
+        bool changed = runOnLoop(*loop, &SE, &BAA);
+        bool phiChanged = eliminateTrivialHeaderPhis(*loop);
         if (changed || phiChanged) {
             PreservedAnalyses pa;
             pa.preserveBasicAA();
