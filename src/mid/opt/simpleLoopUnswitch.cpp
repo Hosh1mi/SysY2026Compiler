@@ -51,6 +51,16 @@ void SimpleLoopUnswitch::execute(Module *module) {
     }
 }
 
+PreservedAnalyses SimpleLoopUnswitch::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    bool changed = false;
+    for (auto *func : module->function_list_) {
+        if (!func->is_declaration())
+            changed |= runOnFunction(func);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
 bool SimpleLoopUnswitch::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty())
         return false;

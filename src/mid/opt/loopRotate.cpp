@@ -12,6 +12,16 @@ void LoopRotate::execute(Module *module) {
     }
 }
 
+PreservedAnalyses LoopRotate::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    bool changed = false;
+    for (auto *func : module->function_list_) {
+        if (!func->is_declaration())
+            changed |= runOnFunction(func);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
 static Value *remapValue(Value *value, const std::map<Value *, Value *> &valueMap) {
     auto it = valueMap.find(value);
     return it == valueMap.end() ? value : it->second;

@@ -24,6 +24,7 @@ class LCSSA : public Pass {
 public:
     void execute(Module *module) override;
     std::string name() const override { return "LCSSA"; }
+    bool convergenceRelevant() const override { return false; }
 
 private:
     bool runOnFunction(Function *func);

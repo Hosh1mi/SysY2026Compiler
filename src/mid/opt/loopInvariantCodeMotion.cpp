@@ -12,11 +12,14 @@ void LICM::execute(Module *module) {
 }
 
 PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
+    bool changed = false;
     for (auto func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func, AM);
+            changed |= runOnFunction(func, AM);
     }
-    return PreservedAnalyses::none();
+    // 未改动 ⇒ all()（4.2 收敛判定）；改动时函数级失效已在内部完成，
+    // 这里保守再报 none()
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
@@ -302,7 +305,8 @@ bool LICM::runOnLoop(const Loop &loop, ScalarEvolution *SE,
     return changed;
 }
 
-void LICM::eliminateSinglePredPhis(Function *func) {
+bool LICM::eliminateSinglePredPhis(Function *func) {
+    bool anyChanged = false;
     bool changed = true;
     while (changed) {
         changed = false;
@@ -316,10 +320,12 @@ void LICM::eliminateSinglePredPhis(Function *func) {
                 phi->replace_all_use_with(incoming);
                 bb->delete_instr(phi);
                 changed = true;
+                anyChanged = true;
                 it = bb->instr_list_.begin();
             }
         }
     }
+    return anyChanged;
 }
 
 bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
@@ -370,10 +376,10 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     return anyChanged;
 }
 
-void LICM::runOnFunction(Function *func, AnalysisManager &AM) {
-    if (func->basic_blocks_.empty()) return;
+bool LICM::runOnFunction(Function *func, AnalysisManager &AM) {
+    if (func->basic_blocks_.empty()) return false;
 
-    eliminateSinglePredPhis(func);
+    bool anyChanged = eliminateSinglePredPhis(func);
 
     // 由内向外处理。本 pass 不改 CFG，但 changed 后会失效 AM 缓存的
     // LoopInfo，Loop* 不能跨失效持有——先收集稳定的 header 列表，
@@ -408,9 +414,11 @@ void LICM::runOnFunction(Function *func, AnalysisManager &AM) {
         bool changed = runOnLoop(*loop, &SE, &BAA);
         bool phiChanged = eliminateTrivialHeaderPhis(*loop);
         if (changed || phiChanged) {
+            anyChanged = true;
             PreservedAnalyses pa;
             pa.preserveBasicAA();
             AM.invalidateFunction(func, pa);
         }
     }
+    return anyChanged;
 }
