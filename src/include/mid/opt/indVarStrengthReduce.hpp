@@ -1,11 +1,13 @@
 #pragma once
 #include "pass.hpp"
+#include "../analysis/loopInfo.hpp"
 #include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
-#include <map>
 #include <set>
 #include <vector>
 
+// IndVarStrengthReduce：把循环内随 IV 线性变化的 GEP 地址计算削弱为
+// 指针 phi + 常量步进。循环结构统一来自 LoopInfo（plan 阶段 3.1）。
 class IndVarStrengthReduce : public Pass {
 public:
     void execute(Module *module) override;
@@ -14,13 +16,6 @@ public:
 
 private:
     void runOnFunction(Function *func, AnalysisManager &AM);
-
-    struct Loop {
-        BasicBlock *header;
-        std::set<BasicBlock *> blocks;
-        BasicBlock *latch;      // block with back edge to header
-        BasicBlock *preheader;  // predecessor outside the loop
-    };
 
     struct BasicIV {
         PhiInst *phi;       // header phi
@@ -37,12 +32,6 @@ private:
         long long constOffset = 0;
         const SCEV *offset = nullptr; // one materializable loop-invariant non-constant term
     };
-
-    // dominator info (from Function)
-    DominatorInfo *domInfo_ = nullptr;
-
-    // loop detection
-    std::vector<Loop> findLoops(Function *func);
 
     // loop-invariant test
     bool isLoopInvariant(Value *val, const std::set<BasicBlock *> &loopBlocks);
