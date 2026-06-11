@@ -336,8 +336,7 @@ void Arm64FuncContext::emitPrologue() {
     mergePromotedConstRegs(savedIntRegs, promotedConsts_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
-    // NEON regs are 16 bytes each → 2 × 8-byte slots
-    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
     int localSize = align16(prologueFrameSize_ + savedRegBytes);
     int saveOffset = -prologueFrameSize_;
 
@@ -383,27 +382,10 @@ void Arm64FuncContext::emitPrologue() {
             emitStoreRegMachine("d" + std::to_string(savedFloatRegs[i]), saveOffset);
         }
     }
-    // Save callee-saved NEON registers (v8-v15), 16 bytes each.
-    // str qN only supports unsigned offset; use sub+str for negative offsets.
-    for (size_t i = 0; i < savedNEONRegs.size(); i++) {
-        saveOffset -= 16;
-        int r = savedNEONRegs[i];
-        if (saveOffset >= 0) {
-            emitStoreMemMachine("q" + std::to_string(r),
-                                "[x29, #" + std::to_string(saveOffset) + "]",
-                                {"q" + std::to_string(r), "x29"}, MOpcode::Store);
-        } else {
-            int absOff = -saveOffset;
-            if (absOff <= 4095)
-                emitRawAluMachine("\tsub x16, x29, #" + std::to_string(absOff),
-                                  "x16", {"x29"});
-            else {
-                emitIntConst(absOff, "x16");
-                emitBinaryMachine("sub", "x16", "x29", "x16");
-            }
-            emitStoreMemMachine("q" + std::to_string(r), "[x16]",
-                                {"q" + std::to_string(r), "x16"}, MOpcode::Store);
-        }
+    // AAPCS64 only requires callees to preserve the low 64 bits of v8-v15.
+    for (int r : savedNEONRegs) {
+        saveOffset -= 8;
+        emitStoreRegMachine("d" + std::to_string(r), saveOffset);
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
@@ -547,7 +529,7 @@ void Arm64FuncContext::emitEpilogue() {
     mergePromotedConstRegs(savedIntRegs, promotedConsts_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
-    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;
+    int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
     int localSize = align16(prologueFrameSize_ + savedRegBytes);
     int restoreOffset = -prologueFrameSize_;
 
@@ -571,27 +553,10 @@ void Arm64FuncContext::emitEpilogue() {
             emitLoadRegMachine("d" + std::to_string(savedFloatRegs[i]), restoreOffset);
         }
     }
-    // Restore callee-saved NEON registers (v8-v15).
-    // ldr qN only supports unsigned offset; use sub+ldr for negative offsets.
-    for (size_t i = 0; i < savedNEONRegs.size(); i++) {
-        restoreOffset -= 16;
-        int r = savedNEONRegs[i];
-        if (restoreOffset >= 0) {
-            emitLoadMemMachine("q" + std::to_string(r),
-                               "[x29, #" + std::to_string(restoreOffset) + "]",
-                               {"x29"}, MOpcode::Load, 4);
-        } else {
-            int absOff = -restoreOffset;
-            if (absOff <= 4095)
-                emitRawAluMachine("\tsub x16, x29, #" + std::to_string(absOff),
-                                  "x16", {"x29"});
-            else {
-                emitIntConst(absOff, "x16");
-                emitBinaryMachine("sub", "x16", "x29", "x16");
-            }
-            emitLoadMemMachine("q" + std::to_string(r), "[x16]",
-                               {"x16"}, MOpcode::Load, 4);
-        }
+    // Match the prologue: restore only the ABI-preserved low 64 bits.
+    for (int r : savedNEONRegs) {
+        restoreOffset -= 8;
+        emitLoadRegMachine("d" + std::to_string(r), restoreOffset);
     }
 
     if (localSize > 0) {
