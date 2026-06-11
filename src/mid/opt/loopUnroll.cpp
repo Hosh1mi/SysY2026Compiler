@@ -1,47 +1,10 @@
 #include "../../include/mid/opt/loopUnroll.hpp"
 #include <algorithm>
-#include <functional>
-#include <queue>
+#include <cstdlib>
+#include <iostream>
 
 static const int UNROLL_FACTOR   = 4;
 static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
-
-// ── Loop detection ─────────────────────────────────────────────────────────
-
-std::vector<LoopUnroll::Loop> LoopUnroll::findLoops(Function *func) {
-    std::vector<Loop> loops;
-    auto &idom = domInfo_->idom;
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!idom.count(succ)) continue;
-            if (!domInfo_->dominates(succ, bb)) continue;
-            Loop loop;
-            loop.header = succ;
-            loop.latch  = bb;
-            loop.blocks.insert(succ);
-            std::queue<BasicBlock *> wl;
-            wl.push(bb);
-            while (!wl.empty()) {
-                auto cur = wl.front(); wl.pop();
-                if (!loop.blocks.insert(cur).second) continue;
-                for (auto pred : cur->pre_bbs_)
-                    if (!loop.blocks.count(pred)) wl.push(pred);
-            }
-            loops.push_back(std::move(loop));
-        }
-    }
-    return loops;
-}
-
-BasicBlock *LoopUnroll::getPreheader(const Loop &loop) {
-    BasicBlock *pre = nullptr;
-    for (auto pred : loop.header->pre_bbs_) {
-        if (loop.blocks.count(pred)) continue;
-        if (pre) return nullptr;
-        pre = pred;
-    }
-    return pre;
-}
 
 // ── Instruction cloning ───────────────────────────────────────────────────
 
@@ -107,10 +70,11 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     if (loop.blocks.size() != 2) return false;
 
     BasicBlock *header = loop.header;
-    BasicBlock *latch  = loop.latch;
+    BasicBlock *latch  = loop.singleLatch();
+    if (!latch || latch == header) return false;
 
     // Need a single preheader
-    BasicBlock *preheader = getPreheader(loop);
+    BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
 
     // Need a single exit from the header
@@ -249,6 +213,11 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     int effectiveUnrollFactor = UNROLL_FACTOR;  // 4
     if (numIntNonIVPhis > 0 && numPtrPhis >= 2)
         effectiveUnrollFactor = 2;
+
+    if (std::getenv("DEBUG_LOOP_UNROLL"))
+        std::cerr << "[LoopUnroll] func=" << func->name_
+                  << " header=" << header->name_
+                  << " factor=" << effectiveUnrollFactor << "\n";
 
     // ── Transformation ────────────────────────────────────────────────────
 
@@ -397,16 +366,21 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
 void LoopUnroll::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
+    LoopInfo LI;
+    LI.analyze(func);
+    if (LI.allLoops().empty()) return;
 
-    // Innermost first
-    std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-        return a.blocks.size() < b.blocks.size();
-    });
+    // Innermost first。unroll 成功会改 CFG（preheader 改指 headerMain），
+    // 快照内其余 Loop 结构随之过期——与迁移前行为一致：外层循环因
+    // blocks.size()!=2 本就不会命中，错过的机会留给下一次调度。
+    std::vector<Loop *> loops;
+    for (auto &l : LI.allLoops())
+        loops.push_back(l.get());
+    std::sort(loops.begin(), loops.end(),
+              [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
-    for (auto &loop : loops)
-        tryUnroll(loop, func, func->parent_);
+    for (auto *loop : loops)
+        tryUnroll(*loop, func, func->parent_);
 
     func->set_instr_name();
 }
