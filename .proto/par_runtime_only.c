@@ -9,6 +9,7 @@ static volatile int __sysy_job_seq = 0;
 static volatile int __sysy_done_seq = 0;
 static volatile int __sysy_job_id, __sysy_job_lo, __sysy_job_hi;
 static int __sysy_worker_started = 0;
+static int __sysy_worker_ok = 0; // clone 失败时整段降级串行
 static cpu_set_t __sysy_orig_mask;
 static int __sysy_orig_mask_valid = 0;
 
@@ -52,10 +53,15 @@ void __sysy_parallel_for(int id, int lo, int hi) {
         if (sched_getaffinity(0, sizeof(__sysy_orig_mask), &__sysy_orig_mask) == 0)
             __sysy_orig_mask_valid = 1;
         __sysy_bind_cpu(0);
-        clone(__sysy_worker, __sysy_wstack + sizeof(__sysy_wstack),
-              CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
-                  CLONE_THREAD | CLONE_SYSVSEM,
-              0);
+        __sysy_worker_ok =
+            clone(__sysy_worker, __sysy_wstack + sizeof(__sysy_wstack),
+                  CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+                      CLONE_THREAD | CLONE_SYSVSEM,
+                  0) > 0;
+    }
+    if (!__sysy_worker_ok) { // 环境禁线程：降级串行，避免发布任务后挂死
+        __sysy_par_dispatch(id, lo, hi);
+        return;
     }
     int mid = lo + (hi - lo) / 2;
     __sysy_job_id = id;

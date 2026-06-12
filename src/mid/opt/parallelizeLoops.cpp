@@ -48,6 +48,19 @@ bool isPrivatizableScratch(GlobalVariable *gv,
     return true;
 }
 
+// 全局数组字节大小（SysY 元素 i32/float 均 4 字节）
+long long globalArrayBytes(GlobalVariable *gv) {
+    auto *ptrTy = dynamic_cast<PointerType *>(gv->type_);
+    if (!ptrTy) return -1;
+    long long elems = 1;
+    Type *ty = ptrTy->contained_;
+    while (auto *arr = dynamic_cast<ArrayType *>(ty)) {
+        elems *= arr->num_elements_;
+        ty = arr->contained_;
+    }
+    return elems * 4;
+}
+
 } // namespace
 
 void ParallelizeLoops::execute(Module *module) {
@@ -119,6 +132,21 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
         if (inst->is_phi()) return false;
         break;
     }
+
+    // 逃逸边检查：循环内所有后继必须仍在循环内，唯一例外是
+    // exitingBlock→exitBlock。dedicated exits（plan 1.1）未实现，
+    // break 形循环的多条 exiting 边可能汇入同一 exit 块——若放过，
+    // 变换只改写一条出口边，其余会留成跨函数分支。
+    for (auto *bb : loop.blocksOrdered) {
+        auto *term = bb->get_terminator();
+        if (!term) return false;
+        for (unsigned i = 0; i < term->num_ops_; i++) {
+            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+            if (!succ || loop.blocks.count(succ)) continue;
+            if (bb == shape.exitingBlock && succ == exitBlock) continue;
+            return false;
+        }
+    }
     return true;
 }
 
@@ -184,11 +212,19 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     // __mm_tmp_* 全局 scratch 缓冲，下标只随内层 IV 变化）——DA 对
     // "下标不含外层 IV"的 store 会漏报跨外层迭代依赖，不能只靠 DA。
     ScalarEvolution &SE = AM->getScalarEvolution(func);
+    long long privBytes = 0;
     for (auto *s : stores) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(s->get_operand(1));
         auto *base = gep ? dynamic_cast<GlobalVariable *>(gepRootBase(gep))
                          : nullptr;
         if (base && isPrivatizableScratch(base, loop.blocks)) {
+            // 私有拷贝放 worker 栈（静态 1MB），总量限 64KB 防溢出
+            long long bytes = globalArrayBytes(base);
+            if (bytes < 0) return false;
+            if (!privatize->count(base)) {
+                privBytes += bytes;
+                if (privBytes > 64 * 1024) return false;
+            }
             privatize->insert(base);
             continue;
         }
