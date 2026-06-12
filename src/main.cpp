@@ -33,6 +33,8 @@
 #include "include/mid/opt/globalScalarPromotion.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
+#include "include/backend/arm64/parallelRuntime.hpp"
+#include "include/mid/opt/parallelizeLoops.hpp"
 
 #include <cctype>
 #include <cstdio>
@@ -194,6 +196,7 @@ static void addLoopPipeline(PassManager &pm) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
+    pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
@@ -269,6 +272,32 @@ int main(int argc, char **argv) {
         Arm64CodeGen codegen(m.get(), *out);
         configureBackend(codegen, options);
         codegen.generate();
+        {
+            // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
+            int nBodies = 0;
+            bool hasParallel = false;
+            for (auto *f : m->function_list_) {
+                if (f->name_ == "__sysy_parallel_for" && f->is_declaration())
+                    hasParallel = true;
+                if (f->name_.rfind("__sysy_par_body_", 0) == 0)
+                    nBodies++;
+            }
+            if (hasParallel) {
+                *out << "\n\t.text\n\t.align 2\n"
+                     << "\t.global __sysy_par_dispatch\n"
+                     << "__sysy_par_dispatch:\n";
+                for (int i = 0; i < nBodies; i++)
+                    *out << "\tcmp w0, #" << i << "\n"
+                         << "\tb.eq .Lsysy_disp_" << i << "\n";
+                *out << "\tret\n";
+                for (int i = 0; i < nBodies; i++)
+                    *out << ".Lsysy_disp_" << i << ":\n"
+                         << "\tmov w0, w1\n"
+                         << "\tmov w1, w2\n"
+                         << "\tb __sysy_par_body_" << i << "\n";
+                *out << kSysyParallelRuntimeAsm;
+            }
+        }
     } else if (options.printIR) {
         *out << m->print();
     }

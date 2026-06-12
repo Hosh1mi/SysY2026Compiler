@@ -1231,7 +1231,36 @@ void LoopVectorize::emitVectorizedLoop(
                         // Create vector phi in vecHeader
                         auto *phi = PhiInst::create_phi(ivVecTy, vecHeader);
                         vecHeader->add_instruction_front(phi);
-                        phi->addIncoming(stepVec, preheader);
+                        // 初始 lane 向量必须叠加标量 IV 初值：init 非 0
+                        // （如并行外提体的 lo 形参）时 <0,1,2,3> 是错的
+                        Value *scalarInit = nullptr;
+                        for (unsigned pi = 0; pi < vecPhi->num_ops_; pi += 2) {
+                            if (vecPhi->get_operand(pi + 1) ==
+                                static_cast<Value *>(preheader)) {
+                                scalarInit = vecPhi->get_operand(pi);
+                                break;
+                            }
+                        }
+                        Value *initLanes = stepVec;
+                        if (auto *initCI =
+                                dynamic_cast<ConstantInt *>(scalarInit)) {
+                            if (initCI->value_ != 0) {
+                                std::vector<Constant*> laneElems;
+                                for (int j = 0; j < vecWidth; j++)
+                                    laneElems.push_back(new ConstantInt(
+                                        module->int32_ty_,
+                                        initCI->value_ + j));
+                                initLanes = new ConstantVector(ivVecTy, laneElems);
+                            }
+                        } else if (scalarInit) {
+                            Value *splat = emitSplat(scalarInit, preheader);
+                            auto *add = new BinaryInst(ivVecTy, Instruction::Add,
+                                                       splat, stepVec, preheader);
+                            preheader->remove_instr(add);
+                            preheader->add_instruction_before_terminator(add);
+                            initLanes = add;
+                        }
+                        phi->addIncoming(initLanes, preheader);
                         vecIVPhi = phi;
                     }
                     // In vecBody: advance the phi once (shared across all groups)
