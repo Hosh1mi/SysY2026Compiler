@@ -124,8 +124,10 @@ void Arm64FuncContext::generate() {
         Arm64RegAlloc regAlloc(func_);
         regAlloc.allocate();
         assignedRegs_ = regAlloc.assignedRegs();
+        promotedConsts_ = regAlloc.promotedConsts();
     } else {
         assignedRegs_.clear();
+        promotedConsts_.clear();
     }
     reservedIntRegs_.clear();
     reservedFloatRegs_.clear();
@@ -141,12 +143,17 @@ void Arm64FuncContext::generate() {
         else if (reg[0] == 'v')
             reservedNEONRegs_.insert(regNo);
     }
+    for (const auto &kv : promotedConsts_)
+        reservedIntRegs_.insert(std::stoi(kv.second.substr(1)));
 
     preparePhi();
     blockSkipped_.clear();
     cselHandled_.clear();
 
     emitPrologue();
+    // 提升常量在入口物化一次（位于 callee-saved 保存之后）
+    for (const auto &kv : promotedConsts_)
+        emitIntConst(kv.first, kv.second);
     reorderBlocks();
     for (auto bb : func_->basic_blocks_) {
         emitBlock(bb);
@@ -249,6 +256,16 @@ void Arm64FuncContext::reorderBlocks() {
     func_->basic_blocks_ = order;
 }
 
+// 把提升常量占用的 callee-saved 寄存器并入保存列表（保持升序去重，
+// prologue/epilogue 两处必须用同一结果以保证栈布局一致）
+static void mergePromotedConstRegs(std::vector<int> &regs,
+                                   const std::map<int, std::string> &promoted) {
+    std::set<int> s(regs.begin(), regs.end());
+    for (const auto &kv : promoted)
+        s.insert(std::stoi(kv.second.substr(1)));
+    regs.assign(s.begin(), s.end());
+}
+
 void Arm64FuncContext::emitPrologue() {
     emitMachineLine("\t.global " + func_->name_);
     emitMachineLine("\t.p2align 2");
@@ -316,6 +333,7 @@ void Arm64FuncContext::emitPrologue() {
     prologueFrameSize_ = frameSize_;
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
+    mergePromotedConstRegs(savedIntRegs, promotedConsts_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     // NEON regs are 16 bytes each → 2 × 8-byte slots
@@ -526,6 +544,7 @@ void Arm64FuncContext::emitEpilogue() {
     emitMachineLine(".L" + func_->name_ + "_epilogue:");
 
     auto savedIntRegs = collectAssignedIntRegs(assignedRegs_);
+    mergePromotedConstRegs(savedIntRegs, promotedConsts_);
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size() * 2) * 8;

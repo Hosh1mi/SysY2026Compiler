@@ -352,25 +352,30 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         Magic::MagicNumber mag = Magic::getMagic(d);
 
                         std::string wNum = loadInt(v1);
-                        std::string wMagic = allocIntReg();
-                        emitIntConst(mag.multiplier, wMagic);
+                        std::string wMagic = intConstReg(mag.multiplier);
 
                         std::string xTemp = allocAddrReg();
                         std::string wHi = "w" + xTemp.substr(1);
 
                         emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
                                           xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
-                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
-                                          xTemp, {xTemp});
 
-                        if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                            emitBinaryMachine("add", wHi, wHi, wNum);
-                        } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                            emitBinaryMachine("sub", wHi, wHi, wNum);
+                        if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
+                            // 取高 32 位与 >>shift 合并为一条 64 位 asr
+                            emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
+                                                  + std::to_string(32 + mag.shift),
+                                              xTemp, {xTemp});
+                        } else {
+                            emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
+                                              xTemp, {xTemp});
+                            if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
+                                emitBinaryMachine("add", wHi, wHi, wNum);
+                            else
+                                emitBinaryMachine("sub", wHi, wHi, wNum);
+                            emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
+                                                  + std::to_string(mag.shift),
+                                              wHi, {wHi});
                         }
-
-                        emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
-                                          wHi, {wHi});
                         // 末条指令同时完成 wNum 的最后一次读，可直接写入分配寄存器
                         std::string wResult = hasAssignedReg(inst) ? assignedReg(inst)
                                                                    : allocIntReg();
@@ -599,30 +604,34 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 Magic::MagicNumber mag = Magic::getMagic(divisor);
 
                 std::string wNum = loadInt(v1);
-                std::string wMagic = allocIntReg();
-                emitIntConst(mag.multiplier, wMagic);
+                std::string wMagic = intConstReg(mag.multiplier);
 
                 std::string xTemp = allocAddrReg();
                 std::string wHi = "w" + xTemp.substr(1);
 
                 emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
                                   xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
-                emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
-                                  xTemp, {xTemp});
 
-                if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                    emitBinaryMachine("add", wHi, wHi, wNum);
-                } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                    emitBinaryMachine("sub", wHi, wHi, wNum);
+                if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
+                    // 取高 32 位与 >>shift 合并为一条 64 位 asr
+                    emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
+                                          + std::to_string(32 + mag.shift),
+                                      xTemp, {xTemp});
+                } else {
+                    emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
+                                      xTemp, {xTemp});
+                    if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
+                        emitBinaryMachine("add", wHi, wHi, wNum);
+                    else
+                        emitBinaryMachine("sub", wHi, wHi, wNum);
+                    emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
+                                          + std::to_string(mag.shift),
+                                      wHi, {wHi});
                 }
-
-                emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
-                                  wHi, {wHi});
                 emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
                                   wHi, {wHi, wNum});
 
-                std::string wD = allocIntReg();
-                emitIntConst(divisor, wD);
+                std::string wD = intConstReg(divisor);
                 // 中间结果全在 scratch，wNum 的最后一次读在末条 msub 上，
                 // 结果可直接写分配寄存器（与 wNum 同号亦安全）
                 std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();

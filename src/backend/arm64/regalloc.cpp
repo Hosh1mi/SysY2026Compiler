@@ -1,5 +1,6 @@
 #include "../../include/backend/arm64/regalloc.hpp"
 #include "../../include/backend/arm64/helpers.hpp"
+#include "../../include/backend/arm64/magicNumber.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -10,6 +11,10 @@ Arm64RegAlloc::Arm64RegAlloc(Function *f) : func_(f) {}
 
 const std::map<Value*, std::string> &Arm64RegAlloc::assignedRegs() const {
     return assignedRegs_;
+}
+
+const std::map<int, std::string> &Arm64RegAlloc::promotedConsts() const {
+    return promotedConsts_;
 }
 
 bool Arm64RegAlloc::hasAssignedReg(Value *v) const {
@@ -774,4 +779,66 @@ void Arm64RegAlloc::allocate() {
     colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity, trulyInterferes);
     colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity, trulyInterferes);
     colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity, trulyInterferes);
+
+    // ---- 12. 循环内多指令常量提升 ----
+    // srem/sdiv 常数除法的魔数乘数/除数、以及 Add/Sub/ICmp 的大常量操作数
+    // 在循环里每次迭代都要 movz+movk 重物化。把权重最高的几个 32 位常量
+    // 提升到整个函数都未被占用的 callee-saved 寄存器（与已有着色零干涉，
+    // 调用也不破坏），入口物化一次。按常量值而非 Value* 记录，魔数这类
+    // ISel 派生常量也能命中。
+    {
+        auto needsMovk = [](int v) {
+            return (((uint32_t)v >> 16) & 0xFFFF) != 0;
+        };
+        std::map<int, double> weight;
+        auto addCandidate = [&](int v, double w) {
+            if (needsMovk(v)) weight[v] += w;
+        };
+        for (auto bb : blocksOrder) {
+            int depth = loopDepth[bb];
+            if (depth <= 0) continue;
+            double w = std::pow(20.0, depth);
+            for (auto inst : bb->instr_list_) {
+                if (inst->op_id_ == Instruction::SRem) {
+                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                    if (ci && ci->value_ > 1 &&
+                        (ci->value_ & (ci->value_ - 1)) != 0) {
+                        addCandidate(Magic::getMagic(ci->value_).multiplier, w);
+                        addCandidate(ci->value_, w);  // msub 还需要除数本身
+                    }
+                } else if (inst->op_id_ == Instruction::SDiv) {
+                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                    if (ci && ci->value_ != INT32_MIN) {
+                        int32_t abs_d = ci->value_ > 0 ? ci->value_ : -ci->value_;
+                        if (abs_d > 1 && (abs_d & (abs_d - 1)) != 0)
+                            addCandidate(Magic::getMagic(ci->value_).multiplier, w);
+                    }
+                } else if (inst->op_id_ == Instruction::Add ||
+                           inst->op_id_ == Instruction::Sub ||
+                           inst->op_id_ == Instruction::ICmp) {
+                    // 这些指令的多指令大常量操作数必然走 loadInt 物化
+                    for (unsigned i = 0; i < inst->num_ops_; ++i)
+                        if (auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
+                            addCandidate(ci->value_, w);
+                }
+            }
+        }
+        if (!weight.empty()) {
+            std::set<int> usedRegs;
+            for (auto &kv : assignedRegs_) {
+                const std::string &r = kv.second;
+                if (!r.empty() && (r[0] == 'w' || r[0] == 'x'))
+                    usedRegs.insert(std::stoi(r.substr(1)));
+            }
+            std::vector<int> freeRegs;
+            for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
+                if (!usedRegs.count(r)) freeRegs.push_back(r);
+            std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
+            for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
+            std::sort(ranked.begin(), ranked.end());
+            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)4});
+            for (size_t i = 0; i < n; ++i)
+                promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
+        }
+    }
 }

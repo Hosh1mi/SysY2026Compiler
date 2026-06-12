@@ -95,6 +95,8 @@ private:
     // emit constant into register
     void emitIntConst(int val, const std::string &reg);
     void emitFloatConst(float val, const std::string &reg);
+    // 取一个持有常量 val 的只读寄存器：优先用提升常量寄存器，否则物化进 scratch
+    std::string intConstReg(int val);
 
     // emit global address
     void emitGlobalAddr(GlobalVariable *gv, const std::string &reg);
@@ -131,6 +133,8 @@ private:
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
+    // 循环内提升的大常量：常量值 → 专属 callee-saved 寄存器（入口物化一次）
+    std::map<int, std::string> promotedConsts_;
 
     struct PhiCopy {
         BasicBlock *pred;

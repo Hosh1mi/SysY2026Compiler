@@ -734,8 +734,7 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
             emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
                                  MOpcode::Cmp, {}, {r1}, 1, true, false, true);
         } else {
-            std::string r2 = allocIntReg();
-            emitIntConst(val, r2);
+            std::string r2 = intConstReg(val);
             emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
                                  MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
         }

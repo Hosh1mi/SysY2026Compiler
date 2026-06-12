@@ -19,6 +19,10 @@ public:
     /// Result: Value* → register name.
     const std::map<Value*, std::string> &assignedRegs() const;
 
+    /// 循环内多指令常量提升结果：32 位常量值 → 持有它的 callee-saved
+    /// 寄存器（如 "w28"）。寄存器在整个函数中未被任何值占用，入口物化。
+    const std::map<int, std::string> &promotedConsts() const;
+
     /// Convenience accessors on the result set.
     bool hasAssignedReg(Value *v) const;
     std::string assignedReg(Value *v, bool asAddress = false) const;
@@ -45,4 +49,5 @@ private:
 
     Function *func_;
     std::map<Value*, std::string> assignedRegs_;
+    std::map<int, std::string> promotedConsts_;
 };

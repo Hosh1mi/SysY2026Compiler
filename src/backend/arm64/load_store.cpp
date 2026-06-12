@@ -239,12 +239,20 @@ std::string Arm64FuncContext::allocAddrReg() {
 
 // ---- load from slot/constant/global to scratch register ----
 
+// 取一个持有常量 val 的只读寄存器：优先用提升常量寄存器（入口已物化），
+// 否则物化进 scratch。调用方不得写入返回的寄存器。
+std::string Arm64FuncContext::intConstReg(int val) {
+    auto it = promotedConsts_.find(val);
+    if (it != promotedConsts_.end()) return it->second;
+    std::string r = allocIntReg();
+    emitIntConst(val, r);
+    return r;
+}
+
 std::string Arm64FuncContext::loadInt(Value *v) {
     if (auto ci = dynamic_cast<ConstantInt*>(v)) {
         if (ci->value_ == 0) return "wzr";
-        std::string r = allocIntReg();
-        emitIntConst(ci->value_, r);
-        return r;
+        return intConstReg(ci->value_);
     }
     if (hasAssignedReg(v)) {
         std::string reg = assignedReg(v);
