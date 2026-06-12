@@ -587,7 +587,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 auto *gepPtrTy = dynamic_cast<PointerType *>(gep->type_);
                 bool gepYieldsArray =
                     gepPtrTy && gepPtrTy->contained_->tid_ == Type::ArrayTyID;
-                SCEVGEPInfo gepInfo = SCEVGEPInfo{};
+                SCEVGEPInfo gepInfo = gepYieldsArray ? SCEVGEPInfo{} : SE.getLinearizedGEP(gep);
                 if (gepInfo.valid) {
                     LinearIVExpr flatExpr =
                         linearizeSCEVForIV(gepInfo.elementOffset, iv, loop, SE);
