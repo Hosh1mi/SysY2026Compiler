@@ -547,8 +547,13 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     auto *builder = new IRStmtBuilder(preheader, module);
 
     for (auto &iv : ivs) {
+        // 初值允许非常量：来自唯一循环外入边，必在 preheader 可用。
+        // coeff*init 折不成编译期常量时，在 preheader 物化为 mul+add
+        // （纯地址算术，与 initGEP 同等投机安全）。
+        // 仅限最内层循环：外层行指针 phi 的活跃区跨过内层循环，
+        // 实测增加寄存器压力得不偿失（h-10 trsm +25%）。
         auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
-        if (!initCI) continue;
+        if (!initCI && (!isI32(iv.initVal) || !loop.children.empty())) continue;
 
         struct GEPCandidate {
             GetElementPtrInst *gep;
@@ -567,11 +572,14 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
                 auto initExprCanMaterialize = [&](LinearIVExpr expr) -> bool {
                     if (expr.coeff != 0) {
-                        long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
-                        if (!fitsInt(ivStart)) return false;
+                        if (initCI) {
+                            long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                            if (!fitsInt(ivStart)) return false;
+                            expr.constOffset += ivStart;
+                            if (!fitsInt(expr.constOffset)) return false;
+                        }
+                        // 非常量初值：coeff*init 运行期计算，余下部分照常检查
                         expr.coeff = 0;
-                        expr.constOffset += ivStart;
-                        if (!fitsInt(expr.constOffset)) return false;
                     }
                     return canMaterializeOffsetInPreheader(expr, loop);
                 };
@@ -690,24 +698,49 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             bool failed = false;
             for (unsigned i = 1; i < gep->num_ops_; i++) {
                 LinearIVExpr expr = c.indexExprs[i - 1];
+                Value *ivStartVal = nullptr; // 非常量初值时的运行期 coeff*init
                 if (expr.coeff != 0) {
-                    long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
-                    if (!fitsInt(ivStart)) {
-                        failed = true;
-                        break;
+                    if (initCI) {
+                        long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                        if (!fitsInt(ivStart)) {
+                            failed = true;
+                            break;
+                        }
+                        expr.constOffset += ivStart;
+                        if (!fitsInt(expr.constOffset)) {
+                            failed = true;
+                            break;
+                        }
+                    } else if (expr.coeff == 1) {
+                        ivStartVal = iv.initVal;
+                    } else {
+                        builder->set_insert_point(preheader);
+                        auto *mul = builder->create_imul(
+                            iv.initVal,
+                            new ConstantInt(module->int32_ty_, expr.coeff));
+                        preheader->remove_instr(mul);
+                        preheader->add_instruction_before_terminator(mul);
+                        ivStartVal = mul;
                     }
                     expr.coeff = 0;
-                    expr.constOffset += ivStart;
-                    if (!fitsInt(expr.constOffset)) {
-                        failed = true;
-                        break;
-                    }
                 }
 
                 Value *idxVal = materializeOffsetInPreheader(expr, preheader, loop, builder, module);
                 if (!idxVal) {
                     failed = true;
                     break;
+                }
+                if (ivStartVal) {
+                    auto *baseCI = dynamic_cast<ConstantInt *>(idxVal);
+                    if (baseCI && baseCI->value_ == 0) {
+                        idxVal = ivStartVal;
+                    } else {
+                        builder->set_insert_point(preheader);
+                        auto *add = builder->create_iadd(idxVal, ivStartVal);
+                        preheader->remove_instr(add);
+                        preheader->add_instruction_before_terminator(add);
+                        idxVal = add;
+                    }
                 }
                 initIndices.push_back(idxVal);
             }
