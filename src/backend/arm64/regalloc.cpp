@@ -39,7 +39,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                                const std::vector<int> &colorToReg, bool isFloat,
                                const std::set<int> &callerSavedRegs,
                                const std::map<Value*, double> &spillCost,
-                               const std::map<Value*, std::set<Value*>> &phiAffinity) {
+                               const std::map<Value*, std::set<Value*>> &phiAffinity,
+                               const std::function<bool(Value*, Value*)> &trulyInterferes) {
     if (pool.empty()) return;
     int K = (int)colorToReg.size();
 
@@ -63,8 +64,12 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     // 把 phi 相连且不冲突的活跃区间在着色前合并成一个节点，使 phi 拷贝
     // 退化为自搬移（由 peephole 删除）。Briggs 准则保证合并后的节点
     // 高度数邻居 < K，不会让图变得更难着色，因此不会引入新的 spill。
-    // 正确性依赖两点：区间凸包不重叠 ⇒ 真实活跃区间不重叠；phi 拷贝
-    // 发射端（emitPhiCopies）本身具备并行拷贝语义，撞号/成环均能处理。
+    // 冲突判定：凸包不重叠（adj 无边）⇒ 必然安全；凸包重叠时再用
+    // trulyInterferes 做基于真实活跃性的精确判定——循环 phi 的凸包
+    // 横跨整个循环，与 backedge incoming 必然凸包重叠，但真实活跃
+    // 区间通常不冲突（incoming 死于并行拷贝处），精确判定能合并它们。
+    // 着色阶段仍使用凸包邻接（合并节点取成员邻接之并），保守安全。
+    // phi 拷贝发射端（emitPhiCopies）具备并行拷贝语义，撞号/成环均能处理。
     std::map<Value*, Value*> ufParent;
     std::function<Value*(Value*)> ufFind = [&](Value *v) -> Value* {
         auto it = ufParent.find(v);
@@ -90,6 +95,9 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
+    std::map<Value*, std::vector<Value*>> members;
+    for (auto &iv : sorted) members[iv.value] = {iv.value};
+
     bool mergedAny = true;
     while (mergedAny) {
         mergedAny = false;
@@ -97,7 +105,17 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             Value *a = ufFind(e.first);
             Value *b = ufFind(e.second);
             if (a == b) continue;
-            if (adj[a].count(b)) continue;  // 冲突，不能共用寄存器
+            if (adj[a].count(b)) {
+                // 凸包重叠 ≠ 真干涉：对两个类的成员做精确两两检测
+                bool conflict = false;
+                for (auto *x : members[a]) {
+                    for (auto *y : members[b]) {
+                        if (trulyInterferes(x, y)) { conflict = true; break; }
+                    }
+                    if (conflict) break;
+                }
+                if (conflict) continue;
+            }
 
             // Briggs：合并节点的"高度数（>=K）邻居"个数必须 < K
             std::set<Value*> nbrs = adj[a];
@@ -124,6 +142,10 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             intervalForValue[a].crossesCall =
                 intervalForValue[a].crossesCall || intervalForValue[b].crossesCall;
             cost[a] = std::max(cost[a], cost[b]);
+            auto &ma = members[a];
+            auto &mb = members[b];
+            ma.insert(ma.end(), mb.begin(), mb.end());
+            members.erase(b);
             mergedAny = true;
         }
     }
@@ -687,8 +709,69 @@ void Arm64RegAlloc::allocate() {
             intPool.push_back(iv);
     }
 
-    // ---- 10. Graph coloring (Chaitin-Briggs) ----
-    colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity);
-    colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity);
-    colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity);
+    // ---- 10. Precise SSA interference oracle（仅用于 affinity 合并判定）----
+    // liveAtDefs(v)：v 定义写入后仍活跃的值集合。两值真干涉 ⇔ 一方在另一
+    // 方定义点处活跃（SSA 性质）。phi 的物理定义点是各前驱末尾的并行拷贝：
+    // 任何在某前驱出口活跃的值都与 phi 冲突，唯一豁免是 phi 自己来自该
+    // 前驱的 incoming（并行拷贝读先于写）；同块其余 phi 视为同时定义，
+    // 相互冲突（规避 swap 问题）。
+    auto liveAtDefsCache = std::make_shared<std::map<Value*, std::set<Value*>>>();
+    auto liveAtDefs = [this, liveAtDefsCache, &liveIn, &liveOut, &preds]
+                      (Value *v) -> const std::set<Value*>& {
+        auto it = liveAtDefsCache->find(v);
+        if (it != liveAtDefsCache->end()) return it->second;
+
+        std::set<Value*> live;
+        if (auto *phi = dynamic_cast<PhiInst*>(v)) {
+            BasicBlock *bb = phi->parent_;
+            live = liveIn[bb];
+            for (auto *inst : bb->instr_list_) {
+                auto *p2 = dynamic_cast<PhiInst*>(inst);
+                if (p2 && p2 != phi && canAssignRegister(p2)) live.insert(p2);
+            }
+            for (auto *pred : preds[bb]) {
+                Value *incoming = nullptr;
+                for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+                    if (phi->get_operand(i + 1) == pred) {
+                        incoming = phi->get_operand(i);
+                        break;
+                    }
+                }
+                for (auto *x : liveOut[pred])
+                    if (x != incoming) live.insert(x);
+            }
+        } else if (auto *inst = dynamic_cast<Instruction*>(v)) {
+            BasicBlock *bb = inst->parent_;
+            live = liveOut[bb];
+            for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
+                Instruction *cur = *rit;
+                if (cur == inst) break;  // live == inst 定义后的活跃集合
+                if (canAssignRegister(cur)) live.erase(cur);
+                if (dynamic_cast<PhiInst*>(cur)) continue;  // phi 的读发生在前驱
+                for (unsigned i = 0; i < cur->num_ops_; ++i) {
+                    auto *op = cur->get_operand(i);
+                    if (canAssignRegister(op)) live.insert(op);
+                }
+            }
+        } else {
+            // Argument：在入口块起点定义，与其余参数及入口 liveIn 同时活跃
+            BasicBlock *entryBB = func_->basic_blocks_[0];
+            live = liveIn[entryBB];
+            for (auto *arg : func_->arguments_)
+                if (arg != v && canAssignRegister(arg)) live.insert(arg);
+        }
+        live.erase(v);
+        auto &slot = (*liveAtDefsCache)[v];
+        slot = std::move(live);
+        return slot;
+    };
+    std::function<bool(Value*, Value*)> trulyInterferes =
+        [liveAtDefs](Value *a, Value *b) -> bool {
+            return liveAtDefs(a).count(b) > 0 || liveAtDefs(b).count(a) > 0;
+        };
+
+    // ---- 11. Graph coloring (Chaitin-Briggs) ----
+    colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity, trulyInterferes);
+    colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity, trulyInterferes);
+    colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity, trulyInterferes);
 }

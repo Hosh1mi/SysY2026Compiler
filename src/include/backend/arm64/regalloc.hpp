@@ -1,5 +1,6 @@
 #pragma once
 #include "../../mid/ir/ir.hpp"
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -39,7 +40,8 @@ private:
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::set<int> &callerSavedRegs,
                    const std::map<Value*, double> &spillCost,
-                   const std::map<Value*, std::set<Value*>> &phiAffinity);
+                   const std::map<Value*, std::set<Value*>> &phiAffinity,
+                   const std::function<bool(Value*, Value*)> &trulyInterferes);
 
     Function *func_;
     std::map<Value*, std::string> assignedRegs_;

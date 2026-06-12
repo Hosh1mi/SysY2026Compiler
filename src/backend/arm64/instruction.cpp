@@ -321,7 +321,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if (abs_d > 0 && (abs_d & (abs_d - 1)) == 0) {
                         int k = __builtin_ctz(abs_d);
                         std::string rNum    = loadInt(v1);
-                        std::string rResult = allocIntReg();
+                        // rNum 的最后一次读和 rResult 的首次写在同一条指令上，
+                        // 因此 rResult 直接用分配寄存器即使与 rNum 同号也安全
+                        std::string rResult = hasAssignedReg(inst) ? assignedReg(inst)
+                                                                   : allocIntReg();
 
                         if (k == 1) {
                             // ÷2:  barrel-shifter folds bias into add
@@ -352,29 +355,29 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         std::string wMagic = allocIntReg();
                         emitIntConst(mag.multiplier, wMagic);
 
-                        std::string wNumSafe = allocIntReg();
-                        emitMoveMachine(wNumSafe, wNum);
-
                         std::string xTemp = allocAddrReg();
                         std::string wHi = "w" + xTemp.substr(1);
 
-                        emitRawAluMachine("\tsmull " + xTemp + ", " + wNumSafe + ", " + wMagic,
-                                          xTemp, {wNumSafe, wMagic}, MOpcode::Mul, 3);
+                        emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
+                                          xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
                         emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
                                           xTemp, {xTemp});
 
                         if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                            emitBinaryMachine("add", wHi, wHi, wNumSafe);
+                            emitBinaryMachine("add", wHi, wHi, wNum);
                         } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                            emitBinaryMachine("sub", wHi, wHi, wNumSafe);
+                            emitBinaryMachine("sub", wHi, wHi, wNum);
                         }
 
                         emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
                                           wHi, {wHi});
-                        emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNumSafe + ", lsr #31",
-                                          wHi, {wHi, wNumSafe});
+                        // 末条指令同时完成 wNum 的最后一次读，可直接写入分配寄存器
+                        std::string wResult = hasAssignedReg(inst) ? assignedReg(inst)
+                                                                   : allocIntReg();
+                        emitRawAluMachine("\tadd " + wResult + ", " + wHi + ", " + wNum + ", lsr #31",
+                                          wResult, {wHi, wNum});
 
-                        storeInt(inst, wHi);
+                        storeInt(inst, wResult);
                         emitted = true;
                     }
                 }
@@ -396,8 +399,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
                 if (factor == -1) {
                     // × -1：negate
+                    // 以下各情形 rd 的写入都不早于 r 的最后一次读（同指令内
+                    // 读先于写），因此 rd 直接用分配寄存器、与 r 同号也安全
                     std::string r  = loadInt(var);
-                    std::string rd = allocIntReg();
+                    std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                     emitUnaryMachine("neg", rd, r);
                     storeInt(inst, rd);
                     emitted = true;
@@ -412,7 +417,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if ((abs_f & (abs_f - 1)) == 0) {
                         int k = __builtin_ctz(abs_f);
                         std::string r  = loadInt(var);
-                        std::string rd = allocIntReg();
+                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                         emitRawAluMachine("\tlsl " + rd + ", " + r + ", #" + std::to_string(k),
                                           rd, {r});
                         if (negative)
@@ -429,7 +434,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     {
                         int k = __builtin_ctz(m1);
                         std::string r  = loadInt(var);
-                        std::string rd = allocIntReg();
+                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                         emitRawAluMachine("\tadd " + rd + ", " + r + ", "
                                           + r + ", lsl #" + std::to_string(k),
                                           rd, {r});
@@ -448,7 +453,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     {
                         int k = __builtin_ctz(p1);
                         std::string r  = loadInt(var);
-                        std::string rd = allocIntReg();
+                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                         if (negative) {
                             // r*(1 - 2^k) = r - r*2^k
                             emitRawAluMachine("\tsub " + rd + ", " + r + ", "
@@ -549,14 +554,16 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (divisor == 0) { /* Fallback */ }
             // ---- 除数为 1，余数恒为 0 ----
             else if (divisor == -1) {
-                std::string rd = allocIntReg();
+                std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                 emitMoveMachine(rd, "wzr");
                 storeInt(inst, rd);
                 break;
             }
             else if (divisor == 2) {
                 std::string r = loadInt(v1);
-                std::string rd = allocIntReg();
+                // rd 在 tst 读 r 之前就被写入，rd 与 r 同号时必须走 scratch
+                std::string rd = (hasAssignedReg(inst) && assignedReg(inst) != r)
+                                     ? assignedReg(inst) : allocIntReg();
                 emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
                 emitMachineInstrLine("\ttst " + r + ", " + r,
                                      MOpcode::Cmp, {}, {r}, 1, true);
@@ -581,7 +588,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
                 emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
 
-                std::string rResult = allocIntReg();
+                // 末条 sub 同时是 rNum 的最后一次读，直接写分配寄存器安全
+                std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
                 emitBinaryMachine("sub", rResult, rNum, rQ);
                 storeInt(inst, rResult);
                 break;
@@ -594,33 +602,32 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 std::string wMagic = allocIntReg();
                 emitIntConst(mag.multiplier, wMagic);
 
-                std::string wNumSafe = allocIntReg();
-                emitMoveMachine(wNumSafe, wNum);
-
                 std::string xTemp = allocAddrReg();
                 std::string wHi = "w" + xTemp.substr(1);
 
-                emitRawAluMachine("\tsmull " + xTemp + ", " + wNumSafe + ", " + wMagic,
-                                  xTemp, {wNumSafe, wMagic}, MOpcode::Mul, 3);
+                emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
+                                  xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
                 emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
                                   xTemp, {xTemp});
 
                 if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT) {
-                    emitBinaryMachine("add", wHi, wHi, wNumSafe);
+                    emitBinaryMachine("add", wHi, wHi, wNum);
                 } else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT) {
-                    emitBinaryMachine("sub", wHi, wHi, wNumSafe);
+                    emitBinaryMachine("sub", wHi, wHi, wNum);
                 }
 
                 emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
                                   wHi, {wHi});
-                emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNumSafe + ", lsr #31",
-                                  wHi, {wHi, wNumSafe});
+                emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
+                                  wHi, {wHi, wNum});
 
                 std::string wD = allocIntReg();
                 emitIntConst(divisor, wD);
-                std::string wResult = allocIntReg();
-                emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNumSafe,
-                                  wResult, {wHi, wD, wNumSafe}, MOpcode::Mul, 3);
+                // 中间结果全在 scratch，wNum 的最后一次读在末条 msub 上，
+                // 结果可直接写分配寄存器（与 wNum 同号亦安全）
+                std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+                emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNum,
+                                  wResult, {wHi, wD, wNum}, MOpcode::Mul, 3);
 
                 storeInt(inst, wResult);
                 break;
@@ -632,7 +639,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string ra = loadInt(v1);
         std::string rb = loadInt(v2);
         std::string rq = allocIntReg();
-        std::string rr = allocIntReg();
+        // 末条 msub 同时是 ra/rb 的最后一次读，直接写分配寄存器安全
+        std::string rr = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
         emitBinaryMachine("sdiv", rq, ra, rb, MOpcode::Div, 12);
         emitRawAluMachine("\tmsub " + rr + ", " + rq + ", " + rb + ", " + ra,
                           rr, {rq, rb, ra}, MOpcode::Mul, 3);
