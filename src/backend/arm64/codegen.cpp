@@ -5,6 +5,7 @@
 #include "../../include/backend/arm64/machineDCE.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/mid/ir/ir.hpp"
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -41,8 +42,34 @@ static void rebuildCfgLinks(Module *m) {
     }
 }
 
+// cmp+br 融合（emitBlock）要求 icmp 紧邻其 cond br。中端 pass（如 IVSR
+// 的指针步进 GEP、LoopRotate 克隆）可能在两者之间插入指令，使融合退化为
+// cmp+cset+mov+cbz 四条。把"单 use 且被本块终结符用作条件"的 icmp 下沉
+// 到终结符之前——SSA 下该移动总是安全：操作数的定义只会更靠前，且单 use
+// 意味着中间指令不可能使用这个 icmp。
+static void sinkCmpToBranch(Module *m) {
+    for (auto *f : m->function_list_) {
+        if (f->is_declaration()) continue;
+        for (auto *bb : f->basic_blocks_) {
+            auto *term = bb->get_terminator();
+            if (!term || !term->is_br() || term->num_ops_ != 3) continue;
+            auto *icmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
+            if (!icmp || icmp->parent_ != bb || icmp->use_list_.size() != 1) continue;
+            auto &il = bb->instr_list_;
+            auto it = std::find(il.begin(), il.end(), static_cast<Instruction *>(icmp));
+            if (it == il.end()) continue;
+            auto nx = std::next(it);
+            if (nx != il.end() && *nx == term) continue;  // 已紧邻
+            il.erase(it);
+            auto tit = std::find(il.begin(), il.end(), static_cast<Instruction *>(term));
+            il.insert(tit, icmp);
+        }
+    }
+}
+
 void Arm64CodeGen::generate() {
     rebuildCfgLinks(m_);
+    sinkCmpToBranch(m_);
     MachineModule module;
 
     // 1. 分类全局变量
