@@ -161,18 +161,20 @@ static void replaceMachineInstr(MachineInstr &inst, const std::string &text) {
 static bool lineReadsReg(const ParsedLine &l, const std::string &r) {
 	if (l.operands.empty()) return false;
 	for (size_t i = 1; i < l.operands.size(); ++i)
-		if (l.operands[i] == r) return true;
+		if (l.operands[i] == r || samePhysicalReg(l.operands[i], r)) return true;
 	if (l.mnemonic == "str" || l.mnemonic == "stp" || l.mnemonic == "stur" ||
 	    l.mnemonic == "cbnz" || l.mnemonic == "cbz" ||
 	    l.mnemonic == "cmp" || l.mnemonic == "fcmp" || l.mnemonic == "tst")
-		if (l.operands[0] == r) return true;
+		if (l.operands[0] == r || samePhysicalReg(l.operands[0], r)) return true;
 	return false;
 }
 
 static bool lineUsesReg(const ParsedLine &l, const std::string &r) {
 	for (const auto &op : l.operands) {
 		// Check as whole word match
-		if (op == r) return true;
+		if (op == r || samePhysicalReg(op, r)) return true;
+		MemOperand mem = parseMemOp(op);
+		if (mem.valid && samePhysicalReg(mem.base, r)) return true;
 		// Check if r appears inside a memory operand
 		size_t p = op.find(r);
 		if (p != std::string::npos) {
@@ -290,6 +292,7 @@ static bool tryMachineSwapMov(MachineBasicBlock &block, size_t idx) {
 static bool machineRegDeadAfter(const MachineBasicBlock &block,
                                 size_t idx,
                                 const std::string &reg);
+static bool isControlFlowBarrier(const std::string &mnemonic);
 
 static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
@@ -317,6 +320,79 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	                    makeMachineInsn("mov", {dstReg, srcReg}));
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
+}
+
+static bool canPropagateCopy(const ParsedLine &line,
+                             const std::string &tempReg,
+                             const std::string &srcReg,
+                             ParsedLine &rewritten) {
+	auto rewriteUses = [&](std::initializer_list<size_t> useIndices) {
+		bool replaced = false;
+		for (size_t idx : useIndices) {
+			if (idx >= rewritten.operands.size()) continue;
+			if (rewritten.operands[idx] != tempReg) continue;
+			rewritten.operands[idx] = srcReg;
+			replaced = true;
+		}
+		return replaced;
+	};
+
+	rewritten = line;
+	if (line.mnemonic == "cmp" || line.mnemonic == "cmn" || line.mnemonic == "fcmp" ||
+	    line.mnemonic == "tst" || line.mnemonic == "ccmp") {
+		return rewriteUses({0, 1});
+	}
+	return false;
+}
+
+static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx) {
+	ParsedLine copy = parseLine(block.instrs[idx].text);
+	if (copy.kind != LineKind::Instruction) return false;
+	if (copy.mnemonic != "mov" && copy.mnemonic != "fmov") return false;
+	if (copy.operands.size() != 2) return false;
+
+	const std::string &tempReg = copy.operands[0];
+	const std::string &srcReg = copy.operands[1];
+	if (tempReg == srcReg || samePhysicalReg(tempReg, srcReg)) return false;
+	if (srcReg == "sp" || srcReg == "wzr" || srcReg == "xzr") return false;
+
+	char tempCls = regClass(tempReg);
+	char srcCls = regClass(srcReg);
+	if (!tempCls || !srcCls || tempCls != srcCls) return false;
+	if (copy.mnemonic == "mov" && (tempCls == 's' || tempCls == 'd')) return false;
+	if (copy.mnemonic == "fmov" && tempCls != 's' && tempCls != 'd') return false;
+
+	for (size_t i = idx + 1; i < block.instrs.size(); ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+			continue;
+		if (line.kind != LineKind::Instruction)
+			return false;
+		if (isCallBarrier(line.mnemonic) || isControlFlowBarrier(line.mnemonic))
+			return false;
+
+		if (lineWritesReg(line, srcReg))
+			return false;
+		if (lineUsesReg(line, tempReg) && !lineReadsReg(line, tempReg))
+			return false;
+		if (!lineReadsReg(line, tempReg)) {
+			if (lineWritesReg(line, tempReg))
+				return false;
+			continue;
+		}
+
+		ParsedLine rewritten;
+		if (!canPropagateCopy(line, tempReg, srcReg, rewritten))
+			return false;
+		if (!machineRegDeadAfter(block, i, tempReg))
+			return false;
+
+		replaceMachineInstr(block.instrs[i],
+		                    makeMachineInsn(rewritten.mnemonic, rewritten.operands));
+		return true;
+	}
+
+	return false;
 }
 
 static bool machineRegDeadAfter(const MachineBasicBlock &block,
@@ -890,6 +966,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineForwardMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineCopyPropagate(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
