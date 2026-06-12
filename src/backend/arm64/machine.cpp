@@ -216,12 +216,18 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::FlagUse;
         mi.usesFlags = true;
         defFirstUseRest();
-    } else if (op == "b" || startsWith(op, "b.") || op == "cbz" || op == "cbnz") {
+    } else if (op == "b" || startsWith(op, "b.") || op == "cbz" || op == "cbnz" ||
+               op == "tbz" || op == "tbnz") {
         mi.opcode = MOpcode::Branch;
         mi.isBarrier = true;
         if (startsWith(op, "b."))
             mi.usesFlags = true;
-        addUses(mi, rest);
+        if (op == "tbz" || op == "tbnz") {
+            if (!operands.empty())
+                addUses(mi, operands[0]);
+        } else {
+            addUses(mi, rest);
+        }
     } else if (op == "bl") {
         mi.opcode = MOpcode::Call;
         mi.isCall = true;
