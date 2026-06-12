@@ -1234,6 +1234,90 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 	return false;
 }
 
+// 条件后缀取反；不认识的后缀返回 nullptr。
+static const char *invertCondSuffix(const std::string &c) {
+	if (c == "eq") return "ne";
+	if (c == "ne") return "eq";
+	if (c == "lt") return "ge";
+	if (c == "ge") return "lt";
+	if (c == "gt") return "le";
+	if (c == "le") return "gt";
+	if (c == "hi") return "ls";
+	if (c == "ls") return "hi";
+	if (c == "hs") return "lo";
+	if (c == "lo") return "hs";
+	if (c == "mi") return "pl";
+	if (c == "pl") return "mi";
+	if (c == "vs") return "vc";
+	if (c == "vc") return "vs";
+	return nullptr;
+}
+
+// 条件分支反转：条件目标恰好是无条件 b 之后的 fallthrough 位置时，
+// 反转条件改跳无条件目标，让原条件目标变成 fallthrough：
+//   b.lt L1            b.ge L2
+//   b L2          →    L1:
+//   L1:                ...
+// 同样处理 cbz/cbnz、tbz/tbnz。要求两条分支之间无其他可见指令
+// （phi 拷贝属于 b 的目标边，夹在中间时不可反转）。
+static bool tryMachineInvertCondBranch(MachineFunction &func,
+                                       size_t blockIdx,
+                                       size_t instrIdx) {
+	auto &block = func.blocks[blockIdx];
+	auto &inst = block.instrs[instrIdx];
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction) return false;
+
+	std::string invMnemonic;
+	if (line.mnemonic.size() > 2 && line.mnemonic.compare(0, 2, "b.") == 0) {
+		const char *inv = invertCondSuffix(line.mnemonic.substr(2));
+		if (!inv) return false;
+		invMnemonic = std::string("b.") + inv;
+	} else if (line.mnemonic == "cbz") {
+		invMnemonic = "cbnz";
+	} else if (line.mnemonic == "cbnz") {
+		invMnemonic = "cbz";
+	} else if (line.mnemonic == "tbz") {
+		invMnemonic = "tbnz";
+	} else if (line.mnemonic == "tbnz") {
+		invMnemonic = "tbz";
+	} else {
+		return false;
+	}
+
+	int ti = branchTargetOperandIndex(line);
+	if (ti < 0) return false;
+
+	// 下一条可见指令必须是同块内的无条件 b（不跨 label）
+	size_t j = instrIdx + 1;
+	for (; j < block.instrs.size(); ++j) {
+		ParsedLine l = parseLine(block.instrs[j].text);
+		if (l.kind == LineKind::Empty || l.kind == LineKind::Comment)
+			continue;
+		break;
+	}
+	if (j >= block.instrs.size()) return false;
+	ParsedLine bline = parseLine(block.instrs[j].text);
+	if (bline.kind != LineKind::Instruction || bline.mnemonic != "b" ||
+	    bline.operands.size() != 1)
+		return false;
+
+	const std::string condTarget = line.operands[ti];
+	const std::string uncondTarget = bline.operands[0];
+	if (condTarget == uncondTarget) return false;
+	if (!nextVisibleIsLabel(func, blockIdx, j, condTarget)) return false;
+	// 条件目标若是 forwarder（label 后第一条指令是无条件 b），交给跳转链
+	// 折叠 + 死 forwarder 清理处理——那条路径能得到"直跳 + fallthrough"
+	// 的更优形态；在这里反转会把罕走的条件边变成每次都 taken。
+	if (resolveForwardTarget(func, condTarget) != condTarget) return false;
+
+	std::vector<std::string> ops = line.operands;
+	ops[ti] = uncondTarget;
+	replaceMachineInstr(inst, makeMachineInsn(invMnemonic, ops));
+	block.instrs.erase(block.instrs.begin() + j);
+	return true;
+}
+
 static bool tryMachineFallthroughBranch(MachineFunction &func,
                                         size_t blockIdx,
                                         size_t instrIdx) {
@@ -1323,6 +1407,12 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineRemoveDeadForwarder(func, b, i)) {
+					changed = true;
+					break;
+				}
+				// 反转必须排在跳转链折叠/清理之后：trampoline 形态
+				// （b.cond edge; b X; edge: b Y）先由上面两条规则化简
+				if (tryMachineInvertCondBranch(func, b, i)) {
 					changed = true;
 					break;
 				}

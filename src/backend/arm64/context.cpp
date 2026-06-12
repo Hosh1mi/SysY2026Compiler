@@ -201,6 +201,41 @@ void Arm64FuncContext::reorderBlocks() {
     placed.insert(current);
 
     while (order.size() < func_->basic_blocks_.size()) {
+        // 侧块内联：cond br 两边都未放置、两条边都无 phi 拷贝、且 trueBB
+        // 以"无条件 b 跳到已放置块"结尾（典型：循环内 if-then 小块跳回
+        // backedge）时，把 trueBB 紧贴本块放置、falseBB 跟在其后。
+        // peephole（tryMachineInvertCondBranch）随后把 b.cond 反转成
+        // fallthrough，热路径（如 Collatz 的 3n+1 边）少走一次 taken branch，
+        // 同时避免 trueBB 被甩到函数末尾破坏循环体局部性。
+        {
+            auto term = current->get_terminator();
+            if (term && term->is_br() && term->num_ops_ == 3) {
+                auto trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
+                auto falseBB = static_cast<BasicBlock*>(term->get_operand(2));
+                bool hasCopies = false;
+                for (const auto &pc : phiCopies_) {
+                    if (pc.pred == current &&
+                        (pc.succ == trueBB || pc.succ == falseBB)) {
+                        hasCopies = true;
+                        break;
+                    }
+                }
+                if (!hasCopies && trueBB != falseBB &&
+                    !placed.count(trueBB) && !placed.count(falseBB)) {
+                    auto tterm = trueBB->get_terminator();
+                    if (tterm && tterm->is_br() && tterm->num_ops_ == 1 &&
+                        placed.count(static_cast<BasicBlock*>(tterm->get_operand(0)))) {
+                        order.push_back(trueBB);
+                        placed.insert(trueBB);
+                        current = falseBB;
+                        order.push_back(current);
+                        placed.insert(current);
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Try the preferred fallthrough successor first
         auto it = preferred.find(current);
         if (it != preferred.end() && !placed.count(it->second)) {
