@@ -433,14 +433,6 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     InductionVar iv;
     if (!findInductionVar(loop, iv)) { return false; }
 
-    // 5. 非 IV header phi 限制（5.1 收紧，2026-06-11）：
-    //    - 整型 aux phi 一律拒绝。lane 映射 add(phi, j) 假设步长 +1，且
-    //      余数循环没有 aux 接力 phi（注释里的 remAux 从未实现）——aux 在
-    //      余数循环会从初值重启，错译 30_many_dimensions（计数器写数组）。
-    //      完整 aux phi 链（带步长的 lane 偏移 + vec 回边 ×W + remAux +
-    //      afterLoop 合流）见 plan 5.1 待办。
-    //    - 指针 phi 仅允许 gep(phi, 1)（单位元素步长）：lane 映射
-    //      gep(phi, j) 同样假设步长 1。
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         if (inst == iv.phi) continue;
@@ -503,19 +495,6 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
         return false;
     }
 
-    // 无 store 的循环（如 03_sort 的查找循环）没有可打包的向量目标
-    //（VECTOR_IR 以 store 组为锚），产物是 4 倍标量展开、零 NEON。
-    // 实测这种"变相展开"对 sort 家族有 ~5% 收益（中位数 495ms vs
-    // 拒绝后 522ms），故保留；asm 里见不到 .4s 是预期行为，不是 bug。
-
-    // 8. Find the trip count bound from the comparison instruction
-    //    We need to know the loop bound to determine if strip-mining is viable
-    //    For now, we'll emit both vectorized loop and remainder loop
-
-    // 9. Reject loops where a store feeds from SDiv/SRem/FDiv.
-    //    VECTOR_IR cannot pack these (only handles Add/Sub/Mul),
-    //    so scalar unrolling would leave 4 copies with high register
-    //    pressure — worse than the original scalar loop.
     {
         std::vector<Instruction*> bodyInsts;
         for (auto bb : loop.blocks)
@@ -687,11 +666,6 @@ void LoopVectorize::emitVectorizedLoop(
     vecHeader->add_instruction_front(vecPhi);
     vecPhi->addIncoming(iv.initVal, preheader);
 
-    // Compute the vectorized loop's upper bound check.
-    // We process VF elements {i, i+1, ..., i+VF-1} per iteration.
-    // For SLT i < bound: the last element must satisfy i+VF-1 < bound,
-    //   i.e. i < bound - (VF-1).  VF is one too conservative.
-    // For SLE / SGT / SGE the same (VF-1) adjustment applies.
     int adj = vecWidth - 1;  // VF - 1
     bool negStride = (iv.stride < 0);
     Value *boundMain;
@@ -750,14 +724,6 @@ void LoopVectorize::emitVectorizedLoop(
                                       vecPhi, vecStride, vecBody);
     vecPhi->addIncoming(vecNext, vecBody);
 
-    // —— 向量体生成 ——
-    // 模式 A (纯 load-binop-store)：全向量化（vector load → vector binop → vector store）
-    // 模式 B (IV 参与运算)：标量展开 + insertelement 打包 + vector store
-    //
-    // 判断：如果所有非 GEP/load/store 指令的操作数都不直接依赖 IV，
-    //       则可以用模式 A 全向量化。
-    // 但如果有非 IV phi（pointer phi、累加器等），模式 A 无法处理，
-    // 必须走模式 B 让 headerNonIVPhis 映射来正确 remap 这些 phi。
     bool patternA = true;
     for (auto inst : origHeader->instr_list_) {
         if (!inst->is_phi()) break;
@@ -952,11 +918,6 @@ void LoopVectorize::emitVectorizedLoop(
                                                 remap(ui->get_operand(0)), vecBody);
         }
     } else {
-        // ── 标量展开（模式 B 或未开启 VECTOR_IR）──
-        // Pre-collect non-IV phis from the loop header so cloned
-        // instructions (stores, etc.) can remap them correctly.
-        // Without this, all j>0 clones would reference the original
-        // phi and write to the same address, losing 3/4 of stores.
         std::vector<PhiInst*> headerNonIVPhis;
         for (auto inst : origHeader->instr_list_) {
             if (!inst->is_phi()) break;

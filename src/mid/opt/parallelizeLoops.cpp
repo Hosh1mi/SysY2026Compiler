@@ -8,10 +8,6 @@
 #include <iostream>
 #include <set>
 
-// 判定与变换的完整设计见 plan 5.2 / parallel-runtime-design 记忆。
-// 阶段一限制：仅顶层循环、唯一 IV phi（无归约）、步长 +1、全局数组基址、
-// 仅 i32 live-in、无 call/alloca/标量 live-out。
-
 namespace {
 
 bool isParDebugEnabled() {
@@ -448,10 +444,6 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
             }
         }
     }
-
-    // dispatch 不生成 IR：后端 regalloc 对"icmp 链 + 多 call 块"形态存在
-    // 错误分配（w0 同时承载 id 与 hi，2026-06-12 实测），改由 main.cpp 在
-    // .s 末尾直接发射手写 dispatch 汇编（尾跳转+参数平移，构造上正确）。
 
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

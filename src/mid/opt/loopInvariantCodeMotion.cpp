@@ -17,8 +17,7 @@ PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
         if (!func->is_declaration())
             changed |= runOnFunction(func, AM);
     }
-    // 未改动 ⇒ all()（4.2 收敛判定）；改动时函数级失效已在内部完成，
-    // 这里保守再报 none()
+
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
@@ -142,14 +141,6 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
         inst->is_store() || inst->is_alloca())
         return false;
-
-    // 投机安全性说明（平台契约，勿删）：本 pass 不区分"保证执行"，
-    // 循环零次执行时外提指令也会跑。这依赖两个目标事实：
-    //   1. AArch64 的 sdiv 除零不陷阱（结果 0），srem 由 sdiv+msub 合成；
-    //   2. SysY 数组都是静态分配，load 总是可解引用（越界本身是 UB）。
-    // 若未来移植到 div 会陷阱的目标，div/rem/load/纯 call 的外提必须补
-    // isGuaranteedToExecute（指令块支配所有 exiting 块）+ 真 preheader
-    //（单后继）检查——旋转后 LoopInfo 的 preheader 是双后继 guard。
 
     if (inst->is_call()) {
         if (inst->is_void()) return false;

@@ -515,10 +515,6 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
-    // gep(alloca) 的削弱按候选粒度跳过（见候选收集处）：后端不能把栈
-    // 数组地址独立物化进寄存器，指针 phi 会读垃圾（crypto 实证）。
-    // 旧的"函数含数组 alloca 即整体跳过"过宽——并行外提体的私有化
-    // alloca 会让全局数组 GEP 也失去削弱。
     int inLoopHeaderPreds = 0;
     for (auto *pred : loop.header->pre_bbs_) {
         if (loop.blocks.count(pred))
@@ -543,11 +539,6 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     auto *builder = new IRStmtBuilder(preheader, module);
 
     for (auto &iv : ivs) {
-        // 初值允许非常量：来自唯一循环外入边，必在 preheader 可用。
-        // coeff*init 折不成编译期常量时，在 preheader 物化为 mul+add
-        // （纯地址算术，与 initGEP 同等投机安全）。
-        // 仅限最内层循环：外层行指针 phi 的活跃区跨过内层循环，
-        // 实测增加寄存器压力得不偿失（h-10 trsm +25%）。
         auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
         if (!initCI && (!isI32(iv.initVal) || !loop.children.empty())) continue;
 
