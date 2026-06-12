@@ -515,14 +515,10 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
-    for (auto *bb : func->basic_blocks_) {
-        for (auto *inst : bb->instr_list_) {
-            auto *alloca = dynamic_cast<AllocaInst *>(inst);
-            if (alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID)
-                return;
-        }
-    }
-
+    // gep(alloca) 的削弱按候选粒度跳过（见候选收集处）：后端不能把栈
+    // 数组地址独立物化进寄存器，指针 phi 会读垃圾（crypto 实证）。
+    // 旧的"函数含数组 alloca 即整体跳过"过宽——并行外提体的私有化
+    // alloca 会让全局数组 GEP 也失去削弱。
     int inLoopHeaderPreds = 0;
     for (auto *pred : loop.header->pre_bbs_) {
         if (loop.blocks.count(pred))
@@ -569,6 +565,14 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             for (auto inst : bb->instr_list_) {
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
+
+                // 栈数组基址不削弱（后端取地址限制，函数级注释见 processLoop 顶部）
+                {
+                    Value *root = gep->get_operand(0);
+                    while (auto *g2 = dynamic_cast<GetElementPtrInst *>(root))
+                        root = g2->get_operand(0);
+                    if (dynamic_cast<AllocaInst *>(root)) continue;
+                }
 
                 auto initExprCanMaterialize = [&](LinearIVExpr expr) -> bool {
                     if (expr.coeff != 0) {
