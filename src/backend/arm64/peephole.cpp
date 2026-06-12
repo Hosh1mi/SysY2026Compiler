@@ -1270,11 +1270,10 @@ void peepholeOptimize(MachineFunction &func) {
 					changed = true;
 					break;
 				}
-				// conflict happened,temporary disable copy propagation
-				// if (tryMachineCopyPropagate(func.blocks[b], i)) {
-				// 	changed = true;
-				// 	break;
-				// }
+				if (tryMachineCopyPropagate(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
 				if (tryMachineImmediateFold(func.blocks[b], i)) {
 					changed = true;
 					break;
