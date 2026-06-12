@@ -210,21 +210,9 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     bool headerIsOnlyExiting =
         loop->exiting.size() == 1 && loop->exiting[0] == header;
-    if (!headerIsOnlyExiting) {
-        for (auto *inst : exitSucc->instr_list_) {
-            if (!inst->is_phi()) break;
-            auto *p = static_cast<PhiInst *>(inst);
-            if (p->num_ops_ < 2) continue;
-            Value *first = p->get_operand(0);
-            bool allSame = true;
-            for (unsigned i = 2; i + 1 < p->num_ops_; i += 2) {
-                if (p->get_operand(i) != first) { allSame = false; break; }
-            }
-            auto *iv = dynamic_cast<Instruction *>(first);
-            if (allSame && iv && loop->isInLoop(iv->parent_))
-                return false;
-        }
-    }
+    // 多 exiting 循环旋转后 exitSucc 的 LCSSA 形 phi（各入边同一循环内值）
+    // 会变成三路入边拷贝——曾因后端合并不掉而在此 bail。regalloc 的精确
+    // SSA 干涉 coalescing（2026-06-12）落地后这些拷贝可正常合并，门槛取消。
     std::set<PhiInst *> phisNeedingExitPhi;
     for (auto *phi : headerPhis) {
         for (auto &use : phi->use_list_) {
