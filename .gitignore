@@ -2,6 +2,7 @@
 .git
 build/
 prompt/
+docs/
 *.o
 *.obj
 *.exe
@@ -33,3 +34,4 @@ test/result.txt
 /test/re
 *.png
 *.elf
+*.sy

@@ -7,4 +7,5 @@ public:
     std::string name() const override { return "CFGSimplify"; }
 private:
     bool convertDiamondsToSelect(Function *func);
+    bool hoistLoopInvariantBranch(Function *func);
 };

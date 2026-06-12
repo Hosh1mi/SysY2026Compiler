@@ -182,28 +182,18 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
 }
 
 static void addLoopPipeline(PassManager &pm) {
-    pm.addPass(std::make_unique<UnifyExitNodes>());
+    // pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
-    // 4.2 重复调度组：各循环变换互相暴露机会（unswitch/rotate 产生的新
-    // 形态、LICM 外提后的新简化），一轮内"生成型"pass 全部无变化即提前
-    // 退出，上限 3 轮。组内不得有 CFGSimplify（会摧毁规范形——3.2 契约）。
     pm.beginRepeatGroup(/*maxRounds=*/3);
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
-    // unswitch 在 LCSSA 维持窗口内：出口值改写完全依赖 exit phi
     pm.addPass(std::make_unique<SimpleLoopUnswitch>());
     pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<PhiOpSink>());
     pm.addPass(std::make_unique<LICM>());
     addCanonicalCleanup(pm);
-    // 死循环删除放清理之后：DCE 把循环计算的值清成"未使用"后才暴露机会
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
-    // LoopVectorize 暂时停用：标量展开对非 IV 循环携带 phi 的处理有
-    // 多处正确性问题（克隆引用余数循环的 phi、步长假设、live-out 在
-    // 余数循环零次执行时未定义），已确认错译 h_functional/30_many_dimensions
-    // （2026-06-11 复测仍错译：-O1 输出 0，期望 351799）。
-    // 阶段 5.1 加固中（2026-06-11 起重新启用，错译修复见 loopVectorize.cpp）。
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
@@ -220,17 +210,11 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addInterproceduralAndGlobals(pm);
     addLoopPipeline(pm);
     addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
 
-    // Higher opt levels run a second full round to expose cleanup and loop
-    // opportunities created by inlining and canonicalization.
     if (optLevel >= 2) {
-        // addSsaPreparation(pm);
-        // addScalarNormalization(pm);
-        // addInterproceduralAndGlobals(pm);
-        // addLoopPipeline(pm);
-        // addCanonicalCleanup(pm);
-        // addCfgCleanup(pm);
+        
     }
 }
 

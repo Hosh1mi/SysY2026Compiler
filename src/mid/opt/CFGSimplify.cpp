@@ -288,6 +288,283 @@ static bool foldConstantBranches(Function *func) {
     return changed;
 }
 
+static std::unordered_map<BasicBlock *, std::set<BasicBlock *>>
+computeDominators(Function *func) {
+    std::unordered_map<BasicBlock *, std::set<BasicBlock *>> doms;
+    if (!func || func->basic_blocks_.empty()) return doms;
+
+    std::set<BasicBlock *> allBlocks(func->basic_blocks_.begin(),
+                                     func->basic_blocks_.end());
+    BasicBlock *entry = func->basic_blocks_.front();
+
+    for (auto *bb : func->basic_blocks_) {
+        if (bb == entry)
+            doms[bb] = {bb};
+        else
+            doms[bb] = allBlocks;
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto *bb : func->basic_blocks_) {
+            if (bb == entry) continue;
+
+            std::set<BasicBlock *> next = allBlocks;
+            bool hasReachablePred = false;
+            for (auto *pred : bb->pre_bbs_) {
+                auto it = doms.find(pred);
+                if (it == doms.end()) continue;
+                if (!hasReachablePred) {
+                    next = it->second;
+                    hasReachablePred = true;
+                } else {
+                    std::set<BasicBlock *> intersection;
+                    std::set_intersection(next.begin(), next.end(),
+                                          it->second.begin(), it->second.end(),
+                                          std::inserter(intersection, intersection.begin()));
+                    next = std::move(intersection);
+                }
+            }
+            if (!hasReachablePred) next.clear();
+            next.insert(bb);
+
+            if (doms[bb] != next) {
+                doms[bb] = std::move(next);
+                changed = true;
+            }
+        }
+    }
+
+    return doms;
+}
+
+static bool dominates(const std::unordered_map<BasicBlock *, std::set<BasicBlock *>> &doms,
+                      BasicBlock *dom, BasicBlock *bb) {
+    auto it = doms.find(bb);
+    return it != doms.end() && it->second.count(dom);
+}
+
+static Value *getPhiIncomingValue(PhiInst *phi, BasicBlock *pred) {
+    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        if (phi->get_operand(i + 1) == pred)
+            return phi->get_operand(i);
+    }
+    return nullptr;
+}
+
+static bool phisHaveSameIncomingValues(BasicBlock *target,
+                                       BasicBlock *lhsPred,
+                                       BasicBlock *rhsPred) {
+    for (auto *instr : target->instr_list_) {
+        if (!instr->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instr);
+        Value *lhs = getPhiIncomingValue(phi, lhsPred);
+        Value *rhs = getPhiIncomingValue(phi, rhsPred);
+        if (!lhs || !rhs || lhs != rhs) return false;
+    }
+    return true;
+}
+
+static void replacePhiPred(BasicBlock *target, BasicBlock *oldPred,
+                           BasicBlock *newPred) {
+    for (auto *instr : target->instr_list_) {
+        if (!instr->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instr);
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == oldPred)
+                phi->set_operand(i + 1, newPred);
+        }
+    }
+}
+
+static bool blockHasOnlyOptionalCmpAndTerminator(BasicBlock *bb,
+                                                 ICmpInst *cmp,
+                                                 bool allowCmp) {
+    for (auto *instr : bb->instr_list_) {
+        if (instr->is_phi()) return false;
+        if (instr->is_br()) return true;
+        if (allowCmp && instr == cmp) continue;
+        return false;
+    }
+    return false;
+}
+
+static bool branchTargetsBlock(BasicBlock *pred, BasicBlock *target) {
+    auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
+    if (!br) return false;
+    if (br->num_ops_ == 1) return br->get_operand(0) == target;
+    if (br->num_ops_ == 3)
+        return br->get_operand(1) == target || br->get_operand(2) == target;
+    return false;
+}
+
+static void redirectBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
+                                 BasicBlock *newTarget) {
+    auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
+    if (!br) return;
+    if (br->num_ops_ == 1) {
+        redirectUncondBr(pred, oldTarget, newTarget);
+        return;
+    }
+    if (br->num_ops_ != 3) return;
+    for (int i = 1; i <= 2; i++) {
+        if (br->get_operand(i) == oldTarget) {
+            redirectCondBr(pred, i, oldTarget, newTarget);
+            return;
+        }
+    }
+}
+
+static bool valueDominatesBlock(Value *value, BasicBlock *bb,
+                                const std::unordered_map<BasicBlock *, std::set<BasicBlock *>> &doms) {
+    if (dynamic_cast<Constant *>(value)) return true;
+    if (dynamic_cast<GlobalVariable *>(value)) return true;
+    if (dynamic_cast<Argument *>(value)) return true;
+    auto *inst = dynamic_cast<Instruction *>(value);
+    return inst && inst->parent_ && dominates(doms, inst->parent_, bb);
+}
+
+// Hoist loop-invariant branch conditions out of loop bodies.
+// Detects the OR/AND short-circuit residue pattern where an invariant
+// condition is re-checked on every iteration:
+//
+//   P: br i1 C1, label X, label B              (OR case: true→X, false→B)
+//   B: br i1 C2, label X, label Y              (C2 is invariant relative to P)
+//
+// Transforms to:
+//   guard: br i1 C2, label X, label P
+//   P:    br i1 C1, label X, label Y            (B eliminated)
+//
+// The AND variant (P: true→B, B: false→Y) is handled symmetrically.
+bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
+    if (func->basic_blocks_.size() < 3) return false;
+
+    bool changed = false;
+    auto doms = computeDominators(func);
+
+    // Collect B blocks; we'll look at each once.
+    auto bbs = func->basic_blocks_;
+    for (auto *B : bbs) {
+        // Skip blocks already removed from func in a previous iteration.
+        if (std::find(func->basic_blocks_.begin(), func->basic_blocks_.end(), B)
+            == func->basic_blocks_.end()) continue;
+        if (B == func->basic_blocks_.front()) continue;
+        if (B->pre_bbs_.size() != 1) continue;
+
+        auto *P = B->pre_bbs_[0];
+        if (!P || P->parent_ != func) continue;
+
+        auto *bTerm = dynamic_cast<BranchInst *>(B->get_terminator());
+        if (!bTerm || bTerm->num_ops_ != 3) continue;
+
+        auto *pTerm = dynamic_cast<BranchInst *>(P->get_terminator());
+        if (!pTerm || pTerm->num_ops_ != 3) continue;
+
+        auto *pT = dynamic_cast<BasicBlock *>(pTerm->get_operand(1));
+        auto *pF = dynamic_cast<BasicBlock *>(pTerm->get_operand(2));
+        auto *bT = dynamic_cast<BasicBlock *>(bTerm->get_operand(1));
+        auto *bF = dynamic_cast<BasicBlock *>(bTerm->get_operand(2));
+
+        // Identify pattern: P and B share exactly one successor.
+        // OR  pattern: P true→X, P false→B;  B true→X, B false→Y
+        // AND pattern: P true→B, P false→Y;  B true→X, B false→Y
+        BasicBlock *X = nullptr; // shared successor
+        BasicBlock *Y = nullptr; // B's other successor (non-shared)
+        bool isOr = false;
+
+        if (pT == bT && pF == B) {
+            X = pT; Y = bF; isOr = true;
+        } else if (pF == bF && pT == B) {
+            X = bT; Y = pF; isOr = false;
+        } else {
+            continue;
+        }
+        if (!X || !Y || X == Y || X == P || X == B || Y == P || Y == B)
+            continue;
+
+        BasicBlock *sharedSucc = isOr ? X : Y;
+        BasicBlock *nonSharedSucc = isOr ? Y : X;
+        if (!phisHaveSameIncomingValues(sharedSucc, P, B)) continue;
+
+        Value *C2 = bTerm->get_operand(0);
+        auto *cmpInst = dynamic_cast<ICmpInst *>(C2);
+        if (!cmpInst) continue;
+
+        BasicBlock *defBlock = cmpInst->parent_;
+        if (defBlock == P || defBlock == B) continue;
+        if (!dominates(doms, defBlock, P)) continue;
+        if (!blockHasOnlyOptionalCmpAndTerminator(B, cmpInst, false)) continue;
+
+        bool allInvariant = true;
+        for (unsigned i = 0; i < cmpInst->num_ops_; i++) {
+            if (!valueDominatesBlock(cmpInst->get_operand(i), P, doms)) {
+                allInvariant = false;
+                break;
+            }
+        }
+        if (!allInvariant) continue;
+
+        BasicBlock *entryPred = nullptr;
+        int externalPreds = 0;
+        for (auto *pred : P->pre_bbs_) {
+            if (!dominates(doms, P, pred)) {
+                entryPred = pred;
+                externalPreds++;
+            }
+        }
+        if (externalPreds != 1 || !entryPred) continue;
+        if (!branchTargetsBlock(entryPred, P)) continue;
+
+        // ── Apply transformation ──
+
+        // Create guard block inserted before P.
+        auto *guard = new BasicBlock(func->parent_, P->name_ + ".guard", func);
+        auto itGuard = std::find(func->basic_blocks_.begin(),
+                                 func->basic_blocks_.end(), guard);
+        if (itGuard != func->basic_blocks_.end())
+            func->basic_blocks_.erase(itGuard);
+        auto itIns = std::find(func->basic_blocks_.begin(), func->basic_blocks_.end(), P);
+        func->basic_blocks_.insert(itIns, guard);
+
+        // Guard checks the invariant condition.
+        if (isOr)
+            new BranchInst(C2, X, P, guard);
+        else
+            new BranchInst(C2, P, Y, guard);
+
+        // Redirect entryPred → guard instead of entryPred → P.
+        redirectBranchTarget(entryPred, P, guard);
+
+        // Update P's phis: entryPred entry → guard entry.
+        replacePhiPred(P, entryPred, guard);
+
+        // Redirect P's branch from B to Y.
+        if (isOr)
+            redirectCondBr(P, 2, B, Y);
+        else
+            redirectCondBr(P, 1, B, Y);
+
+        // Shared successor can now be reached directly from guard.
+        replacePhiPred(sharedSucc, B, guard);
+        // B's non-shared successor is now reached from P.
+        replacePhiPred(nonSharedSucc, B, P);
+
+        // Remove CFG edges from B to its successors.
+        X->remove_pre_basic_block(B);
+        Y->remove_pre_basic_block(B);
+
+        // Delete B.
+        std::vector<Instruction *> instrs(B->instr_list_.begin(), B->instr_list_.end());
+        for (auto *instr : instrs) B->delete_instr(instr);
+        func->remove_bb(B);
+
+        changed = true;
+    }
+
+    return changed;
+}
+
 // ── helpers for diamond→select conversion ──────────────────────────
 
 static bool isSafeToSpeculate(Instruction *inst) {
@@ -537,14 +814,19 @@ void CFGSimplify::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
 
-        // 0. diamond→select: clone + speculate, select creation
+        // 0. hoistLoopInvariantBranch is intentionally not enabled here.
+        // It is conservative internally, but short-circuit CFGs generated for
+        // conv2d still need edge-splitting/phi-aware handling before this is
+        // safe as a default CFGSimplify transform.
+
+        // 1. diamond→select: clone + speculate, select creation
         // convertDiamondsToSelect(func);
 
         bool changed = true;
         while (changed) {
             changed = false;
             changed |= convertDiamondsToSelect(func);
-            // 1. 折叠常量分支
+            // 2. 折叠常量分支
             changed |= foldConstantBranches(func);
 
             // 3. 合并空基本块
@@ -557,7 +839,7 @@ void CFGSimplify::execute(Module *module) {
                 }
             }
 
-            // 3. 删除不可达块
+            // 4. 删除不可达块
             removeDeadBlocks(func);
         }
     }
