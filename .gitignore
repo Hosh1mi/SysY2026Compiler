@@ -1,8 +1,8 @@
 .DS_Store
 .git
-docs/
 build/
 prompt/
+docs/
 *.o
 *.obj
 *.exe
@@ -34,6 +34,4 @@ test/result.txt
 /test/re
 *.png
 *.elf
-*.html
-*.c
 *.sy

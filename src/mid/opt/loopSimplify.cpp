@@ -12,6 +12,16 @@ void LoopSimplify::execute(Module *module) {
     }
 }
 
+PreservedAnalyses LoopSimplify::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    bool changed = false;
+    for (auto *func : module->function_list_) {
+        if (!func->is_declaration())
+            changed |= runOnFunction(func);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
 bool LoopSimplify::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return false;
 
@@ -33,7 +43,8 @@ bool LoopSimplify::runOnFunction(Function *func) {
 
         for (auto *loop : sorted) {
             if (insertPreheader(loop, func) ||
-                insertBackedgeBlock(loop, func)) {
+                insertBackedgeBlock(loop, func) ||
+                insertDedicatedExits(loop, func)) {
                 changed = true;
                 progress = true;
                 func->set_instr_name();
@@ -251,4 +262,75 @@ bool LoopSimplify::insertBackedgeBlock(Loop *loop, Function *func) {
     }
 
     return true;
+}
+
+// Dedicated exits（LLVM LoopSimplify 第三项保证）：每个 exit 块的前驱
+// 必须全在循环内。exit 同时被循环外路径汇入时，把循环内的出口边拆到
+// 专用块 <exit>.loopexit，循环外前驱保持指向原 exit。
+// 这是 LCSSA 的前置：exit phi 必须能唯一归属于一个循环。
+bool LoopSimplify::insertDedicatedExits(Loop *loop, Function *func) {
+    bool changed = false;
+
+    for (auto *exit : loop->exits) {
+        std::vector<BasicBlock *> inPreds, outPreds;
+        for (auto *pred : exit->pre_bbs_) {
+            if (loop->isInLoop(pred))
+                inPreds.push_back(pred);
+            else
+                outPreds.push_back(pred);
+        }
+        // 已经 dedicated（无外部前驱），或 exits 缓存过期（无内部前驱）
+        if (outPreds.empty() || inPreds.empty())
+            continue;
+
+        auto *dedicated = new BasicBlock(func->parent_,
+                                         exit->name_ + ".loopexit", func);
+        placeBlockBefore(func, dedicated, exit);
+        new BranchInst(exit, dedicated);
+
+        for (auto *pred : inPreds) {
+            replaceBranchTarget(pred, exit, dedicated);
+            pred->remove_succ_basic_block(exit);
+            pred->add_succ_basic_block(dedicated);
+            exit->remove_pre_basic_block(pred);
+            dedicated->add_pre_basic_block(pred);
+        }
+
+        // exit 的 phi：把来自循环内前驱的入边对收拢为一条来自 dedicated
+        // 的入边；多值时在 dedicated 内建 phi 汇合。
+        for (auto *instr : exit->instr_list_) {
+            if (!instr->is_phi()) break;
+            auto *phi = static_cast<PhiInst *>(instr);
+
+            std::vector<Value *> vals;
+            std::vector<BasicBlock *> bbs;
+            for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+                auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+                if (!predBB) continue;
+                if (std::find(inPreds.begin(), inPreds.end(), predBB) ==
+                    inPreds.end())
+                    continue;
+                vals.push_back(phi->get_operand(i));
+                bbs.push_back(predBB);
+                phi->remove_operands(i, i + 1);
+            }
+            if (vals.empty()) continue;
+
+            Value *merged = vals[0];
+            for (size_t j = 1; j < vals.size(); j++) {
+                if (vals[j] == vals[0]) continue;
+                auto *dPhi = PhiInst::create_phi(phi->type_, dedicated);
+                for (size_t k = 0; k < vals.size(); k++)
+                    dPhi->addIncoming(vals[k], bbs[k]);
+                dedicated->add_instruction_before_terminator(dPhi);
+                merged = dPhi;
+                break;
+            }
+            phi->addIncoming(merged, dedicated);
+        }
+
+        changed = true;
+    }
+
+    return changed;
 }

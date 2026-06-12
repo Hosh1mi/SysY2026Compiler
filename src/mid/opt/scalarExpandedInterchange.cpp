@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/scalarExpandedInterchange.hpp"
+#include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -35,6 +36,8 @@ void ScalarExpandedInterchange::runOnFunction(Function *func) {
             if (!detectScalarExpandableReduction(L, LI, AA, info)) continue;
             if (!isLegalAndProfitable(info, DA, CM)) continue;
             if (apply(info, func->parent_)) {
+                // apply 把 preheader 改接到新巢，旧循环巢整体不可达，立即清除
+                removeUnreachableBlocks(func);
                 changed = true;
                 break;                                    // CFG 已变，重新分析
             }

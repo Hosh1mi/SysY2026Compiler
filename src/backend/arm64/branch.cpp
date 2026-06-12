@@ -694,14 +694,32 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
                 emitPhiCopies(parentBB, falseBB);
                 emitBranchMachine("\tb " + bbLabel(func_, falseBB));
             } else {
+                // Both targets have phi copies — count and put trampoline on the path
+                // with fewer copies.
+                int trueCopies = 0, falseCopies = 0;
+                for (const auto &pc : phiCopies_) {
+                    if (pc.pred != parentBB) continue;
+                    if (pc.succ == trueBB)  trueCopies++;
+                    if (pc.succ == falseBB) falseCopies++;
+                }
+                bool trampolineOnTrue = (trueCopies <= falseCopies);
                 std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
-                const char *invOp = useCbz ? "cbnz" : "cbz";
-                emitBranchMachine("\t" + std::string(invOp) + " " + r1 + ", " + edgeLbl, {r1});
-                emitPhiCopies(parentBB, trueBB);
-                emitBranchMachine("\tb " + bbLabel(func_, trueBB));
-                emitMachineLine(edgeLbl + ":");
-                emitPhiCopies(parentBB, falseBB);
-                emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+                if (trampolineOnTrue) {
+                    emitBranchMachine("\t" + std::string(op) + " " + r1 + ", " + edgeLbl, {r1});
+                    emitPhiCopies(parentBB, falseBB);
+                    emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+                    emitMachineLine(edgeLbl + ":");
+                    emitPhiCopies(parentBB, trueBB);
+                    emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+                } else {
+                    const char *invOp = useCbz ? "cbnz" : "cbz";
+                    emitBranchMachine("\t" + std::string(invOp) + " " + r1 + ", " + edgeLbl, {r1});
+                    emitPhiCopies(parentBB, trueBB);
+                    emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+                    emitMachineLine(edgeLbl + ":");
+                    emitPhiCopies(parentBB, falseBB);
+                    emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+                }
             }
             return;
         }
@@ -739,13 +757,31 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
         emitPhiCopies(parentBB, falseBB);
         emitBranchMachine("\tb " + bbLabel(func_, falseBB));
     } else {
+        // Both targets have phi copies — put the trampoline on the path
+        // with fewer copies so the hotter path stays as fallthrough.
+        int trueCopies = 0, falseCopies = 0;
+        for (const auto &pc : phiCopies_) {
+            if (pc.pred != parentBB) continue;
+            if (pc.succ == trueBB)  trueCopies++;
+            if (pc.succ == falseBB) falseCopies++;
+        }
+        bool trampolineOnTrue = (trueCopies <= falseCopies);
         std::string edgeLbl = ".L" + func_->name_ + "_edge_" + std::to_string(edgeCounter_++);
-        emitBranchMachine("\tb." + std::string(invertCond(cond)) + " " + edgeLbl, {}, true);
-        emitPhiCopies(parentBB, trueBB);
-        emitBranchMachine("\tb " + bbLabel(func_, trueBB));
-        emitMachineLine(edgeLbl + ":");
-        emitPhiCopies(parentBB, falseBB);
-        emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+        if (trampolineOnTrue) {
+            emitBranchMachine("\tb." + std::string(cond) + " " + edgeLbl, {}, true);
+            emitPhiCopies(parentBB, falseBB);
+            emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+            emitMachineLine(edgeLbl + ":");
+            emitPhiCopies(parentBB, trueBB);
+            emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+        } else {
+            emitBranchMachine("\tb." + std::string(invertCond(cond)) + " " + edgeLbl, {}, true);
+            emitPhiCopies(parentBB, trueBB);
+            emitBranchMachine("\tb " + bbLabel(func_, trueBB));
+            emitMachineLine(edgeLbl + ":");
+            emitPhiCopies(parentBB, falseBB);
+            emitBranchMachine("\tb " + bbLabel(func_, falseBB));
+        }
     }
 }
 

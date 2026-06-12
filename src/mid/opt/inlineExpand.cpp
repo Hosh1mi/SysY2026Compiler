@@ -689,10 +689,16 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                             mapValue(oldBitCast->get_operand(0), valMap, bbMap),
                             oldBitCast->dest_ty_, newBB);
                 valMap[oldBitCast] = newBB->instr_list_.back();
-            // } else if (auto *oldUnary = dynamic_cast<UnaryInst*>(oldInst)) {
-            //     new UnaryInst(oldUnary->type_, oldUnary->op_id_,
-            //                   mapValue(oldUnary->get_operand(0), valMap, bbMap), newBB);
-            //     valMap[oldUnary] = newBB->instr_list_.back();
+            } else if (auto *oldSelect = dynamic_cast<SelectInst*>(oldInst)) {
+                new SelectInst(mapValue(oldSelect->get_operand(0), valMap, bbMap),
+                               mapValue(oldSelect->get_operand(1), valMap, bbMap),
+                               mapValue(oldSelect->get_operand(2), valMap, bbMap),
+                               newBB);
+                valMap[oldSelect] = newBB->instr_list_.back();
+            } else if (auto *oldUnary = dynamic_cast<UnaryInst*>(oldInst)) {
+                new UnaryInst(oldUnary->type_, oldUnary->op_id_,
+                              mapValue(oldUnary->get_operand(0), valMap, bbMap), newBB);
+                valMap[oldUnary] = newBB->instr_list_.back();
             } else {
                 assert(0 && "unhandled instruction type during inlining");
             }

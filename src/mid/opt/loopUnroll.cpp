@@ -1,47 +1,13 @@
 #include "../../include/mid/opt/loopUnroll.hpp"
 #include <algorithm>
-#include <functional>
-#include <queue>
+#include <cstdlib>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <vector>
 
 static const int UNROLL_FACTOR   = 4;
 static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
-
-// ── Loop detection ─────────────────────────────────────────────────────────
-
-std::vector<LoopUnroll::Loop> LoopUnroll::findLoops(Function *func) {
-    std::vector<Loop> loops;
-    auto &idom = domInfo_->idom;
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!idom.count(succ)) continue;
-            if (!domInfo_->dominates(succ, bb)) continue;
-            Loop loop;
-            loop.header = succ;
-            loop.latch  = bb;
-            loop.blocks.insert(succ);
-            std::queue<BasicBlock *> wl;
-            wl.push(bb);
-            while (!wl.empty()) {
-                auto cur = wl.front(); wl.pop();
-                if (!loop.blocks.insert(cur).second) continue;
-                for (auto pred : cur->pre_bbs_)
-                    if (!loop.blocks.count(pred)) wl.push(pred);
-            }
-            loops.push_back(std::move(loop));
-        }
-    }
-    return loops;
-}
-
-BasicBlock *LoopUnroll::getPreheader(const Loop &loop) {
-    BasicBlock *pre = nullptr;
-    for (auto pred : loop.header->pre_bbs_) {
-        if (loop.blocks.count(pred)) continue;
-        if (pre) return nullptr;
-        pre = pred;
-    }
-    return pre;
-}
 
 // ── Instruction cloning ───────────────────────────────────────────────────
 
@@ -107,10 +73,11 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     if (loop.blocks.size() != 2) return false;
 
     BasicBlock *header = loop.header;
-    BasicBlock *latch  = loop.latch;
+    BasicBlock *latch  = loop.singleLatch();
+    if (!latch || latch == header) return false;
 
     // Need a single preheader
-    BasicBlock *preheader = getPreheader(loop);
+    BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
 
     // Need a single exit from the header
@@ -249,6 +216,11 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     int effectiveUnrollFactor = UNROLL_FACTOR;  // 4
     if (numIntNonIVPhis > 0 && numPtrPhis >= 2)
         effectiveUnrollFactor = 2;
+
+    if (std::getenv("DEBUG_LOOP_UNROLL"))
+        std::cerr << "[LoopUnroll] func=" << func->name_
+                  << " header=" << header->name_
+                  << " factor=" << effectiveUnrollFactor << "\n";
 
     // ── Transformation ────────────────────────────────────────────────────
 
@@ -392,21 +364,313 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     return true;
 }
 
+// ── Do-while (rotated single-block) unrolling ─────────────────────────────
+//
+// 形态：loop = { B }，B: phis…, body…, ivUpdate, cmp(ivUpdate, bound),
+//       br cmp, B, exit。check 在 body 之后 ⇒ 展开需要：
+//   checkBlock:  iv_init <op> bound-adj ? mainLoop : B（不足 N 次直接走原循环）
+//   mainLoop:    N 份 body 链式克隆，cmp(iv_N, bound-adj) 回边/出
+//   remCheck:    cmp(iv_N, bound) ? B（余数 1..N-1 次）: exit（余数 0 次）
+//   B:           phi 入边改为 [init, checkBlock], [iv_N 等, remCheck]
+//   exit:        来自 B 的 live-out 补 [主循环末值, remCheck] 入边
+bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
+    if (loop.blocks.size() != 1) return false;
+
+    BasicBlock *header = loop.header;
+    if (loop.singleLatch() != header) return false;
+    BasicBlock *preheader = loop.preheader;
+    if (!preheader) return false;
+
+    auto *term = header->get_terminator();
+    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    auto *trueSucc  = dynamic_cast<BasicBlock *>(term->get_operand(1));
+    auto *falseSucc = dynamic_cast<BasicBlock *>(term->get_operand(2));
+    if (trueSucc != header || !falseSucc || falseSucc == header) return false;
+    BasicBlock *exitBB = falseSucc;
+    // 需要专用出口（exit 唯一前驱是 header），否则 live-out phi 修补
+    // 无法只看本循环
+    if (exitBB->pre_bbs_.size() != 1 || exitBB->pre_bbs_[0] != header)
+        return false;
+
+    // ── 收集 phi ────────────────────────────────────────────────────────
+    std::vector<PhiInst *> headerPhis;
+    for (auto inst : header->instr_list_) {
+        if (!inst->is_phi()) break;
+        headerPhis.push_back(static_cast<PhiInst *>(inst));
+    }
+    if (headerPhis.empty()) return false;
+
+    auto getInitVal = [&](PhiInst *phi) -> Value * {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i + 1) == preheader)
+                return phi->get_operand(i);
+        return nullptr;
+    };
+    auto getBackVal = [&](PhiInst *phi) -> Value * {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i + 1) == header)
+                return phi->get_operand(i);
+        return nullptr;
+    };
+    for (auto phi : headerPhis)
+        if (phi->num_ops_ != 4 || !getInitVal(phi) || !getBackVal(phi))
+            return false;
+
+    // ── 识别 IV：backedge 入值 = add/sub(phi, 常量) ─────────────────────
+    PhiInst     *ivPhi    = nullptr;
+    Instruction *ivUpdate = nullptr;
+    int          strideVal = 0;
+    for (auto phi : headerPhis) {
+        if (phi->type_->tid_ != Type::IntegerTyID) continue;
+        auto *upd = dynamic_cast<Instruction *>(getBackVal(phi));
+        if (!upd || upd->parent_ != header) continue;
+        if (!upd->is_add() && !upd->is_sub()) continue;
+        Value *op0 = upd->get_operand(0);
+        Value *op1 = upd->get_operand(1);
+        if (upd->is_add()) {
+            auto *c0 = dynamic_cast<ConstantInt *>(op0);
+            auto *c1 = dynamic_cast<ConstantInt *>(op1);
+            ConstantInt *c    = c1 ? c1 : c0;
+            Value       *base = c1 ? op0 : op1;
+            if (!c || c->value_ <= 0 || base != phi) continue;
+            strideVal = c->value_;
+        } else {
+            auto *c1 = dynamic_cast<ConstantInt *>(op1);
+            if (!c1 || c1->value_ <= 0 || op0 != phi) continue;
+            strideVal = -c1->value_;
+        }
+        ivPhi    = phi;
+        ivUpdate = upd;
+        break;
+    }
+    if (!ivPhi) return false;
+
+    // ── 识别 cond：cmp(ivUpdate, 不变 bound)，且只被 br 使用 ────────────
+    auto *cmpInst = dynamic_cast<ICmpInst *>(term->get_operand(0));
+    if (!cmpInst || cmpInst->parent_ != header) return false;
+    if (cmpInst->use_list_.size() != 1) return false;
+    auto op = cmpInst->icmp_op_;
+    if (op != ICmpInst::ICMP_SLT && op != ICmpInst::ICMP_SLE &&
+        op != ICmpInst::ICMP_SGT && op != ICmpInst::ICMP_SGE)
+        return false;
+    Value *bound   = nullptr;
+    bool   ivIsLeft = true;
+    if (cmpInst->get_operand(0) == ivUpdate) {
+        bound = cmpInst->get_operand(1); ivIsLeft = true;
+    } else if (cmpInst->get_operand(1) == ivUpdate) {
+        bound = cmpInst->get_operand(0); ivIsLeft = false;
+    } else {
+        return false;
+    }
+    if (auto *bi = dynamic_cast<Instruction *>(bound))
+        if (bi->parent_ == header) return false;
+
+    // ── body 可克隆性 ───────────────────────────────────────────────────
+    int bodySize = 0;
+    for (auto inst : header->instr_list_) {
+        if (inst->is_phi() || inst == cmpInst || inst->isTerminator()) continue;
+        if (inst->is_call() || inst->is_alloca()) return false;
+        bool canClone = dynamic_cast<BinaryInst *>(inst) ||
+                        dynamic_cast<UnaryInst *>(inst) ||
+                        dynamic_cast<ICmpInst *>(inst) ||
+                        dynamic_cast<FCmpInst *>(inst) ||
+                        dynamic_cast<GetElementPtrInst *>(inst) ||
+                        dynamic_cast<LoadInst *>(inst) ||
+                        dynamic_cast<StoreInst *>(inst) ||
+                        dynamic_cast<ZextInst *>(inst) ||
+                        dynamic_cast<FpToSiInst *>(inst) ||
+                        dynamic_cast<SiToFpInst *>(inst) ||
+                        dynamic_cast<Bitcast *>(inst);
+        if (!canClone) return false;
+        bodySize++;
+    }
+    if (bodySize > MAX_LATCH_INSTS) return false;
+
+    // ── 循环外使用清点：只允许 (a) exitBB 中的 phi（入边=header），
+    //    (b) 其他位置的使用（exitBB 唯一出口支配它们，事后补 phi）─────
+    struct OutsideUse { Instruction *user; unsigned idx; };
+    std::map<Value *, std::vector<OutsideUse>> liveOuts; // 需补 phi 的值
+    for (auto inst : header->instr_list_) {
+        if (inst == cmpInst || inst->isTerminator()) continue;
+        for (const auto &use : inst->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || user->parent_ == header) continue;
+            if (user->parent_ == exitBB && user->is_phi()) continue; // (a)
+            liveOuts[inst].push_back({user, use.arg_no_});           // (b)
+        }
+    }
+
+    // ── 压力启发式（与 while 形一致）────────────────────────────────────
+    int numPtrPhis = 0, numIntNonIVPhis = 0;
+    for (auto phi : headerPhis) {
+        if (phi == ivPhi) continue;
+        if (phi->type_->tid_ == Type::PointerTyID) numPtrPhis++;
+        else if (phi->type_->tid_ == Type::IntegerTyID) numIntNonIVPhis++;
+    }
+    int N = UNROLL_FACTOR;
+    if (numIntNonIVPhis > 0 && numPtrPhis >= 2) N = 2;
+
+    int adj = (N - 1) * strideVal;
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        if (strideVal > 0 && cb->value_ < adj) return false;
+        if (strideVal < 0 && cb->value_ > adj + std::numeric_limits<int>::max())
+            return false;
+    }
+
+    if (std::getenv("DEBUG_LOOP_UNROLL"))
+        std::cerr << "[LoopUnroll] func=" << func->name_
+                  << " header=" << header->name_
+                  << " factor=" << N << " form=dowhile\n";
+
+    // ── 变换 ────────────────────────────────────────────────────────────
+    // 1. boundMain = bound - adj
+    Value *boundMain;
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - adj);
+    } else {
+        auto *adjC = new ConstantInt(module->int32_ty_, adj);
+        auto *sub  = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                    bound, adjC, preheader, /*no-insert*/true);
+        preheader->add_instruction_before_terminator(sub);
+        boundMain = sub;
+    }
+
+    // 2. checkBlock：iv_init 满足 N 次余量则进主循环，否则走原循环
+    auto *checkBlock = new BasicBlock(module, "unroll_guard", func);
+    ICmpInst *cmpEnter =
+        ivIsLeft ? new ICmpInst(op, getInitVal(ivPhi), boundMain, checkBlock)
+                 : new ICmpInst(op, boundMain, getInitVal(ivPhi), checkBlock);
+
+    // 3. mainLoop：phi + N 份克隆
+    auto *mainLoop = new BasicBlock(module, "unroll_main", func);
+    std::unordered_map<PhiInst *, PhiInst *> phiToMain;
+    for (int i = (int)headerPhis.size() - 1; i >= 0; i--) {
+        auto *phi     = headerPhis[i];
+        auto *mainPhi = PhiInst::create_phi(phi->type_, mainLoop);
+        mainLoop->add_instruction_front(mainPhi);
+        mainPhi->addIncoming(getInitVal(phi), checkBlock);
+        phiToMain[phi] = mainPhi;
+    }
+
+    std::unordered_map<Value *, Value *> iterMap;
+    for (auto phi : headerPhis)
+        iterMap[phi] = phiToMain[phi];
+    std::unordered_map<Value *, Value *> finalMap; // 最后一轮的完整映射
+    std::unordered_map<PhiInst *, Value *> curPhiVals;
+    for (int iter = 0; iter < N; iter++) {
+        std::unordered_map<Value *, Value *> localMap = iterMap;
+        for (auto inst : header->instr_list_) {
+            if (inst->is_phi() || inst == cmpInst || inst->isTerminator())
+                continue;
+            auto *newInst = cloneInst(inst, mainLoop, localMap);
+            if (!newInst) return false; // 前置检查后不应发生
+            localMap[inst] = newInst;
+        }
+        for (auto phi : headerPhis) {
+            Value *bv = getBackVal(phi);
+            auto it = localMap.find(bv);
+            curPhiVals[phi] = (it != localMap.end()) ? it->second : bv;
+        }
+        for (auto phi : headerPhis)
+            iterMap[phi] = curPhiVals[phi];
+        if (iter == N - 1)
+            finalMap = std::move(localMap);
+    }
+
+    auto mapFinal = [&](Value *v) -> Value * {
+        if (auto *p = dynamic_cast<PhiInst *>(v))
+            if (curPhiVals.count(p)) return curPhiVals[p];
+        auto it = finalMap.find(v);
+        return it != finalMap.end() ? it->second : v;
+    };
+
+    Value *ivOut = curPhiVals[ivPhi]; // 主循环出口处的 iv（= 映射后的 ivUpdate）
+    ICmpInst *cmpMain =
+        ivIsLeft ? new ICmpInst(op, ivOut, boundMain, mainLoop)
+                 : new ICmpInst(op, boundMain, ivOut, mainLoop);
+    for (auto phi : headerPhis)
+        phiToMain[phi]->addIncoming(curPhiVals[phi], mainLoop);
+
+    // 4. remCheck：还有余数则进原循环，否则直接 exit
+    auto *remCheck = new BasicBlock(module, "unroll_rem_guard", func);
+    ICmpInst *cmpRem =
+        ivIsLeft ? new ICmpInst(op, ivOut, bound, remCheck)
+                 : new ICmpInst(op, bound, ivOut, remCheck);
+    new BranchInst(cmpRem, header, exitBB, remCheck);
+
+    // 5. 分支接线（BranchInst 构造器维护 CFG 链接）
+    new BranchInst(cmpEnter, mainLoop, header, checkBlock);
+    new BranchInst(cmpMain, mainLoop, remCheck, mainLoop);
+
+    // 6. preheader → checkBlock（替换原指向 header 的边）
+    auto *preBr = preheader->get_terminator();
+    for (unsigned i = 0; i < preBr->num_ops_; i++) {
+        if (preBr->get_operand(i) == header)
+            preBr->set_operand(i, checkBlock);
+    }
+    preheader->remove_succ_basic_block(header);
+    preheader->add_succ_basic_block(checkBlock);
+    header->remove_pre_basic_block(preheader);
+    checkBlock->add_pre_basic_block(preheader);
+
+    // 7. 原循环 phi：preheader 入边 → checkBlock；新增 remCheck 入边
+    for (auto phi : headerPhis) {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == preheader) {
+                phi->set_operand(i + 1, checkBlock);
+                break;
+            }
+        }
+        phi->addIncoming(curPhiVals[phi], remCheck);
+    }
+
+    // 8. exitBB phi：补 remCheck 入边（值 = 主循环末值映射）
+    for (auto inst : exitBB->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        Value *fromHeader = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i + 1) == header)
+                fromHeader = phi->get_operand(i);
+        if (!fromHeader) return false; // 不应发生：唯一前驱是 header
+        phi->addIncoming(mapFinal(fromHeader), remCheck);
+    }
+
+    // 9. 其他循环外使用：在 exitBB 顶部补汇合 phi 后改写
+    for (auto &[val, uses] : liveOuts) {
+        auto *mergePhi = PhiInst::create_phi(val->type_, exitBB);
+        exitBB->add_instruction_front(mergePhi);
+        mergePhi->addIncoming(val, header);
+        mergePhi->addIncoming(mapFinal(val), remCheck);
+        for (auto &u : uses)
+            u.user->set_operand(u.idx, mergePhi);
+    }
+
+    return true;
+}
+
 // ── Entry points ──────────────────────────────────────────────────────────
 
 void LoopUnroll::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty()) return;
 
-    domInfo_ = &func->getDominatorInfo();
-    auto loops = findLoops(func);
+    LoopInfo LI;
+    LI.analyze(func);
+    if (LI.allLoops().empty()) return;
 
-    // Innermost first
-    std::sort(loops.begin(), loops.end(), [](const Loop &a, const Loop &b) {
-        return a.blocks.size() < b.blocks.size();
-    });
+    // Innermost first。unroll 成功会改 CFG（preheader 改指 headerMain），
+    // 快照内其余 Loop 结构随之过期——与迁移前行为一致：外层循环因
+    // blocks.size()!=2 本就不会命中，错过的机会留给下一次调度。
+    std::vector<Loop *> loops;
+    for (auto &l : LI.allLoops())
+        loops.push_back(l.get());
+    std::sort(loops.begin(), loops.end(),
+              [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
-    for (auto &loop : loops)
-        tryUnroll(loop, func, func->parent_);
+    for (auto *loop : loops) {
+        if (!tryUnroll(*loop, func, func->parent_))
+            tryUnrollDoWhile(*loop, func, func->parent_);
+    }
 
     func->set_instr_name();
 }

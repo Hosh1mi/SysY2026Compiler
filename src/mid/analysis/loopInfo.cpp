@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/constant.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <queue>
 #include <sstream>
@@ -171,9 +172,21 @@ void LoopInfo::enrichLoop(Loop *loop) {
     }
     loop->preheader = (ext_cnt == 1) ? cand : nullptr;
 
+    // blocks 的 RPO 确定序视图（不可达块兜底排在最后，按指针仅作稳定性兜底）
+    loop->blocksOrdered.assign(loop->blocks.begin(), loop->blocks.end());
+    std::sort(loop->blocksOrdered.begin(), loop->blocksOrdered.end(),
+              [this](BasicBlock *a, BasicBlock *b) {
+                  auto ia = rpoIdx_.find(a), ib = rpoIdx_.find(b);
+                  int ra = ia == rpoIdx_.end() ? INT32_MAX : ia->second;
+                  int rb = ib == rpoIdx_.end() ? INT32_MAX : ib->second;
+                  if (ra != rb) return ra < rb;
+                  return a < b;
+              });
+
     // exiting: 循环内、后继有循环外的块；exits: 那些循环外的后继（去重）
+    // 均按 RPO 序产出，保证消费方的处理/产出顺序跨进程稳定。
     std::set<BasicBlock *> exit_set;
-    for (auto bb : loop->blocks) {
+    for (auto bb : loop->blocksOrdered) {
         bool is_exiting = false;
         for (auto succ : bb->succ_bbs_) {
             if (!loop->blocks.count(succ)) {
@@ -184,6 +197,14 @@ void LoopInfo::enrichLoop(Loop *loop) {
         if (is_exiting) loop->exiting.push_back(bb);
     }
     loop->exits.assign(exit_set.begin(), exit_set.end());
+    std::sort(loop->exits.begin(), loop->exits.end(),
+              [this](BasicBlock *a, BasicBlock *b) {
+                  auto ia = rpoIdx_.find(a), ib = rpoIdx_.find(b);
+                  int ra = ia == rpoIdx_.end() ? INT32_MAX : ia->second;
+                  int rb = ib == rpoIdx_.end() ? INT32_MAX : ib->second;
+                  if (ra != rb) return ra < rb;
+                  return a < b;
+              });
 }
 
 // ── 嵌套树 ─────────────────────────────────────────────────────────────────

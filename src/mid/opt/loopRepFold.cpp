@@ -2,12 +2,11 @@
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
-#include <cstdlib>
-#include <iostream>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
+#include <iostream>
 #include <limits>
-#include <queue>
 #include <set>
 
 namespace {
@@ -195,110 +194,6 @@ AccumulatorStep extractAccumulatorStep(Value *value, PhiInst *totalPhi,
 
 } // namespace
 
-// ── CFG / Dominator helpers（与 LICM 相同策略）──────────────────────────────
-
-std::vector<BasicBlock *> LoopRepFold::computeRPO(Function *func) {
-    std::vector<BasicBlock *> postorder;
-    std::set<BasicBlock *> visited;
-    std::function<void(BasicBlock *)> dfs = [&](BasicBlock *bb) {
-        visited.insert(bb);
-        for (auto succ : bb->succ_bbs_)
-            if (!visited.count(succ)) dfs(succ);
-        postorder.push_back(bb);
-    };
-    if (!func->basic_blocks_.empty())
-        dfs(func->basic_blocks_[0]);
-    std::reverse(postorder.begin(), postorder.end());
-    return postorder;
-}
-
-void LoopRepFold::computeDominators(const std::vector<BasicBlock *> &rpo) {
-    idom_.clear();
-    rpoIdx_.clear();
-    if (rpo.empty()) return;
-    BasicBlock *entry = rpo[0];
-    for (int i = 0; i < (int)rpo.size(); i++)
-        rpoIdx_[rpo[i]] = i;
-    idom_[entry] = entry;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : rpo) {
-            if (bb == entry) continue;
-            BasicBlock *new_idom = nullptr;
-            for (auto pred : bb->pre_bbs_) {
-                if (!idom_.count(pred)) continue;
-                new_idom = new_idom ? intersect(pred, new_idom) : pred;
-            }
-            if (new_idom && idom_[bb] != new_idom) {
-                idom_[bb] = new_idom;
-                changed = true;
-            }
-        }
-    }
-}
-
-BasicBlock *LoopRepFold::intersect(BasicBlock *a, BasicBlock *b) {
-    while (a != b) {
-        while (rpoIdx_[a] > rpoIdx_[b]) a = idom_[a];
-        while (rpoIdx_[b] > rpoIdx_[a]) b = idom_[b];
-    }
-    return a;
-}
-
-bool LoopRepFold::dominates(BasicBlock *a, BasicBlock *b) {
-    while (b != idom_[b]) {
-        if (b == a) return true;
-        b = idom_[b];
-    }
-    return b == a;
-}
-
-// ── 循环检测（多 latch 合并为同一 loop）────────────────────────────────────
-
-std::vector<LoopRepFold::Loop> LoopRepFold::findLoops(Function *func) {
-    std::map<BasicBlock *, Loop> headerToLoop;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!idom_.count(succ)) continue;
-            if (!dominates(succ, bb)) continue;
-
-            auto &loop = headerToLoop[succ];
-            loop.header = succ;
-            if (!loop.latch) loop.latch = bb;
-
-            loop.blocks.insert(succ);
-            std::queue<BasicBlock *> wl;
-            wl.push(bb);
-            while (!wl.empty()) {
-                auto cur = wl.front();
-                wl.pop();
-                if (!loop.blocks.insert(cur).second) continue;
-                for (auto pred : cur->pre_bbs_)
-                    if (!loop.blocks.count(pred)) wl.push(pred);
-            }
-        }
-    }
-
-    // 找唯一外部前驱作为 preheader
-    std::vector<Loop> loops;
-    for (auto &kv : headerToLoop) {
-        auto &loop = kv.second;
-        BasicBlock *pre = nullptr;
-        int ext_count = 0;
-        for (auto pred : loop.header->pre_bbs_) {
-            if (!loop.blocks.count(pred)) {
-                pre = pred;
-                ext_count++;
-            }
-        }
-        loop.preheader = (ext_count == 1) ? pre : nullptr;
-        loops.push_back(std::move(loop));
-    }
-    return loops;
-}
-
 // ── 辅助检查 ────────────────────────────────────────────────────────────────
 
 bool LoopRepFold::isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
@@ -311,7 +206,7 @@ bool LoopRepFold::isLoopInvariant(Value *val, const std::set<BasicBlock *> &bloc
 }
 
 // 判断 phi 是否为：常量初始值（来自 preheader），每次 latch 时 += 常量正步长
-bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop,
+bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop, BasicBlock *latch,
                                long long *init, long long *stride) {
     if (phi->type_->tid_ != Type::IntegerTyID) return false;
     if (phi->num_ops_ != 4) return false; // 恰好 2 对 (val, BB)
@@ -320,7 +215,7 @@ bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop,
     for (unsigned i = 0; i < phi->num_ops_; i += 2) {
         auto *bb = static_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (bb == loop.preheader) pre_val  = phi->get_operand(i);
-        else if (bb == loop.latch) latch_val = phi->get_operand(i);
+        else if (bb == latch) latch_val = phi->get_operand(i);
     }
     if (!pre_val || !latch_val) return false;
 
@@ -348,18 +243,20 @@ bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop,
     return true;
 }
 
+// 仿射求和闭式折叠：total += a*i+b（界/初值/步长全常量）→ 直接算出常量结果，
+// 把出口处对 total_phi 的使用替换为该常量并整体删除循环。
 bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *SE,
-                                   ::Loop *analysisLoop, PhiInst *ivPhi,
+                                   BasicBlock *latch, PhiInst *ivPhi,
                                    PhiInst *totalPhi, BasicBlock *loopExit,
                                    Value *bound, Value *totalInit,
                                    Value *totalLatch, long long ivInit,
                                    long long ivStride) {
-    if (!SE || !analysisLoop) return debugReject("missing analysis loop");
-    if (analysisLoop->singleLatch() != loop.latch) return debugReject("single latch mismatch");
-    if (analysisLoop->singleExit() != loopExit) return debugReject("single exit mismatch");
+    if (!SE) return debugReject("missing scalar evolution");
+    if (loop.singleLatch() != latch) return debugReject("single latch mismatch");
+    if (loop.singleExit() != loopExit) return debugReject("single exit mismatch");
 
     auto *ivAddRec = dynamic_cast<const SCEVAddRecExpr *>(SE->getSCEV(ivPhi));
-    if (!ivAddRec || ivAddRec->loop() != analysisLoop || ivAddRec->phi() != ivPhi)
+    if (!ivAddRec || ivAddRec->loop() != &loop || ivAddRec->phi() != ivPhi)
         return debugReject("iv is not matching addrec");
     long long scevInit = 0;
     long long scevStride = 0;
@@ -390,7 +287,7 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
 
     std::set<Instruction *> accumulatorChain;
     AccumulatorStep accumulator = extractAccumulatorStep(totalLatch, totalPhi,
-                                                        ivPhi, analysisLoop, SE,
+                                                        ivPhi, &loop, SE,
                                                         loop.blocks,
                                                         accumulatorChain);
     if (!accumulator.valid || accumulator.totalRefs != 1)
@@ -455,7 +352,9 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     loopExit->add_pre_basic_block(loop.preheader);
 
     Function *func = loop.header->parent_;
-    std::vector<BasicBlock *> deadBlocks(loop.blocks.begin(), loop.blocks.end());
+    // 3.2 契约：影响 IR 的块遍历必须走 blocksOrdered（确定性顺序）
+    std::vector<BasicBlock *> deadBlocks(loop.blocksOrdered.begin(),
+                                         loop.blocksOrdered.end());
     for (auto *bb : deadBlocks)
         func->remove_bb(bb);
     return true;
@@ -463,9 +362,11 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
 
 // ── 主变换 ──────────────────────────────────────────────────────────────────
 
-bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
-                          ::Loop *analysisLoop) {
-    if (!loop.preheader) return debugReject("missing local preheader");
+bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
+    if (!loop.preheader) return false;
+    // 模式要求 header phi 恰好 (preheader, latch) 两对入边 → 单 latch
+    BasicBlock *latch = loop.singleLatch();
+    if (!latch) return false;
 
     // 1. header 必须恰好有 2 个 phi 节点
     PhiInst *phi0 = nullptr, *phi1 = nullptr;
@@ -482,9 +383,9 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
     PhiInst *r_phi = nullptr, *total_phi = nullptr;
     long long ivInit = 0;
     long long ivStride = 0;
-    if (isCountingIV(phi0, loop, &ivInit, &ivStride)) {
+    if (isCountingIV(phi0, loop, latch, &ivInit, &ivStride)) {
         r_phi = phi0; total_phi = phi1;
-    } else if (isCountingIV(phi1, loop, &ivInit, &ivStride)) {
+    } else if (isCountingIV(phi1, loop, latch, &ivInit, &ivStride)) {
         r_phi = phi1; total_phi = phi0;
     } else {
         return debugReject("cannot find counting IV");
@@ -521,16 +422,17 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
     for (unsigned i = 0; i < total_phi->num_ops_; i += 2) {
         auto *bb = static_cast<BasicBlock *>(total_phi->get_operand(i + 1));
         if (bb == loop.preheader) total_init  = total_phi->get_operand(i);
-        else if (bb == loop.latch) total_latch = total_phi->get_operand(i);
+        else if (bb == latch) total_latch = total_phi->get_operand(i);
     }
     if (!total_init || !total_latch) return debugReject("cannot find total init/latch incoming");
     if (!isLoopInvariant(total_init, loop.blocks)) return debugReject("total init is not invariant");
 
-    if (tryFoldAffineSum(loop, module, SE, analysisLoop, r_phi, total_phi,
+    if (tryFoldAffineSum(loop, module, SE, latch, r_phi, total_phi,
                          loop_exit, N, total_init, total_latch,
                          ivInit, ivStride))
         return true;
 
+    // 仿射路径未命中时，纯重复折叠只支持 init=0 / 步长=1 的计数 IV
     if (ivInit != 0 || ivStride != 1)
         return false;
 
@@ -545,31 +447,82 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
     }
     if (body_phi_uses == 0) return false;
 
-    // 6b. total_latch 不能依赖计数 IV（每次迭代增量必须相同）
+    // 6b. 折叠公式 init + (total_latch_1 - init) * N 成立的充分条件：
+    //     total_latch 作为 total_phi 的函数必须恰为 total_phi + C，且 C 每圈
+    //     恒定。数据流上要求 total_latch 沿"累加链"可达 total_phi：
+    //       acc := total_phi | phi(全部入边均为 acc) | acc ± q（q 与 IV/total
+    //       无数据依赖）
+    //     phi 汇合允许（路径间增量不同时由下面的控制检查兜底）；总和系数
+    //     不为 1（如 t+t）或经"选择"引入非 acc 值（如 phi[total, x]）即拒绝。
+    //     控制流上要求：除本循环 header 外，循环内所有条件分支的条件都不
+    //     依赖计数 IV——否则路径选择随圈变化，增量不再恒定。
+    //     （唯一的跨圈状态只有 r_phi/total_phi 两个 header phi；条件无法
+    //     依赖 total_phi——那是非 phi 使用，已被检查 5 拒绝。）
     {
-        std::set<Value *> visited;
-        std::function<bool(Value *)> dependsOnIV = [&](Value *v) -> bool {
-            if (v == r_phi) return true;
-            if (!visited.insert(v).second) return false;
+        std::set<Value *> indepVisited;
+        std::function<bool(Value *)> indepOfIV = [&](Value *v) -> bool {
+            if (v == r_phi || v == total_phi) return false;
             auto *inst = dynamic_cast<Instruction *>(v);
-            if (!inst) return false;
-            if (!loop.blocks.count(inst->parent_)) return false;
+            if (!inst) return true;
+            if (!loop.blocks.count(inst->parent_)) return true;
+            if (!indepVisited.insert(v).second) return true;
             for (unsigned i = 0; i < inst->num_ops_; i++)
-                if (dependsOnIV(inst->get_operand(i))) return true;
+                if (!indepOfIV(inst->get_operand(i))) return false;
+            return true;
+        };
+
+        std::set<Value *> accVisited;
+        std::function<bool(Value *)> isAcc = [&](Value *v) -> bool {
+            if (v == total_phi) return true;
+            auto *inst = dynamic_cast<Instruction *>(v);
+            if (!inst || !loop.blocks.count(inst->parent_)) return false;
+            if (!accVisited.insert(v).second) return true; // 环上节点正在验证
+            if (inst->is_phi()) {
+                auto *phi = static_cast<PhiInst *>(inst);
+                for (unsigned i = 0; i < phi->num_ops_; i += 2)
+                    if (!isAcc(phi->get_operand(i))) return false;
+                return true;
+            }
+            auto *bin = dynamic_cast<BinaryInst *>(inst);
+            if (!bin) return false;
+            Value *lhs = bin->get_operand(0);
+            Value *rhs = bin->get_operand(1);
+            if (bin->is_add())
+                return (isAcc(lhs) && indepOfIV(rhs)) ||
+                       (isAcc(rhs) && indepOfIV(lhs));
+            if (bin->is_sub())
+                return isAcc(lhs) && indepOfIV(rhs);
             return false;
         };
-        if (dependsOnIV(total_latch)) return false;
+        if (!isAcc(total_latch)) return false;
+
+        for (auto *bb : loop.blocks) {
+            if (bb == loop.header) continue;
+            auto *t = bb->get_terminator();
+            if (t && t->is_br() && t->num_ops_ == 3 &&
+                !indepOfIV(t->get_operand(0)))
+                return false;
+        }
+    }
+
+    // 6c. 折叠会拆掉回边并让循环只走一遍：除 total_phi 外，循环内任何值
+    //     （含 r_phi）被循环外使用时，其"终值"在折叠后都是错的 → bail。
+    //     total_phi 的循环外使用由 7d 统一改写到出口 phi。
+    for (auto *bb : loop.blocks) {
+        for (auto *inst : bb->instr_list_) {
+            if (inst == total_phi) continue;
+            for (auto &use : inst->use_list_) {
+                auto *user = dynamic_cast<Instruction *>(use.val_);
+                if (user && user->parent_ && !loop.blocks.count(user->parent_))
+                    return false;
+            }
+        }
     }
 
     // ────────────────────────── 变换开始 ──────────────────────────────────
-    {
-        FILE *f = fopen("/tmp/repfold_debug.txt", "a");
-        if (f) {
-            fprintf(f, "[LoopRepFold] folding loop header=%s in func=%s\n",
-                    loop.header->name_.c_str(), loop.header->parent_->name_.c_str());
-            fclose(f);
-        }
-    }
+    if (std::getenv("DEBUG_LOOP_REPFOLD"))
+        std::cerr << "[LoopRepFold] fold func=" << loop.header->parent_->name_
+                  << " header=" << loop.header->name_ << "\n";
     auto *int_ty = total_phi->type_;
 
     // 7a. 在 latch 中（terminator 之前）插入 total_final 计算
@@ -580,32 +533,32 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
         auto *ci_init = dynamic_cast<ConstantInt *>(total_init);
         if (ci_init && ci_init->value_ == 0) {
             auto *mul = new BinaryInst(int_ty, Instruction::Mul,
-                                       total_latch, N, loop.latch, true);
-            loop.latch->add_instruction_before_terminator(mul);
+                                       total_latch, N, latch, true);
+            latch->add_instruction_before_terminator(mul);
             total_final = mul;
         } else {
             auto *delta  = new BinaryInst(int_ty, Instruction::Sub,
-                                          total_latch, total_init, loop.latch, true);
+                                          total_latch, total_init, latch, true);
             auto *scaled = new BinaryInst(int_ty, Instruction::Mul,
-                                          delta, N, loop.latch, true);
+                                          delta, N, latch, true);
             auto *result = new BinaryInst(int_ty, Instruction::Add,
-                                          total_init, scaled, loop.latch, true);
-            loop.latch->add_instruction_before_terminator(delta);
-            loop.latch->add_instruction_before_terminator(scaled);
-            loop.latch->add_instruction_before_terminator(result);
+                                          total_init, scaled, latch, true);
+            latch->add_instruction_before_terminator(delta);
+            latch->add_instruction_before_terminator(scaled);
+            latch->add_instruction_before_terminator(result);
             total_final = result;
         }
     }
 
     // 7b. 重定向 latch 的无条件跳转：header → loop_exit
     {
-        auto *latch_br = loop.latch->get_terminator();
+        auto *latch_br = latch->get_terminator();
         // set_operand 会维护 BasicBlock 的 use_list
         latch_br->set_operand(0, loop_exit);
-        loop.latch->remove_succ_basic_block(loop.header);
-        loop.latch->add_succ_basic_block(loop_exit);
-        loop.header->remove_pre_basic_block(loop.latch);
-        loop_exit->add_pre_basic_block(loop.latch);
+        latch->remove_succ_basic_block(loop.header);
+        latch->add_succ_basic_block(loop_exit);
+        loop.header->remove_pre_basic_block(latch);
+        loop_exit->add_pre_basic_block(latch);
     }
 
     // 7c. 删除 header 各 phi 中来自 latch 的 incoming
@@ -617,33 +570,37 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
             }
         }
     };
-    removeIncoming(r_phi,     loop.latch);
-    removeIncoming(total_phi, loop.latch);
+    removeIncoming(r_phi,     latch);
+    removeIncoming(total_phi, latch);
 
-    // 7d. 在 loop_exit 插入 phi 处理出口值，并替换 total_phi 的使用
-    //     v_total = phi [total_phi, header], [total_final, latch]
+    // 7d. 在 loop_exit 插入 phi 处理出口值，并替换 total_phi 的全部循环外
+    //     使用：v_total = phi [total_phi, header], [total_final, latch]。
+    //     header 是唯一 exiting 块且 loop_exit 是专用出口 ⇒ 任何从循环到
+    //     循环外的路径必经 loop_exit ⇒ exit_phi 支配所有循环外使用点
+    //     （不限于 loop_exit 块内，远处的使用同样必须改写——折叠后
+    //     total_phi 本身收缩为 init，留着不改写就是错值）。
     {
-        bool used_in_exit = false;
+        bool used_outside = false;
         for (auto &use : total_phi->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
-            if (user && user->parent_ == loop_exit) {
-                used_in_exit = true;
+            if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
+                used_outside = true;
                 break;
             }
         }
 
-        if (used_in_exit) {
+        if (used_outside) {
             std::vector<Value *>      phi_vals = {total_phi, total_final};
-            std::vector<BasicBlock *> phi_bbs  = {loop.header, loop.latch};
+            std::vector<BasicBlock *> phi_bbs  = {loop.header, latch};
             auto *exit_phi = new PhiInst(Instruction::PHI, phi_vals, phi_bbs,
                                          int_ty, loop_exit);
             loop_exit->add_instruction_front(exit_phi);
 
-            // 收集并替换 loop_exit 中 total_phi 的使用
             std::vector<std::pair<Instruction *, unsigned>> to_replace;
             for (auto &use : total_phi->use_list_) {
                 auto *user = dynamic_cast<Instruction *>(use.val_);
-                if (user && user->parent_ == loop_exit && user != exit_phi)
+                if (user && user->parent_ && user != exit_phi &&
+                    !loop.blocks.count(user->parent_))
                     to_replace.push_back({user, use.arg_no_});
             }
             for (auto &[user, arg_no] : to_replace)
@@ -657,33 +614,32 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE,
 // ── 函数级 / 模块级入口 ─────────────────────────────────────────────────────
 
 void LoopRepFold::runOnFunction(Function *func, AnalysisManager *AM) {
-    if (func->basic_blocks_.empty()) return;
+    if (func->basic_blocks_.empty() || !AM) return;
 
+    // 折叠成功后 CFG 已变（仿射路径还会整体删块），Loop 快照过期 →
+    // 失效缓存、重新分析再扫，直到无折叠机会。
     bool changed = true;
     while (changed) {
         changed = false;
-        auto rpo = computeRPO(func);
-        computeDominators(rpo);
-        auto loops = findLoops(func);
+        LoopInfo &LI = AM->getLoopInfo(func);
+        if (LI.allLoops().empty()) return;
+        ScalarEvolution *SE = &AM->getScalarEvolution(func);
+
         if (isLoopRepFoldDebugEnabled())
             std::cerr << "[LoopRepFold] function=" << func->name_
-                      << " loops=" << loops.size() << "\n";
+                      << " loops=" << LI.allLoops().size() << "\n";
 
-        // 优先处理小循环（内层），但对于本 pass，外层 r-loop 体积最大 → 按 blocks 数降序
+        // 外层 r-loop 体积最大 → 按 blocks 数降序（由外向内）
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
         std::sort(loops.begin(), loops.end(),
-                  [](const Loop &a, const Loop &b) { return a.blocks.size() > b.blocks.size(); });
+                  [](Loop *a, Loop *b) { return a->blocks.size() > b->blocks.size(); });
 
-        for (auto &loop : loops) {
-            ScalarEvolution *SE = nullptr;
-            ::Loop *analysisLoop = nullptr;
-            if (AM) {
-                LoopInfo &LI = AM->getLoopInfo(func);
-                SE = &AM->getScalarEvolution(func);
-                analysisLoop = LI.getLoopFor(loop.header);
-            }
-            if (tryFold(loop, func->parent_, SE, analysisLoop)) {
+        for (auto *loop : loops) {
+            if (tryFold(*loop, func->parent_, SE)) {
                 changed = true;
-                if (AM) AM->clear(func);
+                AM->clear(func);
                 break;
             }
         }

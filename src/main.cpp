@@ -5,6 +5,7 @@
 #include "include/mid/ir/irGen.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/deadCodeDelete.hpp"
+#include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
@@ -15,7 +16,12 @@
 #include "include/mid/opt/inlineExpand.hpp"
 #include "include/mid/opt/bitFuncRecognize.hpp"
 #include "include/mid/opt/loopSimplify.hpp"
+#include "include/mid/opt/lcssa.hpp"
+#include "include/mid/opt/simpleLoopUnswitch.hpp"
+#include "include/mid/opt/loopRotate.hpp"
+#include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
 #include "include/mid/opt/scalarExpandedInterchange.hpp"
@@ -135,6 +141,7 @@ static void addCanonicalCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
     pm.addPass(std::make_unique<InstCombine>());
+    pm.addPass(std::make_unique<DeadStoreEliminate>());
     pm.addPass(std::make_unique<DeadCodeDelete>());
 }
 
@@ -177,8 +184,16 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
 static void addLoopPipeline(PassManager &pm) {
     // pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
+    pm.beginRepeatGroup(/*maxRounds=*/3);
     pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
+    pm.addPass(std::make_unique<SimpleLoopUnswitch>());
+    pm.addPass(std::make_unique<LoopRotate>());
+    pm.addPass(std::make_unique<PhiOpSink>());
     pm.addPass(std::make_unique<LICM>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LoopDeletion>());
+    pm.endRepeatGroup();
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
@@ -198,17 +213,8 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
 
-    /* Only used for experiment */
     if (optLevel >= 2) {
-        // pm.addPass(std::make_unique<CFGSimplify>());
-        // pm.addPass(std::make_unique<Mem2Reg>());
-        // pm.addPass(std::make_unique<EarlyCSE>());
-        // pm.addPass(std::make_unique<InstCombine>());
-        // pm.addPass(std::make_unique<CFGSimplify>());
-        // pm.addPass(std::make_unique<TailRecursionEliminate>());
-    }
-    if(optLevel >= 3){
-        // pm.addPass(std::make_unique<LoopSimplify>());
+        
     }
 }
 

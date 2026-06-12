@@ -18,7 +18,31 @@
 #include <unistd.h>
 #endif
 
+// 后端的活跃性分析等依赖 pre_bbs_/succ_bbs_，但中端个别 pass 改写分支目标时
+// 会遗漏维护这两个链表（terminator 才是事实）。进入代码生成前统一按
+// terminator 重建，避免陈旧/缺失的边导致错误的寄存器分配。
+static void rebuildCfgLinks(Module *m) {
+    for (auto *f : m->function_list_) {
+        if (f->is_declaration()) continue;
+        for (auto *bb : f->basic_blocks_) {
+            bb->pre_bbs_.clear();
+            bb->succ_bbs_.clear();
+        }
+        for (auto *bb : f->basic_blocks_) {
+            auto *term = bb->get_terminator();
+            if (!term) continue;
+            for (unsigned i = 0; i < term->num_ops_; ++i) {
+                if (auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i))) {
+                    bb->add_succ_basic_block(succ);
+                    succ->add_pre_basic_block(bb);
+                }
+            }
+        }
+    }
+}
+
 void Arm64CodeGen::generate() {
+    rebuildCfgLinks(m_);
     MachineModule module;
 
     // 1. 分类全局变量

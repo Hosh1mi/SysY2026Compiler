@@ -1,9 +1,9 @@
 #include "../../include/mid/opt/indVarStrengthReduce.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
-#include <stack>
 
 void IndVarStrengthReduce::execute(Module *module) {
     AnalysisManager AM;
@@ -19,70 +19,41 @@ PreservedAnalyses IndVarStrengthReduce::execute(Module *module, AnalysisManager 
 }
 
 void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
-    domInfo_ = &func->getDominatorInfo();
+    if (func->basic_blocks_.empty()) return;
 
-    auto loops = findLoops(func);
+    // 每个循环处理完会全量失效 AM（含 LoopInfo），Loop* 不能跨失效持有
+    // ——先收集稳定 header 列表，每轮按 header 重查（与 LICM 同策略）。
+    // 顺序：由内向外（旧实现按回边在块布局中的出现序，嵌套时即内层先）。
+    std::vector<BasicBlock *> headers;
+    {
+        LoopInfo &LI = AM.getLoopInfo(func);
+        std::vector<Loop *> loops;
+        for (auto &l : LI.allLoops())
+            loops.push_back(l.get());
+        std::sort(loops.begin(), loops.end(),
+                  [](Loop *a, Loop *b) { return a->depth > b->depth; });
+        for (auto *l : loops)
+            headers.push_back(l->header);
+    }
 
     Module *module = func->parent_;
-    for (auto &loop : loops) {
+    for (auto *header : headers) {
+        LoopInfo &LI = AM.getLoopInfo(func);
+        Loop *loop = nullptr;
+        for (auto &l : LI.allLoops()) {
+            if (l->header == header) {
+                loop = l.get();
+                break;
+            }
+        }
+        if (!loop) continue;
+        // 纯自环（latch==header）旧实现不识别，保持跳过
+        if (loop->singleLatch() == loop->header) continue;
+
         ScalarEvolution &SE = AM.getScalarEvolution(func);
-        processLoop(loop, func, module, SE);
+        processLoop(*loop, func, module, SE);
         AM.invalidateFunction(func, PreservedAnalyses::none());
     }
-}
-
-// -----------------------------------------------------------------------
-// 循环检测：找回边 → 自然循环
-// -----------------------------------------------------------------------
-std::vector<IndVarStrengthReduce::Loop> IndVarStrengthReduce::findLoops(Function *func) {
-    std::vector<Loop> loops;
-
-    for (auto bb : func->basic_blocks_) {
-        for (auto succ : bb->succ_bbs_) {
-            if (!domInfo_->dominates(succ, bb)) continue;
-            if (bb == succ) continue;
-
-            Loop loop;
-            loop.header = succ;
-            loop.latch = bb;
-
-            std::set<BasicBlock *> loopBlocks;
-            loopBlocks.insert(succ);
-
-            if (bb != succ) {
-                std::stack<BasicBlock *> worklist;
-                worklist.push(bb);
-                loopBlocks.insert(bb);
-
-                while (!worklist.empty()) {
-                    auto cur = worklist.top();
-                    worklist.pop();
-                    for (auto pred : cur->pre_bbs_) {
-                        if (!loopBlocks.count(pred)) {
-                            loopBlocks.insert(pred);
-                            worklist.push(pred);
-                        }
-                    }
-                }
-            }
-
-            loop.blocks = loopBlocks;
-
-            BasicBlock *externalPred = nullptr;
-            int extCount = 0;
-            for (auto pred : succ->pre_bbs_) {
-                if (!loopBlocks.count(pred)) {
-                    externalPred = pred;
-                    extCount++;
-                }
-            }
-            loop.preheader = (extCount == 1) ? externalPred : nullptr;
-
-            loops.push_back(loop);
-        }
-    }
-
-    return loops;
 }
 
 // -----------------------------------------------------------------------
@@ -588,7 +559,8 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
         };
         std::vector<GEPCandidate> candidates;
 
-        for (auto bb : loop.blocks) {
+        // 确定序遍历：候选顺序决定 preheader 中 initGEP 的产出顺序
+        for (auto bb : loop.blocksOrdered) {
             for (auto inst : bb->instr_list_) {
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
@@ -707,6 +679,12 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
             if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
             int effectiveStride = static_cast<int>(effectiveStride64);
+
+            if (std::getenv("DEBUG_IVSR"))
+                std::cerr << "[IVSR] func=" << func->name_
+                          << " header=" << loop.header->name_
+                          << " gep=%" << gep->name_
+                          << " stride=" << effectiveStride << "\n";
 
             std::vector<Value *> initIndices;
             bool failed = false;

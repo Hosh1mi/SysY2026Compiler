@@ -22,9 +22,13 @@ public:
     BasicBlock *header    = nullptr;   // 循环入口，被所有 latch 跳回
     BasicBlock *preheader = nullptr;   // header 的唯一外部前驱（找不到则 nullptr）
     std::vector<BasicBlock *> latches; // 所有指向 header 的循环内块（back-edge sources）
-    std::vector<BasicBlock *> exiting; // 循环内、有后继落在循环外的块
-    std::vector<BasicBlock *> exits;   // 循环外、被 exiting 跳到的块（去重）
-    std::set<BasicBlock *>    blocks;  // 本循环及所有子循环的所有块
+    std::vector<BasicBlock *> exiting; // 循环内、有后继落在循环外的块（RPO 序）
+    std::vector<BasicBlock *> exits;   // 循环外、被 exiting 跳到的块（去重，RPO 序）
+    std::set<BasicBlock *>    blocks;  // 本循环及所有子循环的所有块（成员查询用）
+    // blocks 的确定序视图（RPO）。std::set 按指针排序，跨进程不稳定——
+    // 凡是"遍历顺序会影响产出 IR 顺序"的场景（LICM 外提、IVSR 候选收集、
+    // LCSSA 快照等）必须用本列表，不要直接迭代 blocks。
+    std::vector<BasicBlock *> blocksOrdered;
 
     // 嵌套
     Loop *parent = nullptr;
