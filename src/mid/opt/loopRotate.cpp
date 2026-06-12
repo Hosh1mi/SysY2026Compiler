@@ -210,13 +210,6 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     bool headerIsOnlyExiting =
         loop->exiting.size() == 1 && loop->exiting[0] == header;
-    // 多 exiting 循环的旋转门槛（维持 LCSSA 前的 bail 行为）：
-    // exitSucc 中 LCSSA 形 phi（各入边同一循环内值）对应 LCSSA 前的
-    // "循环外直接使用"——旋转会把它扩成三路入边，其并行拷贝落在
-    // backedge 路径上且后端目前合并不掉（huffman 实测每圈 +3 mov，
-    // 约 +8%），故 bail；天然多值汇合 phi（各入边值不同）LCSSA 前
-    // 就允许旋转，继续放行（h-1 系列依赖，挡掉会 +34%）。
-    // 后端 phi 拷贝合并改进后可放开此限制。
     if (!headerIsOnlyExiting) {
         for (auto *inst : exitSucc->instr_list_) {
             if (!inst->is_phi()) break;

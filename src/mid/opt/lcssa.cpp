@@ -128,7 +128,6 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
             }
         }
 
-        // 插了 phi 但一个 use 都没改写到也算 changed（phi 留给 DCE）
         changed = true;
     }
 

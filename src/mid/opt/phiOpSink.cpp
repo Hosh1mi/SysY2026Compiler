@@ -100,12 +100,6 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI) {
             return false;
     }
 
-    // 跨循环出口下沉的操作数限制：重算操作数若是"被退出循环"的循环携带
-    // phi，其"出口处的值"沿不同出口边相位不同——原始出口边带的是末迭代
-    // 入口值，而 do-while 展开主循环出口边上 unroll 的 liveOut（mapFinal
-    // 对 phi 用 curPhiVals）补的是组末更新后值——重算会取错相位，错译
-    // （crypto/pseudo_md5 实测踩到）。非 phi 的循环内定义（寄存器即末迭代
-    // 计算值，unroll 用末 clone 映射，两边一致）与循环不变量则安全。
     for (Value *opnd : {lhs, rhs}) {
         auto *p = dynamic_cast<PhiInst *>(opnd);
         if (!p || !p->parent_)

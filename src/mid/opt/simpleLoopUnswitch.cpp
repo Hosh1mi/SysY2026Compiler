@@ -153,11 +153,6 @@ Instruction *SimpleLoopUnswitch::cloneInst(
 }
 
 bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
-    // ── 收益门槛：仅最内层循环 ─────────────────────────────────────────
-    // 切外层会克隆整个嵌套（01_mm3 实测：round2 对 mm 外层循环 unswitch,
-    // 33 指令的双层嵌套翻倍 → 寄存器压力/I-cache，中位数 +35%）；
-    // 收益案例（conv2d -25%）全部来自单层循环。外层 if(mode) 包大嵌套的
-    // 形态留给收益模型完善后再放开。
     if (!loop.children.empty())
         return false;
 
@@ -169,10 +164,6 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
         preTerm->get_operand(0) != loop.header)
         return false;
 
-    // ── 候选：条件不变、两目标都在循环内的条件分支 ─────────────────────
-    // 条件两种形态：(a) 循环外定义的值；(b) 循环内单条 icmp 但操作数全
-    // 不变（LICM 在本 pass 之后才跑，这是最常见的 if(mode==K) 形态）——
-    // 分派时把比较克隆到 preheader。
     BasicBlock *condBB = nullptr;
     Instruction *condBr = nullptr;
     Value *cond = nullptr;
@@ -362,8 +353,6 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
     retargetIncoming(loop.header, preheader, phTrue);
     retargetIncoming(cloneHeader, preheader, phFalse);
 
-    // 折叠分支后两份拷贝各有一条死路径（可能是多块子图），立即清除：
-    // 留着会触发 verify 的不可达块告警，phi 还会被收缩成自引用指令
     removeUnreachableBlocks(func);
 
     return true;

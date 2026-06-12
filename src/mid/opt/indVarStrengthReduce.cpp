@@ -515,14 +515,6 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
-    for (auto *bb : func->basic_blocks_) {
-        for (auto *inst : bb->instr_list_) {
-            auto *alloca = dynamic_cast<AllocaInst *>(inst);
-            if (alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID)
-                return;
-        }
-    }
-
     int inLoopHeaderPreds = 0;
     for (auto *pred : loop.header->pre_bbs_) {
         if (loop.blocks.count(pred))
@@ -548,7 +540,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
     for (auto &iv : ivs) {
         auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
-        if (!initCI) continue;
+        if (!initCI && (!isI32(iv.initVal) || !loop.children.empty())) continue;
 
         struct GEPCandidate {
             GetElementPtrInst *gep;
@@ -565,13 +557,24 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
 
+                // 栈数组基址不削弱（后端取地址限制，函数级注释见 processLoop 顶部）
+                {
+                    Value *root = gep->get_operand(0);
+                    while (auto *g2 = dynamic_cast<GetElementPtrInst *>(root))
+                        root = g2->get_operand(0);
+                    if (dynamic_cast<AllocaInst *>(root)) continue;
+                }
+
                 auto initExprCanMaterialize = [&](LinearIVExpr expr) -> bool {
                     if (expr.coeff != 0) {
-                        long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
-                        if (!fitsInt(ivStart)) return false;
+                        if (initCI) {
+                            long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                            if (!fitsInt(ivStart)) return false;
+                            expr.constOffset += ivStart;
+                            if (!fitsInt(expr.constOffset)) return false;
+                        }
+                        // 非常量初值：coeff*init 运行期计算，余下部分照常检查
                         expr.coeff = 0;
-                        expr.constOffset += ivStart;
-                        if (!fitsInt(expr.constOffset)) return false;
                     }
                     return canMaterializeOffsetInPreheader(expr, loop);
                 };
@@ -579,7 +582,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 auto *gepPtrTy = dynamic_cast<PointerType *>(gep->type_);
                 bool gepYieldsArray =
                     gepPtrTy && gepPtrTy->contained_->tid_ == Type::ArrayTyID;
-                SCEVGEPInfo gepInfo = SCEVGEPInfo{};
+                SCEVGEPInfo gepInfo = gepYieldsArray ? SCEVGEPInfo{} : SE.getLinearizedGEP(gep);
                 if (gepInfo.valid) {
                     LinearIVExpr flatExpr =
                         linearizeSCEVForIV(gepInfo.elementOffset, iv, loop, SE);
@@ -690,24 +693,49 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             bool failed = false;
             for (unsigned i = 1; i < gep->num_ops_; i++) {
                 LinearIVExpr expr = c.indexExprs[i - 1];
+                Value *ivStartVal = nullptr; // 非常量初值时的运行期 coeff*init
                 if (expr.coeff != 0) {
-                    long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
-                    if (!fitsInt(ivStart)) {
-                        failed = true;
-                        break;
+                    if (initCI) {
+                        long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
+                        if (!fitsInt(ivStart)) {
+                            failed = true;
+                            break;
+                        }
+                        expr.constOffset += ivStart;
+                        if (!fitsInt(expr.constOffset)) {
+                            failed = true;
+                            break;
+                        }
+                    } else if (expr.coeff == 1) {
+                        ivStartVal = iv.initVal;
+                    } else {
+                        builder->set_insert_point(preheader);
+                        auto *mul = builder->create_imul(
+                            iv.initVal,
+                            new ConstantInt(module->int32_ty_, expr.coeff));
+                        preheader->remove_instr(mul);
+                        preheader->add_instruction_before_terminator(mul);
+                        ivStartVal = mul;
                     }
                     expr.coeff = 0;
-                    expr.constOffset += ivStart;
-                    if (!fitsInt(expr.constOffset)) {
-                        failed = true;
-                        break;
-                    }
                 }
 
                 Value *idxVal = materializeOffsetInPreheader(expr, preheader, loop, builder, module);
                 if (!idxVal) {
                     failed = true;
                     break;
+                }
+                if (ivStartVal) {
+                    auto *baseCI = dynamic_cast<ConstantInt *>(idxVal);
+                    if (baseCI && baseCI->value_ == 0) {
+                        idxVal = ivStartVal;
+                    } else {
+                        builder->set_insert_point(preheader);
+                        auto *add = builder->create_iadd(idxVal, ivStartVal);
+                        preheader->remove_instr(add);
+                        preheader->add_instruction_before_terminator(add);
+                        idxVal = add;
+                    }
                 }
                 initIndices.push_back(idxVal);
             }
