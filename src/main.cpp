@@ -188,7 +188,7 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
 static void addLoopPipeline(PassManager &pm) {
     // pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
-    pm.beginRepeatGroup(/*maxRounds=*/3);
+    pm.beginRepeatGroup(/*maxRounds=*/8);
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<SimpleLoopUnswitch>());

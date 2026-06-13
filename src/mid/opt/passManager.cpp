@@ -70,7 +70,11 @@ void PassManager::run(Module *module) {
             const size_t entryInsts = countInstructions(module);
             const size_t instBudget = entryInsts * 2 + 1024;
 
-            for (int round = 1; round <= g.maxRounds; round++) {
+            int maxRounds = g.maxRounds;
+            if (const char *ov = std::getenv("LOOP_PIPELINE_MAX_ROUNDS"))
+                maxRounds = std::atoi(ov);
+
+            for (int round = 1; round <= maxRounds; round++) {
                 bool roundChanged = false;
                 std::string changedList;
                 for (size_t j = g.begin; j < g.end; j++) {
