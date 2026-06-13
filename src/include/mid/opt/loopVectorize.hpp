@@ -21,9 +21,26 @@ private:
     struct InductionVar {
         PhiInst      *phi;             // header phi
         Value        *initVal;         // initial value (from preheader)
-        int           stride;          // constant stride (must be > 0)
+        int           stride;          // constant stride
         bool          isAdd;           // true for add, false for sub
         Instruction  *updateInst;      // the add/sub instruction in latch
+    };
+
+    struct PackedOperand {
+        enum Kind { CONTIGUOUS, IV_STEP, GATHER, INVARIANT };
+        Kind   kind;
+        Type  *scalarTy;
+        Value *source;                 // phi / invariant scalar
+        int    laneStride;             // elements between adjacent lanes
+    };
+
+    struct ReductionGroup {
+        PhiInst       *accPhi;         // loop-carried reduction phi
+        Value         *initVal;        // initial scalar accumulator
+        Value         *latchValue;     // final scalar value at latch edge
+        PackedOperand  lhs;
+        PackedOperand  rhs;
+        int            scalarStep;     // scalar elements consumed per original iter
     };
 
     // ── Memory access description ──────────────────────────────────────
@@ -40,6 +57,8 @@ private:
 
     // ── Loop analysis helpers ──────────────────────────────────────────
     bool findInductionVar(const Loop &loop, InductionVar &iv);
+    bool analyzeReductionLoop(const Loop &loop, const InductionVar &iv,
+                              ReductionGroup &group);
     bool analyzeStrideAccesses(const Loop &loop, const InductionVar &iv,
                                std::vector<MemAccess> &loads,
                                std::vector<MemAccess> &stores);
@@ -53,6 +72,10 @@ private:
                                    const BasicAliasAnalysis &BAA);
     bool tryVectorize(Loop &loop, Function *func, Module *module,
                       const BasicAliasAnalysis &BAA);
+    void emitReductionVectorizedLoop(const Loop &loop, const InductionVar &iv,
+                                     const ReductionGroup &group,
+                                     int vecWidth, Function *func,
+                                     Module *module);
     void emitVectorizedLoop(const Loop &loop, const InductionVar &iv,
                             const std::vector<MemAccess> &loads,
                             const std::vector<MemAccess> &stores,
