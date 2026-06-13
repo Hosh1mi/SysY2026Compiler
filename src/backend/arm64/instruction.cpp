@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/helpers.hpp"
 #include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/mid/ir/ir.hpp"
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -10,6 +11,152 @@
 #include <map>
 #include <set>
 #include <vector>
+
+namespace {
+
+struct LaneLoadPackPattern {
+    std::array<LoadInst*, 4> loads{};
+    std::array<InsertElementInst*, 4> inserts{};
+};
+
+struct AddvReductionExitPattern {
+    StoreInst *store = nullptr;
+    Bitcast *spillBitcast = nullptr;
+    std::array<GetElementPtrInst*, 3> laneGeps{};
+    std::array<LoadInst*, 4> laneLoads{};
+    std::array<BinaryInst*, 3> adds{};
+    BinaryInst *finalAdd = nullptr;
+};
+
+static bool isI32Vector4(Type *ty) {
+    if (!ty || ty->tid_ != Type::VectorTyID) return false;
+    auto *vecTy = static_cast<VectorType *>(ty);
+    return vecTy->num_elements_ == 4 &&
+           vecTy->contained_->tid_ == Type::IntegerTyID;
+}
+
+static ConstantInt *getConstIntOperand(Value *v) {
+    return dynamic_cast<ConstantInt *>(v);
+}
+
+static bool isLoadI32InBlock(Value *v, BasicBlock *bb, LoadInst *&load) {
+    load = dynamic_cast<LoadInst *>(v);
+    return load && load->parent_ == bb && load->type_->tid_ == Type::IntegerTyID;
+}
+
+static bool matchLaneLoadPack(Instruction *inst, LaneLoadPackPattern &pattern) {
+    auto *ins3 = dynamic_cast<InsertElementInst *>(inst);
+    if (!ins3 || !isI32Vector4(ins3->type_)) return false;
+    auto *bb = ins3->parent_;
+    if (!bb) return false;
+
+    auto *idx3 = getConstIntOperand(ins3->get_operand(2));
+    if (!idx3 || idx3->value_ != 3) return false;
+
+    auto walkLane = [&](InsertElementInst *ins, int lane, InsertElementInst *&prevIns,
+                        LoadInst *&load) -> bool {
+        auto *idx = getConstIntOperand(ins->get_operand(2));
+        if (!idx || idx->value_ != lane) return false;
+        if (!isLoadI32InBlock(ins->get_operand(1), bb, load)) return false;
+        prevIns = dynamic_cast<InsertElementInst *>(ins->get_operand(0));
+        return true;
+    };
+
+    pattern.inserts[3] = ins3;
+    InsertElementInst *ins2 = nullptr;
+    if (!walkLane(ins3, 3, ins2, pattern.loads[3])) return false;
+    if (!ins2 || ins2->parent_ != bb) return false;
+
+    pattern.inserts[2] = ins2;
+    InsertElementInst *ins1 = nullptr;
+    if (!walkLane(ins2, 2, ins1, pattern.loads[2])) return false;
+    if (!ins1 || ins1->parent_ != bb) return false;
+
+    pattern.inserts[1] = ins1;
+    InsertElementInst *ins0 = nullptr;
+    if (!walkLane(ins1, 1, ins0, pattern.loads[1])) return false;
+    if (!ins0 || ins0->parent_ != bb) return false;
+
+    pattern.inserts[0] = ins0;
+    auto *idx0 = getConstIntOperand(ins0->get_operand(2));
+    if (!idx0 || idx0->value_ != 0) return false;
+    if (!isLoadI32InBlock(ins0->get_operand(1), bb, pattern.loads[0])) return false;
+
+    return true;
+}
+
+static bool matchReductionExitAddv(StoreInst *store,
+                                   AddvReductionExitPattern &pattern) {
+    auto *vecTy = store->get_operand(0)->type_;
+    if (!isI32Vector4(vecTy)) return false;
+
+    auto *bb = store->parent_;
+    if (!bb) return false;
+
+    auto nextInst = [&](Instruction *cur) -> Instruction * {
+        auto it = std::find(bb->instr_list_.begin(), bb->instr_list_.end(), cur);
+        if (it == bb->instr_list_.end()) return nullptr;
+        ++it;
+        while (it != bb->instr_list_.end() && (*it)->is_phi()) ++it;
+        return it == bb->instr_list_.end() ? nullptr : *it;
+    };
+
+    auto *bc = dynamic_cast<Bitcast *>(nextInst(store));
+    if (!bc || bc->get_operand(0) != store->get_operand(1)) return false;
+    if (!bc->dest_ty_ || bc->dest_ty_->tid_ != Type::PointerTyID) return false;
+    if (static_cast<PointerType *>(bc->dest_ty_)->contained_->tid_ != Type::IntegerTyID)
+        return false;
+
+    auto *load0 = dynamic_cast<LoadInst *>(nextInst(bc));
+    if (!load0 || load0->get_operand(0) != bc) return false;
+    auto *gep1 = dynamic_cast<GetElementPtrInst *>(nextInst(load0));
+    auto *load1 = gep1 ? dynamic_cast<LoadInst *>(nextInst(gep1)) : nullptr;
+    auto *gep2 = load1 ? dynamic_cast<GetElementPtrInst *>(nextInst(load1)) : nullptr;
+    auto *load2 = gep2 ? dynamic_cast<LoadInst *>(nextInst(gep2)) : nullptr;
+    auto *gep3 = load2 ? dynamic_cast<GetElementPtrInst *>(nextInst(load2)) : nullptr;
+    auto *load3 = gep3 ? dynamic_cast<LoadInst *>(nextInst(gep3)) : nullptr;
+    auto *add01 = load3 ? dynamic_cast<BinaryInst *>(nextInst(load3)) : nullptr;
+    auto *add012 = add01 ? dynamic_cast<BinaryInst *>(nextInst(add01)) : nullptr;
+    auto *add0123 = add012 ? dynamic_cast<BinaryInst *>(nextInst(add012)) : nullptr;
+    if (!load1 || !load2 || !load3 || !add01 || !add012 || !add0123) return false;
+
+    auto matchLaneGep = [&](GetElementPtrInst *gep, int lane) -> bool {
+        if (!gep || gep->get_operand(0) != bc || gep->num_ops_ != 2) return false;
+        auto *idx = getConstIntOperand(gep->get_operand(1));
+        return idx && idx->value_ == lane;
+    };
+    if (!matchLaneGep(gep1, 1) || !matchLaneGep(gep2, 2) || !matchLaneGep(gep3, 3))
+        return false;
+    if (load1->get_operand(0) != gep1 || load2->get_operand(0) != gep2 ||
+        load3->get_operand(0) != gep3)
+        return false;
+
+    auto matchAdd = [](BinaryInst *add, Value *lhs, Value *rhs) {
+        return add && add->is_add() &&
+               ((add->get_operand(0) == lhs && add->get_operand(1) == rhs) ||
+                (add->get_operand(0) == rhs && add->get_operand(1) == lhs));
+    };
+    if (!matchAdd(add01, load0, load1)) return false;
+    if (!matchAdd(add012, add01, load2)) return false;
+    if (!matchAdd(add0123, add012, load3)) return false;
+
+    if (load0->use_list_.size() != 1 || load1->use_list_.size() != 1 ||
+        load2->use_list_.size() != 1 || load3->use_list_.size() != 1 ||
+        gep1->use_list_.size() != 1 || gep2->use_list_.size() != 1 ||
+        gep3->use_list_.size() != 1 || add01->use_list_.size() != 1 ||
+        add012->use_list_.size() != 1)
+        return false;
+
+    pattern.store = store;
+    pattern.spillBitcast = bc;
+    pattern.laneGeps = {gep1, gep2, gep3};
+    pattern.laneLoads = {load0, load1, load2, load3};
+    pattern.adds = {add01, add012, add0123};
+    pattern.finalAdd = add0123;
+    return true;
+}
+
+} // namespace
 
 namespace {
 
@@ -103,9 +250,88 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     resetRegs();
 
     auto &instrs = bb->instr_list_;
+    std::map<Instruction *, LaneLoadPackPattern> laneLoadPacks;
+    std::set<Instruction *> laneLoadSkipped;
+    std::map<Instruction *, AddvReductionExitPattern> addvReductions;
+    std::set<Instruction *> addvSkipped;
+
+    for (auto *candidate : instrs) {
+        LaneLoadPackPattern pack;
+        if (!matchLaneLoadPack(candidate, pack)) continue;
+        laneLoadPacks[candidate] = pack;
+        for (auto *load : pack.loads) laneLoadSkipped.insert(load);
+        laneLoadSkipped.insert(pack.inserts[0]);
+        laneLoadSkipped.insert(pack.inserts[1]);
+        laneLoadSkipped.insert(pack.inserts[2]);
+    }
+
+    for (auto *candidate : instrs) {
+        auto *store = dynamic_cast<StoreInst *>(candidate);
+        if (!store) continue;
+        AddvReductionExitPattern pattern;
+        if (!matchReductionExitAddv(store, pattern)) continue;
+        addvReductions[candidate] = pattern;
+        addvSkipped.insert(pattern.spillBitcast);
+        for (auto *gep : pattern.laneGeps) addvSkipped.insert(gep);
+        for (auto *load : pattern.laneLoads) addvSkipped.insert(load);
+        for (auto *add : pattern.adds) addvSkipped.insert(add);
+    }
+
     for (auto it = instrs.begin(); it != instrs.end(); ++it) {
         auto inst = *it;
         if (inst->is_phi()) continue;
+        if (laneLoadSkipped.count(inst) || addvSkipped.count(inst)) continue;
+
+        auto lanePackIt = laneLoadPacks.find(inst);
+        if (lanePackIt != laneLoadPacks.end()) {
+            const auto &pack = lanePackIt->second;
+            std::function<void(Value *, std::set<Instruction *> &)> rematAddrValue =
+                [&](Value *val, std::set<Instruction *> &visited) {
+                    auto *def = dynamic_cast<Instruction *>(val);
+                    if (!def || def->parent_ != bb || def->is_phi()) return;
+                    if (!visited.insert(def).second) return;
+                    if (!def->is_add() && !def->is_sub() && !def->is_gep() &&
+                        def->op_id_ != Instruction::BitCast)
+                        return;
+                    for (unsigned i = 0; i < def->num_ops_; ++i)
+                        rematAddrValue(def->get_operand(i), visited);
+                    emitInstruction(def);
+                };
+            std::string vd =
+                hasAssignedReg(pack.inserts[3]) ? assignedReg(pack.inserts[3]) : allocNEONReg();
+            for (int lane = 0; lane < 4; ++lane) {
+                std::set<Instruction *> rematVisited;
+                Value *ptrVal = pack.loads[lane]->get_operand(0);
+                rematAddrValue(ptrVal, rematVisited);
+                std::string addr = loadAddr(ptrVal);
+                MachineInstr ld = MachineInstr::make(
+                    "\tld1 {" + vd + ".s}[" + std::to_string(lane) + "], [" + addr + "]",
+                    MOpcode::Load, {vd},
+                    lane == 0 ? std::initializer_list<std::string>{addr}
+                              : std::initializer_list<std::string>{vd, addr},
+                    4);
+                ld.mayLoad = true;
+                emitMachineInstr(std::move(ld));
+            }
+            if (!hasAssignedReg(pack.inserts[3])) storeVector(pack.inserts[3], vd);
+            continue;
+        }
+
+        auto addvIt = addvReductions.find(inst);
+        if (addvIt != addvReductions.end()) {
+            const auto &pattern = addvIt->second;
+            std::string srcVec = loadVector(pattern.store->get_operand(0));
+            std::string vTmp = allocNEONReg();
+            std::string sTmp = "s" + vTmp.substr(1);
+            emitRawAluMachine("\taddv " + sTmp + ", " + srcVec + ".4s",
+                              sTmp, {srcVec}, MOpcode::Neon, 4);
+            std::string wDst =
+                hasAssignedReg(pattern.finalAdd) ? assignedReg(pattern.finalAdd)
+                                                 : allocIntReg();
+            emitMoveMachine(wDst, sTmp, "fmov");
+            storeInt(pattern.finalAdd, wDst);
+            continue;
+        }
 
         // Skip ICmp if its only user is a Select (Select emits its own cmp)
         if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {

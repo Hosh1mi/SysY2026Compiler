@@ -258,6 +258,10 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::Mul;
         mi.latency = (op == "fmul") ? 5 : 3;
         defFirstUseRest();
+    } else if (op == "addv") {
+        mi.opcode = MOpcode::Neon;
+        mi.latency = 4;
+        defFirstUseRest();
     } else if (op == "sdiv" || op == "udiv" || op == "fdiv") {
         mi.opcode = MOpcode::Div;
         mi.latency = 12;

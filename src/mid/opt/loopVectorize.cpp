@@ -88,6 +88,119 @@ Value *LoopVectorize::getBasePtr(Value *ptr) {
     return ptr;
 }
 
+static bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi,
+                               Value *&initVal, Value *&latchVal,
+                               BasicBlock *&latchBB) {
+    initVal = nullptr;
+    latchVal = nullptr;
+    latchBB = nullptr;
+
+    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+        if (loop.blocks.count(pred)) {
+            if (latchVal) return false;
+            latchVal = phi->get_operand(i);
+            latchBB = pred;
+        } else {
+            if (initVal) return false;
+            initVal = phi->get_operand(i);
+        }
+    }
+
+    return initVal && latchVal && latchBB;
+}
+
+static bool decomposePointerOffset(Value *ptr, PhiInst *basePhi, int &offset) {
+    offset = 0;
+    Value *cur = ptr;
+    while (cur != basePhi) {
+        auto *gep = dynamic_cast<GetElementPtrInst*>(cur);
+        if (!gep || gep->num_ops_ != 2) return false;
+        auto *step = dynamic_cast<ConstantInt*>(gep->get_operand(1));
+        if (!step) return false;
+        offset += step->value_;
+        cur = gep->get_operand(0);
+    }
+    return true;
+}
+
+static bool matchIVPlusConstant(Value *val, PhiInst *ivPhi, int &offset) {
+    if (val == ivPhi) {
+        offset = 0;
+        return true;
+    }
+    auto *add = dynamic_cast<BinaryInst*>(val);
+    if (!add || !add->is_add()) return false;
+    Value *a = add->get_operand(0);
+    Value *b = add->get_operand(1);
+    if (a == ivPhi) {
+        auto *ci = dynamic_cast<ConstantInt*>(b);
+        if (!ci) return false;
+        offset = ci->value_;
+        return true;
+    }
+    if (b == ivPhi) {
+        auto *ci = dynamic_cast<ConstantInt*>(a);
+        if (!ci) return false;
+        offset = ci->value_;
+        return true;
+    }
+    return false;
+}
+
+static int scalarTypeSizeInBytes(Type *ty) {
+    switch (ty->tid_) {
+    case Type::IntegerTyID: return 4;
+    case Type::FloatTyID: return 4;
+    case Type::PointerTyID: return 8;
+    case Type::ArrayTyID:
+        return static_cast<ArrayType*>(ty)->num_elements_ *
+               scalarTypeSizeInBytes(static_cast<ArrayType*>(ty)->contained_);
+    case Type::VectorTyID:
+        return static_cast<VectorType*>(ty)->num_elements_ *
+               scalarTypeSizeInBytes(static_cast<VectorType*>(ty)->contained_);
+    default:
+        return 8;
+    }
+}
+
+static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
+                                  Type *scalarTy, int &laneStride) {
+    Type *curTy = static_cast<PointerType*>(gep->get_operand(0)->type_)->contained_;
+    int scalarSize = scalarTypeSizeInBytes(scalarTy);
+
+    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+        int elemBytes = scalarTypeSizeInBytes(curTy);
+        if (i == varyPos) {
+            if (elemBytes % scalarSize != 0) return false;
+            laneStride = elemBytes / scalarSize;
+            return laneStride > 0;
+        }
+
+        if (curTy->tid_ == Type::ArrayTyID) {
+            curTy = static_cast<ArrayType*>(curTy)->contained_;
+        } else if (curTy->tid_ == Type::PointerTyID) {
+            curTy = static_cast<PointerType*>(curTy)->contained_;
+        }
+    }
+
+    return false;
+}
+
+static void rewritePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
+                               Value *newVal, BasicBlock *newPred) {
+    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        if (phi->get_operand(i + 1) != oldPred) continue;
+        phi->get_operand(i)->remove_use(phi->use_pos_[i]);
+        phi->get_operand(i + 1)->remove_use(phi->use_pos_[i + 1]);
+        phi->operands_[i] = newVal;
+        phi->use_pos_[i] = newVal->add_use(phi, i);
+        phi->operands_[i + 1] = newPred;
+        phi->use_pos_[i + 1] = newPred->add_use(phi, i + 1);
+        return;
+    }
+}
+
 // =====================================================================
 // 寻找归纳变量
 // =====================================================================
@@ -100,25 +213,11 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
 
         if (phi->type_->tid_ != Type::IntegerTyID) continue;
 
-        // Identify the incoming value from outside the loop (initVal)
-        // and from inside (updateInst)
-        Value *initVal   = nullptr;
-        Value *latchVal  = nullptr;
+        Value *initVal = nullptr;
+        Value *latchVal = nullptr;
         BasicBlock *latchBB = nullptr;
-
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-            auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-            if (loop.blocks.count(pred)) {
-                if (latchVal) { latchVal = nullptr; break; }
-                latchVal = phi->get_operand(i);
-                latchBB  = pred;
-            } else {
-                if (initVal) { initVal = nullptr; break; }
-                initVal = phi->get_operand(i);
-            }
-        }
-
-        if (!initVal || !latchVal || !latchBB) continue;
+        if (!getLoopPhiIncoming(loop, phi, initVal, latchVal, latchBB))
+            continue;
 
         // The latch value must be an add or sub of the phi with a constant
         auto *updateInst = dynamic_cast<Instruction*>(latchVal);
@@ -140,8 +239,7 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
             stride = static_cast<ConstantInt*>(op0)->value_;
         }
 
-        // Only unit stride ±1 is supported
-        if (stride != 1 && stride != -1) continue;
+        if (stride == 0) continue;
 
         iv.phi         = phi;
         iv.initVal     = initVal;
@@ -152,6 +250,299 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
     }
 
     return false;
+}
+
+bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &iv,
+                                         ReductionGroup &group) {
+    const bool debugReduction =
+        std::getenv("DEBUG_LOOP_VECTORIZE_REDUCTION") != nullptr;
+    auto reject = [&](const char *reason) {
+        if (debugReduction) {
+            std::cerr << "[LoopVectorize:reduction] reject header="
+                      << (loop.header ? loop.header->name_ : "<null>")
+                      << " reason=" << reason << "\n";
+        }
+        return false;
+    };
+
+    if (iv.phi->type_->tid_ != Type::IntegerTyID || iv.stride <= 0)
+        return reject("iv-type-or-step");
+    if (VECTORIZE_FACTOR % iv.stride != 0)
+        return reject("iv-step-not-divisible");
+    if (loop.blocks.size() > 3)
+        return reject("too-many-blocks");
+    if (!loop.preheader)
+        return reject("missing-preheader");
+    for (auto *inst : loop.preheader->instr_list_) {
+        if (inst->type_->tid_ == Type::VectorTyID)
+            return reject("already-vectorized");
+        if (inst->is_store() &&
+            inst->get_operand(0)->type_->tid_ == Type::VectorTyID)
+            return reject("already-vectorized");
+    }
+
+    auto *latch = loop.singleLatch();
+    if (!latch || latch == loop.header)
+        return reject("bad-latch");
+
+    auto *headerBr = loop.header->get_terminator();
+    if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3)
+        return reject("bad-header-branch");
+    auto *cmpInst = dynamic_cast<ICmpInst*>(headerBr->get_operand(0));
+    if (!cmpInst)
+        return reject("missing-header-cmp");
+    if (cmpInst->get_operand(0) != iv.phi && cmpInst->get_operand(1) != iv.phi)
+        return reject("iv-not-in-cmp");
+
+    struct PointerPhiInfo {
+        PhiInst *phi = nullptr;
+        Value *initVal = nullptr;
+        int totalStep = 0;
+    };
+
+    std::vector<PointerPhiInfo> pointerPhis;
+    PhiInst *accPhi = nullptr;
+    Value *accInit = nullptr;
+    Value *accLatch = nullptr;
+
+    for (auto *inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst*>(inst);
+        if (phi == iv.phi) continue;
+
+        Value *initVal = nullptr;
+        Value *latchVal = nullptr;
+        BasicBlock *latchBB = nullptr;
+        if (!getLoopPhiIncoming(loop, phi, initVal, latchVal, latchBB))
+            return reject("phi-incoming");
+
+        if (phi->type_->tid_ == Type::PointerTyID) {
+            int totalStep = 0;
+            if (!decomposePointerOffset(latchVal, phi, totalStep))
+                return reject("pointer-phi-step");
+            if (totalStep == 0)
+                return reject("pointer-phi-zero-step");
+            pointerPhis.push_back({phi, initVal, totalStep});
+            continue;
+        }
+
+        if (phi->type_->tid_ != Type::IntegerTyID)
+            return reject("unsupported-phi-type");
+        if (accPhi)
+            return reject("multiple-int-phis");
+        accPhi = phi;
+        accInit = initVal;
+        accLatch = latchVal;
+    }
+
+    if (!accPhi)
+        return reject("missing-acc-phi");
+    if (accPhi->type_ != iv.phi->type_)
+        return false;
+    if (accPhi->type_->tid_ != Type::IntegerTyID)
+        return false;
+
+    std::vector<std::pair<Value*, Value*>> mulInputsRev;
+    Value *cursor = accLatch;
+    while (cursor != accPhi) {
+        auto *sub = dynamic_cast<BinaryInst*>(cursor);
+        if (!sub || !sub->is_sub())
+            return reject("reduction-not-sub");
+        auto *mul = dynamic_cast<BinaryInst*>(sub->get_operand(1));
+        if (!mul || !mul->is_mul() || mul->type_->tid_ != Type::IntegerTyID)
+            return reject("reduction-not-mul");
+        mulInputsRev.push_back({mul->get_operand(0), mul->get_operand(1)});
+        cursor = sub->get_operand(0);
+        if (mulInputsRev.size() > static_cast<size_t>(VECTORIZE_FACTOR))
+            return reject("reduction-too-wide");
+    }
+
+    if (mulInputsRev.size() != static_cast<size_t>(iv.stride))
+        return reject("reduction-step-mismatch");
+
+    std::reverse(mulInputsRev.begin(), mulInputsRev.end());
+
+    auto classifyOperand = [&](int opIdx, PackedOperand &packed) -> bool {
+        Value *first = mulInputsRev[0].first;
+        if (opIdx == 1) first = mulInputsRev[0].second;
+
+        bool invariant = true;
+        for (size_t i = 1; i < mulInputsRev.size(); ++i) {
+            Value *cur = opIdx == 0 ? mulInputsRev[i].first : mulInputsRev[i].second;
+            if (cur != first) {
+                invariant = false;
+                break;
+            }
+        }
+
+        if (invariant && isLoopInvariant(first, loop.blocks)) {
+            packed.kind = PackedOperand::INVARIANT;
+            packed.scalarTy = first->type_;
+            packed.source = first;
+            packed.laneStride = 0;
+            return first->type_->tid_ == Type::IntegerTyID;
+        }
+
+        std::vector<Value*> ptrs;
+        ptrs.reserve(mulInputsRev.size());
+        for (auto &pair : mulInputsRev) {
+            Value *laneVal = opIdx == 0 ? pair.first : pair.second;
+            auto *load = dynamic_cast<LoadInst*>(laneVal);
+            if (!load || load->type_->tid_ != Type::IntegerTyID)
+                return false;
+            ptrs.push_back(load->get_operand(0));
+        }
+
+        if (auto *firstGep = dynamic_cast<GetElementPtrInst*>(ptrs[0])) {
+            unsigned varyPos = 0;
+            int firstOffset = 0;
+            bool foundVary = false;
+
+            for (unsigned idx = 1; idx < firstGep->num_ops_; ++idx) {
+                int off = 0;
+                if (!matchIVPlusConstant(firstGep->get_operand(idx), iv.phi, off))
+                    continue;
+                if (off != 0) return false;
+                varyPos = idx;
+                foundVary = true;
+                break;
+            }
+
+            if (foundVary) {
+                bool sameShape = true;
+                for (size_t lane = 0; lane < ptrs.size(); ++lane) {
+                    auto *gep = dynamic_cast<GetElementPtrInst*>(ptrs[lane]);
+                    if (!gep || gep->num_ops_ != firstGep->num_ops_ ||
+                        gep->get_operand(0) != firstGep->get_operand(0)) {
+                        sameShape = false;
+                        break;
+                    }
+                    for (unsigned idx = 1; idx < gep->num_ops_; ++idx) {
+                        if (idx == varyPos) {
+                            int off = 0;
+                            if (!matchIVPlusConstant(gep->get_operand(idx), iv.phi, off) ||
+                                off != static_cast<int>(lane)) {
+                                sameShape = false;
+                            }
+                        } else if (gep->get_operand(idx) != firstGep->get_operand(idx)) {
+                            sameShape = false;
+                        } else if (!isLoopInvariant(gep->get_operand(idx), loop.blocks)) {
+                            sameShape = false;
+                        }
+                        if (!sameShape) break;
+                    }
+                    if (!sameShape) break;
+                }
+
+                int laneStride = 0;
+                if (sameShape &&
+                    computeGEPIndexStride(firstGep, varyPos,
+                                          static_cast<LoadInst*>(
+                                              opIdx == 0 ? mulInputsRev[0].first
+                                                         : mulInputsRev[0].second)
+                                              ->type_,
+                                          laneStride)) {
+                    auto *firstLoad = dynamic_cast<LoadInst*>(
+                        opIdx == 0 ? mulInputsRev[0].first : mulInputsRev[0].second);
+                    packed.kind = laneStride == 1
+                                      ? PackedOperand::CONTIGUOUS
+                                      : PackedOperand::GATHER;
+                    packed.scalarTy = firstLoad->type_;
+                    packed.source = firstGep;
+                    packed.laneStride = laneStride;
+                    return true;
+                }
+            }
+        }
+
+        for (const auto &ptrInfo : pointerPhis) {
+            std::vector<int> offsets;
+            offsets.reserve(ptrs.size());
+            for (auto *ptr : ptrs) {
+                int offset = 0;
+                if (!decomposePointerOffset(ptr, ptrInfo.phi, offset)) {
+                    offsets.clear();
+                    break;
+                }
+                offsets.push_back(offset);
+            }
+            if (offsets.size() != ptrs.size())
+                continue;
+
+            if (offsets.empty() || offsets[0] != 0)
+                continue;
+            int laneStride = offsets.size() > 1 ? offsets[1] : ptrInfo.totalStep;
+            if (laneStride <= 0)
+                continue;
+
+            bool arithmetic = true;
+            for (size_t lane = 0; lane < offsets.size(); ++lane) {
+                if (offsets[lane] != static_cast<int>(lane) * laneStride) {
+                    arithmetic = false;
+                    break;
+                }
+            }
+            if (!arithmetic)
+                continue;
+            if (ptrInfo.totalStep != laneStride * iv.stride)
+                continue;
+
+            packed.kind = (std::abs(laneStride) == 1)
+                              ? PackedOperand::CONTIGUOUS
+                              : PackedOperand::GATHER;
+            auto *firstLoad = dynamic_cast<LoadInst*>(
+                opIdx == 0 ? mulInputsRev[0].first : mulInputsRev[0].second);
+            packed.scalarTy = firstLoad->type_;
+            packed.source = ptrInfo.phi;
+            packed.laneStride = laneStride;
+            return true;
+        }
+
+        return false;
+    };
+
+    PackedOperand lhs, rhs;
+    if (!classifyOperand(0, lhs))
+        return reject("lhs-classify");
+    if (!classifyOperand(1, rhs))
+        return reject("rhs-classify");
+    if (lhs.scalarTy->tid_ != Type::IntegerTyID || rhs.scalarTy->tid_ != Type::IntegerTyID)
+        return reject("non-i32");
+    if (lhs.kind == PackedOperand::GATHER && rhs.kind == PackedOperand::GATHER)
+        return reject("two-gathers");
+    size_t usedPointerPhis = 0;
+    if (dynamic_cast<PhiInst*>(lhs.source)) usedPointerPhis++;
+    if (dynamic_cast<PhiInst*>(rhs.source) && rhs.source != lhs.source) usedPointerPhis++;
+    if (!pointerPhis.empty() && usedPointerPhis != pointerPhis.size())
+        return reject("unused-pointer-phi");
+
+    for (auto *bb : loop.blocks) {
+        for (auto *inst : bb->instr_list_) {
+            if (inst->is_phi() || inst->isTerminator()) continue;
+            if (inst->is_store() || inst->is_call() || inst->is_alloca())
+                return reject("unsupported-side-effect");
+            if (inst->is_load() || inst->is_gep() || inst->is_mul() ||
+                inst->is_sub() || inst->is_add() || inst->is_cmp())
+                continue;
+            return reject("unsupported-inst");
+        }
+    }
+
+    if (debugReduction) {
+        std::cerr << "[LoopVectorize:reduction] match header="
+                  << loop.header->name_ << " gather="
+                  << (lhs.kind == PackedOperand::GATHER ||
+                      rhs.kind == PackedOperand::GATHER)
+                  << "\n";
+    }
+
+    group.accPhi = accPhi;
+    group.initVal = accInit;
+    group.latchValue = accLatch;
+    group.lhs = lhs;
+    group.rhs = rhs;
+    group.scalarStep = iv.stride;
+    return true;
 }
 
 // =====================================================================
@@ -426,12 +817,24 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     // 2. Loop must have a unique exit
     if (!loop.singleExit()) { return false; }
 
-    // 3. Loop should be small (single block or simple 2-block: header+latch)
-    if (loop.blocks.size() > 2) { /* no log — too many outer loops */ return false; }
-
-    // 4. Find induction variable (unit stride, constant stride = 1)
+    // 3. Find induction variable
     InductionVar iv;
     if (!findInductionVar(loop, iv)) { return false; }
+
+    ReductionGroup reduction;
+    if (analyzeReductionLoop(loop, iv, reduction)) {
+        if (std::getenv("DEBUG_LOOP_VECTORIZE"))
+            std::cerr << "[LoopVectorize] reduction func=" << func->name_
+                      << " header=" << loop.header->name_
+                      << " iv_step=" << iv.stride << "\n";
+        emitReductionVectorizedLoop(loop, iv, reduction, VECTORIZE_FACTOR,
+                                    func, func->parent_);
+        return true;
+    }
+
+    // 4. Store-group path remains restricted to small unit-stride loops.
+    if (loop.blocks.size() > 2) { return false; }
+    if (iv.stride != 1 && iv.stride != -1) { return false; }
 
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
@@ -593,6 +996,336 @@ static Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
                             bc->dest_ty_, destBB);
 
     return nullptr;
+}
+
+void LoopVectorize::emitReductionVectorizedLoop(
+    const Loop &loop, const InductionVar &iv, const ReductionGroup &group,
+    int vecWidth, Function *func, Module *module)
+{
+    const bool debugReduction =
+        std::getenv("DEBUG_LOOP_VECTORIZE_REDUCTION") != nullptr;
+    BasicBlock *preheader = loop.preheader;
+    BasicBlock *origHeader = loop.header;
+    BasicBlock *origLatch = loop.singleLatch();
+    if (debugReduction) {
+        std::cerr << "[LoopVectorize:reduction] emit-start header="
+                  << origHeader->name_ << "\n";
+    }
+    auto *preheaderBr = preheader ? preheader->get_terminator() : nullptr;
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1 ||
+        preheaderBr->get_operand(0) != origHeader) {
+        if (debugReduction) {
+            std::cerr << "[LoopVectorize:reduction] emit-bail-preheader header="
+                      << origHeader->name_ << " ops="
+                      << (preheaderBr ? std::to_string(preheaderBr->num_ops_) : "null")
+                      << "\n";
+        }
+        return;
+    }
+
+    auto *headerBr = origHeader->get_terminator();
+    if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3) return;
+    auto *cmpInst = dynamic_cast<ICmpInst*>(headerBr->get_operand(0));
+    if (!cmpInst) return;
+
+    Value *bound = nullptr;
+    bool ivIsLeft = true;
+    if (cmpInst->get_operand(0) == iv.phi) {
+        bound = cmpInst->get_operand(1);
+    } else if (cmpInst->get_operand(1) == iv.phi) {
+        bound = cmpInst->get_operand(0);
+        ivIsLeft = false;
+    } else {
+        return;
+    }
+    if (!isLoopInvariant(bound, loop.blocks)) return;
+
+    Type *vecTy = module->get_vector_type(group.accPhi->type_, vecWidth);
+    auto *vecTyCast = static_cast<VectorType*>(vecTy);
+    auto getVecPtrTy = [&](Type *scalarTy) -> Type * {
+        return module->get_pointer_type(module->get_vector_type(scalarTy, vecWidth));
+    };
+    auto insertBeforeTerm = [&](Instruction *inst, BasicBlock *bb) {
+        if (!bb->get_terminator()) return;
+        bb->remove_instr(inst);
+        bb->add_instruction_before_terminator(inst);
+    };
+    auto emitSplat = [&](Value *scalar, BasicBlock *bb) -> Value * {
+        Value *result = nullptr;
+        for (int j = 0; j < vecWidth; ++j) {
+            auto *idxConst = new ConstantInt(module->int32_ty_, j);
+            Value *base = result ? result : scalar;
+            auto *ins = new InsertElementInst(base, scalar, idxConst, bb);
+            if (j == 0) ins->type_ = module->get_vector_type(scalar->type_, vecWidth);
+            if (bb == preheader) insertBeforeTerm(ins, bb);
+            result = ins;
+        }
+        return result;
+    };
+    auto emitPack4 = [&](Value *vals[4], BasicBlock *bb) -> Value * {
+        Value *result = nullptr;
+        for (int j = 0; j < vecWidth; ++j) {
+            auto *idxConst = new ConstantInt(module->int32_ty_, j);
+            Value *base = result ? result : vals[j];
+            auto *ins = new InsertElementInst(base, vals[j], idxConst, bb);
+            if (j == 0) ins->type_ = module->get_vector_type(vals[j]->type_, vecWidth);
+            result = ins;
+        }
+        return result;
+    };
+
+    BasicBlock *vecHeader = new BasicBlock(module, "vec_red_hdr", func);
+    BasicBlock *vecBody = new BasicBlock(module, "vec_red_body", func);
+    BasicBlock *vecExit = new BasicBlock(module, "vec_red_exit", func);
+
+    auto *vecIVPhi = PhiInst::create_phi(module->int32_ty_, vecHeader);
+    vecHeader->add_instruction_front(vecIVPhi);
+    vecIVPhi->addIncoming(iv.initVal, preheader);
+
+    std::vector<Constant*> zeroElems;
+    for (int lane = 0; lane < vecWidth; ++lane)
+        zeroElems.push_back(new ConstantInt(module->int32_ty_, 0));
+    auto *zeroVec = new ConstantVector(vecTyCast, zeroElems);
+    auto *zeroLane = new ConstantInt(module->int32_ty_, 0);
+    auto *initAccVec = new InsertElementInst(zeroVec, group.initVal, zeroLane, preheader);
+    insertBeforeTerm(initAccVec, preheader);
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-init header="
+                  << origHeader->name_ << "\n";
+
+    auto *vecAccPhi = PhiInst::create_phi(vecTy, vecHeader);
+    vecHeader->add_instruction_front(vecAccPhi);
+    vecAccPhi->addIncoming(initAccVec, preheader);
+
+    std::unordered_map<PhiInst*, Value*> vecPtrPhis;
+    std::unordered_map<PhiInst*, int> laneStrides;
+    auto registerPtrOperand = [&](const PackedOperand &packed) {
+        auto *phi = dynamic_cast<PhiInst*>(packed.source);
+        if (!phi || vecPtrPhis.count(phi)) return;
+        Value *initVal = nullptr;
+        Value *latchVal = nullptr;
+        BasicBlock *latchBB = nullptr;
+        if (!getLoopPhiIncoming(loop, phi, initVal, latchVal, latchBB)) return;
+        auto *vecPtrPhi = PhiInst::create_phi(phi->type_, vecHeader);
+        vecHeader->add_instruction_front(vecPtrPhi);
+        vecPtrPhi->addIncoming(initVal, preheader);
+        vecPtrPhis[phi] = vecPtrPhi;
+        laneStrides[phi] = packed.laneStride;
+    };
+    if (group.lhs.kind != PackedOperand::INVARIANT) registerPtrOperand(group.lhs);
+    if (group.rhs.kind != PackedOperand::INVARIANT) registerPtrOperand(group.rhs);
+
+    int adj = vecWidth - 1;
+    Value *boundMain = nullptr;
+    if (auto *cb = dynamic_cast<ConstantInt*>(bound)) {
+        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - adj);
+    } else {
+        auto *adjConst = new ConstantInt(module->int32_ty_, adj);
+        auto *adjInst = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                       bound, adjConst, preheader, false);
+        preheader->add_instruction_before_terminator(adjInst);
+        boundMain = adjInst;
+    }
+
+    ICmpInst::ICmpOp vecCmpOp;
+    if (ivIsLeft) {
+        vecCmpOp = cmpInst->icmp_op_;
+    } else {
+        switch (cmpInst->icmp_op_) {
+        case ICmpInst::ICMP_SLT: vecCmpOp = ICmpInst::ICMP_SGT; break;
+        case ICmpInst::ICMP_SLE: vecCmpOp = ICmpInst::ICMP_SGE; break;
+        case ICmpInst::ICMP_SGT: vecCmpOp = ICmpInst::ICMP_SLT; break;
+        case ICmpInst::ICMP_SGE: vecCmpOp = ICmpInst::ICMP_SLE; break;
+        default: vecCmpOp = cmpInst->icmp_op_; break;
+        }
+    }
+
+    ICmpInst *vecCmp = nullptr;
+    if (ivIsLeft)
+        vecCmp = new ICmpInst(vecCmpOp, vecIVPhi, boundMain, vecHeader);
+    else
+        vecCmp = new ICmpInst(vecCmpOp, boundMain, vecIVPhi, vecHeader);
+    new BranchInst(vecCmp, vecBody, vecExit, vecHeader);
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-header header="
+                  << origHeader->name_ << "\n";
+
+    std::unordered_map<Value*, Value*> splatCache;
+    auto emitPackedOperand = [&](const PackedOperand &packed) -> Value * {
+        if (packed.kind == PackedOperand::INVARIANT) {
+            auto &entry = splatCache[packed.source];
+            if (!entry) entry = emitSplat(packed.source, preheader);
+            return entry;
+        }
+
+        if (auto *gepTemplate = dynamic_cast<GetElementPtrInst*>(packed.source)) {
+            unsigned varyPos = 0;
+            bool foundVary = false;
+            for (unsigned idx = 1; idx < gepTemplate->num_ops_; ++idx) {
+                int off = 0;
+                if (!matchIVPlusConstant(gepTemplate->get_operand(idx), iv.phi, off))
+                    continue;
+                if (off != 0) return nullptr;
+                varyPos = idx;
+                foundVary = true;
+                break;
+            }
+            if (!foundVary) return nullptr;
+
+            auto buildLanePtr = [&](int lane) -> Value * {
+                std::vector<Value*> idxs;
+                for (unsigned idx = 1; idx < gepTemplate->num_ops_; ++idx) {
+                    if (idx != varyPos) {
+                        idxs.push_back(gepTemplate->get_operand(idx));
+                        continue;
+                    }
+                    if (lane == 0) {
+                        idxs.push_back(vecIVPhi);
+                    } else {
+                        auto *off = new ConstantInt(module->int32_ty_, lane);
+                        idxs.push_back(new BinaryInst(module->int32_ty_, Instruction::Add,
+                                                      vecIVPhi, off, vecBody));
+                    }
+                }
+                return new GetElementPtrInst(gepTemplate->get_operand(0), idxs, vecBody);
+            };
+
+            if (packed.kind == PackedOperand::CONTIGUOUS) {
+                auto *basePtr = buildLanePtr(0);
+                auto *bc = new Bitcast(Instruction::BitCast, basePtr,
+                                       getVecPtrTy(packed.scalarTy), vecBody);
+                return new LoadInst(bc, vecBody);
+            }
+
+            if (packed.kind == PackedOperand::GATHER) {
+                Value *lanes[4] = {nullptr, nullptr, nullptr, nullptr};
+                for (int lane = 0; lane < vecWidth; ++lane)
+                    lanes[lane] = new LoadInst(buildLanePtr(lane), vecBody);
+                return emitPack4(lanes, vecBody);
+            }
+        }
+
+        auto *ptrPhi = dynamic_cast<PhiInst*>(packed.source);
+        auto it = vecPtrPhis.find(ptrPhi);
+        if (it == vecPtrPhis.end()) return nullptr;
+        Value *basePtr = it->second;
+
+        if (packed.kind == PackedOperand::CONTIGUOUS) {
+            auto *bc = new Bitcast(Instruction::BitCast, basePtr,
+                                   getVecPtrTy(packed.scalarTy), vecBody);
+            return new LoadInst(bc, vecBody);
+        }
+
+        if (packed.kind == PackedOperand::GATHER) {
+            Value *lanes[4] = {nullptr, nullptr, nullptr, nullptr};
+            for (int lane = 0; lane < vecWidth; ++lane) {
+                Value *ptr = basePtr;
+                if (lane != 0) {
+                    auto *off = new ConstantInt(module->int32_ty_,
+                                                lane * packed.laneStride);
+                    ptr = new GetElementPtrInst(basePtr, {off}, vecBody);
+                }
+                lanes[lane] = new LoadInst(ptr, vecBody);
+            }
+            return emitPack4(lanes, vecBody);
+        }
+
+        return nullptr;
+    };
+
+    Value *lhsVec = emitPackedOperand(group.lhs);
+    Value *rhsVec = emitPackedOperand(group.rhs);
+    if (!lhsVec || !rhsVec) return;
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-operands header="
+                  << origHeader->name_ << "\n";
+
+    auto *vecMul = new BinaryInst(vecTy, Instruction::Mul, lhsVec, rhsVec, vecBody);
+    auto *vecAccNext = new BinaryInst(vecTy, Instruction::Sub, vecAccPhi, vecMul, vecBody);
+    vecAccPhi->addIncoming(vecAccNext, vecBody);
+
+    auto *vecStep = new ConstantInt(module->int32_ty_, vecWidth);
+    auto *vecIVNext = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                     vecIVPhi, vecStep, vecBody);
+    vecIVPhi->addIncoming(vecIVNext, vecBody);
+
+    for (auto &kv : vecPtrPhis) {
+        auto *phi = kv.first;
+        Value *cur = kv.second;
+        int laneStride = laneStrides[phi];
+        auto *step = new ConstantInt(module->int32_ty_, vecWidth * laneStride);
+        auto *next = new GetElementPtrInst(cur, {step}, vecBody);
+        static_cast<PhiInst*>(cur)->addIncoming(next, vecBody);
+    }
+
+    new BranchInst(vecHeader, vecBody);
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-body header="
+                  << origHeader->name_ << "\n";
+
+    BasicBlock *entry = func->basic_blocks_.front();
+    auto *accSpill = new AllocaInst(vecTy, entry, true);
+    entry->add_instruction_front(accSpill);
+    new StoreInst(vecAccPhi, accSpill, vecExit);
+    auto *spillI32Ptr = new Bitcast(Instruction::BitCast, accSpill,
+                                    module->get_pointer_type(module->int32_ty_), vecExit);
+    std::vector<Value*> laneVals;
+    for (int lane = 0; lane < vecWidth; ++lane) {
+        Value *ptr = spillI32Ptr;
+        if (lane != 0) {
+            auto *off = new ConstantInt(module->int32_ty_, lane);
+            ptr = new GetElementPtrInst(spillI32Ptr, {off}, vecExit);
+        }
+        laneVals.push_back(new LoadInst(ptr, vecExit));
+    }
+
+    Value *foldedAcc = laneVals[0];
+    for (int lane = 1; lane < vecWidth; ++lane)
+        foldedAcc = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                   foldedAcc, laneVals[lane], vecExit);
+    new BranchInst(origHeader, vecExit);
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-exit header="
+                  << origHeader->name_ << "\n";
+
+    for (auto *inst : origHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst*>(inst);
+        if (phi == iv.phi) {
+            rewritePhiIncoming(phi, preheader, vecIVPhi, vecExit);
+            continue;
+        }
+        if (phi == group.accPhi) {
+            rewritePhiIncoming(phi, preheader, foldedAcc, vecExit);
+            continue;
+        }
+        if (phi->type_->tid_ == Type::PointerTyID) {
+            auto it = vecPtrPhis.find(phi);
+            if (it != vecPtrPhis.end()) {
+                rewritePhiIncoming(phi, preheader, it->second, vecExit);
+                continue;
+            }
+        }
+    }
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-phis header="
+                  << origHeader->name_ << "\n";
+
+    preheader->delete_instr(preheaderBr);
+    preheader->remove_succ_basic_block(origHeader);
+    origHeader->remove_pre_basic_block(preheader);
+    new BranchInst(vecHeader, preheader);
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-cfg header="
+                  << origHeader->name_ << "\n";
+
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-before-rename header="
+                  << origHeader->name_ << "\n";
+    func->set_instr_name();
+    if (debugReduction)
+        std::cerr << "[LoopVectorize:reduction] emit-done header="
+                  << origHeader->name_ << "\n";
 }
 
 // =====================================================================
