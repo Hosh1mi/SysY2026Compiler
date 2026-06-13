@@ -258,6 +258,15 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::Mul;
         mi.latency = (op == "fmul") ? 5 : 3;
         defFirstUseRest();
+    } else if (op == "mla" || op == "mls") {
+        mi.opcode = MOpcode::Neon;
+        mi.latency = 3;
+        if (!operands.empty()) {
+            addDef(mi, operands[0]);
+            addUses(mi, operands[0]);
+        }
+        for (size_t i = 1; i < operands.size(); ++i)
+            addUses(mi, operands[i]);
     } else if (op == "addv") {
         mi.opcode = MOpcode::Neon;
         mi.latency = 4;

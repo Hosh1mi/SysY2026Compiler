@@ -28,6 +28,18 @@ struct AddvReductionExitPattern {
     BinaryInst *finalAdd = nullptr;
 };
 
+struct VectorMlaMlsPattern {
+    BinaryInst *root = nullptr;
+    BinaryInst *mul = nullptr;
+    Value *acc = nullptr;
+    Value *lhs = nullptr;
+    Value *rhs = nullptr;
+    LoadInst *accLoad = nullptr;
+    LoadInst *lhsLoad = nullptr;
+    LoadInst *rhsLoad = nullptr;
+    const char *opcode = nullptr;
+};
+
 static bool isI32Vector4(Type *ty) {
     if (!ty || ty->tid_ != Type::VectorTyID) return false;
     auto *vecTy = static_cast<VectorType *>(ty);
@@ -156,6 +168,58 @@ static bool matchReductionExitAddv(StoreInst *store,
     return true;
 }
 
+static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
+    auto *root = dynamic_cast<BinaryInst *>(inst);
+    if (!root || !isI32Vector4(root->type_)) return false;
+
+    const bool isAdd = root->is_add();
+    const bool isSub = root->is_sub();
+    if (!isAdd && !isSub) return false;
+
+    auto *bb = root->parent_;
+    if (!bb) return false;
+
+    auto tryMatch = [&](Value *acc, Value *mulVal, const char *opcode) {
+        auto *mul = dynamic_cast<BinaryInst *>(mulVal);
+        if (!mul || !mul->is_mul() || mul->parent_ != bb || !isI32Vector4(mul->type_))
+            return false;
+        if (mul->use_list_.size() != 1) return false;
+        if (acc->type_ != root->type_) return false;
+
+        LoadInst *accLoad = nullptr;
+        LoadInst *lhsLoad = nullptr;
+        LoadInst *rhsLoad = nullptr;
+        if (std::string(opcode) == "mla") {
+            auto captureLoad = [&](Value *val, LoadInst *&load) {
+                load = dynamic_cast<LoadInst *>(val);
+                if (!load) return true;
+                if (load->parent_ != bb || !isI32Vector4(load->type_)) return false;
+                return load->use_list_.size() == 1;
+            };
+            if (!captureLoad(acc, accLoad) || !captureLoad(mul->get_operand(0), lhsLoad) ||
+                !captureLoad(mul->get_operand(1), rhsLoad))
+                return false;
+        }
+
+        pattern.root = root;
+        pattern.mul = mul;
+        pattern.acc = acc;
+        pattern.lhs = mul->get_operand(0);
+        pattern.rhs = mul->get_operand(1);
+        pattern.accLoad = accLoad;
+        pattern.lhsLoad = lhsLoad;
+        pattern.rhsLoad = rhsLoad;
+        pattern.opcode = opcode;
+        return true;
+    };
+
+    if (isSub)
+        return tryMatch(root->get_operand(0), root->get_operand(1), "mls");
+
+    return tryMatch(root->get_operand(0), root->get_operand(1), "mla") ||
+           tryMatch(root->get_operand(1), root->get_operand(0), "mla");
+}
+
 } // namespace
 
 namespace {
@@ -254,6 +318,8 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     std::set<Instruction *> laneLoadSkipped;
     std::map<Instruction *, AddvReductionExitPattern> addvReductions;
     std::set<Instruction *> addvSkipped;
+    std::map<Instruction *, VectorMlaMlsPattern> vectorMlaMlsRoots;
+    std::set<Instruction *> vectorMlaMlsSkipped;
 
     for (auto *candidate : instrs) {
         LaneLoadPackPattern pack;
@@ -277,10 +343,22 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         for (auto *add : pattern.adds) addvSkipped.insert(add);
     }
 
+    for (auto *candidate : instrs) {
+        VectorMlaMlsPattern pattern;
+        if (!matchVectorMlaMls(candidate, pattern)) continue;
+        vectorMlaMlsRoots[candidate] = pattern;
+        vectorMlaMlsSkipped.insert(pattern.mul);
+        if (pattern.accLoad) vectorMlaMlsSkipped.insert(pattern.accLoad);
+        if (pattern.lhsLoad) vectorMlaMlsSkipped.insert(pattern.lhsLoad);
+        if (pattern.rhsLoad) vectorMlaMlsSkipped.insert(pattern.rhsLoad);
+    }
+
     for (auto it = instrs.begin(); it != instrs.end(); ++it) {
         auto inst = *it;
         if (inst->is_phi()) continue;
-        if (laneLoadSkipped.count(inst) || addvSkipped.count(inst)) continue;
+        if (laneLoadSkipped.count(inst) || addvSkipped.count(inst) ||
+            vectorMlaMlsSkipped.count(inst))
+            continue;
 
         auto lanePackIt = laneLoadPacks.find(inst);
         if (lanePackIt != laneLoadPacks.end()) {
@@ -330,6 +408,55 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                                                  : allocIntReg();
             emitMoveMachine(wDst, sTmp, "fmov");
             storeInt(pattern.finalAdd, wDst);
+            continue;
+        }
+
+        auto mlaIt = vectorMlaMlsRoots.find(inst);
+        if (mlaIt != vectorMlaMlsRoots.end()) {
+            const auto &pattern = mlaIt->second;
+            resetRegs();
+
+            std::string rd = hasAssignedReg(pattern.root) ? assignedReg(pattern.root)
+                                                          : allocNEONReg();
+            if (hasAssignedReg(pattern.root) && rd.size() >= 2 && rd[0] == 'v')
+                usedNEONRegs_.insert(std::stoi(rd.substr(1)));
+
+            auto emitVectorLoadInto = [&](LoadInst *load, const std::string &vd) {
+                std::string addr = loadAddr(load->get_operand(0));
+                MachineInstr ld = MachineInstr::make(
+                    "\tld1 {" + vd + ".4s}, [" + addr + "]",
+                    MOpcode::Load, {vd}, {addr}, 4);
+                ld.mayLoad = true;
+                emitMachineInstr(std::move(ld));
+            };
+            auto pinMulOperand = [&](Value *val, LoadInst *load) {
+                std::string tmp = allocNEONReg();
+                if (load) {
+                    emitVectorLoadInto(load, tmp);
+                    return tmp;
+                }
+                std::string reg = loadVector(val);
+                emitRawAluMachine("\tmov " + tmp + ".16b, " + reg + ".16b",
+                                  tmp, {reg}, MOpcode::Neon);
+                return tmp;
+            };
+            std::string lhsReg = pinMulOperand(pattern.lhs, pattern.lhsLoad);
+            std::string rhsReg = pinMulOperand(pattern.rhs, pattern.rhsLoad);
+
+            if (pattern.accLoad) {
+                emitVectorLoadInto(pattern.accLoad, rd);
+            } else {
+                std::string accReg = loadVector(pattern.acc);
+                if (rd != accReg) {
+                    emitRawAluMachine("\tmov " + rd + ".16b, " + accReg + ".16b",
+                                      rd, {accReg}, MOpcode::Neon);
+                }
+            }
+
+            emitRawAluMachine("\t" + std::string(pattern.opcode) + " " + rd + ".4s, " +
+                                  lhsReg + ".4s, " + rhsReg + ".4s",
+                              rd, {rd, lhsReg, rhsReg}, MOpcode::Neon, 3);
+            if (!hasAssignedReg(pattern.root)) storeVector(pattern.root, rd);
             continue;
         }
 
