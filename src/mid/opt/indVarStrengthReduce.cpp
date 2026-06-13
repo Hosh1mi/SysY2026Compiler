@@ -47,9 +47,21 @@ void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
             }
         }
         if (!loop) continue;
-        // 纯自环（latch==header）旧实现不识别，保持跳过
-        if (loop->singleLatch() == loop->header) continue;
-
+        // Self-loop headers are valid IVSR targets, but doing this on outer
+        // self-loop nests creates many long-lived pointer phis and heavy
+        // register pressure. Keep it to innermost self-loops.
+        if (loop->singleLatch() == loop->header) {
+            if (loop->blocks.size() != 1) continue;
+            bool hasNestedLoop = false;
+            for (auto &other : LI.allLoops()) {
+                if (other.get() != loop && other->depth > loop->depth &&
+                    loop->blocks.count(other->header)) {
+                    hasNestedLoop = true;
+                    break;
+                }
+            }
+            if (hasNestedLoop) continue;
+        }
         ScalarEvolution &SE = AM.getScalarEvolution(func);
         processLoop(*loop, func, module, SE);
         AM.invalidateFunction(func, PreservedAnalyses::none());
@@ -464,7 +476,9 @@ Value *IndVarStrengthReduce::materializeOffsetInPreheader(const LinearIVExpr &ex
             if (!isI32(offsetVal) || !isLoopInvariant(offsetVal, loop.blocks))
                 return nullptr;
         } else {
-            return nullptr;
+            offsetVal = materializeInvariantSCEV(expr.offset, preheader, loop,
+                                                builder, module);
+            if (!offsetVal) return nullptr;
         }
     }
 
@@ -489,6 +503,76 @@ Value *IndVarStrengthReduce::materializeOffsetInPreheader(const LinearIVExpr &ex
     return add;
 }
 
+bool IndVarStrengthReduce::canMaterializeInvariantSCEV(const SCEV *s,
+                                                       const Loop &loop) {
+    if (!s || !isI32SCEV(s)) return false;
+
+    if (dynamic_cast<const SCEVConstant *>(s)) return true;
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s)) {
+        Value *value = unknown->value();
+        return isI32(value) && isLoopInvariant(value, loop.blocks);
+    }
+
+    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(s)) {
+        Value *value = addrec->phi();
+        return isI32(value) && isLoopInvariant(value, loop.blocks);
+    }
+
+    if (auto *nary = dynamic_cast<const SCEVNAryExpr *>(s)) {
+        if (s->kind() != SCEVKind::AddExpr && s->kind() != SCEVKind::MulExpr)
+            return false;
+        for (auto *op : nary->operands()) {
+            if (!canMaterializeInvariantSCEV(op, loop)) return false;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+Value *IndVarStrengthReduce::materializeInvariantSCEV(
+    const SCEV *s, BasicBlock *preheader, const Loop &loop,
+    IRStmtBuilder *builder, Module *module) {
+    if (!canMaterializeInvariantSCEV(s, loop)) return nullptr;
+
+    if (auto *c = dynamic_cast<const SCEVConstant *>(s))
+        return new ConstantInt(module->int32_ty_, static_cast<int>(c->value()));
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s))
+        return unknown->value();
+
+    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(s))
+        return addrec->phi();
+
+    auto *nary = dynamic_cast<const SCEVNAryExpr *>(s);
+    if (!nary || nary->operands().empty()) return nullptr;
+
+    Value *result = materializeInvariantSCEV(nary->operands()[0], preheader,
+                                             loop, builder, module);
+    if (!result) return nullptr;
+
+    for (size_t i = 1; i < nary->operands().size(); i++) {
+        Value *rhs = materializeInvariantSCEV(nary->operands()[i], preheader,
+                                              loop, builder, module);
+        if (!rhs) return nullptr;
+
+        builder->set_insert_point(preheader);
+        Instruction *inst = nullptr;
+        if (s->kind() == SCEVKind::AddExpr)
+            inst = builder->create_iadd(result, rhs);
+        else if (s->kind() == SCEVKind::MulExpr)
+            inst = builder->create_imul(result, rhs);
+        else
+            return nullptr;
+        preheader->remove_instr(inst);
+        preheader->add_instruction_before_terminator(inst);
+        result = inst;
+    }
+
+    return result;
+}
+
 bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &expr,
                                                            const Loop &loop) {
     if (!fitsInt(expr.constOffset)) return false;
@@ -507,7 +591,7 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
         return isI32(value) && isLoopInvariant(value, loop.blocks);
     }
 
-    return false;
+    return canMaterializeInvariantSCEV(expr.offset, loop);
 }
 
 // -----------------------------------------------------------------------
@@ -682,6 +766,8 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
             if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
             int effectiveStride = static_cast<int>(effectiveStride64);
+            if (std::abs(effectiveStride) > 16)
+                continue;
 
             if (std::getenv("DEBUG_IVSR"))
                 std::cerr << "[IVSR] func=" << func->name_

@@ -46,6 +46,10 @@ private:
     LinearIVExpr linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
                                     const Loop &loop, ScalarEvolution &SE);
     bool canMaterializeOffsetInPreheader(const LinearIVExpr &expr, const Loop &loop);
+    bool canMaterializeInvariantSCEV(const SCEV *s, const Loop &loop);
+    Value *materializeInvariantSCEV(const SCEV *s, BasicBlock *preheader,
+                                    const Loop &loop, IRStmtBuilder *builder,
+                                    Module *module);
     Value *materializeOffsetInPreheader(const LinearIVExpr &expr, BasicBlock *preheader,
                                         const Loop &loop, IRStmtBuilder *builder,
                                         Module *module);
