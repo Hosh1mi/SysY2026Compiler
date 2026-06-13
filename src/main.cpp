@@ -31,6 +31,7 @@
 #include "include/mid/opt/CFGSimplify.hpp"
 #include "include/mid/opt/unifyExitNodes.hpp"
 #include "include/mid/opt/globalScalarPromotion.hpp"
+#include "include/mid/opt/gvn.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -212,6 +213,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
     addLoopPipeline(pm);
+    pm.addPass(std::make_unique<GVN>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
