@@ -433,6 +433,21 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     }
     if (!phi || !falsePhiVal) return false;
 
+    // Pattern B hazard: falsePhiVal flows from the cond block, not from an
+    // emitted block.  Emitting trueInst below can clobber the register holding
+    // falsePhiVal — e.g. trueInst = `add falsePhiVal, x` where regalloc gave
+    // trueInst's dest the same register as falsePhiVal.  That is legal in the
+    // original CFG (falsePhiVal is dead after the add on the true path), but
+    // the csel still needs falsePhiVal for the false arm.  Without this save
+    // the csel degenerates to `csel R, R, R` (both inputs = trueInst's value).
+    // Save falsePhiVal into a fresh register before trueInst runs.
+    std::string falseSaveReg;
+    if (!falseInst && hasAssignedReg(trueInst) && hasAssignedReg(falsePhiVal) &&
+        assignedReg(trueInst) == assignedReg(falsePhiVal)) {
+        falseSaveReg = allocIntReg();
+        emitMoveMachine(falseSaveReg, assignedReg(falsePhiVal));
+    }
+
     // Emit the true instruction inline so its register holds the right
     // value before the csel reads it.  (Calls are already rejected above.)
     emitInstruction(trueInst);
@@ -484,7 +499,9 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
                          : hasAssignedReg(trueInst)  ? assignedReg(trueInst)  : loadInt(trueInst);
     // For Pattern A, falseInst was emitted above; its value is now in its assigned reg or slot.
     // For Pattern B, falsePhiVal comes from the cond block (already live).
-    std::string falseReg = hasAssignedReg(falsePhiVal)? assignedReg(falsePhiVal): loadInt(falsePhiVal);
+    std::string falseReg = !falseSaveReg.empty()       ? falseSaveReg
+                         : hasAssignedReg(falsePhiVal) ? assignedReg(falsePhiVal)
+                         : loadInt(falsePhiVal);
     emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
                          MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
                          false, true, true);
