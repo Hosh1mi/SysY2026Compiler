@@ -33,6 +33,7 @@
 #include "include/mid/opt/unifyExitNodes.hpp"
 #include "include/mid/opt/globalScalarPromotion.hpp"
 #include "include/mid/opt/gvn.hpp"
+#include "include/mid/opt/lateValueCleanup.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -219,6 +220,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
+    pm.addPass(std::make_unique<LateValueCleanup>());
 
     if (optLevel >= 2) {
         

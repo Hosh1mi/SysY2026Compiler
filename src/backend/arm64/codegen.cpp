@@ -9,6 +9,8 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <set>
 #include <vector>
 #include <thread>
 #include <sstream>
@@ -67,8 +69,128 @@ static void sinkCmpToBranch(Module *m) {
     }
 }
 
+static bool updatePhiIncomingBlock(BasicBlock *target, BasicBlock *oldPred,
+                                   BasicBlock *newPred) {
+    bool changed = false;
+    for (auto *inst : target->instr_list_) {
+        if (!inst->is_phi()) continue;
+        for (unsigned i = 1; i < inst->num_ops_; i += 2) {
+            if (inst->get_operand(i) == oldPred) {
+                inst->set_operand(i, newPred);
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+static BasicBlock *splitEdgeForSink(BasicBlock *pred, BasicBlock *target,
+                                    BranchInst *br, unsigned operandIndex,
+                                    int &counter) {
+    Function *func = pred->parent_;
+    auto *edge = new BasicBlock(func->parent_,
+                                "label_sink_load_" + std::to_string(counter++),
+                                func);
+
+    pred->remove_succ_basic_block(target);
+    target->remove_pre_basic_block(pred);
+    br->set_operand(operandIndex, edge);
+    pred->add_succ_basic_block(edge);
+    edge->add_pre_basic_block(pred);
+    updatePhiIncomingBlock(target, pred, edge);
+    new BranchInst(target, edge);
+    func->invalidateDominatorInfo();
+    return edge;
+}
+
+static bool sinkGlobalLoadsPastEarlyExit(Module *m) {
+    bool changed = false;
+    int edgeCounter = 0;
+
+    for (auto *func : m->function_list_) {
+        if (func->is_declaration() || func->basic_blocks_.empty())
+            continue;
+
+        std::vector<BasicBlock *> blocks = func->basic_blocks_;
+        for (auto *bb : blocks) {
+            auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
+            if (!br || br->num_ops_ != 3)
+                continue;
+
+            auto *trueBB = dynamic_cast<BasicBlock *>(br->get_operand(1));
+            auto *falseBB = dynamic_cast<BasicBlock *>(br->get_operand(2));
+            if (!trueBB || !falseBB)
+                continue;
+
+            std::map<BasicBlock *, BasicBlock *> splitForTarget;
+            std::vector<LoadInst *> loads;
+            for (auto *inst : bb->instr_list_) {
+                if (inst == br)
+                    break;
+                auto *load = dynamic_cast<LoadInst *>(inst);
+                if (!load || !dynamic_cast<GlobalVariable *>(load->get_operand(0)))
+                    continue;
+                loads.push_back(load);
+            }
+
+            for (auto *load : loads) {
+                if (load->parent_ != bb)
+                    continue;
+
+                BasicBlock *target = nullptr;
+                bool safe = !load->use_list_.empty();
+                for (const auto &use : load->use_list_) {
+                    auto *user = dynamic_cast<Instruction *>(use.val_);
+                    if (!user || !user->parent_ || user->parent_ == bb) {
+                        safe = false;
+                        break;
+                    }
+
+                    bool inTrue = func->dominates(trueBB, user->parent_);
+                    bool inFalse = func->dominates(falseBB, user->parent_);
+                    if (inTrue == inFalse) {
+                        safe = false;
+                        break;
+                    }
+
+                    BasicBlock *useTarget = inTrue ? trueBB : falseBB;
+                    if (!target)
+                        target = useTarget;
+                    else if (target != useTarget) {
+                        safe = false;
+                        break;
+                    }
+                }
+                if (!safe || !target)
+                    continue;
+
+                unsigned operandIndex = (target == trueBB) ? 1u : 2u;
+                BasicBlock *edge = nullptr;
+                auto it = splitForTarget.find(target);
+                if (it != splitForTarget.end()) {
+                    edge = it->second;
+                } else {
+                    edge = splitEdgeForSink(bb, target, br, operandIndex, edgeCounter);
+                    splitForTarget[target] = edge;
+                    changed = true;
+                }
+
+                bb->remove_instr(load);
+                edge->add_instruction_before_terminator(load);
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
+}
+
 void Arm64CodeGen::generate() {
     rebuildCfgLinks(m_);
+    if (enable_regalloc_) {
+        if (sinkGlobalLoadsPastEarlyExit(m_))
+            rebuildCfgLinks(m_);
+    }
     sinkCmpToBranch(m_);
     MachineModule module;
 

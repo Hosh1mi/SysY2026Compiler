@@ -73,6 +73,15 @@ void Arm64FuncContext::emitCallMachine(const std::string &callee) {
     inst.isCall = true;
     inst.isBarrier = true;
     emitMachineInstr(std::move(inst));
+
+    // Caller-saved promoted constants are intentionally not spilled around
+    // calls.  Re-materialize them after each call so later loop code can still
+    // treat the promoted register as read-only.
+    for (const auto &kv : promotedConsts_) {
+        int regNo = std::stoi(kv.second.substr(1));
+        if (regNo < 19 || regNo > 28)
+            emitIntConst(kv.first, kv.second);
+    }
 }
 
 void Arm64FuncContext::emitRetMachine() {
@@ -261,8 +270,11 @@ void Arm64FuncContext::reorderBlocks() {
 static void mergePromotedConstRegs(std::vector<int> &regs,
                                    const std::map<int, std::string> &promoted) {
     std::set<int> s(regs.begin(), regs.end());
-    for (const auto &kv : promoted)
-        s.insert(std::stoi(kv.second.substr(1)));
+    for (const auto &kv : promoted) {
+        int regNo = std::stoi(kv.second.substr(1));
+        if (regNo >= 19 && regNo <= 28)
+            s.insert(regNo);
+    }
     regs.assign(s.begin(), s.end());
 }
 

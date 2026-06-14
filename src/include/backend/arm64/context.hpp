@@ -137,7 +137,7 @@ private:
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
-    // 循环内提升的大常量：常量值 → 专属 callee-saved 寄存器（入口物化一次）
+    // 循环内提升的大常量：常量值 → 专属寄存器（入口物化，caller-saved 在 call 后重物化）
     std::map<int, std::string> promotedConsts_;
 
     struct PhiCopy {

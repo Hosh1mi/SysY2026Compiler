@@ -19,8 +19,8 @@ public:
     /// Result: Value* → register name.
     const std::map<Value*, std::string> &assignedRegs() const;
 
-    /// 循环内多指令常量提升结果：32 位常量值 → 持有它的 callee-saved
-    /// 寄存器（如 "w28"）。寄存器在整个函数中未被任何值占用，入口物化。
+    /// 循环内多指令常量提升结果：32 位常量值 → 持有它的物理寄存器。
+    /// 叶函数可使用 callee-saved；非叶函数使用 caller-saved 并在 call 后重物化。
     const std::map<int, std::string> &promotedConsts() const;
 
     /// Convenience accessors on the result set.

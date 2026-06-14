@@ -23,6 +23,11 @@ bool candidateHasLoadUseHazard(const MachineInstr &prev,
     return prev.mayLoad && hasIntersection(prev.defs, candidate.uses);
 }
 
+bool candidateUsesPrevDef(const MachineInstr &prev,
+                          const MachineInstr &candidate) {
+    return hasIntersection(prev.defs, candidate.uses);
+}
+
 } // namespace
 
 void MachineScheduler::schedule(MachineFunction &func) const {
@@ -174,6 +179,12 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
                 bool hazardB = candidateHasLoadUseHazard(instrs[prev], instrs[b]);
                 if (hazardA != hazardB)
                     return !hazardA;
+                if (instrs[prev].latency > 1) {
+                    bool depA = candidateUsesPrevDef(instrs[prev], instrs[a]);
+                    bool depB = candidateUsesPrevDef(instrs[prev], instrs[b]);
+                    if (depA != depB)
+                        return !depA;
+                }
             }
             if (critical[a] != critical[b])
                 return critical[a] > critical[b];

@@ -783,9 +783,10 @@ void Arm64RegAlloc::allocate() {
     // ---- 12. 循环内多指令常量提升 ----
     // srem/sdiv 常数除法的魔数乘数/除数、以及 Add/Sub/ICmp 的大常量操作数
     // 在循环里每次迭代都要 movz+movk 重物化。把权重最高的几个 32 位常量
-    // 提升到整个函数都未被占用的 callee-saved 寄存器（与已有着色零干涉，
-    // 调用也不破坏），入口物化一次。按常量值而非 Value* 记录，魔数这类
-    // ISel 派生常量也能命中。
+    // 提升到整个函数都未被占用的寄存器（与已有着色零干涉），入口物化一次。
+    // 叶函数使用 callee-saved，非叶函数优先使用 caller-saved；后端会在 call
+    // 后重新物化 caller-saved promoted constants，避免额外保存/恢复 x19-x28。
+    // 按常量值而非 Value* 记录，魔数这类 ISel 派生常量也能命中。
     {
         auto needsMovk = [](int v) {
             return (((uint32_t)v >> 16) & 0xFFFF) != 0;
@@ -833,8 +834,13 @@ void Arm64RegAlloc::allocate() {
                     usedRegs.insert(std::stoi(r.substr(1)));
             }
             std::vector<int> freeRegs;
-            for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
-                if (!usedRegs.count(r)) freeRegs.push_back(r);
+            if (isLeaf) {
+                for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
+                    if (!usedRegs.count(r)) freeRegs.push_back(r);
+            } else {
+                for (int r = 10; r <= 15; ++r)
+                    if (!usedRegs.count(r)) freeRegs.push_back(r);
+            }
             std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
             for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
             std::sort(ranked.begin(), ranked.end());
