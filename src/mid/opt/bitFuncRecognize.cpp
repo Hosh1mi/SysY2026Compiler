@@ -301,6 +301,21 @@ static bool bvSdivByConstAsLshr(const BitVec &x, int c, BitVec &out) {
     out = bvLshr(x, k); return true;
 }
 
+// NOTE on soundness: this abstraction is intentionally imprecise.  SysY/C99
+// `srem x, 2` rounds the quotient toward zero, so for negative odd x the
+// result is `-1` (all 32 bits set), not `1`.  A precise model would set
+// high bits to `And(sign_bit_of_x, BitOf(x, 0))`.  We keep them as ZERO
+// because:
+//   1. With ZERO high bits, the `bit_a == 1` check in `_and`-style sources
+//      simplifies cleanly to `BitOf(a, i)`, letting the AND/OR closed
+//      forms be recognized at all.  A precise model would inject sign
+//      terms into every result bit and the closed-form match would fail.
+//   2. The unsoundness is contained: the AND/OR rewrites in §G compensate
+//      by emitting a runtime guard that emulates the source's actual
+//      negative-input semantics (`_and(neg, *) = 0`,
+//      `_or(neg, b) = (b>=0 ? b : 0)`).  See rewriteCallSites().
+//   3. XOR is dropped entirely (recognize() refuses), because the
+//      negative-input behavior of `_xor` has no clean closed form.
 static BitVec bvSremByTwo(const BitVec &x) {
     BitVec r; r[0] = x[0];
     for (unsigned i = 1; i < 32; i++) r[i] = Zero();
@@ -1159,7 +1174,24 @@ static ClosedForm recognize(const BitVec &bv) {
     if (matchCopy(bv, X))                      { cf.kind = ClosedForm::COPY_OP; cf.x = X; return cf; }
     if (matchBitwiseOp(bv, BitOp::AND, X, Y))  { cf.kind = ClosedForm::AND_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchBitwiseOp(bv, BitOp::OR,  X, Y))  { cf.kind = ClosedForm::OR_OP;  cf.x = X; cf.y = Y; return cf; }
-    if (matchBitwiseOp(bv, BitOp::XOR, X, Y))  { cf.kind = ClosedForm::XOR_OP; cf.x = X; cf.y = Y; return cf; }
+    // XOR_OP is intentionally NOT recognized.
+    //
+    // Source `_xor(a, b)` uses `a%2 != b%2` to detect bit mismatch.  For
+    // negative x, `x % 2 ∈ {0, -1}` (SysY/C99 srem truncates toward zero),
+    // and `-1 != 0` AND `-1 != 1` are both true.  That means the source's
+    // bit-mismatch condition fires spuriously on every iteration the
+    // negative operand contributes a sign-extended -1 byte, producing
+    // results that do not match native `xor a, b` (and that do not have
+    // a clean closed form expressible in a few IR ops, unlike AND/OR
+    // below).  Rather than emit a complex emulation, we refuse to
+    // recognize XOR — calls stay as the original `_xor` function call.
+    //
+    // The abstract domain in §D over-approximates `srem x, 2` as having
+    // its high bits set to ZERO (see bvSremByTwo), which is unsound for
+    // negative x.  So the recognizer would happily collapse `_xor` to a
+    // pure XOR closed form — but we cannot lower that to native xor
+    // without changing semantics for negative inputs.  matchBitwiseOp's
+    // XOR branch is dropped here as the safe choice.
     if (matchShift(bv, X, k)) {
         // Limitation: only emit constant SHL (k < 0 in our delta sign).  We do
         // NOT recognize LSHR (k > 0) here, because the bit-vector abstraction
@@ -1432,14 +1464,89 @@ static void rewriteCallSites(Module *module,
                 }
 
                 Instruction *newInst = nullptr;
-                if (eq.kind == ClosedForm::AND_OP ||
-                    eq.kind == ClosedForm::OR_OP  ||
-                    eq.kind == ClosedForm::XOR_OP) {
-                    Value *a = call->get_operand(eq.inputIdxA);
-                    Value *b = call->get_operand(eq.inputIdxB);
-                    newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, b, bb, true);
-                    bb->add_instruction_before_inst(newInst, call);
-                } else if (eq.kind == ClosedForm::SHL_OP) {
+                // ── Negative-input correctness for AND/OR ─────────────────────
+                // Source `_and(a, b)` and `_or(a, b)` extract bits with `a % 2`.
+                // SysY/C99 srem rounds the quotient toward zero, so for negative
+                // odd a, the parity is `-1` (not 1).  The source's `bit == 1`
+                // test then misfires:
+                //   _and: `(a<0 ? -1 : a&1) == 1 && (b<0 ? -1 : b&1) == 1` only
+                //         ever holds when BOTH operands are non-negative; once
+                //         either operand reaches -1 in the a/=2 chain, no more
+                //         contributions are added.  Effective semantics:
+                //             _and(a, b) = (a<0 || b<0) ? 0 : (a & b)
+                //   _or:  symmetric.  A negative operand contributes nothing
+                //         because its parity is never == 1.  Effective:
+                //             _or(a, b) = (a<0 ? 0 : a) | (b<0 ? 0 : b)
+                //
+                // The abstract domain over-approximates (see bvSremByTwo's NOTE)
+                // and happily produces the pure AND / OR closed form.  Naively
+                // lowering to `and a, b` / `or a, b` is WRONG for negative
+                // operands — that is the bug fixed here.
+                //
+                // We emit the source's negative-input semantics inline using
+                // select.  For non-negative inputs the guard is statically
+                // false and the result simplifies back to the fast native op;
+                // subsequent SCCP / range analysis can then strip the guard at
+                // call sites where the args are provably non-negative
+                // (e.g. huffman: bytes 0..255).  ── end note ───────────────────
+                // Implementation note: we mask each operand individually
+                // *before* ANDing them, mirroring the OR rewrite below:
+                //     `(a<0 ? 0 : a) & (b<0 ? 0 : b)`
+                // This is semantically equivalent to the source's "0 if either
+                // operand is negative, else a&b": masking a negative operand
+                // to 0 makes the resulting AND collapse to 0 regardless of
+                // the other side.
+                //
+                // We do NOT use the more compact `select((a|b)<0, 0, a&b)`
+                // form, nor a chained `select(b<0, 0, select(a<0, 0, a&b))`.
+                // Both triggered a register-allocator interaction in the
+                // backend that clobbered the call's `n` argument register
+                // before the trailing `bits -= n` (observed in asm as
+                // `csel w0, wzr, w1, lt` immediately followed by
+                // `sub w2, w7, w0` reading the just-overwritten w0).  The
+                // parallel mask-then-AND shape keeps each select's live
+                // range short and matches the proven-safe OR_OP rewrite.
+                if (eq.kind == ClosedForm::AND_OP) {
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *b       = call->get_operand(eq.inputIdxB);
+                    auto *zeroA1   = new ConstantInt(call->type_, 0);
+                    auto *aNeg     = new ICmpInst(ICmpInst::ICMP_SLT, a, zeroA1, bb, true);
+                    bb->add_instruction_before_inst(aNeg, call);
+                    auto *zeroA2   = new ConstantInt(call->type_, 0);
+                    auto *aMasked  = new SelectInst(aNeg, zeroA2, a, call->type_);
+                    bb->add_instruction_before_inst(aMasked, call);
+                    auto *zeroB1   = new ConstantInt(call->type_, 0);
+                    auto *bNeg     = new ICmpInst(ICmpInst::ICMP_SLT, b, zeroB1, bb, true);
+                    bb->add_instruction_before_inst(bNeg, call);
+                    auto *zeroB2   = new ConstantInt(call->type_, 0);
+                    auto *bMasked  = new SelectInst(bNeg, zeroB2, b, call->type_);
+                    bb->add_instruction_before_inst(bMasked, call);
+                    auto *result   = new BinaryInst(call->type_, Instruction::And, aMasked, bMasked, bb, true);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst = result;
+                } else if (eq.kind == ClosedForm::OR_OP) {
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *b       = call->get_operand(eq.inputIdxB);
+                    auto *zeroA1   = new ConstantInt(call->type_, 0);
+                    auto *aNeg     = new ICmpInst(ICmpInst::ICMP_SLT, a, zeroA1, bb, true);
+                    bb->add_instruction_before_inst(aNeg, call);
+                    auto *zeroA2   = new ConstantInt(call->type_, 0);
+                    auto *aMasked  = new SelectInst(aNeg, zeroA2, a, call->type_);
+                    bb->add_instruction_before_inst(aMasked, call);
+                    auto *zeroB1   = new ConstantInt(call->type_, 0);
+                    auto *bNeg     = new ICmpInst(ICmpInst::ICMP_SLT, b, zeroB1, bb, true);
+                    bb->add_instruction_before_inst(bNeg, call);
+                    auto *zeroB2   = new ConstantInt(call->type_, 0);
+                    auto *bMasked  = new SelectInst(bNeg, zeroB2, b, call->type_);
+                    bb->add_instruction_before_inst(bMasked, call);
+                    auto *result   = new BinaryInst(call->type_, Instruction::Or, aMasked, bMasked, bb, true);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst = result;
+                }
+                // XOR_OP intentionally unreachable here — recognize() refuses
+                // to return XOR_OP because the negative-input semantics of
+                // `_xor` have no clean closed form.  See recognize().
+                else if (eq.kind == ClosedForm::SHL_OP) {
                     // Note: LSHR_OP is intentionally not handled here.  See
                     // recognize() — constant lshr cannot be safely materialized
                     // because the bv abstraction loses the original signed-ness
