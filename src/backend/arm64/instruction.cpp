@@ -5,6 +5,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -49,6 +50,41 @@ static bool isI32Vector4(Type *ty) {
 
 static ConstantInt *getConstIntOperand(Value *v) {
     return dynamic_cast<ConstantInt *>(v);
+}
+
+static uint32_t maskForWidth(unsigned width) {
+    return width >= 32 ? UINT32_MAX : ((1u << width) - 1u);
+}
+
+static uint32_t rotateRightWithin(uint32_t value, unsigned rot, unsigned width) {
+    uint32_t mask = maskForWidth(width);
+    value &= mask;
+    rot %= width;
+    if (rot == 0) return value;
+    return ((value >> rot) | (value << (width - rot))) & mask;
+}
+
+static uint32_t replicatePattern(uint32_t pattern, unsigned width) {
+    uint32_t result = 0;
+    for (unsigned pos = 0; pos < 32; pos += width)
+        result |= pattern << pos;
+    return result;
+}
+
+static bool isLogicalImm32(uint32_t imm) {
+    if (imm == 0 || imm == UINT32_MAX) return false;
+
+    for (unsigned width = 2; width <= 32; width <<= 1) {
+        for (unsigned ones = 1; ones < width; ++ones) {
+            uint32_t base = static_cast<uint32_t>((1ull << ones) - 1ull);
+            for (unsigned rot = 0; rot < width; ++rot) {
+                uint32_t pattern = rotateRightWithin(base, rot, width);
+                if (replicatePattern(pattern, width) == imm)
+                    return true;
+            }
+        }
+    }
+    return false;
 }
 
 static bool isLoadI32InBlock(Value *v, BasicBlock *bb, LoadInst *&load) {
@@ -823,7 +859,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (ci) {
                 int32_t factor = ci->value_;
 
-                if (factor == -1) {
+                if (factor == 0) {
+                    storeInt(inst, "wzr");
+                    emitted = true;
+                } else if (factor == 1) {
+                    std::string r = loadInt(var);
+                    storeInt(inst, r);
+                    emitted = true;
+                } else if (factor == -1) {
                     // × -1：negate
                     // 以下各情形 rd 的写入都不早于 r 的最后一次读（同指令内
                     // 读先于写），因此 rd 直接用分配寄存器、与 r 同号也安全
@@ -832,10 +875,18 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     emitUnaryMachine("neg", rd, r);
                     storeInt(inst, rd);
                     emitted = true;
-
-                } else if (factor != INT32_MIN) {  // INT32_MIN 的 -factor 溢出，跳过
-                    bool    negative = (factor < 0);
-                    int32_t abs_f    = negative ? -factor : factor;
+                } else if (factor == INT32_MIN) {
+                    std::string r  = loadInt(var);
+                    std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+                    emitRawAluMachine("\tlsl " + rd + ", " + r + ", #31",
+                                      rd, {r});
+                    storeInt(inst, rd);
+                    emitted = true;
+                } else {
+                    bool     negative = (factor < 0);
+                    uint32_t abs_f    = negative
+                        ? (0u - static_cast<uint32_t>(factor))
+                        : static_cast<uint32_t>(factor);
 
                     // 情形 A：abs_f = 2^k
                     //   正：lsl rd, r, #k
@@ -855,9 +906,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     // 情形 B：abs_f = 2^k + 1（如 3,5,9,17,33…）
                     //   正：add rd, r, r, lsl #k            1 条
                     //   负：add rd, r, r, lsl #k  +  neg    2 条
-                    else if (int32_t m1 = abs_f - 1;
-                            m1 > 0 && (m1 & (m1 - 1)) == 0)
+                    else if (enableRegAlloc_ &&
+                             (abs_f - 1) > 0 &&
+                             (((abs_f - 1) & (abs_f - 2)) == 0))
                     {
+                        uint32_t m1 = abs_f - 1;
                         int k = __builtin_ctz(m1);
                         std::string r  = loadInt(var);
                         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
@@ -874,9 +927,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     //   正：lsl tmp, r, #k  ;  sub rd, tmp, r    2 条
                     //   负：factor = 1 - 2^k，即 r - r<<k
                     //       sub rd, r, r, lsl #k                 1 条  ← 关键优化
-                    else if (int32_t p1 = abs_f + 1;   // +1 不会溢出：abs_f <= INT32_MAX-1
-                            p1 > 0 && (p1 & (p1 - 1)) == 0)
+                    else if (enableRegAlloc_ &&
+                             (abs_f + 1) > 0 &&
+                             (((abs_f + 1) & abs_f) == 0))
                     {
+                        uint32_t p1 = abs_f + 1;
                         int k = __builtin_ctz(p1);
                         std::string r  = loadInt(var);
                         std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
@@ -887,7 +942,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                                               rd, {r});
                         } else {
                             std::string rTmp = allocIntReg();
-                            emitRawAluMachine("\tlsl " + rTmp + ", " + r + ", #" + std::to_string(k),
+                            emitRawAluMachine("\tlsl " + rTmp + ", " + r + ", #"
+                                              + std::to_string(k),
                                               rTmp, {r});
                             emitBinaryMachine("sub", rd, rTmp, r);
                         }
@@ -971,98 +1027,91 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     }
 
     // ---- SRem: a % b = a - (a/b) * b ----
-    // Be cautious modifying this 
+    // Be cautious modifying this
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) { // 检查第二个操作数是否是常量
+        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
             int32_t divisor = ci->value_;
-            if (divisor == 0) { /* Fallback */ }
-            // ---- 除数为 1，余数恒为 0 ----
-            else if (divisor == -1) {
-                std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                emitMoveMachine(rd, "wzr");
-                storeInt(inst, rd);
+            if (divisor == 0) {
+                // Fall through to the hardware sdiv+msub sequence.
+            } else if (divisor == 1 || divisor == -1) {
+                storeInt(inst, "wzr");
                 break;
-            }
-            else if (divisor == 2) {
-                std::string r = loadInt(v1);
-                // rd 在 tst 读 r 之前就被写入，rd 与 r 同号时必须走 scratch
-                std::string rd = (hasAssignedReg(inst) && assignedReg(inst) != r)
-                                     ? assignedReg(inst) : allocIntReg();
-                emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
-                emitMachineInstrLine("\ttst " + r + ", " + r,
-                                     MOpcode::Cmp, {}, {r}, 1, true);
-                emitMachineInstrLine("\tcneg " + rd + ", " + rd + ", mi",
-                                     MOpcode::FlagUse, {rd}, {rd}, 1, false, true);
-                storeInt(inst, rd);
-                break;
-            }
-            // ---- 除数为 2 的幂 (d > 0) ----
-            else if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
-                // rem = num - (((num >> 31) & (d-1)) + num) >> k) << k
-                int k = __builtin_ctz(divisor);   // log2(d)
-                std::string rNum = loadInt(v1);
-                std::string rSign = allocIntReg();
-                std::string rQ = allocIntReg();
+            } else if (divisor != INT32_MIN) {
+                int32_t absDivisor = divisor > 0 ? divisor : -divisor;
 
-                emitRawAluMachine("\tasr " + rSign + ", " + rNum + ", #31", rSign, {rNum});
-                emitRawAluMachine("\tand " + rSign + ", " + rSign + ", #"
-                                      + std::to_string(divisor - 1),
-                                  rSign, {rSign});
-                emitBinaryMachine("add", rQ, rNum, rSign);
-                emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
-                emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #" + std::to_string(k), rQ, {rQ});
+                if (absDivisor == 2) {
+                    std::string r = loadInt(v1);
+                    // rd 在 tst 读 r 之前就被写入，rd 与 r 同号时必须走 scratch
+                    std::string rd = (hasAssignedReg(inst) && assignedReg(inst) != r)
+                                         ? assignedReg(inst) : allocIntReg();
+                    emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
+                    emitMachineInstrLine("\ttst " + r + ", " + r,
+                                         MOpcode::Cmp, {}, {r}, 1, true);
+                    emitMachineInstrLine("\tcneg " + rd + ", " + rd + ", mi",
+                                         MOpcode::FlagUse, {rd}, {rd}, 1, false, true);
+                    storeInt(inst, rd);
+                    break;
+                } else if ((absDivisor & (absDivisor - 1)) == 0) {
+                    int k = __builtin_ctz(absDivisor);
+                    std::string rNum = loadInt(v1);
+                    std::string rSign = allocIntReg();
+                    std::string rQ = allocIntReg();
 
-                // 末条 sub 同时是 rNum 的最后一次读，直接写分配寄存器安全
-                std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                emitBinaryMachine("sub", rResult, rNum, rQ);
-                storeInt(inst, rResult);
-                break;
-            }
-            // ---- 除数为正且 > 1，使用 Magic Number ----
-            else if (divisor > 1) {
-                Magic::MagicNumber mag = Magic::getMagic(divisor);
+                    emitRawAluMachine("\tasr " + rSign + ", " + rNum + ", #31",
+                                      rSign, {rNum});
+                    emitRawAluMachine("\tand " + rSign + ", " + rSign + ", #"
+                                          + std::to_string(absDivisor - 1),
+                                      rSign, {rSign});
+                    emitBinaryMachine("add", rQ, rNum, rSign);
+                    emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #"
+                                          + std::to_string(k),
+                                      rQ, {rQ});
+                    emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #"
+                                          + std::to_string(k),
+                                      rQ, {rQ});
 
-                std::string wNum = loadInt(v1);
-                std::string wMagic = intConstReg(mag.multiplier);
+                    std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+                    emitBinaryMachine("sub", rResult, rNum, rQ);
+                    storeInt(inst, rResult);
+                    break;
+                } else if (absDivisor > 1) {
+                    Magic::MagicNumber mag = Magic::getMagic(absDivisor);
+                    std::string wNum = loadInt(v1);
+                    std::string wMagic = intConstReg(mag.multiplier);
+                    std::string xTemp = allocAddrReg();
+                    std::string wHi = "w" + xTemp.substr(1);
 
-                std::string xTemp = allocAddrReg();
-                std::string wHi = "w" + xTemp.substr(1);
+                    emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
+                                      xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
 
-                emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
-                                  xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
+                    if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
+                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
+                                              + std::to_string(32 + mag.shift),
+                                          xTemp, {xTemp});
+                    } else {
+                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
+                                          xTemp, {xTemp});
+                        if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
+                            emitBinaryMachine("add", wHi, wHi, wNum);
+                        else
+                            emitBinaryMachine("sub", wHi, wHi, wNum);
+                        emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
+                                              + std::to_string(mag.shift),
+                                          wHi, {wHi});
+                    }
+                    emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
+                                      wHi, {wHi, wNum});
 
-                if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
-                    // 取高 32 位与 >>shift 合并为一条 64 位 asr
-                    emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
-                                          + std::to_string(32 + mag.shift),
-                                      xTemp, {xTemp});
-                } else {
-                    emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
-                                      xTemp, {xTemp});
-                    if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
-                        emitBinaryMachine("add", wHi, wHi, wNum);
-                    else
-                        emitBinaryMachine("sub", wHi, wHi, wNum);
-                    emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
-                                          + std::to_string(mag.shift),
-                                      wHi, {wHi});
+                    std::string wD = intConstReg(absDivisor);
+                    std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+                    emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNum,
+                                      wResult, {wHi, wD, wNum}, MOpcode::Mul, 3);
+                    storeInt(inst, wResult);
+                    break;
                 }
-                emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
-                                  wHi, {wHi, wNum});
-
-                std::string wD = intConstReg(divisor);
-                // 中间结果全在 scratch，wNum 的最后一次读在末条 msub 上，
-                // 结果可直接写分配寄存器（与 wNum 同号亦安全）
-                std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNum,
-                                  wResult, {wHi, wD, wNum}, MOpcode::Mul, 3);
-
-                storeInt(inst, wResult);
-                break;
             }
-            // 负除数或 0 继续走通用路径
         }
 
         // ---- 通用 SRem (变量除数或未优化情况) ----
@@ -1078,66 +1127,67 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 
-        // ---- Integer Bitwise Logical (And / Or / Xor) ----
+    // ---- Integer Bitwise Logical (And / Or / Xor) ----
     case Instruction::And:
     case Instruction::Or:
     case Instruction::Xor: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        std::string r1 = loadInt(v1);
-        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
 
         const char *opcode;
         if (inst->op_id_ == Instruction::And)      opcode = "and";
         else if (inst->op_id_ == Instruction::Or)   opcode = "orr";
         else                                        opcode = "eor";
 
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-            // 立即数位运算：and/orr/eor wd, w1, #imm
-            // ARM64 and/orr/eor 支持的立即数格式有限（位掩码立即数），
-            // 对于简单的小常数（如 1, 3, 7, 15 等 2^n-1）通常可以编码
-            // 若不可编码，则需加载到寄存器
+        ConstantInt *ci = dynamic_cast<ConstantInt*>(v2);
+        Value *var = v1;
+        if (!ci) {
+            ci = dynamic_cast<ConstantInt*>(v1);
+            var = v2;
+        }
+
+        if (ci) {
             uint32_t imm = static_cast<uint32_t>(ci->value_);
-            // 简单判断：对于 and 指令，2^n-1 形式的掩码总是可编码的
-            // 对于 orr/eor，小常数也可编码
-            // 为安全起见，如果立即数较小或为位掩码形式，使用立即数
-            // 否则先加载到寄存器
-            bool useImmediate = false;
-            if (inst->op_id_ == Instruction::And) {
-                // and 指令的立即数：ARM64 支持复杂的位掩码立即数
-                // 简单启发式：值 <= 0xFFFF 或是 2^n-1 形式
-                if (imm <= 0xFFFF || (imm & (imm + 1)) == 0) {
-                    useImmediate = true;
-                }
-            } else if (inst->op_id_ == Instruction::Or) {
-                // orr 立即数也是位掩码立即数
-                if (imm <= 0xFFFF) {
-                    useImmediate = true;
-                }
-            } else {
-                // eor 立即数也是位掩码立即数
-                if (imm <= 0xFFFF) {
-                    useImmediate = true;
-                }
+
+            if (inst->op_id_ == Instruction::And && imm == 0) {
+                storeInt(inst, "wzr");
+                break;
+            }
+            if (inst->op_id_ == Instruction::And && imm == UINT32_MAX) {
+                std::string r = loadInt(var);
+                storeInt(inst, r);
+                break;
+            }
+            if ((inst->op_id_ == Instruction::Or || inst->op_id_ == Instruction::Xor) &&
+                imm == 0) {
+                std::string r = loadInt(var);
+                storeInt(inst, r);
+                break;
+            }
+            if (inst->op_id_ == Instruction::Or && imm == UINT32_MAX) {
+                std::string allOnes = intConstReg(ci->value_);
+                storeInt(inst, allOnes);
+                break;
             }
 
-            if (useImmediate) {
-                emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ", " + r1
-                                      + ", #" + std::to_string(ci->value_),
-                                  rd, {r1});
+            std::string r = loadInt(var);
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+            if (isLogicalImm32(imm)) {
+                emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ", " + r
+                                      + ", #" + std::to_string(imm),
+                                  rd, {r});
             } else {
-                // 加载立即数到寄存器
-                std::string r2 = allocIntReg();
-                emitIntConst(ci->value_, r2);
-                emitBinaryMachine(opcode, rd, r1, r2);
-                freeIntReg(r2);
+                std::string r2 = intConstReg(ci->value_);
+                emitBinaryMachine(opcode, rd, r, r2);
             }
+            storeInt(inst, rd);
         } else {
-            // 寄存器位运算：and/orr/eor wd, w1, w2
+            std::string r1 = loadInt(v1);
             std::string r2 = loadInt(v2);
+            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
             emitBinaryMachine(opcode, rd, r1, r2);
+            storeInt(inst, rd);
         }
-        storeInt(inst, rd);
         break;
     }
 
