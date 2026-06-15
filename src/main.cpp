@@ -182,6 +182,12 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<BitFuncRecognize>());
     pm.addPass(std::make_unique<InlineExpand>());
     pm.addPass(std::make_unique<LocalCopyPropagation>());
+    // First stamp: make FnPure/FnReadOnly visible before the global and
+    // scalar cleanups that can profit from post-inline call semantics.
+    pm.addPass(std::make_unique<SemanticMarkerStamp>());
+    // Re-run EarlyCSE after stamping so BasicAA can reuse the persisted
+    // function semantics for pure/readonly call reasoning.
+    pm.addPass(std::make_unique<EarlyCSE>());
     pm.addPass(std::make_unique<GlobalScalarPromotion>());
     pm.addPass(std::make_unique<Mem2Reg>());
     addDeepCleanup(pm);
@@ -216,8 +222,8 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addSsaPreparation(pm);
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
-    // 在 inline / mem2reg 之后、循环管线之前一次性戳语义标记：
-    // 此时函数纯度终态稳定、可提升标量已消失，LICM/GVN 随后即可消费不变性标记。
+    // Second stamp: refresh attributes and immutable-load facts after the
+    // global promotion / Mem2Reg / cleanup sequence, then feed loop+GVN.
     pm.addPass(std::make_unique<SemanticMarkerStamp>());
     addLoopPipeline(pm);
     pm.addPass(std::make_unique<GVN>());
