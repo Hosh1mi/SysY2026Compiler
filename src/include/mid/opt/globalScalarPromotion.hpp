@@ -5,10 +5,9 @@
 // the alloca into SSA, removing memory traffic from the hot path.
 //
 // Scope and limitations:
-//   - Runs only on functions where hasAnyCall() returns false.  Calls can
-//     reach into the same global through another function, and promoting
-//     locally would break what the callee observes.  In practice this gate
-//     fires almost exclusively on the post-inline `main`.
+//   - Runs only on functions whose surviving calls are all `FnPure`.  A
+//     readonly/unknown call may still observe the same global through another
+//     function, and promoting locally would then break what the callee sees.
 //   - Integer-typed globals only.  Float globals and arrays are skipped.
 //   - Each ret block grows two instructions per promoted global (load alloca
 //     + store global) so the observable value at return matches the

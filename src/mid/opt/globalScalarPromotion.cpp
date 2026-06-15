@@ -16,10 +16,21 @@ static bool isScalarIntGlobal(GlobalVariable *gv) {
     return pt->contained_->tid_ == Type::IntegerTyID;
 }
 
-static bool hasAnyCall(Function *func) {
-    for (auto *bb : func->basic_blocks_)
-        for (auto *inst : bb->instr_list_)
-            if (inst->is_call()) return true;
+static bool hasBlockingCall(Function *func) {
+    for (auto *bb : func->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            auto *call = dynamic_cast<CallInst *>(inst);
+            if (!call) continue;
+
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || callee->is_declaration())
+                return true;
+            if (callee->hasSemFlag(SemFlag::FnPure))
+                continue;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -118,11 +129,10 @@ static void promoteInFunction(Function *func) {
 void GlobalScalarPromotion::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
-        // Only promote in call-free functions.  A surviving call could reach
-        // into the global via another function; promoting locally would then
-        // break the value the callee observes.  In practice this gate fires
-        // almost exclusively on the post-inline `main`.
-        if (hasAnyCall(func)) continue;
+        // Only promote across calls that provably do not observe memory.
+        // Readonly/unknown calls may still read the global, so they keep
+        // the existing hard barrier semantics.
+        if (hasBlockingCall(func)) continue;
         promoteInFunction(func);
     }
 }

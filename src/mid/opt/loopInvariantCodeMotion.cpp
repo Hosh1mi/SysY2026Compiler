@@ -147,7 +147,8 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
         auto *call = static_cast<CallInst *>(inst);
         auto *callee = dynamic_cast<Function *>(
             call->get_operand(call->num_ops_ - 1));
-        return callee && BAA.isPure(callee);
+        return callee &&
+               (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee));
     }
 
     if (inst->is_load()) {

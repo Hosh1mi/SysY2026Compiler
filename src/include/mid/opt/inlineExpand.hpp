@@ -1,6 +1,7 @@
 #pragma once
 #include "pass.hpp"
 #include <unordered_map>
+#include <unordered_set>
 
 class InlineExpand : public Pass {
 public:
@@ -11,6 +12,7 @@ private:
                    int recursiveBudget);
     unsigned countCallSites(Function *callee, Module *module);
     unsigned countInstructions(Function *func);
+    bool isRecursive(Function *func);
     bool isSelfRecursive(Function *func);
     bool hasNonSelfCalls(Function *func);
     bool isCallInLoop(CallInst *call);
@@ -27,6 +29,10 @@ private:
                                std::unordered_map<Value*, Value*> &valMap,
                                std::unordered_map<BasicBlock*, BasicBlock*> &bbMap,
                                std::vector<BasicBlock*> &newBBs);
+    bool reaches(Function *from, Function *target,
+                 std::unordered_set<Function *> &visited);
+
+    std::unordered_map<Function *, bool> recursiveCache_;
 };
 
 constexpr int INLINE_THRESHOLD = 80;

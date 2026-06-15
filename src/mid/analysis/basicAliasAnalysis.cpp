@@ -37,6 +37,7 @@ void BasicAliasAnalysis::analyze(Module *module) {
                 next.sideEffect != cur.sideEffect ||
                 next.overall != cur.overall ||
                 next.hasUnknownMemoryEffect != cur.hasUnknownMemoryEffect ||
+                next.argNoCapture != cur.argNoCapture ||
                 next.locationEffects != cur.locationEffects) {
                 cur = next;
                 changed = true;
@@ -219,6 +220,12 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
     summary.sideEffect = false;
     summary.overall = ModRefInfo::NoModRef;
     summary.hasUnknownMemoryEffect = false;
+    summary.argNoCapture.resize(func->arguments_.size(), false);
+
+    for (auto *arg : func->arguments_) {
+        if (dynamic_cast<PointerType *>(arg->type_))
+            summary.argNoCapture[arg->arg_no_] = true;
+    }
 
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
@@ -272,6 +279,13 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
         }
     }
 
+    for (auto *arg : func->arguments_) {
+        if (!dynamic_cast<PointerType *>(arg->type_))
+            continue;
+        std::unordered_set<Value *> visited;
+        summary.argNoCapture[arg->arg_no_] = valueDoesNotCapture(arg, visited);
+    }
+
     if (summary.overall != ModRefInfo::NoModRef)
         summary.pure = false;
     return summary;
@@ -279,8 +293,17 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
 
 ModRefInfo BasicAliasAnalysis::getFunctionModRef(Function *func,
                                                  Value *ptrOrGlobal) const {
+    if (!func) return ModRefInfo::ModRef;
+    if (func->hasSemFlag(SemFlag::FnPure))
+        return ModRefInfo::NoModRef;
+
     auto it = summaries_.find(func);
-    if (!func || it == summaries_.end()) return ModRefInfo::ModRef;
+    if (it == summaries_.end()) {
+        if (func->hasSemFlag(SemFlag::FnReadOnly))
+            return ptrOrGlobal ? ModRefInfo::Ref : ModRefInfo::Ref;
+        return ModRefInfo::ModRef;
+    }
+
     const FunctionSummary &summary = it->second;
     if (!ptrOrGlobal) return summary.overall;
 
@@ -325,13 +348,34 @@ ModRefInfo BasicAliasAnalysis::getModRefInfo(Instruction *inst, Value *ptr) cons
 }
 
 bool BasicAliasAnalysis::isPure(Function *func) const {
+    if (func && func->hasSemFlag(SemFlag::FnPure))
+        return true;
     auto it = summaries_.find(func);
     return it != summaries_.end() && it->second.pure;
 }
 
 bool BasicAliasAnalysis::mayHaveSideEffect(Function *func) const {
+    if (func &&
+        (func->hasSemFlag(SemFlag::FnPure) ||
+         func->hasSemFlag(SemFlag::FnReadOnly))) {
+        return false;
+    }
     auto it = summaries_.find(func);
     return it == summaries_.end() || it->second.sideEffect;
+}
+
+bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
+    if (!func || !arg || arg->parent_ != func)
+        return false;
+    if (arg->hasSemFlag(SemFlag::ArgNoCapture))
+        return true;
+
+    auto it = summaries_.find(func);
+    if (it == summaries_.end())
+        return false;
+    if (arg->arg_no_ >= it->second.argNoCapture.size())
+        return false;
+    return it->second.argNoCapture[arg->arg_no_];
 }
 
 bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
@@ -343,4 +387,62 @@ bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
 Value *BasicAliasAnalysis::getUnderlyingObject(Value *ptr) const {
     if (!ptr) return nullptr;
     return getPointerInfo(ptr).base;
+}
+
+bool BasicAliasAnalysis::valueDoesNotCapture(
+    Value *value, std::unordered_set<Value *> &visited) const {
+    if (!value)
+        return false;
+    if (!visited.insert(value).second)
+        return true;
+
+    for (const auto &use : value->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user)
+            return false;
+
+        if (user->is_load())
+            continue;
+
+        if (user->is_store()) {
+            if (use.arg_no_ == 0)
+                return false;
+            continue;
+        }
+
+        if (user->is_ret())
+            return false;
+
+        if (user->is_call()) {
+            auto *call = static_cast<CallInst *>(user);
+            if (use.arg_no_ >= call->num_ops_ - 1)
+                return false;
+
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || callee->is_declaration())
+                return false;
+            if (use.arg_no_ >= callee->arguments_.size())
+                return false;
+            if (!isNoCapture(callee, callee->arguments_[use.arg_no_]))
+                return false;
+            continue;
+        }
+
+        if (user->is_cmp() || user->is_fcmp())
+            continue;
+
+        if (user->is_gep() || dynamic_cast<Bitcast *>(user) ||
+            dynamic_cast<PhiInst *>(user) || dynamic_cast<SelectInst *>(user)) {
+            if (!dynamic_cast<PointerType *>(user->type_))
+                return false;
+            if (!valueDoesNotCapture(user, visited))
+                return false;
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
 }

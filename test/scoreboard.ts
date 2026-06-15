@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-nocheck
 // 依赖无关版本：用 Node 内置 fetch + 正则解析，去掉 axios / cheerio。
 // Node >= 23.6 可直接 `node test/scoreboard.ts` 运行（原生 TS type-stripping）。
 //

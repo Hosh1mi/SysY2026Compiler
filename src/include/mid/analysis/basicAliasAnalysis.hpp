@@ -5,6 +5,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 enum class AliasResult {
@@ -56,6 +57,7 @@ public:
 
     bool isPure(Function *func) const;
     bool mayHaveSideEffect(Function *func) const;
+    bool isNoCapture(Function *func, Argument *arg) const;
     bool isLocalArrayPointer(Value *ptr) const;
 
     // 解析指针的底层内存对象（穿透 bitcast / GEP 链），返回 alloca / global / argument 等。
@@ -82,6 +84,7 @@ private:
         bool sideEffect = true;
         ModRefInfo overall = ModRefInfo::ModRef;
         bool hasUnknownMemoryEffect = true;
+        std::vector<bool> argNoCapture;
         std::vector<LocationEffect> locationEffects;
     };
 
@@ -90,6 +93,8 @@ private:
     void addLocationEffect(FunctionSummary &summary, MemoryLocation loc,
                            ModRefInfo effect) const;
     FunctionSummary computeFunctionSummary(Function *func) const;
+    bool valueDoesNotCapture(Value *value,
+                             std::unordered_set<Value *> &visited) const;
     bool isTrackedMemoryObject(Value *value) const;
     std::string aliasResultName(AliasResult result) const;
 
