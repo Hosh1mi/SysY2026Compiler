@@ -1886,7 +1886,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
     
         // 执行调用
-        emitCallMachine(callee->name_);
+        emitCallMachine(callee->name_, call);
     
         // 回收栈参数空间
         if (stackBytes > 0) {

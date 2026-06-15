@@ -1,9 +1,11 @@
 #include "../../include/backend/arm64/context.hpp"
 #include "../../include/backend/arm64/helpers.hpp"
+#include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/backend/arm64/regalloc.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <climits>
 #include <cstring>
 #include <functional>
 #include <utility>
@@ -68,18 +70,112 @@ void Arm64FuncContext::emitBranchMachine(const std::string &line,
                          false, usesFlags, true);
 }
 
-void Arm64FuncContext::emitCallMachine(const std::string &callee) {
+void Arm64FuncContext::emitCallMachine(const std::string &callee, CallInst *call) {
     MachineInstr inst = MachineInstr::make("\tbl " + callee, MOpcode::Call);
     inst.isCall = true;
     inst.isBarrier = true;
     emitMachineInstr(std::move(inst));
 
     // Caller-saved promoted constants are intentionally not spilled around
-    // calls.  Re-materialize them after each call so later loop code can still
-    // treat the promoted register as read-only.
+    // calls.  Re-materialize only when a real use is reachable before the next
+    // clobber; this keeps loop constants hoisted without emitting dead reloads
+    // after calls that return directly or call again first.
+    if (call)
+        emitLivePromotedConstsFrom(call->parent_, call);
+}
+
+bool Arm64FuncContext::callClobbersPromotedConst(int val) const {
+    auto it = promotedConsts_.find(val);
+    if (it == promotedConsts_.end())
+        return false;
+    int regNo = std::stoi(it->second.substr(1));
+    return regNo < 19 || regNo > 28;
+}
+
+bool Arm64FuncContext::instructionUsesPromotedConst(Instruction *inst, int val) const {
+    if (!inst || inst->is_call())
+        return false;
+
+    auto isPromoted = [&]() {
+        return promotedConsts_.count(val) > 0;
+    };
+    if (!isPromoted())
+        return false;
+
+    auto usesDirectConstant = [&]() {
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            auto *ci = dynamic_cast<ConstantInt *>(inst->get_operand(i));
+            if (ci && ci->value_ == val)
+                return true;
+        }
+        return false;
+    };
+
+    if (inst->op_id_ == Instruction::SRem) {
+        auto *ci = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
+            int32_t absDivisor = ci->value_ > 0 ? ci->value_ : -ci->value_;
+            if (absDivisor > 1 && (absDivisor & (absDivisor - 1)) != 0) {
+                Magic::MagicNumber mag = Magic::getMagic(absDivisor);
+                if (val == mag.multiplier || val == absDivisor)
+                    return true;
+            }
+        }
+    } else if (inst->op_id_ == Instruction::SDiv) {
+        auto *ci = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
+            int32_t absDivisor = ci->value_ > 0 ? ci->value_ : -ci->value_;
+            if (absDivisor > 1 && (absDivisor & (absDivisor - 1)) != 0) {
+                Magic::MagicNumber mag = Magic::getMagic(ci->value_);
+                if (val == mag.multiplier)
+                    return true;
+            }
+        }
+    }
+
+    return usesDirectConstant();
+}
+
+bool Arm64FuncContext::promotedConstReachableBeforeClobber(
+    BasicBlock *bb, Instruction *after, int val, std::set<BasicBlock*> &visited) const {
+    if (!bb)
+        return false;
+
+    auto it = bb->instr_list_.begin();
+    if (after) {
+        it = std::find(bb->instr_list_.begin(), bb->instr_list_.end(), after);
+        if (it == bb->instr_list_.end())
+            return false;
+        ++it;
+    } else if (!visited.insert(bb).second) {
+        return false;
+    }
+
+    for (; it != bb->instr_list_.end(); ++it) {
+        Instruction *inst = *it;
+        if (inst->is_call() && callClobbersPromotedConst(val))
+            return false;
+        if (instructionUsesPromotedConst(inst, val))
+            return true;
+    }
+
+    auto *term = bb->get_terminator();
+    if (!term)
+        return false;
+    for (unsigned i = 0; i < term->num_ops_; ++i) {
+        auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+        if (succ && promotedConstReachableBeforeClobber(succ, nullptr, val, visited))
+            return true;
+    }
+    return false;
+}
+
+void Arm64FuncContext::emitLivePromotedConstsFrom(BasicBlock *bb, Instruction *after) {
     for (const auto &kv : promotedConsts_) {
-        int regNo = std::stoi(kv.second.substr(1));
-        if (regNo < 19 || regNo > 28)
+        if (after && !callClobbersPromotedConst(kv.first))
+            continue;
+        std::set<BasicBlock*> visited;
+        if (promotedConstReachableBeforeClobber(bb, after, kv.first, visited))
             emitIntConst(kv.first, kv.second);
     }
 }
@@ -160,9 +256,8 @@ void Arm64FuncContext::generate() {
     cselHandled_.clear();
 
     emitPrologue();
-    // 提升常量在入口物化一次（位于 callee-saved 保存之后）
-    for (const auto &kv : promotedConsts_)
-        emitIntConst(kv.first, kv.second);
+    if (!func_->basic_blocks_.empty())
+        emitLivePromotedConstsFrom(func_->basic_blocks_[0], nullptr);
     reorderBlocks();
     for (auto bb : func_->basic_blocks_) {
         emitBlock(bb);

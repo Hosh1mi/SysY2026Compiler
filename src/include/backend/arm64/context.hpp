@@ -51,7 +51,7 @@ private:
     void emitBranchMachine(const std::string &line,
                            std::initializer_list<std::string> uses = {},
                            bool usesFlags = false);
-    void emitCallMachine(const std::string &callee);
+    void emitCallMachine(const std::string &callee, CallInst *call);
     void emitRetMachine();
     void emitStackAdjustMachine(const std::string &opcode, int bytes);
     void emitStackAdjustMachine(const std::string &opcode, const std::string &reg);
@@ -62,6 +62,12 @@ private:
     void emitEpilogue();
     void emitBlock(BasicBlock *bb);
     void emitInstruction(Instruction *inst);
+    void emitLivePromotedConstsFrom(BasicBlock *bb, Instruction *after);
+    bool promotedConstReachableBeforeClobber(BasicBlock *bb, Instruction *after,
+                                             int val,
+                                             std::set<BasicBlock*> &visited) const;
+    bool instructionUsesPromotedConst(Instruction *inst, int val) const;
+    bool callClobbersPromotedConst(int val) const;
 
     // slot management
     int getSlot(Value *v);
@@ -137,7 +143,7 @@ private:
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
-    // 循环内提升的大常量：常量值 → 专属寄存器（入口物化，caller-saved 在 call 后重物化）
+    // 循环内提升的大常量：常量值 → 专属寄存器（入口/call 后按可达使用选择性物化）
     std::map<int, std::string> promotedConsts_;
 
     struct PhiCopy {
