@@ -88,7 +88,7 @@ ExprSignature makePhiSig(Instruction *phi) {
     return sig;
 }
 
-// store / 非纯 call：按 BasicAA 失效可能被改写的 load 缓存。
+// store / 可写 call：按 BasicAA 失效可能被改写的 load 缓存。
 // 被擦除的祖先作用域条目记入 removed_sigs，子树退出后恢复
 // （兄弟路径不经过本块的写操作，恢复是安全的）。
 void invalidateLoads(Instruction *modInst, GvnState &st,
@@ -103,6 +103,24 @@ void invalidateLoads(Instruction *modInst, GvnState &st,
             ++si;
         }
     }
+}
+
+bool isPureCall(Function *callee, const BasicAliasAnalysis &BAA) {
+    return callee &&
+           !callee->is_declaration() &&
+           (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee));
+}
+
+bool isReadOnlyCall(Function *callee, const BasicAliasAnalysis &BAA) {
+    if (!callee || callee->is_declaration())
+        return false;
+    if (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee))
+        return false;
+    if (callee->hasSemFlag(SemFlag::FnReadOnly))
+        return true;
+
+    ModRefInfo mr = BAA.getFunctionModRef(callee);
+    return isRefSet(mr) && !isModSet(mr);
 }
 
 void gvnDfs(BasicBlock *bb,
@@ -191,9 +209,9 @@ void gvnDfs(BasicBlock *bb,
             auto *call = static_cast<CallInst*>(inst);
             auto *callee =
                 dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
-            if (callee && !callee->is_declaration() && st.BAA->isPure(callee)) {
+            if (isPureCall(callee, *st.BAA)) {
                 tryCSE(inst, compute_signature(inst, kEmptyVnMap));
-            } else {
+            } else if (!isReadOnlyCall(callee, *st.BAA)) {
                 invalidateLoads(inst, st, removed_sigs);
             }
             continue;

@@ -10,60 +10,34 @@
 using namespace std;
 
 void InlineExpand::execute(Module *module) {
-    struct WorkItem {
-        CallInst *call;
-        int recursiveBudget;
-    };
+    recursiveCache_.clear();
 
-    vector<WorkItem> worklist;
+    vector<CallInst *> worklist;
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
         for (auto bb : func->basic_blocks_) {
             for (auto inst : bb->instr_list_) {
                 if (auto *call = dynamic_cast<CallInst*>(inst))
-                    worklist.push_back({call, 0});
+                    worklist.push_back(call);
             }
         }
     }
 
     while (!worklist.empty()) {
-        WorkItem item = worklist.back();
+        CallInst *call = worklist.back();
         worklist.pop_back();
-        CallInst *call = item.call;
 
         if (!call->parent_) continue;
 
         Function *caller = call->parent_->parent_;
         Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
-        if (!callee || !canInline(call, callee, caller, item.recursiveBudget))
+        if (!callee || !canInline(call, callee, caller))
             continue;
 
-        bool recursive = isSelfRecursive(callee);
-        int selfCallBudget = 0;
-        if (recursive) {
-            int weightedCost = estimateInlineCost(callee);
-            bool callInLoop = isCallInLoop(call);
-            int foldBenefit = estimateConstantFoldBenefit(call, callee);
-            selfCallBudget = item.recursiveBudget > 0
-                                 ? item.recursiveBudget
-                                 : estimateRecursiveInlineBudget(weightedCost,
-                                                                 callInLoop,
-                                                                 foldBenefit);
-            selfCallBudget -= weightedCost;
-        }
-
         vector<CallInst*> newCalls = performInline(call);
-        for (auto *nc : newCalls) {
-            if (!nc->parent_)
-                continue;
-            Function *newCallee = dynamic_cast<Function*>(nc->get_operand(nc->num_ops_ - 1));
-            if (newCallee == callee && recursive) {
-                if (selfCallBudget > 0)
-                    worklist.push_back({nc, selfCallBudget});
-                continue;
-            }
-            worklist.push_back({nc, 0});
-        }
+        for (auto *nc : newCalls)
+            if (nc->parent_)
+                worklist.push_back(nc);
     }
 }
 
@@ -115,6 +89,7 @@ int InlineExpand::weighInstruction(Instruction *inst) {
             auto *callee = dynamic_cast<Function*>(
                 inst->get_operand(inst->num_ops_ - 1));
             if (callee && !callee->is_declaration() &&
+                !isRecursive(callee) &&
                 countInstructions(callee) <= INLINE_ALWAYS_THRESHOLD) {
                 int w = 0;
                 for (auto bb : callee->basic_blocks_)
@@ -140,28 +115,40 @@ int InlineExpand::estimateInlineCost(Function *func) {
     return cost;
 }
 
-bool InlineExpand::isSelfRecursive(Function *func) {
-    for (auto bb : func->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
-            if (auto *call = dynamic_cast<CallInst*>(inst)) {
-                if (call->get_operand(call->num_ops_ - 1) == func)
-                    return true;
-            }
+bool InlineExpand::reaches(Function *from, Function *target,
+                           unordered_set<Function *> &visited) {
+    if (!from || !visited.insert(from).second)
+        return false;
+
+    for (auto *bb : from->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            auto *call = dynamic_cast<CallInst *>(inst);
+            if (!call)
+                continue;
+
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || callee->is_declaration())
+                continue;
+            if (callee == target)
+                return true;
+            if (reaches(callee, target, visited))
+                return true;
         }
     }
+
     return false;
 }
 
-bool InlineExpand::hasNonSelfCalls(Function *func) {
-    for (auto bb : func->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
-            if (auto *call = dynamic_cast<CallInst*>(inst)) {
-                if (call->get_operand(call->num_ops_ - 1) != func)
-                    return true;
-            }
-        }
-    }
-    return false;
+bool InlineExpand::isRecursive(Function *func) {
+    auto cached = recursiveCache_.find(func);
+    if (cached != recursiveCache_.end())
+        return cached->second;
+
+    unordered_set<Function *> visited;
+    bool recursive = reaches(func, func, visited);
+    recursiveCache_[func] = recursive;
+    return recursive;
 }
 
 int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) {
@@ -293,41 +280,18 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
     return foldBenefit;
 }
 
-int InlineExpand::estimateRecursiveInlineBudget(int weightedCost,
-                                                bool callInLoop,
-                                                int foldBenefit) {
-    int savedOverhead = CALL_OVERHEAD;
-    if (callInLoop)
-        savedOverhead *= LOOP_MULTIPLIER;
-
-    int benefit = savedOverhead + foldBenefit;
-    if (!callInLoop && foldBenefit == 0)
-        return 0;
-    if (weightedCost > INLINE_RECURSIVE_HOT_COST && benefit <= weightedCost)
-        return 0;
-
-    int budget = benefit;
-    if (callInLoop)
-        budget *= LOOP_MULTIPLIER;
-    budget += foldBenefit;
-
-    return std::min(budget, INLINE_COST_BUDGET);
-}
-
-bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
-                             int recursiveBudget) {
+bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller) {
     if (callee->is_declaration() || callee == caller)
         return false;
 
     unsigned raw = countInstructions(callee);
-    bool recursive = isSelfRecursive(callee);
-
-    if (!recursive && raw > INLINE_THRESHOLD)
-        return false;
-    if (recursive && raw > INLINE_RECURSIVE_THRESHOLD)
+    if (isRecursive(callee))
         return false;
 
-    if (!recursive && raw <= INLINE_ALWAYS_THRESHOLD)
+    if (raw > INLINE_THRESHOLD)
+        return false;
+
+    if (raw <= INLINE_ALWAYS_THRESHOLD)
         return true;
 
     unsigned sites = countCallSites(callee, caller->parent_);
@@ -339,16 +303,6 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
     if (callInLoop)
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
-
-    if (recursive) {
-        if (hasNonSelfCalls(callee))
-            return false;
-        if (recursiveBudget > 0)
-            return weightedCost <= recursiveBudget;
-        int budget = estimateRecursiveInlineBudget(weightedCost, callInLoop,
-                                                   foldBenefit);
-        return weightedCost <= budget;
-    }
 
     if (sites == 1)
         return true;
