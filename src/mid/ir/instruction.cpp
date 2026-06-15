@@ -355,6 +355,8 @@ std::string LoadInst::print() {
     instr_ir += ",";
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), true);
+    if (this->hasSemFlag(SemFlag::ImmutableLoad))
+        instr_ir += "  ; immutable";
     return instr_ir;
 }
 
@@ -367,6 +369,11 @@ std::string AllocaInst::print() {
     instr_ir += instr_id2string_[this->op_id_];
     instr_ir += " ";
     instr_ir += alloca_ty_->print();
+    if (this->hasSemFlag(SemFlag::ImmutableObject)) {
+        instr_ir += "  ; immutable";
+        if (this->hasSemFlag(SemFlag::SrcConstArray))
+            instr_ir += " const-array";
+    }
     return instr_ir;
 }
 

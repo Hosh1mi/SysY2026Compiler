@@ -16,6 +16,21 @@ Function::~Function() {}
 std::string Function::print() {
     set_instr_name();  // 先统一命名，保证输出一致
     std::string func_ir;
+
+    // 语义属性以前置注释行输出（保持 define/参数表本身合法、可见即可 round-trip）
+    {
+        std::string sem;
+        if (this->hasSemFlag(SemFlag::FnPure)) sem += " pure";
+        else if (this->hasSemFlag(SemFlag::FnReadOnly)) sem += " readonly";
+        for (auto *arg : this->arguments_) {
+            std::string a;
+            if (arg->hasSemFlag(SemFlag::ArgReadOnly)) a += " readonly";
+            if (arg->hasSemFlag(SemFlag::ArgNoCapture)) a += " nocapture";
+            if (!a.empty()) sem += "; %" + arg->name_ + ":" + a;
+        }
+        if (!sem.empty()) func_ir += "; sem:" + sem + "\n";
+    }
+
     if (this->is_declaration())
         func_ir += "declare ";
     else

@@ -118,12 +118,14 @@ void GenIR::visit(DefAST &ast) {
             if (ast.initVal == nullptr || ast.initVal->initValList.empty()) {
                 auto init = new ConstantZero(arrayTys[0]);
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
+                if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
                 scope.push(varName, var);
             } else {
                 useConst = true; //全局数组量的初始值必为常量
                 auto init = globalInit(dimensions, arrayTys, 0, ast.initVal->initValList);
                 useConst = false;
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
+                if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
                 scope.push(varName, var);
             }
         }
@@ -175,6 +177,9 @@ void GenIR::visit(DefAST &ast) {
         }
         auto arrayAlloc = builder->create_alloca(arrayTy);
         arrayAlloc->name_ = varName;
+        // 源级 const 数组：内容初始化后不再改写，打上不变性标记供后续优化消费。
+        if (isConst)
+            arrayAlloc->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
         scope.push(varName, arrayAlloc);
         if (ast.initVal == nullptr) { //无初始化
             if (isConst) cout << "no initVal when define const!" << endl;   //无初始化局部常量报错

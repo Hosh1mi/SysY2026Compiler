@@ -60,8 +60,11 @@ ExprSignature makeLoadSig(Instruction *load, uint64_t gen) {
     sig.op_id = Instruction::Load;
     sig.ty = load->type_;
     sig.extra_op = 0;
+    // 不变内存（ImmutableLoad）的读与内存状态无关，固定 gen=0，
+    // 使同一地址的读跨汇合/回边也能 CSE。
+    uint64_t g = load->hasSemFlag(SemFlag::ImmutableLoad) ? 0 : gen;
     sig.ops = {get_canonical_constant(load->get_operand(0)),
-               reinterpret_cast<Value*>(static_cast<uintptr_t>(gen))};
+               reinterpret_cast<Value*>(static_cast<uintptr_t>(g))};
     return sig;
 }
 
@@ -92,6 +95,7 @@ void invalidateLoads(Instruction *modInst, GvnState &st,
                      std::vector<std::pair<ExprSignature, Value*>> &removed_sigs) {
     for (auto si = st.expr_map.begin(); si != st.expr_map.end();) {
         if (si->first.op_id == Instruction::Load &&
+            !static_cast<Instruction*>(si->second)->hasSemFlag(SemFlag::ImmutableLoad) &&
             isModSet(st.BAA->getModRefInfo(modInst, si->first.ops[0]))) {
             removed_sigs.push_back({si->first, si->second});
             si = st.expr_map.erase(si);

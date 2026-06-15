@@ -2,7 +2,9 @@
 // IR 值基类：所有 IR 实体（常量、指令、基本块、函数等）的基类，维护 use-def 链
 
 #include "type.hpp"
+#include "semFlags.hpp"
 
+#include <cstdint>
 #include <list>
 #include <string>
 
@@ -46,9 +48,16 @@ public:
 
     // 将所有使用 this 的地方替换为 new_val
     void replace_all_use_with(Value* new_val);
+
+    // 语义标记（见 SemFlag）：源级/分析事实，随 IR 对象持久并在 print() 中输出
+    void setSemFlag(SemFlag f)   { sem_flags_ |=  static_cast<uint32_t>(f); }
+    void clearSemFlag(SemFlag f) { sem_flags_ &= ~static_cast<uint32_t>(f); }
+    bool hasSemFlag(SemFlag f) const { return (sem_flags_ & static_cast<uint32_t>(f)) != 0; }
+
     Type* type_;
     std::string name_;
     std::list<Use> use_list_;  // 所有引用该 Value 的 Use 集合
+    uint32_t sem_flags_ = 0;   // 语义标记位集合，见 SemFlag
 };
 
 // 将 Value 按操作数格式打印（带 @ 或 % 前缀）

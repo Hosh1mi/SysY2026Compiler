@@ -58,6 +58,9 @@ public:
     bool mayHaveSideEffect(Function *func) const;
     bool isLocalArrayPointer(Value *ptr) const;
 
+    // 解析指针的底层内存对象（穿透 bitcast / GEP 链），返回 alloca / global / argument 等。
+    Value *getUnderlyingObject(Value *ptr) const;
+
 private:
     struct PointerInfo {
         Value *base = nullptr;

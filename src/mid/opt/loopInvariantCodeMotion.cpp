@@ -151,6 +151,10 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
     }
 
     if (inst->is_load()) {
+        // 不变内存（const 全局/不逃逸局部 const 数组）的读：内容永不改写，
+        // 可越过循环内别名歧义直接外提，无需逐指令扫描 clobber。
+        if (inst->hasSemFlag(SemFlag::ImmutableLoad))
+            return true;
         Value *ptr = inst->get_operand(0);
         for (auto *bb : loop.blocks) {
             for (auto *other : bb->instr_list_) {

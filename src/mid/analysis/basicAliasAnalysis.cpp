@@ -339,3 +339,8 @@ bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
     auto *alloca = dynamic_cast<AllocaInst *>(info.base);
     return alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID;
 }
+
+Value *BasicAliasAnalysis::getUnderlyingObject(Value *ptr) const {
+    if (!ptr) return nullptr;
+    return getPointerInfo(ptr).base;
+}

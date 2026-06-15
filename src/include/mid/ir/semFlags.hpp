@@ -1,0 +1,27 @@
+#pragma once
+// IR 语义标记（semantic markers）：把源级语义（如 const 不变性）与分析证明的事实
+// （函数纯度、参数只读）持久承载在 Value 上，并在文本 IR 中打印，供后续优化
+// （LICM / GVN 等）直接消费，避免各 pass 反复重建相同结论。
+//
+// 统一用一个 uint32_t 位集合承载（见 Value::sem_flags_），新增一类标记 = 新增一个
+// 位 + 一处打印分支，避免给各子类逐个加 bool 的补丁式扩散。
+
+#include <cstdint>
+
+enum class SemFlag : uint32_t {
+    None            = 0,
+    // (1) const 内存不变性
+    ImmutableObject = 1u << 0,  // AllocaInst / GlobalVariable：初始化后内容永不被改写
+    ImmutableLoad   = 1u << 1,  // LoadInst：读取 immutable 对象，且处于其初始化区之后
+    // (2) 函数 / 参数属性（由 BasicAliasAnalysis 证明后持久化）
+    FnPure          = 1u << 2,  // Function：无副作用（既不写内存也无可观察读）
+    FnReadOnly      = 1u << 3,  // Function：可能读内存，但从不写
+    ArgReadOnly     = 1u << 4,  // Argument：callee 从不经此指针写
+    ArgNoCapture    = 1u << 5,  // Argument：指针不逃逸出 callee（暂保留，未启用）
+    // (3) 源级结构信息
+    SrcConstArray   = 1u << 6,  // AllocaInst：来自源级 `const` 数组声明
+};
+
+inline SemFlag operator|(SemFlag a, SemFlag b) {
+    return static_cast<SemFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}

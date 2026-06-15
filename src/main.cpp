@@ -34,6 +34,7 @@
 #include "include/mid/opt/globalScalarPromotion.hpp"
 #include "include/mid/opt/gvn.hpp"
 #include "include/mid/opt/lateValueCleanup.hpp"
+#include "include/mid/opt/semanticMarkerStamp.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -215,6 +216,9 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addSsaPreparation(pm);
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
+    // 在 inline / mem2reg 之后、循环管线之前一次性戳语义标记：
+    // 此时函数纯度终态稳定、可提升标量已消失，LICM/GVN 随后即可消费不变性标记。
+    pm.addPass(std::make_unique<SemanticMarkerStamp>());
     addLoopPipeline(pm);
     pm.addPass(std::make_unique<GVN>());
     addCanonicalCleanup(pm);
