@@ -41,6 +41,8 @@ private:
         PackedOperand  lhs;
         PackedOperand  rhs;
         int            scalarStep;     // scalar elements consumed per original iter
+        bool           isAdd = false;  // true: acc += ...（求和/点积）; false: acc -= lhs*rhs（乘-减链）
+        bool           noMul = false;  // true: 每 lane 值 = lhs（求和）; false: lhs*rhs（点积/乘-减）
     };
 
     // ── Memory access description ──────────────────────────────────────

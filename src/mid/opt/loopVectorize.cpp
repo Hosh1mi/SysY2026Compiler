@@ -342,17 +342,46 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     if (accPhi->type_->tid_ != Type::IntegerTyID)
         return false;
 
+    // 归约链识别。支持三类（整型，mod 2^32 下加/减结合且交换，
+    // 4-lane 部分和 + 退出处水平相加与顺序累加结果完全一致——安全）：
+    //   acc = acc - (a*b) - (a*b) ...   乘-减链（原有，stride 可 >1）
+    //   acc = acc + (a*b)               点积（stride==1）
+    //   acc = acc + load                求和（stride==1）
+    auto *topBin = dynamic_cast<BinaryInst*>(accLatch);
+    if (!topBin || !(topBin->is_add() || topBin->is_sub()))
+        return reject("reduction-not-add-or-sub");
+    bool isAdd = topBin->is_add();
+    bool noMul = false;
+
     std::vector<std::pair<Value*, Value*>> mulInputsRev;
     Value *cursor = accLatch;
     while (cursor != accPhi) {
-        auto *sub = dynamic_cast<BinaryInst*>(cursor);
-        if (!sub || !sub->is_sub())
-            return reject("reduction-not-sub");
-        auto *mul = dynamic_cast<BinaryInst*>(sub->get_operand(1));
-        if (!mul || !mul->is_mul() || mul->type_->tid_ != Type::IntegerTyID)
-            return reject("reduction-not-mul");
-        mulInputsRev.push_back({mul->get_operand(0), mul->get_operand(1)});
-        cursor = sub->get_operand(0);
+        auto *bin = dynamic_cast<BinaryInst*>(cursor);
+        if (!bin || (isAdd ? !bin->is_add() : !bin->is_sub()))
+            return reject("reduction-chain-op");
+
+        Value *recur, *newVal;
+        if (isAdd) {
+            // 加法可交换：递归项是直接等于 accPhi 的一侧（仅支持单步 add ⇒ stride==1）
+            if (bin->get_operand(0) == accPhi) { recur = bin->get_operand(0); newVal = bin->get_operand(1); }
+            else if (bin->get_operand(1) == accPhi) { recur = bin->get_operand(1); newVal = bin->get_operand(0); }
+            else return reject("reduction-add-recurrence");
+        } else {
+            recur = bin->get_operand(0);   // a - b：递归项是 a，被减项是 b
+            newVal = bin->get_operand(1);
+        }
+
+        auto *mul = dynamic_cast<BinaryInst*>(newVal);
+        if (mul && mul->is_mul() && mul->type_->tid_ == Type::IntegerTyID) {
+            if (noMul) return reject("reduction-mixed-kind");
+            mulInputsRev.push_back({mul->get_operand(0), mul->get_operand(1)});
+        } else {
+            if (!isAdd) return reject("reduction-not-mul");       // 减法链仍只接受乘积
+            if (!mulInputsRev.empty()) return reject("reduction-mixed-kind");
+            noMul = true;
+            mulInputsRev.push_back({newVal, nullptr});            // 求和：单操作数
+        }
+        cursor = recur;
         if (mulInputsRev.size() > static_cast<size_t>(VECTORIZE_FACTOR))
             return reject("reduction-too-wide");
     }
@@ -504,12 +533,26 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     PackedOperand lhs, rhs;
     if (!classifyOperand(0, lhs))
         return reject("lhs-classify");
-    if (!classifyOperand(1, rhs))
+    if (noMul) {
+        // 求和无第二操作数：给 rhs 一个惰性占位（INVARIANT/source=null），发射端不使用
+        rhs.kind = PackedOperand::INVARIANT;
+        rhs.scalarTy = lhs.scalarTy;
+        rhs.source = nullptr;
+        rhs.laneStride = 0;
+    } else if (!classifyOperand(1, rhs)) {
         return reject("rhs-classify");
+    }
     if (lhs.scalarTy->tid_ != Type::IntegerTyID || rhs.scalarTy->tid_ != Type::IntegerTyID)
         return reject("non-i32");
     if (lhs.kind == PackedOperand::GATHER && rhs.kind == PackedOperand::GATHER)
         return reject("two-gathers");
+    // 求和（acc += a[i]）与 acc -= a[i]*b[i] 已验证正确；但 acc += a[i]*b[i]
+    // 两路非不变载入的点积当前发射有误，暂不接受（退回标量，结果仍正确）。
+    // a[i]*const（一路不变）已验证正确，仍允许。
+    if (isAdd && !noMul &&
+        lhs.kind != PackedOperand::INVARIANT &&
+        rhs.kind != PackedOperand::INVARIANT)
+        return reject("add-dot-two-loads-unsupported");
     size_t usedPointerPhis = 0;
     if (dynamic_cast<PhiInst*>(lhs.source)) usedPointerPhis++;
     if (dynamic_cast<PhiInst*>(rhs.source) && rhs.source != lhs.source) usedPointerPhis++;
@@ -542,6 +585,8 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     group.lhs = lhs;
     group.rhs = rhs;
     group.scalarStep = iv.stride;
+    group.isAdd = isAdd;
+    group.noMul = noMul;
     return true;
 }
 
@@ -1234,14 +1279,22 @@ void LoopVectorize::emitReductionVectorizedLoop(
     };
 
     Value *lhsVec = emitPackedOperand(group.lhs);
-    Value *rhsVec = emitPackedOperand(group.rhs);
-    if (!lhsVec || !rhsVec) return;
+    if (!lhsVec) return;
+    Value *perLaneVec;
+    if (group.noMul) {
+        perLaneVec = lhsVec;                       // 求和：每 lane 即载入值，无乘法
+    } else {
+        Value *rhsVec = emitPackedOperand(group.rhs);
+        if (!rhsVec) return;
+        perLaneVec = new BinaryInst(vecTy, Instruction::Mul, lhsVec, rhsVec, vecBody);
+    }
     if (debugReduction)
         std::cerr << "[LoopVectorize:reduction] emit-operands header="
                   << origHeader->name_ << "\n";
 
-    auto *vecMul = new BinaryInst(vecTy, Instruction::Mul, lhsVec, rhsVec, vecBody);
-    auto *vecAccNext = new BinaryInst(vecTy, Instruction::Sub, vecAccPhi, vecMul, vecBody);
+    auto *vecAccNext = new BinaryInst(
+        vecTy, group.isAdd ? Instruction::Add : Instruction::Sub,
+        vecAccPhi, perLaneVec, vecBody);
     vecAccPhi->addIncoming(vecAccNext, vecBody);
 
     auto *vecStep = new ConstantInt(module->int32_ty_, vecWidth);
