@@ -432,9 +432,8 @@ void Arm64FuncContext::emitPrologue() {
                     if (dst == src) {
                         // Pre-colored to incoming register — no spill needed
                     } else {
-                        // 预留栈槽备打破拷贝环用；不在此急切 spill：
-                        // 无环时下面用 mov 解决，该 spill 将成死存储。
                         int slot = getSlot(arg);
+                        emitStoreRegMachine(src, slot);
                         argMoves.push_back({dst, src, slot, true});
                     }
                 } else {
@@ -469,8 +468,8 @@ void Arm64FuncContext::emitPrologue() {
                     if (dst == reg) {
                         // Pre-colored to incoming register — no spill needed
                     } else {
-                        // 预留栈槽备打破拷贝环用；不在此急切 spill（见上）。
                         int slot = getSlot(arg);
+                        emitStoreRegMachine(reg, slot);
                         argMoves.push_back({dst, reg, slot, false});
                     }
                 } else {
