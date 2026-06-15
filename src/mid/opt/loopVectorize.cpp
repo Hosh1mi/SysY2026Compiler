@@ -546,13 +546,13 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         return reject("non-i32");
     if (lhs.kind == PackedOperand::GATHER && rhs.kind == PackedOperand::GATHER)
         return reject("two-gathers");
-    // 求和（acc += a[i]）与 acc -= a[i]*b[i] 已验证正确；但 acc += a[i]*b[i]
-    // 两路非不变载入的点积当前发射有误，暂不接受（退回标量，结果仍正确）。
-    // a[i]*const（一路不变）已验证正确，仍允许。
+    // 两路非不变载入的点积（acc += a[i]*b[i]）暂不向量化：后端向量 mla 的
+    // 取址有 loadAddr 缓存 bug（两路 ld1 撞同一暂存寄存器，算成 b*b）。
+    // 待后端修好该缓存问题后再放开。求和与 a[i]*const 不受影响。
     if (isAdd && !noMul &&
         lhs.kind != PackedOperand::INVARIANT &&
         rhs.kind != PackedOperand::INVARIANT)
-        return reject("add-dot-two-loads-unsupported");
+        return reject("add-dot-two-loads-deferred");
     size_t usedPointerPhis = 0;
     if (dynamic_cast<PhiInst*>(lhs.source)) usedPointerPhis++;
     if (dynamic_cast<PhiInst*>(rhs.source) && rhs.source != lhs.source) usedPointerPhis++;
@@ -568,6 +568,37 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
                 inst->is_sub() || inst->is_add() || inst->is_cmp())
                 continue;
             return reject("unsupported-inst");
+        }
+    }
+
+    // ── 盈利性成本模型 ────────────────────────────────────────────────
+    // 与 trip 无关的结构性判定：一次向量迭代的代价 vs 它替代的 VF 次标量迭代。
+    //   连续载入  = 1   （单条向量 load）
+    //   聚集 gather = 2*VF（A53 无原生 gather：退化成 VF 次标量 load + VF 次打包插入）
+    //   不变量    = 0   （splat 提升到 preheader，循环内零成本）
+    // 这样：纯 gather 求和（无计算可摊销）被拒；gather×连续 的点积（有乘法/累加
+    // 摊销，如 h-5）保留；连续访问一律保留。只有结构上确实不划算的才退回标量。
+    {
+        auto loadCost = [&](PackedOperand::Kind k) -> int {
+            if (k == PackedOperand::GATHER) return 2 * VECTORIZE_FACTOR;
+            if (k == PackedOperand::INVARIANT) return 0;
+            return 1;  // CONTIGUOUS
+        };
+        int vecIterCost = loadCost(lhs.kind) + (noMul ? 0 : loadCost(rhs.kind))
+                        + (noMul ? 1 : 2);  // 累加(+ 乘法)
+        int scalarLoads = (lhs.kind != PackedOperand::INVARIANT ? 1 : 0)
+                        + ((!noMul && rhs.kind != PackedOperand::INVARIANT) ? 1 : 0);
+        int scalarEquiv = VECTORIZE_FACTOR * (scalarLoads + (noMul ? 1 : 2));
+        if (vecIterCost >= scalarEquiv)
+            return reject("not-profitable");
+
+        // 常量上界且 trip 太小：向量序言 + 水平归约 + 标量余数 的固定开销不值。
+        Value *bnd = (cmpInst->get_operand(0) == iv.phi)
+                         ? cmpInst->get_operand(1) : cmpInst->get_operand(0);
+        if (auto *cb = dynamic_cast<ConstantInt*>(bnd)) {
+            long long trip = (long long)cb->value_ / (iv.stride > 0 ? iv.stride : 1);
+            if (trip < 2 * VECTORIZE_FACTOR)
+                return reject("trip-too-small");
         }
     }
 
