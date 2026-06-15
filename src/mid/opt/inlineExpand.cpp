@@ -15,8 +15,6 @@ void InlineExpand::execute(Module *module) {
         int recursiveBudget;
     };
 
-    recursiveCache_.clear();
-
     vector<WorkItem> worklist;
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
@@ -58,13 +56,13 @@ void InlineExpand::execute(Module *module) {
         for (auto *nc : newCalls) {
             if (!nc->parent_)
                 continue;
-            Function *newCallee = dynamic_cast<Function*>(
-                nc->get_operand(nc->num_ops_ - 1));
-            if (recursive && newCallee == callee && selfCallBudget > 0) {
-                worklist.push_back({nc, selfCallBudget});
-            } else {
-                worklist.push_back({nc, 0});
+            Function *newCallee = dynamic_cast<Function*>(nc->get_operand(nc->num_ops_ - 1));
+            if (newCallee == callee && recursive) {
+                if (selfCallBudget > 0)
+                    worklist.push_back({nc, selfCallBudget});
+                continue;
             }
+            worklist.push_back({nc, 0});
         }
     }
 }
@@ -117,7 +115,6 @@ int InlineExpand::weighInstruction(Instruction *inst) {
             auto *callee = dynamic_cast<Function*>(
                 inst->get_operand(inst->num_ops_ - 1));
             if (callee && !callee->is_declaration() &&
-                !isRecursive(callee) &&
                 countInstructions(callee) <= INLINE_ALWAYS_THRESHOLD) {
                 int w = 0;
                 for (auto bb : callee->basic_blocks_)
@@ -141,42 +138,6 @@ int InlineExpand::estimateInlineCost(Function *func) {
         for (auto inst : bb->instr_list_)
             cost += weighInstruction(inst);
     return cost;
-}
-
-bool InlineExpand::reaches(Function *from, Function *target,
-                           unordered_set<Function *> &visited) {
-    if (!from || !visited.insert(from).second)
-        return false;
-
-    for (auto *bb : from->basic_blocks_) {
-        for (auto *inst : bb->instr_list_) {
-            auto *call = dynamic_cast<CallInst *>(inst);
-            if (!call)
-                continue;
-
-            auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
-            if (!callee || callee->is_declaration())
-                continue;
-            if (callee == target)
-                return true;
-            if (reaches(callee, target, visited))
-                return true;
-        }
-    }
-
-    return false;
-}
-
-bool InlineExpand::isRecursive(Function *func) {
-    auto cached = recursiveCache_.find(func);
-    if (cached != recursiveCache_.end())
-        return cached->second;
-
-    unordered_set<Function *> visited;
-    bool recursive = reaches(func, func, visited);
-    recursiveCache_[func] = recursive;
-    return recursive;
 }
 
 bool InlineExpand::isSelfRecursive(Function *func) {
@@ -359,18 +320,14 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
         return false;
 
     unsigned raw = countInstructions(callee);
-    bool selfRecursive = isSelfRecursive(callee);
-    bool recursiveScc = isRecursive(callee);
+    bool recursive = isSelfRecursive(callee);
 
-    if (recursiveScc && !selfRecursive)
+    if (!recursive && raw > INLINE_THRESHOLD)
+        return false;
+    if (recursive && raw > INLINE_RECURSIVE_THRESHOLD)
         return false;
 
-    if (!selfRecursive && raw > INLINE_THRESHOLD)
-        return false;
-    if (selfRecursive && raw > INLINE_RECURSIVE_THRESHOLD)
-        return false;
-
-    if (!selfRecursive && raw <= INLINE_ALWAYS_THRESHOLD)
+    if (!recursive && raw <= INLINE_ALWAYS_THRESHOLD)
         return true;
 
     unsigned sites = countCallSites(callee, caller->parent_);
@@ -383,10 +340,7 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
 
-    if (selfRecursive) {
-        // Keep recursive helpers out of loops to avoid reopening fft-style CFG bloat.
-        if (callInLoop)
-            return false;
+    if (recursive) {
         if (hasNonSelfCalls(callee))
             return false;
         if (recursiveBudget > 0)
