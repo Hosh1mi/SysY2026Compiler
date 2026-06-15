@@ -178,6 +178,13 @@ public:
         set_operand(0, v1);
         set_operand(1, v2);
     }
+    // no-insert constructor (caller uses add_instruction_before_inst)
+    FCmpInst(FCmpOp op, Value* v1, Value* v2, BasicBlock* bb, bool)
+        : Instruction(bb->parent_->parent_->int1_ty_, Instruction::FCmp, 2), fcmp_op_(op) {
+        set_operand(0, v1);
+        set_operand(1, v2);
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
     FCmpOp fcmp_op_;
 };

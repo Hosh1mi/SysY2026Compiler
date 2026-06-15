@@ -414,17 +414,18 @@ void Arm64FuncContext::emitPrologue() {
                        !dynamic_cast<Constant*>(inst) &&
                        !inst->is_store() && !inst->is_br() && !inst->is_ret() &&
                        !hasAssignedReg(inst)) {
-                // Skip ICmp whose only user is a Select —
-                // the Select emits its own cmp, the ICmp is never stored.
-                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                // Skip compare whose only user is a Select —
+                // the Select emits its own cmp/fcmp, the compare is never stored.
+                if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+                    inst->use_list_.size() == 1) {
                     auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
                     if (user) continue;
                 }
                 // Skip Select whose only user is a Ret —
-                // the csel writes directly to w0, no stack slot needed.
+                // csel/fcsel writes directly to the return register, no stack slot needed.
                 if (inst->op_id_ == Instruction::Select &&
                     inst->use_list_.size() == 1 &&
-                    !isFloat(inst->type_)) {
+                    (isInt(inst->type_) || isPtr(inst->type_) || isFloat(inst->type_))) {
                     auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
                     if (user) continue;
                 }
