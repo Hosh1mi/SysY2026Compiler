@@ -1,4 +1,4 @@
-#include "../../include/mid/opt/loopIRCE.hpp"
+#include "../../include/mid/opt/inductiveRangeCheckElimination.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <unordered_set>
 
@@ -927,14 +927,14 @@ bool tryTightenMonotoneGuardLoop(Loop &loop, Module *module) {
 
 } // namespace
 
-void LoopIRCE::execute(Module *module) {
+void inductiveRangeCheckElimination::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
             runOnFunction(func);
     }
 }
 
-PreservedAnalyses LoopIRCE::execute(Module *module, AnalysisManager &AM) {
+PreservedAnalyses inductiveRangeCheckElimination::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -944,7 +944,7 @@ PreservedAnalyses LoopIRCE::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-bool LoopIRCE::runOnFunction(Function *func) {
+bool inductiveRangeCheckElimination::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty())
         return false;
 
@@ -966,7 +966,7 @@ bool LoopIRCE::runOnFunction(Function *func) {
     return changed;
 }
 
-bool LoopIRCE::tryTightenLoop(Loop &loop, Module *module) {
+bool inductiveRangeCheckElimination::tryTightenLoop(Loop &loop, Module *module) {
     BasicBlock *preheader = loop.preheader;
     BasicBlock *header = loop.header;
     BasicBlock *latch = loop.singleLatch();

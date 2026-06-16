@@ -19,7 +19,7 @@
 #include "include/mid/opt/lcssa.hpp"
 #include "include/mid/opt/simpleLoopUnswitch.hpp"
 #include "include/mid/opt/loopRotate.hpp"
-#include "include/mid/opt/loopIRCE.hpp"
+#include "include/mid/opt/inductiveRangeCheckElimination.hpp"
 #include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "include/mid/opt/loopDeletion.hpp"
@@ -204,8 +204,8 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<SimpleLoopUnswitch>());
     pm.addPass(std::make_unique<LoopRotate>());
     pm.addPass(std::make_unique<PhiOpSink>());
+    pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
     pm.addPass(std::make_unique<LICM>());
-    pm.addPass(std::make_unique<LoopIRCE>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
