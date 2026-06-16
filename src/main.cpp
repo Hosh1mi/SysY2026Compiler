@@ -36,6 +36,7 @@
 #include "include/mid/opt/lateValueCleanup.hpp"
 #include "include/mid/opt/semanticMarkerStamp.hpp"
 #include "include/mid/opt/codeSink.hpp"
+#include "include/mid/opt/tailDuplication.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -232,6 +233,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CodeSink>());
     addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<TailDuplication>());
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCfgCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
