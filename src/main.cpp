@@ -29,6 +29,7 @@
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
+#include "include/mid/opt/triangularLoopInterchange.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
 #include "include/mid/opt/unifyExitNodes.hpp"
 #include "include/mid/opt/globalScalarPromotion.hpp"
@@ -170,6 +171,7 @@ static void addDeepCleanup(PassManager &pm) {
 }
 
 static void addSsaPreparation(PassManager &pm) {
+    pm.addPass(std::make_unique<DeadCodeDelete>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<EarlyCSE>());
@@ -218,6 +220,7 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    pm.addPass(std::make_unique<TriangularLoopInterchange>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
     addDeepCleanup(pm);
