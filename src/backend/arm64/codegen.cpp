@@ -262,14 +262,14 @@ void Arm64CodeGen::generate() {
 
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
-                    if (!no_schedule_ && enable_regalloc_) {
-                        MachineScheduler scheduler;
-                        scheduler.schedule(machineFunc);
-                    }
                     if (!no_peephole_) {
                         machineDCE(machineFunc);
                         peepholeOptimize(machineFunc);
                         machineDCE(machineFunc);
+                    }
+                    if (!no_schedule_ && enable_regalloc_) {
+                        MachineScheduler scheduler;
+                        scheduler.schedule(machineFunc);
                     }
                     if (dump_machine_instr_) {
                         std::cerr << dumpMachineFunction(machineFunc);
