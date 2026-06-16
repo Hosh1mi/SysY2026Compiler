@@ -5,14 +5,16 @@
 #include "pass.hpp"
 
 // LoopIRCE: 简化版迭代域裁剪。
-// 识别形如：
-//   while (j < bound) {
-//     if (outer < j) { j = j + 1; continue; }
-//     work(j);
-//     j = j + 1;
-//   }
-// 的内层循环，把上界收紧为 min(bound, outer + 1)。
-// 第一版只处理 +1 递增 IV、单一 guard、continue 直回回边的紧形态。
+// 识别单 IV、单 guard、单 latch 的紧形态循环，把显式 guard 推导成更紧的 trip
+// bound：
+//   - 递增 IV：tightenedUpper = min(origUpper, guardUpper)
+//   - 递减 IV：tightenedLower = max(origLower, guardLower)
+// 支持：
+//   - 非零初值
+//   - 步长 +1 / -1
+//   - invariant、invariant +/- const 形式的 affine guard
+//   - header 直接跳 latch 的 skip-path，或显式 continue 块
+//   - rotated +1 loop 中、body/header 内的单调 guard 链区间裁剪
 class LoopIRCE : public Pass {
 public:
     void execute(Module *module) override;
