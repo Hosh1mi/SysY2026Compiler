@@ -578,6 +578,10 @@ static bool isSafeToSpeculate(Instruction *inst) {
     return true;
 }
 
+static bool isCmpForSelect(Value *value) {
+    return dynamic_cast<ICmpInst*>(value) || dynamic_cast<FCmpInst*>(value);
+}
+
 // Return all non-phi, non-terminator instructions in b.
 static std::vector<Instruction*> getInstrs(BasicBlock *b) {
     std::vector<Instruction*> v;
@@ -590,7 +594,7 @@ static std::vector<Instruction*> getInstrs(BasicBlock *b) {
 }
 
 // Clone inst into newBB with operand remapping via vm.
-// Supports BinaryInst, ICmpInst, SelectInst; returns nullptr otherwise.
+// Supports BinaryInst, ICmpInst, FCmpInst, SelectInst; returns nullptr otherwise.
 static Instruction *cloneWithRemap(
     Instruction *inst, BasicBlock *newBB,
     const std::unordered_map<Value*, Value*> &vm)
@@ -605,6 +609,9 @@ static Instruction *cloneWithRemap(
     if (auto *cmp = dynamic_cast<ICmpInst*>(inst))
         return new ICmpInst(cmp->icmp_op_,
             remap(cmp->get_operand(0)), remap(cmp->get_operand(1)), newBB, true);
+    if (auto *fcmp = dynamic_cast<FCmpInst*>(inst))
+        return new FCmpInst(fcmp->fcmp_op_,
+            remap(fcmp->get_operand(0)), remap(fcmp->get_operand(1)), newBB, true);
     if (auto *sel = dynamic_cast<SelectInst*>(inst)) {
         auto *clone = new SelectInst(remap(sel->get_operand(0)),
             remap(sel->get_operand(1)), remap(sel->get_operand(2)), sel->type_);
@@ -656,11 +663,11 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         auto *term = bb->get_terminator();
         if (!term || !term->is_br() || term->num_ops_ != 3) continue;
 
-        auto *icmp = dynamic_cast<ICmpInst*>(term->get_operand(0));
-        if (!icmp || icmp->parent_ != bb) continue;
+        auto *cmp = dynamic_cast<Instruction*>(term->get_operand(0));
+        if (!cmp || !isCmpForSelect(cmp) || cmp->parent_ != bb) continue;
         auto it = std::find(bb->instr_list_.rbegin(), bb->instr_list_.rend(), term);
-        if (it == bb->instr_list_.rend() || *++it != icmp) continue;
-        if (icmp->use_list_.size() != 1) continue;
+        if (it == bb->instr_list_.rend() || *++it != cmp) continue;
+        if (cmp->use_list_.size() != 1) continue;
 
         auto *trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
         auto *falseBB = static_cast<BasicBlock*>(term->get_operand(2));
@@ -747,7 +754,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
             Value *falseVal = falseVals[pi];
             Value *trueOperand  = valMapT.count(trueVal)  ? valMapT[trueVal]  : trueVal;
             Value *falseOperand = valMapF.count(falseVal) ? valMapF[falseVal] : falseVal;
-            auto *sel = new SelectInst(icmp, trueOperand, falseOperand, trueOperand->type_);
+            auto *sel = new SelectInst(cmp, trueOperand, falseOperand, trueOperand->type_);
             bb->add_instruction_before_inst(sel, term);
             sels.push_back(sel);
         }

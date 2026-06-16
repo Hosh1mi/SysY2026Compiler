@@ -424,14 +424,15 @@ void Arm64RegAlloc::allocate() {
 
             if (canAssignRegister(inst)) {
                 bool skipForSelect = false;
-                if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+                if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+                    inst->use_list_.size() == 1) {
                     auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
                     if (user) skipForSelect = true;
                 }
                 if (!skipForSelect &&
                     inst->op_id_ == Instruction::Select &&
                     inst->use_list_.size() == 1 &&
-                    !isFloat(inst->type_)) {
+                    (isInt(inst->type_) || isPtr(inst->type_) || isFloat(inst->type_))) {
                     auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
                     if (user) skipForSelect = true;
                 }
@@ -446,7 +447,7 @@ void Arm64RegAlloc::allocate() {
                 if (canAssignRegister(val)) {
                     lastUse[val] = std::max(lastUse[val], idx);
                 }
-                // Select emits its own cmp using the ICmp's operands, so
+                // Select emits its own cmp/fcmp using the compare operands, so
                 // extend those operands' live ranges to this Select's position.
                 if (inst->op_id_ == Instruction::Select) {
                     if (auto *icmp = dynamic_cast<ICmpInst*>(val)) {
@@ -454,6 +455,13 @@ void Arm64RegAlloc::allocate() {
                             auto icmpOp = icmp->get_operand(j);
                             if (canAssignRegister(icmpOp)) {
                                 lastUse[icmpOp] = std::max(lastUse[icmpOp], idx);
+                            }
+                        }
+                    } else if (auto *fcmp = dynamic_cast<FCmpInst*>(val)) {
+                        for (unsigned j = 0; j < fcmp->num_ops_; ++j) {
+                            auto fcmpOp = fcmp->get_operand(j);
+                            if (canAssignRegister(fcmpOp)) {
+                                lastUse[fcmpOp] = std::max(lastUse[fcmpOp], idx);
                             }
                         }
                     }

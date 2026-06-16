@@ -496,8 +496,9 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             continue;
         }
 
-        // Skip ICmp if its only user is a Select (Select emits its own cmp)
-        if (inst->op_id_ == Instruction::ICmp && inst->use_list_.size() == 1) {
+        // Skip compare if its only user is a Select (Select emits its own cmp)
+        if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+            inst->use_list_.size() == 1) {
             auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
             if (user) continue; // Select will emit cmp + csel
         }
@@ -1356,47 +1357,81 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto *condVal = inst->get_operand(0);
         auto *tv = inst->get_operand(1);
         auto *fv = inst->get_operand(2);
-        auto *icmp = dynamic_cast<ICmpInst*>(condVal);
-        if (!icmp) break; // fallback: can't emit csel without flags
-
-        // Emit cmp (like fused cmp+branch, but followed by csel)
-        auto *cv1 = icmp->get_operand(0);
-        auto *cv2 = icmp->get_operand(1);
-        std::string r1 = isPtr(cv1->type_) ? loadAddr(cv1) : loadInt(cv1);
-        const char *cond = icmpCond(icmp->icmp_op_);
-        if (auto ci = dynamic_cast<ConstantInt*>(cv2)) {
-            int val = ci->value_;
-            if (val >= 0 && val <= 4095)
-                emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
-                                     MOpcode::Cmp, {}, {r1}, 1, true, false, true);
-            else { std::string r2 = allocIntReg(); emitIntConst(val, r2);
+        const char *cond = nullptr;
+        if (auto *icmp = dynamic_cast<ICmpInst*>(condVal)) {
+            auto *cv1 = icmp->get_operand(0);
+            auto *cv2 = icmp->get_operand(1);
+            std::string r1 = isPtr(cv1->type_) ? loadAddr(cv1) : loadInt(cv1);
+            cond = icmpCond(icmp->icmp_op_);
+            if (auto ci = dynamic_cast<ConstantInt*>(cv2)) {
+                int val = ci->value_;
+                if (val >= 0 && val <= 4095)
+                    emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
+                                         MOpcode::Cmp, {}, {r1}, 1, true, false, true);
+                else { std::string r2 = allocIntReg(); emitIntConst(val, r2);
+                    emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                         MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
+            } else {
+                std::string r2 = isPtr(cv2->type_) ? loadAddr(cv2) : loadInt(cv2);
                 emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
-                                     MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true); }
-        } else {
-            std::string r2 = isPtr(cv2->type_) ? loadAddr(cv2) : loadInt(cv2);
-            emitMachineInstrLine("\tcmp " + r1 + ", " + r2,
+                                     MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
+            }
+        } else if (auto *fcmp = dynamic_cast<FCmpInst*>(condVal)) {
+            auto *cv1 = fcmp->get_operand(0);
+            auto *cv2 = fcmp->get_operand(1);
+            std::string r1 = loadFloat(cv1);
+            std::string r2 = loadFloat(cv2);
+            cond = fcmpCond(fcmp->fcmp_op_);
+            emitMachineInstrLine("\tfcmp " + r1 + ", " + r2,
                                  MOpcode::Cmp, {}, {r1, r2}, 1, true, false, true);
+        } else {
+            break; // fallback: can't emit conditional select without flags
         }
 
         std::string dstReg;
-        // If this Select's only user is a Ret, write directly to w0/x0
+        // If this Select's only user is a Ret, write directly to the return reg
         // to avoid a redundant mov in the Ret emission.
         bool directRet = false;
-        if (!isFloat(inst->type_) && inst->use_list_.size() == 1) {
+        if ((isInt(inst->type_) || isPtr(inst->type_) || isFloat(inst->type_)) &&
+            inst->use_list_.size() == 1) {
             auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
             if (user) directRet = true;
         }
         if (directRet) {
-            dstReg = isPtr(inst->type_) ? "x0" : "w0";
+            dstReg = isFloat(inst->type_) ? "s0" : (isPtr(inst->type_) ? "x0" : "w0");
         } else {
-            dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+            if (isFloat(inst->type_))
+                dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
+            else if (isPtr(inst->type_))
+                dstReg = hasAssignedReg(inst) ? assignedReg(inst, true) : allocAddrReg();
+            else
+                dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
         }
-        std::string trueReg = hasAssignedReg(tv)  ? assignedReg(tv)  : loadInt(tv);
-        std::string falseReg= hasAssignedReg(fv)  ? assignedReg(fv)  : loadInt(fv);
-        emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
-                             MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
-                             false, true, true);
-        if (!directRet && !hasAssignedReg(inst)) storeInt(inst, dstReg);
+
+        auto loadSelectOperand = [&](Value *v) -> std::string {
+            if (isFloat(inst->type_))
+                return hasAssignedReg(v) ? assignedReg(v) : loadFloat(v);
+            if (isPtr(inst->type_))
+                return hasAssignedReg(v) ? assignedReg(v, true) : loadAddr(v);
+            return hasAssignedReg(v) ? assignedReg(v) : loadInt(v);
+        };
+
+        std::string trueReg = loadSelectOperand(tv);
+        std::string falseReg = loadSelectOperand(fv);
+        if (isFloat(inst->type_)) {
+            emitMachineInstrLine("\tfcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
+                                 MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
+                                 false, true, true);
+            if (!directRet && !hasAssignedReg(inst)) storeFloat(inst, dstReg);
+        } else {
+            emitMachineInstrLine("\tcsel " + dstReg + ", " + trueReg + ", " + falseReg + ", " + cond,
+                                 MOpcode::FlagUse, {dstReg}, {trueReg, falseReg}, 1,
+                                 false, true, true);
+            if (!directRet && !hasAssignedReg(inst)) {
+                if (isPtr(inst->type_)) storeAddr(inst, dstReg);
+                else storeInt(inst, dstReg);
+            }
+        }
         break;
     }
 
@@ -1691,15 +1726,15 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Ret: {
         if (inst->num_ops_ > 0) {
             auto val = inst->get_operand(0);
-            // If val is a non-float Select whose only user is this Ret,
-            // the csel already wrote the result to w0/x0 — skip the mov.
-            bool alreadyInW0 = false;
-            if (!isFloat(val->type_)) {
-                if (auto si = dynamic_cast<SelectInst*>(val)) {
-                    if (si->use_list_.size() == 1) alreadyInW0 = true;
+            // If val is a scalar Select whose only user is this Ret,
+            // select emission already wrote the result to the return register.
+            bool alreadyInReturnReg = false;
+            if (isInt(val->type_) || isPtr(val->type_) || isFloat(val->type_)) {
+                if (auto *si = dynamic_cast<SelectInst*>(val)) {
+                    if (si->use_list_.size() == 1) alreadyInReturnReg = true;
                 }
             }
-            if (!alreadyInW0) {
+            if (!alreadyInReturnReg) {
                 if (isFloat(val->type_)) {
                     std::string r = loadFloat(val);
                     emitMoveMachine("s0", r, "fmov");
@@ -1886,7 +1921,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
     
         // 执行调用
-        emitCallMachine(callee->name_);
+        emitCallMachine(callee->name_, call);
     
         // 回收栈参数空间
         if (stackBytes > 0) {
