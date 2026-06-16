@@ -5,6 +5,38 @@
 #include <string>
 #include <vector>
 
+enum class MachineRegClass {
+    None,
+    GPR32,
+    GPR64,
+    FPR32,
+    FPR64,
+    NEON128,
+};
+
+struct MachineOperand {
+    enum class Kind {
+        VReg,
+        PhysReg,
+        Imm,
+        Mem,
+        Label,
+    };
+
+    Kind kind = Kind::Imm;
+    std::string text;
+    MachineRegClass regClass = MachineRegClass::None;
+    bool isDef = false;
+
+    static MachineOperand vreg(const std::string &name, MachineRegClass rc,
+                               bool def = false);
+    static MachineOperand physReg(const std::string &name, MachineRegClass rc,
+                                  bool def = false);
+    static MachineOperand imm(const std::string &value);
+    static MachineOperand mem(const std::string &addr);
+    static MachineOperand label(const std::string &name);
+};
+
 enum class MOpcode {
     Unknown,
     Label,
@@ -31,6 +63,7 @@ struct MachineInstr {
     std::string text;
     std::string opcodeText;
     MOpcode opcode = MOpcode::Unknown;
+    std::vector<MachineOperand> operands;
 
     std::set<std::string> defs;
     std::set<std::string> uses;

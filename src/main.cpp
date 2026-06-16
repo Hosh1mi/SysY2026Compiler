@@ -60,7 +60,9 @@ struct DriverOptions {
     bool verifyIR = false;
     bool disablePeephole = false;
     bool disableSchedule = false;
+    bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
+    bool dumpPreMachineInstr = false;
 };
 
 static bool parseOptLevel(const std::string &arg, int argc, char **argv,
@@ -110,8 +112,12 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.disablePeephole = true;
         } else if (arg == "--fno-schedule") {
             options.disableSchedule = true;
+        } else if (arg == "--fno-pre-schedule") {
+            options.disablePreSchedule = true;
         } else if (arg == "--dump-machine-instr") {
             options.dumpMachineInstr = true;
+        } else if (arg == "--dump-pre-machine-instr") {
+            options.dumpPreMachineInstr = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -246,7 +252,9 @@ static void configureBackend(Arm64CodeGen &codegen, const DriverOptions &options
     codegen.setEnableRegAlloc(enableOptimizations);
     codegen.setNoPeephole(!enableOptimizations || options.disablePeephole);
     codegen.setNoSchedule(!enableOptimizations || options.disableSchedule);
+    codegen.setNoPreSchedule(!enableOptimizations || options.disablePreSchedule);
     codegen.setDumpMachineInstr(options.dumpMachineInstr);
+    codegen.setDumpPreMachineInstr(options.dumpPreMachineInstr);
 }
 
 } // namespace

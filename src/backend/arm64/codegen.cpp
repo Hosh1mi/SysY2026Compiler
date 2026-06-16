@@ -3,6 +3,7 @@
 #include "../../include/backend/arm64/context.hpp"
 #include "../../include/backend/arm64/machine.hpp"
 #include "../../include/backend/arm64/machineDCE.hpp"
+#include "../../include/backend/arm64/preRAScheduler.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
@@ -192,6 +193,10 @@ void Arm64CodeGen::generate() {
             rebuildCfgLinks(m_);
     }
     sinkCmpToBranch(m_);
+    if (enable_regalloc_ && !no_pre_schedule_) {
+        PreRAScheduler preScheduler(dump_pre_machine_instr_, &std::cerr);
+        preScheduler.run(m_);
+    }
     MachineModule module;
 
     // 1. 分类全局变量

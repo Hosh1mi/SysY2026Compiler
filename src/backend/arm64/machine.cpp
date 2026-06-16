@@ -58,6 +58,27 @@ std::string normalizeReg(std::string reg) {
     return reg;
 }
 
+MachineRegClass regClassFromName(const std::string &reg) {
+    if (reg.empty())
+        return MachineRegClass::None;
+    char kind = static_cast<char>(std::tolower(static_cast<unsigned char>(reg[0])));
+    switch (kind) {
+        case 'w':
+            return MachineRegClass::GPR32;
+        case 'x':
+            return MachineRegClass::GPR64;
+        case 's':
+            return MachineRegClass::FPR32;
+        case 'd':
+            return MachineRegClass::FPR64;
+        case 'q':
+        case 'v':
+            return MachineRegClass::NEON128;
+        default:
+            return MachineRegClass::None;
+    }
+}
+
 std::vector<std::string> extractRegs(const std::string &s) {
     static const std::regex regRe("\\b(?:[wxsdqv][0-9]+|wzr|xzr|sp)\\b");
     std::vector<std::string> regs;
@@ -243,6 +264,47 @@ bool touchesLinkOrFrameCritical(const MachineInstr &mi) {
 
 } // namespace
 
+MachineOperand MachineOperand::vreg(const std::string &name, MachineRegClass rc,
+                                    bool def) {
+    MachineOperand op;
+    op.kind = Kind::VReg;
+    op.text = name;
+    op.regClass = rc;
+    op.isDef = def;
+    return op;
+}
+
+MachineOperand MachineOperand::physReg(const std::string &name, MachineRegClass rc,
+                                       bool def) {
+    MachineOperand op;
+    op.kind = Kind::PhysReg;
+    op.text = name;
+    op.regClass = rc;
+    op.isDef = def;
+    return op;
+}
+
+MachineOperand MachineOperand::imm(const std::string &value) {
+    MachineOperand op;
+    op.kind = Kind::Imm;
+    op.text = value;
+    return op;
+}
+
+MachineOperand MachineOperand::mem(const std::string &addr) {
+    MachineOperand op;
+    op.kind = Kind::Mem;
+    op.text = addr;
+    return op;
+}
+
+MachineOperand MachineOperand::label(const std::string &name) {
+    MachineOperand op;
+    op.kind = Kind::Label;
+    op.text = name;
+    return op;
+}
+
 MachineInstr MachineInstr::raw(const std::string &line) {
     return parseMachineInstr(line, 0);
 }
@@ -263,13 +325,19 @@ MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
 
     for (const auto &reg : defs) {
         std::string normalized = normalizeReg(reg);
-        if (normalized != "zr")
+        if (normalized != "zr") {
             mi.defs.insert(normalized);
+            mi.operands.push_back(MachineOperand::physReg(
+                reg, regClassFromName(reg), true));
+        }
     }
     for (const auto &reg : uses) {
         std::string normalized = normalizeReg(reg);
-        if (normalized != "zr")
+        if (normalized != "zr") {
             mi.uses.insert(normalized);
+            mi.operands.push_back(MachineOperand::physReg(
+                reg, regClassFromName(reg), false));
+        }
     }
 
     annotateMemoryInfo(mi);

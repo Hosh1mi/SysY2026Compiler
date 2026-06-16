@@ -12,10 +12,6 @@
   
   <tr>
     <td style="vertical-align:top;"><b>Mid-opt</b></td>
-    <td>LoopRotate pass</td>
-  </tr>
-  <tr>
-    <td></td>
     <td>实现更彻底的死代码消除（DCE）</td>
   </tr>
   
@@ -27,19 +23,6 @@
   <tr>
     <td style="vertical-align:top;"><b>Backend</b></td>
     <td>完善 NEON 指令支持</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>规范头部全局量分布</td>
-  </tr>
-  
-  <tr>
-    <td style="vertical-align:top;"><b>已知bug</b></td>
-    <td>排查部分测试集上函数内联后寄存器溢出的异常情况</td>
-  </tr>
-  <tr>
-    <td></td>
-    <td>压栈保存过多被调用者保存寄存器</td>
   </tr>
 
   <tr>
@@ -87,7 +70,9 @@ TODO: 用参数选择pass
 | `--dump-ir` | 每个 pass 前后 dump IR |
 | `--verify-ir` | 每个 pass 后校验 IR 完整性（TODO:目前无作用） |
 | `--fno-peephole` | 在 `-O1` 下禁用 peephole 汇编后优化 |
+| `--fno-pre-schedule` | 在 `-O1` 下禁用 preRA 虚拟机器指令调度 |
 | `--fno-schedule` | 在 `-O1` 下禁用 MachineInstr 调度 |
+| `--dump-pre-machine-instr` | 输出 preRA 虚拟 MachineInstr（vreg defs/uses、latency），dump 到 stderr |
 | `--dump-machine-instr` | 输出每个函数的 MachineInstr 详细信息（opcode类型、defs/uses、latency、标志位），dump 到 stderr |
 
 Pass 基类 (`pass.hpp`) 提供 `name()` 纯虚函数，每个 pass 需返回类名（如 `"Mem2Reg"`），供 dump/verify 使用。
