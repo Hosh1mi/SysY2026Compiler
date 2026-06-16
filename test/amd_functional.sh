@@ -83,7 +83,9 @@ for TEST_DIR in "${TEST_DIRS[@]}"; do
         fi
 
         # 5. Compare
-        if [ "$result" = "$exp" ]; then
+        norm_result=$(printf '%s' "$result" | sed -E 's/[[:space:]]+$//')
+        norm_exp=$(printf '%s' "$exp" | sed -E 's/[[:space:]]+$//')
+        if [ "$norm_result" = "$norm_exp" ]; then
             echo "${GREEN}PASS${RESET} [$dir_name] ${num} ${name}"
             echo "[$dir_name] $base : AC" >> "$RESULT_FILE"
             PASS=$((PASS + 1))

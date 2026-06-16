@@ -1,5 +1,7 @@
 #include "instCombineInternal.hpp"
 
+#include <cstdint>
+
 // ═══════════════════════════════════════════════════════════════════════
 // foldICmpAddSub  —  fold add/sub with constant into icmp
 //
@@ -37,13 +39,19 @@ Value* foldICmpAddSub(ICmpInst *inst) {
     //    icmp pred (sub x, C1), C2  →  icmp pred x, C2 + C1
     auto *c_rhs = as_const_int(rhs);
     if (c_rhs) {
-        int new_c = lhs_inst->is_add()
-            ? c_rhs->value_ - c->value_    // add:  x + C1 pred C2  →  x pred C2-C1
-            : c_rhs->value_ + c->value_;   // sub:  x - C1 pred C2  →  x pred C2+C1
-        auto *new_icmp = new ICmpInst(pred, x,
-            make_const_int(x->type_, new_c), bb, true);
-        bb->add_instruction_before_inst(new_icmp, inst);
-        return new_icmp;
+        // Compute in 64-bit: the rewrite (x±C1) pred C2 → x pred (C2∓C1) is
+        // only sound when the folded constant fits in i32. If C2∓C1 overflows
+        // (e.g. C1=C2=2^30 → 2^31 wraps to INT_MIN), the signed comparison
+        // would silently flip, so bail out and leave the icmp untouched.
+        long long new_c = lhs_inst->is_add()
+            ? (long long)c_rhs->value_ - (long long)c->value_  // add: → C2-C1
+            : (long long)c_rhs->value_ + (long long)c->value_; // sub: → C2+C1
+        if (new_c >= INT32_MIN && new_c <= INT32_MAX) {
+            auto *new_icmp = new ICmpInst(pred, x,
+                make_const_int(x->type_, (int)new_c), bb, true);
+            bb->add_instruction_before_inst(new_icmp, inst);
+            return new_icmp;
+        }
     }
 
     // ── Category A: add/sub by ±1 → reduce predicate, eliminate inst ─

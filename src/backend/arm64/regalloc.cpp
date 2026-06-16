@@ -5,6 +5,7 @@
 #include <cmath>
 #include <functional>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 Arm64RegAlloc::Arm64RegAlloc(Function *f) : func_(f) {}
@@ -161,34 +162,47 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     std::set<Value*> potentialSpills;
 
     // Simplify phase
-    while (!worklist.empty()) {
-        bool found = false;
-        for (auto it = worklist.begin(); it != worklist.end(); ++it) {
-            Value *v = *it;
-            int degree = 0;
-            for (auto n : adj[v])
-                if (worklist.count(n)) degree++;
-            if (degree < K) {
-                stack.push_back(v);
-                worklist.erase(it);
-                found = true;
-                break;
-            }
+    std::vector<Value*> nodes(worklist.begin(), worklist.end());
+    int N = (int)nodes.size();
+    std::unordered_map<Value*, int> idOf;
+    idOf.reserve(N * 2);
+    for (int i = 0; i < N; i++) idOf[nodes[i]] = i;
+
+    std::vector<std::vector<int>> nbr(N);
+    std::vector<int> deg(N);
+    std::vector<double> costV(N);
+    std::vector<char> inWL(N, 1);
+    for (int i = 0; i < N; i++) {
+        auto &a = adj[nodes[i]];
+        nbr[i].reserve(a.size());
+        for (auto *m : a) {
+            auto it = idOf.find(m);
+            if (it != idOf.end()) nbr[i].push_back(it->second);
         }
-        if (!found) {
+        deg[i] = (int)nbr[i].size();
+        costV[i] = cost[nodes[i]];
+    }
+
+    int remaining = N;
+    while (remaining > 0) {
+        int pick = -1;
+        for (int i = 0; i < N; i++) {
+            if (inWL[i] && deg[i] < K) { pick = i; break; }
+        }
+        if (pick < 0) {
             double bestCost = 1e100;
-            Value *best = nullptr;
-            for (auto v : worklist) {
-                int degree = 0;
-                for (auto n : adj[v])
-                    if (worklist.count(n)) degree++;
-                double c = cost[v] / (degree + 1);
-                if (c < bestCost) { bestCost = c; best = v; }
+            for (int i = 0; i < N; i++) {
+                if (!inWL[i]) continue;
+                double c = costV[i] / (deg[i] + 1);
+                if (c < bestCost) { bestCost = c; pick = i; }
             }
-            stack.push_back(best);
-            worklist.erase(best);
-            potentialSpills.insert(best);
+            potentialSpills.insert(nodes[pick]);
         }
+        stack.push_back(nodes[pick]);
+        inWL[pick] = 0;
+        remaining--;
+        for (int n : nbr[pick])
+            if (inWL[n]) deg[n]--;
     }
 
     // Select phase

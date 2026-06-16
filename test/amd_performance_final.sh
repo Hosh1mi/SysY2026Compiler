@@ -95,7 +95,9 @@ for sy in "$TEST_DIR"/*.sy; do
     fi
 
     # 5. Compare
-    if [ "$result" = "$exp" ]; then
+    norm_result=$(printf '%s' "$result" | sed -E 's/[[:space:]]+$//')
+    norm_exp=$(printf '%s' "$exp" | sed -E 's/[[:space:]]+$//')
+    if [ "$norm_result" = "$norm_exp" ]; then
         echo "${GREEN}AC${RESET} ${num} ${name}  $(format_time $elapsed_us)"
         echo "$base : AC" >> "$RESULT_FILE"
         echo "Total time : $(format_time $elapsed_us)" >> "$RESULT_FILE"

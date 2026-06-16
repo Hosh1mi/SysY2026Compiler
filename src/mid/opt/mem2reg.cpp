@@ -4,6 +4,7 @@
 #include <queue>
 #include <stack>
 #include <functional>
+#include <unordered_set>
 
 void Mem2Reg::execute(Module *module) {
     curModule = module;
@@ -109,30 +110,28 @@ bool Mem2Reg::rewriteSingleStoreAlloca(AllocaInfo &info) {
 }
 
 bool Mem2Reg::promoteSingleBlockAlloca(AllocaInfo &info) {
-    if (info.userBlocks.size() == 1) {
-        BasicBlock *bb = info.userBlocks.begin()->first;
-        // 将块内指令按原顺序排序 store 和 load
-        auto &stores = info.userBlocks[bb].stores;
-        auto &loads  = info.userBlocks[bb].loads;
-        // 为每条 load 寻找块内最近的前驱 store
-        for (auto load : loads) {
-            StoreInst *lastStore = nullptr;
-            // 遍历指令列表，记录在 load 之前的最后一个 store
-            for (auto inst : bb->instr_list_) {
-                if (inst == load) break;
-                if (std::find(stores.begin(), stores.end(), inst) != stores.end())
-                    lastStore = static_cast<StoreInst *>(inst);
-            }
-            if (!lastStore) return false; // load 前无 store
-            Value *rval = lastStore->get_operand(0);
-            load->replace_all_use_with(rval);
+    if (info.userBlocks.size() != 1) return false;
+    BasicBlock *bb = info.userBlocks.begin()->first;
+    auto &stores = info.userBlocks[bb].stores;
+    auto &loads  = info.userBlocks[bb].loads;
+
+    std::unordered_set<Instruction *> storeSet(stores.begin(), stores.end());
+    std::unordered_set<Instruction *> loadSet(loads.begin(), loads.end());
+
+    StoreInst *lastStore = nullptr;
+    for (auto inst : bb->instr_list_) {
+        if (storeSet.count(inst)) {
+            lastStore = static_cast<StoreInst *>(inst);
+        } else if (loadSet.count(inst)) {
+            if (!lastStore) return false; // load 前无 store（此时尚未改写任何指令）
+            auto *load = static_cast<LoadInst *>(inst);
+            load->replace_all_use_with(lastStore->get_operand(0));
             toDelete.insert(load);
         }
-        for (auto store : stores) toDelete.insert(store);
-        toDelete.insert(info.alloca);
-        return true;
     }
-    return false;
+    for (auto store : stores) toDelete.insert(store);
+    toDelete.insert(info.alloca);
+    return true;
 }
 
 // -----------------------------------------------------------------------
@@ -433,16 +432,18 @@ void Mem2Reg::runOnFunction(Function *func) {
     // 收集 alloca
     analyseAlloca();
 
-    // 先处理简单情况
-    for (auto it = allocas.begin(); it != allocas.end(); ) {
-        auto &info = *it;
-        if (removeUnusedAlloca(info) || rewriteSingleStoreAlloca(info) || promoteSingleBlockAlloca(info)) {
-            it = allocas.erase(it);
-        } else {
-            insertPhiNodes(info);
-            ++it;
-        }
+    size_t kept = 0;
+    for (size_t r = 0; r < allocas.size(); ++r) {
+        AllocaInfo &info = allocas[r];
+        if (removeUnusedAlloca(info) || rewriteSingleStoreAlloca(info) ||
+            promoteSingleBlockAlloca(info))
+            continue; 
+        insertPhiNodes(info);
+        if (kept != r)
+            allocas[kept] = std::move(allocas[r]);
+        ++kept;
     }
+    allocas.erase(allocas.begin() + kept, allocas.end());
 
     // 全局重命名
     rename();
