@@ -1,8 +1,31 @@
 #include "../../include/mid/analysis/affineAnalysis.hpp"
+#include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
+#include <set>
 #include <sstream>
+
+// v 是否可证明与 iv 无关：use-def 反向可达；load 保守判有关；环用 seen 截断。
+static bool ivIndepImpl(Value *v, PhiInst *iv, std::set<Value *> &seen) {
+    if (v == iv)                      return false;
+    if (dynamic_cast<LoadInst *>(v))  return false;
+    if (!seen.insert(v).second)       return true;
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst)                        return true;
+    for (unsigned i = 0; i < inst->num_ops_; i++) {
+        Value *op = inst->get_operand(i);
+        if (dynamic_cast<BasicBlock *>(op)) continue;
+        if (!ivIndepImpl(op, iv, seen)) return false;
+    }
+    return true;
+}
+
+bool AffineAnalysis::provablyIndependentOfIV(Value *v, PhiInst *iv) {
+    if (!v || !iv) return false;
+    std::set<Value *> seen;
+    return ivIndepImpl(v, iv, seen);
+}
 
 // ── AffineExpr 算术 ───────────────────────────────────────────────────────
 

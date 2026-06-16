@@ -42,23 +42,34 @@ long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
         weights[m] = weights[m + 1] * dim;
     }
 
-    // 对每个 idx 提取仿射形式，按 iv 系数累加字节偏移
+    // 对每个 idx 提取仿射形式，按 iv 系数累加字节偏移。
+    // 某维非仿射时：若可证明该维与 iv 无关，则步进 iv 不改变它 → 贡献 0；
+    // 否则无法确定该维对 iv 的 stride → 整个 GEP stride 未知。
     long total = 0;
     for (unsigned m = 0; m < n_idx; m++) {
-        AffineExpr e = AA_->analyze(gep->get_operand(m + 1));
-        if (!e.valid) return -1;
-        int c = e.coeffOf(iv);
-        total += (long)c * weights[m];
+        Value     *idx = gep->get_operand(m + 1);
+        AffineExpr e   = AA_->analyze(idx);
+        if (e.valid) {
+            total += (long)e.coeffOf(iv) * weights[m];
+        } else if (AffineAnalysis::provablyIndependentOfIV(idx, iv)) {
+            // 与 iv 无关 → 该维贡献 0
+        } else {
+            return -1;
+        }
     }
     return std::abs(total);
 }
 
+// 一组访问对 iv 的总 stride。stride 未知的 GEP 跳过（不污染整体）；
+// 全部未知才返回 -1。
 long CostModel::totalStride(const std::vector<GetElementPtrInst *> &geps, PhiInst *iv) {
     long sum = 0;
+    bool any = false;
     for (auto *g : geps) {
         long s = strideAlong(g, iv);
-        if (s < 0) return -1;
+        if (s < 0) continue;
         sum += s;
+        any = true;
     }
-    return sum;
+    return any ? sum : -1;
 }

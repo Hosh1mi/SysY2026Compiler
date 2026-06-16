@@ -69,6 +69,12 @@ public:
 
     void clearCache() { cache_.clear(); SE_.clear(); }
 
+    // v 是否【可证明】与归纳变量 iv 无关：沿 use-def 反向遍历，到达 iv 即有关；
+    // 遇到 load（内存/间接下标）无法确定，保守判为有关；常量/参数/全局无关。
+    // 供 DependenceAnalysis / CostModel 在下标非仿射时复用，判定某维是否真的
+    // 受 iv 影响（不受影响则该维对 iv 的方向/stride 贡献为 0）。
+    static bool provablyIndependentOfIV(Value *v, PhiInst *iv);
+
 private:
     AffineExpr fromSCEV(const SCEV *s);
 

@@ -18,10 +18,16 @@
 
 #include <vector>
 
+class ArgumentAliasAnalysis;
+
 class DependenceAnalysis {
 public:
     DependenceAnalysis(const LoopInfo &LI, AffineAnalysis &AA)
         : LI_(&LI), AA_(&AA) {}
+
+    // 可选过程间参数别名 oracle：用于消除不同指针参数间的别名歧义。
+    // 不设置时退回原保守行为（不同 global 才判不别名）。
+    void setArgAlias(const ArgumentAliasAnalysis *argAA) { argAA_ = argAA; }
 
     enum Dir : char {
         DIR_EQ  = '=',
@@ -45,6 +51,16 @@ public:
     bool isInterchangeLegal(Loop *outer, Loop *inner,
                             const std::vector<Instruction *> &accesses);
 
+    // 一组访问中，L 这一层是否携带依赖（loop-carried dependence）。
+    // 携带依赖 ⇔ 存在一对相依访问，其在 L 这一层的方向不是 '='（即 L 的迭代之间
+    // 互相影响）。无任何 L-携带依赖时该层完全并行（DOALL），可任意外提/下沉。
+    // accesses 应当全部位于 L 内；任一相依对里求不出 L 的方向时保守判为"携带"。
+    bool loopCarriesDependence(Loop *L,
+                               const std::vector<Instruction *> &accesses);
+    bool isLoopParallel(Loop *L, const std::vector<Instruction *> &accesses) {
+        return !loopCarriesDependence(L, accesses);
+    }
+
 private:
     Value             *gepBase(GetElementPtrInst *gep) const;
     GetElementPtrInst *accessGEP(Instruction *acc) const;
@@ -52,4 +68,5 @@ private:
 
     const LoopInfo  *LI_;
     AffineAnalysis  *AA_;
+    const ArgumentAliasAnalysis *argAA_ = nullptr;
 };
