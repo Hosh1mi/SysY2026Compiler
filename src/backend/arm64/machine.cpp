@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <regex>
 #include <sstream>
 #include <utility>
@@ -27,6 +28,16 @@ std::string lower(std::string s) {
 
 bool startsWith(const std::string &s, const std::string &prefix) {
     return s.rfind(prefix, 0) == 0;
+}
+
+std::string mnemonicFromText(const std::string &line) {
+    std::string t = trim(line);
+    if (t.empty())
+        return "";
+    std::istringstream iss(t);
+    std::string op;
+    iss >> op;
+    return lower(op);
 }
 
 std::string normalizeReg(std::string reg) {
@@ -76,6 +87,137 @@ std::vector<std::string> splitOperands(const std::string &operandText) {
     return operands;
 }
 
+int registerWidthBytes(const std::string &operand) {
+    static const std::regex regRe("\\b(?:[wxsdqv][0-9]+|wzr|xzr)\\b");
+    std::smatch match;
+    if (!std::regex_search(operand, match, regRe))
+        return 0;
+    std::string reg = lower(match.str());
+    if (reg.empty())
+        return 0;
+    switch (reg[0]) {
+        case 'w':
+        case 's':
+            return 4;
+        case 'x':
+        case 'd':
+            return 8;
+        case 'q':
+            return 16;
+        case 'v':
+            if (operand.find(".4s") != std::string::npos ||
+                operand.find(".16b") != std::string::npos ||
+                operand.find(".2d") != std::string::npos)
+                return 16;
+            return 16;
+        default:
+            return 0;
+    }
+}
+
+int memoryWidthBytes(const std::string &op,
+                     const std::vector<std::string> &operands) {
+    if (op == "ld1" || op == "st1")
+        return 16;
+
+    if (op == "ldp" || op == "stp") {
+        int w0 = operands.size() > 0 ? registerWidthBytes(operands[0]) : 0;
+        int w1 = operands.size() > 1 ? registerWidthBytes(operands[1]) : 0;
+        if (w0 > 0 && w1 > 0)
+            return w0 + w1;
+        return 16;
+    }
+
+    if (!operands.empty()) {
+        int w = registerWidthBytes(operands[0]);
+        if (w > 0)
+            return w;
+    }
+    return 0;
+}
+
+bool parseImmediate(const std::string &text, int &value) {
+    std::string s = trim(text);
+    if (s.empty())
+        return false;
+    if (s[0] == '#')
+        s = s.substr(1);
+    if (!s.empty() && s.back() == '!')
+        s.pop_back();
+    if (s.empty())
+        return false;
+    char *end = nullptr;
+    long parsed = std::strtol(s.c_str(), &end, 0);
+    if (!end || *end != '\0')
+        return false;
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+void annotateMemoryInfo(MachineInstr &mi, const std::vector<std::string> &operands,
+                        const std::string &op) {
+    if (!mi.mayLoad && !mi.mayStore)
+        return;
+
+    std::string memOperand;
+    for (const auto &operand : operands) {
+        if (operand.find('[') != std::string::npos) {
+            memOperand = operand;
+            break;
+        }
+    }
+    if (memOperand.empty())
+        return;
+
+    size_t lbr = memOperand.find('[');
+    size_t rbr = memOperand.find(']', lbr);
+    if (lbr == std::string::npos || rbr == std::string::npos || rbr <= lbr + 1)
+        return;
+
+    std::string inside = memOperand.substr(lbr + 1, rbr - lbr - 1);
+    auto addrParts = splitOperands(inside);
+    if (addrParts.empty())
+        return;
+
+    auto regs = extractRegs(addrParts[0]);
+    if (regs.empty())
+        return;
+
+    std::string base = regs[0];
+    if (base != "r29" && base != "sp")
+        return;
+
+    int offset = 0;
+    if (addrParts.size() > 1) {
+        if (!parseImmediate(addrParts[1], offset))
+            return;
+    }
+
+    int width = memoryWidthBytes(op, operands);
+    if (width <= 0)
+        return;
+
+    mi.memBase = base;
+    mi.memOffsetKnown = true;
+    mi.memOffset = offset;
+    mi.memWidth = width;
+}
+
+void annotateMemoryInfo(MachineInstr &mi) {
+    std::string t = trim(mi.text);
+    if (t.empty())
+        return;
+    std::string op;
+    std::string rest;
+    {
+        std::istringstream iss(t);
+        iss >> op;
+        std::getline(iss, rest);
+    }
+    op = lower(op);
+    annotateMemoryInfo(mi, splitOperands(trim(rest)), op);
+}
+
 void addUses(MachineInstr &mi, const std::string &text) {
     for (const auto &reg : extractRegs(text)) {
         if (reg != "zr")
@@ -111,8 +253,13 @@ MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
                                 int latency) {
     MachineInstr mi;
     mi.text = line;
+    mi.opcodeText = mnemonicFromText(line);
     mi.opcode = opcode;
     mi.latency = latency;
+    if (opcode == MOpcode::Load || opcode == MOpcode::PairLoad)
+        mi.mayLoad = true;
+    if (opcode == MOpcode::Store || opcode == MOpcode::PairStore)
+        mi.mayStore = true;
 
     for (const auto &reg : defs) {
         std::string normalized = normalizeReg(reg);
@@ -125,6 +272,7 @@ MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
             mi.uses.insert(normalized);
     }
 
+    annotateMemoryInfo(mi);
     return mi;
 }
 
@@ -212,7 +360,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.setsFlags = true;
         mi.usesFlags = true;
         addUses(mi, rest);
-    } else if (op == "cset" || op == "csel" || op == "cneg") {
+    } else if (op == "cset" || op == "csel" || op == "cneg" || op == "fcsel") {
         mi.opcode = MOpcode::FlagUse;
         mi.usesFlags = true;
         defFirstUseRest();
@@ -254,9 +402,12 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::Mov;
         defFirstUseRest();
     } else if (op == "mul" || op == "madd" || op == "msub" || op == "mneg" ||
-               op == "fmul") {
+               op == "smull" || op == "umull" || op == "smaddl" || op == "umaddl" ||
+               op == "smsubl" || op == "umsubl" || op == "fmul") {
         mi.opcode = MOpcode::Mul;
-        mi.latency = (op == "fmul") ? 5 : 3;
+        bool isVector = rest.find(".4s") != std::string::npos ||
+                        rest.find(".2d") != std::string::npos;
+        mi.latency = (op == "fmul") ? (isVector ? 4 : 5) : 3;
         defFirstUseRest();
     } else if (op == "mla" || op == "mls") {
         mi.opcode = MOpcode::Neon;
@@ -271,20 +422,36 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::Neon;
         mi.latency = 4;
         defFirstUseRest();
+    } else if (op == "movi" || op == "dup") {
+        mi.opcode = MOpcode::Neon;
+        mi.latency = 1;
+        defFirstUseRest();
     } else if (op == "sdiv" || op == "udiv" || op == "fdiv") {
         mi.opcode = MOpcode::Div;
         mi.latency = 12;
         defFirstUseRest();
     } else if (op == "add" || op == "sub" || op == "and" || op == "orr" ||
                op == "eor" || op == "bic" || op == "asr" || op == "lsl" ||
-               op == "lsr" || op == "fadd" || op == "fsub" || op == "fneg") {
+               op == "lsr" || op == "neg" || op == "fadd" || op == "fsub" ||
+               op == "fneg" || op == "scvtf" || op == "fcvtzs" || op == "clz") {
         mi.opcode = MOpcode::Alu;
-        mi.latency = (op == "fadd" || op == "fsub" || op == "fneg") ? 4 : 1;
+        bool isVector = rest.find(".4s") != std::string::npos ||
+                        rest.find(".2d") != std::string::npos;
+        if (op == "fadd" || op == "fsub")
+            mi.latency = isVector ? 1 : 4;
+        else if (op == "fneg" || op == "scvtf" || op == "fcvtzs")
+            mi.latency = 4;
+        else
+            mi.latency = 1;
         defFirstUseRest();
     } else {
         mi.opcode = MOpcode::Unknown;
         defFirstUseRest();
+        if (rest.find('[') != std::string::npos)
+            mi.isBarrier = true;
     }
+
+    annotateMemoryInfo(mi, operands, op);
 
     if (touchesStackPointer(mi) || touchesLinkOrFrameCritical(mi))
         mi.isBarrier = true;
@@ -374,6 +541,10 @@ std::string dumpMachineFunction(const MachineFunction &func) {
             if (inst.isCall)     out << " CALL";
             if (inst.isBarrier)  out << " BARRIER";
             if (inst.isLabelLike)out << " LABEL_LIKE";
+            if (inst.memOffsetKnown) {
+                out << " MEM[" << inst.memBase << "+"
+                    << inst.memOffset << ":" << inst.memWidth << "]";
+            }
             out << "\n";
         }
     }

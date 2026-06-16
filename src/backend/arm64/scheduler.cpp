@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -10,22 +11,25 @@
 
 namespace {
 
-bool hasIntersection(const std::set<std::string> &a, const std::set<std::string> &b) {
-    for (const auto &x : a) {
-        if (b.count(x))
-            return true;
-    }
-    return false;
+bool memoryRangesOverlap(const MachineInstr &a, const MachineInstr &b) {
+    if (!a.memOffsetKnown || !b.memOffsetKnown)
+        return true;
+    if (a.memBase != b.memBase)
+        return true;
+    if (a.memWidth <= 0 || b.memWidth <= 0)
+        return true;
+
+    int aEnd = a.memOffset + a.memWidth;
+    int bEnd = b.memOffset + b.memWidth;
+    return a.memOffset < bEnd && b.memOffset < aEnd;
 }
 
-bool candidateHasLoadUseHazard(const MachineInstr &prev,
-                               const MachineInstr &candidate) {
-    return prev.mayLoad && hasIntersection(prev.defs, candidate.uses);
-}
-
-bool candidateUsesPrevDef(const MachineInstr &prev,
-                          const MachineInstr &candidate) {
-    return hasIntersection(prev.defs, candidate.uses);
+bool memoryOrderNeeded(const MachineInstr &prev, const MachineInstr &cur) {
+    if ((!prev.mayLoad && !prev.mayStore) || (!cur.mayLoad && !cur.mayStore))
+        return false;
+    if (!prev.mayStore && !cur.mayStore)
+        return false;
+    return memoryRangesOverlap(prev, cur);
 }
 
 } // namespace
@@ -64,7 +68,6 @@ void MachineScheduler::schedule(MachineFunction &func) const {
 // $flags; instructions that use flags are treated as using $flags.  This
 // prevents the scheduler from reordering flag users before flag setters.
 static const std::string kFlagReg = "$flags";
-static const std::string kMemoryReg = "$mem";
 
 std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<MachineInstr> &segment,
                                                             bool preserveFlagLiveOut) const {
@@ -81,22 +84,28 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         instrs.push_back(std::move(liveOut));
     }
     const int n = static_cast<int>(instrs.size());
-    std::vector<std::set<int>> succ(n);
-    std::vector<std::set<int>> pred(n);
+    std::vector<std::map<int, int>> succ(n);
+    std::vector<std::map<int, int>> pred(n);
     std::map<std::string, int> lastDef;
     std::map<std::string, std::set<int>> liveUsesSinceDef;
+    std::vector<int> previousMemoryOps;
 
-    auto addEdge = [&](int from, int to) {
+    auto addEdge = [&](int from, int to, int latency) {
         if (from == to || from < 0 || to < 0)
             return;
-        succ[from].insert(to);
-        pred[to].insert(from);
+        latency = std::max(0, latency);
+        auto succIt = succ[from].find(to);
+        if (succIt == succ[from].end() || latency > succIt->second)
+            succ[from][to] = latency;
+        auto predIt = pred[to].find(from);
+        if (predIt == pred[to].end() || latency > predIt->second)
+            pred[to][from] = latency;
     };
 
     auto processRegUse = [&](int i, const std::string &reg) {
         auto defIt = lastDef.find(reg);
         if (defIt != lastDef.end())
-            addEdge(defIt->second, i);
+            addEdge(defIt->second, i, instrs[defIt->second].latency);
         liveUsesSinceDef[reg].insert(i);
     };
 
@@ -104,13 +113,13 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         // WAW: previous definition → this definition
         auto defIt = lastDef.find(reg);
         if (defIt != lastDef.end())
-            addEdge(defIt->second, i);
+            addEdge(defIt->second, i, 0);
 
         // WAR: all outstanding uses must happen before this new definition
         auto useIt = liveUsesSinceDef.find(reg);
         if (useIt != liveUsesSinceDef.end()) {
             for (int user : useIt->second)
-                addEdge(user, i);
+                addEdge(user, i, 0);
             useIt->second.clear();
         }
 
@@ -126,12 +135,16 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         if (instrs[i].usesFlags)
             processRegUse(i, kFlagReg);
 
-        // Memory operations are modeled conservatively:
-        // loads read memory; stores read and define memory. This preserves
-        // load/store and store/store order while still allowing load/load
-        // reordering inside a scheduling segment.
-        if (instrs[i].mayLoad || instrs[i].mayStore)
-            processRegUse(i, kMemoryReg);
+        // Preserve memory order only for pairs that can alias and where at
+        // least one side writes.  Unknown addresses alias conservatively;
+        // fixed, non-overlapping frame slots may move independently.
+        if (instrs[i].mayLoad || instrs[i].mayStore) {
+            for (int prev : previousMemoryOps) {
+                if (memoryOrderNeeded(instrs[prev], instrs[i]))
+                    addEdge(prev, i, 0);
+            }
+            previousMemoryOps.push_back(i);
+        }
 
         // Register defs → WAW + WAR edges
         for (const auto &reg : instrs[i].defs)
@@ -142,25 +155,24 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
         if (instrs[i].setsFlags)
             processRegDef(i, kFlagReg);
 
-        if (instrs[i].mayStore)
-            processRegDef(i, kMemoryReg);
     }
 
     std::vector<int> critical(n, 0);
     std::function<int(int)> computeCritical = [&](int idx) -> int {
         if (critical[idx] > 0)
             return critical[idx];
-        int bestSucc = 0;
-        for (int s : succ[idx])
-            bestSucc = std::max(bestSucc, computeCritical(s));
-        critical[idx] = instrs[idx].latency + bestSucc;
+        int best = instrs[idx].latency;
+        for (const auto &edge : succ[idx])
+            best = std::max(best, edge.second + computeCritical(edge.first));
+        critical[idx] = std::max(1, best);
         return critical[idx];
     };
     for (int i = 0; i < n; ++i)
         computeCritical(i);
 
     std::vector<int> remainingPreds(n, 0);
-    std::vector<bool> emitted(n, false);
+    std::vector<int> readyCycle(n, 0);
+    std::vector<int> emitCycle(n, -1);
     std::vector<int> ready;
     for (int i = 0; i < n; ++i) {
         remainingPreds[i] = static_cast<int>(pred[i].size());
@@ -170,22 +182,34 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
 
     std::vector<int> order;
     order.reserve(n);
-    int prev = -1;
+    int cycle = 0;
 
     while (!ready.empty()) {
-        auto better = [&](int a, int b) {
-            if (prev >= 0) {
-                bool hazardA = candidateHasLoadUseHazard(instrs[prev], instrs[a]);
-                bool hazardB = candidateHasLoadUseHazard(instrs[prev], instrs[b]);
-                if (hazardA != hazardB)
-                    return !hazardA;
-                if (instrs[prev].latency > 1) {
-                    bool depA = candidateUsesPrevDef(instrs[prev], instrs[a]);
-                    bool depB = candidateUsesPrevDef(instrs[prev], instrs[b]);
-                    if (depA != depB)
-                        return !depA;
-                }
+        auto available = [&]() {
+            std::vector<int> result;
+            for (int idx : ready) {
+                if (readyCycle[idx] <= cycle)
+                    result.push_back(idx);
             }
+            return result;
+        };
+
+        auto choices = available();
+        if (choices.empty()) {
+            int nextCycle = std::numeric_limits<int>::max();
+            for (int idx : ready)
+                nextCycle = std::min(nextCycle, readyCycle[idx]);
+            if (nextCycle == std::numeric_limits<int>::max())
+                return segment;
+            cycle = std::max(cycle, nextCycle);
+            continue;
+        }
+
+        auto better = [&](int a, int b) {
+            bool pseudoA = (a == flagLiveOutIndex);
+            bool pseudoB = (b == flagLiveOutIndex);
+            if (pseudoA != pseudoB)
+                return !pseudoA;
             if (critical[a] != critical[b])
                 return critical[a] > critical[b];
             if (instrs[a].latency != instrs[b].latency)
@@ -193,19 +217,24 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
             return instrs[a].originalIndex < instrs[b].originalIndex;
         };
 
-        auto bestIt = ready.begin();
-        for (auto it = ready.begin() + 1; it != ready.end(); ++it) {
-            if (better(*it, *bestIt))
-                bestIt = it;
+        int idx = choices.front();
+        for (size_t i = 1; i < choices.size(); ++i) {
+            if (better(choices[i], idx))
+                idx = choices[i];
         }
 
-        int idx = *bestIt;
-        ready.erase(bestIt);
-        emitted[idx] = true;
+        auto readyIt = std::find(ready.begin(), ready.end(), idx);
+        if (readyIt == ready.end())
+            return segment;
+        ready.erase(readyIt);
+        emitCycle[idx] = cycle;
         order.push_back(idx);
-        prev = idx;
+        if (idx != flagLiveOutIndex)
+            ++cycle;
 
-        for (int s : succ[idx]) {
+        for (const auto &edge : succ[idx]) {
+            int s = edge.first;
+            readyCycle[s] = std::max(readyCycle[s], emitCycle[idx] + edge.second);
             if (--remainingPreds[s] == 0)
                 ready.push_back(s);
         }

@@ -45,6 +45,14 @@ struct MachineInstr {
     int latency = 1;
     int originalIndex = 0;
 
+    // Conservative memory summary for postRA scheduling.  The range is only
+    // considered precise when memOffsetKnown is true; otherwise memory ops are
+    // treated as possibly aliasing any other memory op.
+    std::string memBase;
+    bool memOffsetKnown = false;
+    int memOffset = 0;
+    int memWidth = 0;
+
     static MachineInstr raw(const std::string &line);
     static MachineInstr make(const std::string &line, MOpcode opcode,
                              std::initializer_list<std::string> defs = {},
