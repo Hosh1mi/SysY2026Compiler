@@ -5,11 +5,13 @@
 class DeadCodeDelete : public Pass {
 public:
     void execute(Module *module) override;
+    PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "DeadCodeDelete"; }
     bool convergenceRelevant() const override { return false; }
 private:
-    // 删除函数内不可达的基本块
-    bool removeDeadBlocks(Function *func);
+    bool runOnModule(Module *module);
+    bool runOnFunction(Function *func);
+    bool removeUnreachable(Function *func);
 
     // 激进死代码消除（标记-清扫）
     bool aggressiveDCE(Function *func);
@@ -22,12 +24,6 @@ private:
 
     // 辅助：从关键指令开始标记所有活跃指令
     void markLiveInstructions(Function *func, std::set<Instruction *> &live);
-
-    // 辅助：删除一个基本块及其内部所有指令，并更新使用链
-    void deleteBasicBlock(BasicBlock *bb);
-
-    // 辅助：更新所有基本块中的 Phi 指令，移除指向指定块的输入
-    void updatePhiAfterRemoveBlock(BasicBlock *removed);
 
     // 原始的简单死代码删除（不再主用，可保留作参考）
     bool removeDeadInstructions(Function *func);
