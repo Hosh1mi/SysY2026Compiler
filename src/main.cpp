@@ -4,7 +4,8 @@
 
 #include "include/mid/ir/irGen.hpp"
 #include "include/mid/opt/passManager.hpp"
-#include "include/mid/opt/deadCodeDelete.hpp"
+#include "include/mid/opt/deadCodeEliminate.hpp"
+#include "include/mid/opt/linearBlockMerge.hpp"
 #include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
@@ -151,16 +152,18 @@ static bool openOutput(const DriverOptions &options,
 }
 
 static void addCanonicalCleanup(PassManager &pm) {
-    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<LinearBlockMerge>());
     pm.addPass(std::make_unique<SCCP>());
     pm.addPass(std::make_unique<ConstantFold>());
     pm.addPass(std::make_unique<InstCombine>());
     pm.addPass(std::make_unique<DeadStoreEliminate>());
-    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<LinearBlockMerge>());
 }
 
 static void addCfgCleanup(PassManager &pm) {
-    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
 }
 
@@ -171,7 +174,7 @@ static void addDeepCleanup(PassManager &pm) {
 }
 
 static void addSsaPreparation(PassManager &pm) {
-    pm.addPass(std::make_unique<DeadCodeDelete>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<EarlyCSE>());
