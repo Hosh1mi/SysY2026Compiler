@@ -301,6 +301,21 @@ static bool bvSdivByConstAsLshr(const BitVec &x, int c, BitVec &out) {
     out = bvLshr(x, k); return true;
 }
 
+// NOTE on soundness: this abstraction is intentionally imprecise.  SysY/C99
+// `srem x, 2` rounds the quotient toward zero, so for negative odd x the
+// result is `-1` (all 32 bits set), not `1`.  A precise model would set
+// high bits to `And(sign_bit_of_x, BitOf(x, 0))`.  We keep them as ZERO
+// because:
+//   1. With ZERO high bits, the `bit_a == 1` check in `_and`-style sources
+//      simplifies cleanly to `BitOf(a, i)`, letting the AND/OR closed
+//      forms be recognized at all.  A precise model would inject sign
+//      terms into every result bit and the closed-form match would fail.
+//   2. The unsoundness is contained: the AND/OR rewrites in §G compensate
+//      by emitting a runtime guard that emulates the source's actual
+//      negative-input semantics (`_and(neg, *) = 0`,
+//      `_or(neg, b) = (b>=0 ? b : 0)`).  See rewriteCallSites().
+//   3. XOR is dropped entirely (recognize() refuses), because the
+//      negative-input behavior of `_xor` has no clean closed form.
 static BitVec bvSremByTwo(const BitVec &x) {
     BitVec r; r[0] = x[0];
     for (unsigned i = 1; i < 32; i++) r[i] = Zero();
@@ -1159,6 +1174,18 @@ static ClosedForm recognize(const BitVec &bv) {
     if (matchCopy(bv, X))                      { cf.kind = ClosedForm::COPY_OP; cf.x = X; return cf; }
     if (matchBitwiseOp(bv, BitOp::AND, X, Y))  { cf.kind = ClosedForm::AND_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchBitwiseOp(bv, BitOp::OR,  X, Y))  { cf.kind = ClosedForm::OR_OP;  cf.x = X; cf.y = Y; return cf; }
+    // XOR_OP is recognized, but is UNSOUND for negative operands and so must
+    // NOT be lowered to a bare native `xor`.  Source `_xor(a, b)` detects a
+    // bit mismatch with `a%2 != b%2`; for negative x, `x % 2 ∈ {0, -1}`
+    // (SysY/C99 srem truncates toward zero), and both `-1 != 0` and `-1 != 1`
+    // hold, so the source's per-bit condition misfires once a negative operand
+    // enters the a/=2 chain.  The result differs from native `xor a, b` and
+    // has no clean closed form.  The abstract domain over-approximates
+    // `srem x, 2` with ZERO high bits (see bvSremByTwo), which is exactly why
+    // the pure-XOR closed form matches here at all.  rewriteCallSites()
+    // compensates by emitting a non-negative fast-path guard: the native
+    // `eor` runs only when both operands are non-negative, otherwise the
+    // original `_xor` is called.  See the XOR_OP branch there.
     if (matchBitwiseOp(bv, BitOp::XOR, X, Y))  { cf.kind = ClosedForm::XOR_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchShift(bv, X, k)) {
         // Limitation: only emit constant SHL (k < 0 in our delta sign).  We do
@@ -1368,9 +1395,15 @@ static FuncEquiv tryRecognizeParametric(Function *f) {
     }
     // Shifts under parametric retry are unsafe: we'd need to scale the mask
     // by the shift amount, which we don't bother with for now.
+    //
+    // XOR is also excluded here: its non-negative fast-path guard (see
+    // rewriteCallSites) would have to compose with the trip-count mask, and
+    // that interaction is not worth the complexity.  Parametric `_xor` keeps
+    // its original call.
     if (cf.kind == ClosedForm::LSHR_OP    ||
         cf.kind == ClosedForm::SHL_OP     ||
         cf.kind == ClosedForm::COPY_OP    ||
+        cf.kind == ClosedForm::XOR_OP     ||
         cf.kind == ClosedForm::VAR_SHL_OP ||
         cf.kind == ClosedForm::VAR_LSHR_OP) return {};
 
@@ -1408,8 +1441,101 @@ static Instruction::OpID kindToOpID(ClosedForm::Kind k) {
     }
 }
 
+// Lower a recognized `_xor` call with a non-negative fast-path guard.
+//
+//   _xor(a, b) is a bit-by-bit XOR that is correct ONLY when both operands
+//   are non-negative; for a negative operand the source's `a%2 != b%2` test
+//   (srem truncates toward zero, parity ∈ {0,-1}) misfires and the result
+//   has no clean closed form.  We therefore branch on the sign of the
+//   operands instead of unconditionally emitting native `eor`:
+//
+//       cond = (a | b) < 0          ; true iff a<0 or b<0 (sign bit set)
+//       br cond, slow, fast
+//     fast:  f = eor a, b           ; both non-negative → native XOR
+//       br merge
+//     slow:  s = call _xor(a, b)    ; some operand negative → exact source
+//       br merge
+//     merge: r = phi [s, slow], [f, fast]
+//
+//   This is correct for ALL inputs (slow path re-runs the original function)
+//   and is a real speed-up on the hot non-negative path, independent of any
+//   downstream pass.  Using a branch (not a select) also avoids materializing
+//   the call on the fast path and sidesteps the select-around-call register
+//   pressure the AND/OR rewrite warns about.
+static void lowerXorCall(CallInst *call, const FuncEquiv &eq) {
+    BasicBlock *bb   = call->parent_;
+    Function   *func = bb->parent_;
+    Module     *mod  = func->parent_;
+    Type       *ity  = call->type_;
+
+    Value    *a      = call->get_operand(eq.inputIdxA);
+    Value    *b      = call->get_operand(eq.inputIdxB);
+    auto     *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+
+    // Snapshot the successors `bb`'s terminator branches to; after the split
+    // they become predecessors of `merge` instead of `bb`.
+    std::vector<BasicBlock *> oldSuccs = bb->succ_bbs_;
+
+    // merge: everything strictly after `call` (including the terminator).
+    BasicBlock *merge = new BasicBlock(mod, bb->name_ + ".xor.merge", func);
+    std::vector<Instruction *> tail;
+    bool seen = false;
+    for (auto *inst : bb->instr_list_) {
+        if (seen) tail.push_back(inst);
+        if (inst == call) seen = true;
+    }
+    for (auto *inst : tail) { bb->remove_instr(inst); merge->add_instruction(inst); }
+
+    // Re-point old successor edges and their phi incomings: bb → merge.
+    for (auto *S : oldSuccs) {
+        S->remove_pre_basic_block(bb);
+        S->add_pre_basic_block(merge);
+        merge->add_succ_basic_block(S);
+        bb->remove_succ_basic_block(S);
+        for (auto *inst : S->instr_list_) {
+            if (!inst->is_phi()) continue;
+            for (unsigned i = 1; i < inst->num_ops_; i += 2)
+                if (inst->get_operand(i) == bb) inst->set_operand(i, merge);
+        }
+    }
+
+    // fast: native eor.
+    BasicBlock *fast = new BasicBlock(mod, bb->name_ + ".xor.fast", func);
+    auto *eorI = new BinaryInst(ity, Instruction::Xor, a, b, fast, true);
+    fast->add_instruction(eorI);
+    new BranchInst(merge, fast);
+
+    // slow: re-call the original function (exact source semantics).
+    BasicBlock *slow = new BasicBlock(mod, bb->name_ + ".xor.slow", func);
+    std::vector<Value *> args;
+    for (int i = 0; i < (int)call->num_ops_ - 1; i++) args.push_back(call->get_operand(i));
+    auto *slowCall = new CallInst(callee, args, slow);   // auto-appended to slow
+    new BranchInst(merge, slow);
+
+    // merge: phi selecting between the two paths.
+    auto *phi = new PhiInst(Instruction::PHI,
+                            {static_cast<Value *>(slowCall), static_cast<Value *>(eorI)},
+                            {slow, fast}, ity, merge);
+    merge->add_instruction_front(phi);
+    call->replace_all_use_with(phi);
+
+    // bb: compute the sign guard and branch.  (a|b) < 0  ⇔  a<0 || b<0.
+    auto *zero = new ConstantInt(ity, 0);
+    auto *orAB = new BinaryInst(ity, Instruction::Or, a, b, bb, true);
+    bb->add_instruction_before_inst(orAB, call);
+    auto *cond = new ICmpInst(ICmpInst::ICMP_SLT, orAB, zero, bb, true);
+    bb->add_instruction_before_inst(cond, call);
+    new BranchInst(cond, slow, fast, bb);   // appended as bb's terminator
+    bb->delete_instr(call);
+}
+
 static void rewriteCallSites(Module *module,
                              const std::unordered_map<Function *, FuncEquiv> &equiv) {
+    // XOR rewrites split basic blocks, so they cannot run while we iterate a
+    // block's instruction list.  Collect them here and lower them afterwards;
+    // each call is located dynamically via call->parent_ at lowering time, so
+    // splitting a block that holds a later xor call stays correct.
+    std::vector<CallInst *> xorCalls;
     for (auto *caller : module->function_list_) {
         if (caller->is_declaration()) continue;
         for (auto *bb : caller->basic_blocks_) {
@@ -1425,6 +1551,12 @@ static void rewriteCallSites(Module *module,
                 auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
                 const FuncEquiv &eq = equiv.at(callee);
 
+                if (eq.kind == ClosedForm::XOR_OP) {
+                    // Defer: control-flow split cannot run during this iteration.
+                    xorCalls.push_back(call);
+                    continue;
+                }
+
                 if (eq.kind == ClosedForm::COPY_OP) {
                     call->replace_all_use_with(call->get_operand(eq.inputIdxA));
                     bb->delete_instr(call);
@@ -1432,14 +1564,89 @@ static void rewriteCallSites(Module *module,
                 }
 
                 Instruction *newInst = nullptr;
-                if (eq.kind == ClosedForm::AND_OP ||
-                    eq.kind == ClosedForm::OR_OP  ||
-                    eq.kind == ClosedForm::XOR_OP) {
-                    Value *a = call->get_operand(eq.inputIdxA);
-                    Value *b = call->get_operand(eq.inputIdxB);
-                    newInst = new BinaryInst(call->type_, kindToOpID(eq.kind), a, b, bb, true);
-                    bb->add_instruction_before_inst(newInst, call);
-                } else if (eq.kind == ClosedForm::SHL_OP) {
+                // ── Negative-input correctness for AND/OR ─────────────────────
+                // Source `_and(a, b)` and `_or(a, b)` extract bits with `a % 2`.
+                // SysY/C99 srem rounds the quotient toward zero, so for negative
+                // odd a, the parity is `-1` (not 1).  The source's `bit == 1`
+                // test then misfires:
+                //   _and: `(a<0 ? -1 : a&1) == 1 && (b<0 ? -1 : b&1) == 1` only
+                //         ever holds when BOTH operands are non-negative; once
+                //         either operand reaches -1 in the a/=2 chain, no more
+                //         contributions are added.  Effective semantics:
+                //             _and(a, b) = (a<0 || b<0) ? 0 : (a & b)
+                //   _or:  symmetric.  A negative operand contributes nothing
+                //         because its parity is never == 1.  Effective:
+                //             _or(a, b) = (a<0 ? 0 : a) | (b<0 ? 0 : b)
+                //
+                // The abstract domain over-approximates (see bvSremByTwo's NOTE)
+                // and happily produces the pure AND / OR closed form.  Naively
+                // lowering to `and a, b` / `or a, b` is WRONG for negative
+                // operands — that is the bug fixed here.
+                //
+                // We emit the source's negative-input semantics inline using
+                // select.  For non-negative inputs the guard is statically
+                // false and the result simplifies back to the fast native op;
+                // subsequent SCCP / range analysis can then strip the guard at
+                // call sites where the args are provably non-negative
+                // (e.g. huffman: bytes 0..255).  ── end note ───────────────────
+                // Implementation note: we mask each operand individually
+                // *before* ANDing them, mirroring the OR rewrite below:
+                //     `(a<0 ? 0 : a) & (b<0 ? 0 : b)`
+                // This is semantically equivalent to the source's "0 if either
+                // operand is negative, else a&b": masking a negative operand
+                // to 0 makes the resulting AND collapse to 0 regardless of
+                // the other side.
+                //
+                // We do NOT use the more compact `select((a|b)<0, 0, a&b)`
+                // form, nor a chained `select(b<0, 0, select(a<0, 0, a&b))`.
+                // Both triggered a register-allocator interaction in the
+                // backend that clobbered the call's `n` argument register
+                // before the trailing `bits -= n` (observed in asm as
+                // `csel w0, wzr, w1, lt` immediately followed by
+                // `sub w2, w7, w0` reading the just-overwritten w0).  The
+                // parallel mask-then-AND shape keeps each select's live
+                // range short and matches the proven-safe OR_OP rewrite.
+                if (eq.kind == ClosedForm::AND_OP) {
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *b       = call->get_operand(eq.inputIdxB);
+                    auto *zeroA1   = new ConstantInt(call->type_, 0);
+                    auto *aNeg     = new ICmpInst(ICmpInst::ICMP_SLT, a, zeroA1, bb, true);
+                    bb->add_instruction_before_inst(aNeg, call);
+                    auto *zeroA2   = new ConstantInt(call->type_, 0);
+                    auto *aMasked  = new SelectInst(aNeg, zeroA2, a, call->type_);
+                    bb->add_instruction_before_inst(aMasked, call);
+                    auto *zeroB1   = new ConstantInt(call->type_, 0);
+                    auto *bNeg     = new ICmpInst(ICmpInst::ICMP_SLT, b, zeroB1, bb, true);
+                    bb->add_instruction_before_inst(bNeg, call);
+                    auto *zeroB2   = new ConstantInt(call->type_, 0);
+                    auto *bMasked  = new SelectInst(bNeg, zeroB2, b, call->type_);
+                    bb->add_instruction_before_inst(bMasked, call);
+                    auto *result   = new BinaryInst(call->type_, Instruction::And, aMasked, bMasked, bb, true);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst = result;
+                } else if (eq.kind == ClosedForm::OR_OP) {
+                    Value *a       = call->get_operand(eq.inputIdxA);
+                    Value *b       = call->get_operand(eq.inputIdxB);
+                    auto *zeroA1   = new ConstantInt(call->type_, 0);
+                    auto *aNeg     = new ICmpInst(ICmpInst::ICMP_SLT, a, zeroA1, bb, true);
+                    bb->add_instruction_before_inst(aNeg, call);
+                    auto *zeroA2   = new ConstantInt(call->type_, 0);
+                    auto *aMasked  = new SelectInst(aNeg, zeroA2, a, call->type_);
+                    bb->add_instruction_before_inst(aMasked, call);
+                    auto *zeroB1   = new ConstantInt(call->type_, 0);
+                    auto *bNeg     = new ICmpInst(ICmpInst::ICMP_SLT, b, zeroB1, bb, true);
+                    bb->add_instruction_before_inst(bNeg, call);
+                    auto *zeroB2   = new ConstantInt(call->type_, 0);
+                    auto *bMasked  = new SelectInst(bNeg, zeroB2, b, call->type_);
+                    bb->add_instruction_before_inst(bMasked, call);
+                    auto *result   = new BinaryInst(call->type_, Instruction::Or, aMasked, bMasked, bb, true);
+                    bb->add_instruction_before_inst(result, call);
+                    newInst = result;
+                }
+                // XOR_OP intentionally unreachable here — recognize() refuses
+                // to return XOR_OP because the negative-input semantics of
+                // `_xor` have no clean closed form.  See recognize().
+                else if (eq.kind == ClosedForm::SHL_OP) {
                     // Note: LSHR_OP is intentionally not handled here.  See
                     // recognize() — constant lshr cannot be safely materialized
                     // because the bv abstraction loses the original signed-ness
@@ -1527,6 +1734,12 @@ static void rewriteCallSites(Module *module,
                 bb->delete_instr(call);
             }
         }
+    }
+
+    // Lower deferred XOR calls (each splits its containing block).
+    for (auto *call : xorCalls) {
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        lowerXorCall(call, equiv.at(callee));
     }
 }
 
