@@ -1441,8 +1441,101 @@ static Instruction::OpID kindToOpID(ClosedForm::Kind k) {
     }
 }
 
+// Lower a recognized `_xor` call with a non-negative fast-path guard.
+//
+//   _xor(a, b) is a bit-by-bit XOR that is correct ONLY when both operands
+//   are non-negative; for a negative operand the source's `a%2 != b%2` test
+//   (srem truncates toward zero, parity ∈ {0,-1}) misfires and the result
+//   has no clean closed form.  We therefore branch on the sign of the
+//   operands instead of unconditionally emitting native `eor`:
+//
+//       cond = (a | b) < 0          ; true iff a<0 or b<0 (sign bit set)
+//       br cond, slow, fast
+//     fast:  f = eor a, b           ; both non-negative → native XOR
+//       br merge
+//     slow:  s = call _xor(a, b)    ; some operand negative → exact source
+//       br merge
+//     merge: r = phi [s, slow], [f, fast]
+//
+//   This is correct for ALL inputs (slow path re-runs the original function)
+//   and is a real speed-up on the hot non-negative path, independent of any
+//   downstream pass.  Using a branch (not a select) also avoids materializing
+//   the call on the fast path and sidesteps the select-around-call register
+//   pressure the AND/OR rewrite warns about.
+static void lowerXorCall(CallInst *call, const FuncEquiv &eq) {
+    BasicBlock *bb   = call->parent_;
+    Function   *func = bb->parent_;
+    Module     *mod  = func->parent_;
+    Type       *ity  = call->type_;
+
+    Value    *a      = call->get_operand(eq.inputIdxA);
+    Value    *b      = call->get_operand(eq.inputIdxB);
+    auto     *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+
+    // Snapshot the successors `bb`'s terminator branches to; after the split
+    // they become predecessors of `merge` instead of `bb`.
+    std::vector<BasicBlock *> oldSuccs = bb->succ_bbs_;
+
+    // merge: everything strictly after `call` (including the terminator).
+    BasicBlock *merge = new BasicBlock(mod, bb->name_ + ".xor.merge", func);
+    std::vector<Instruction *> tail;
+    bool seen = false;
+    for (auto *inst : bb->instr_list_) {
+        if (seen) tail.push_back(inst);
+        if (inst == call) seen = true;
+    }
+    for (auto *inst : tail) { bb->remove_instr(inst); merge->add_instruction(inst); }
+
+    // Re-point old successor edges and their phi incomings: bb → merge.
+    for (auto *S : oldSuccs) {
+        S->remove_pre_basic_block(bb);
+        S->add_pre_basic_block(merge);
+        merge->add_succ_basic_block(S);
+        bb->remove_succ_basic_block(S);
+        for (auto *inst : S->instr_list_) {
+            if (!inst->is_phi()) continue;
+            for (unsigned i = 1; i < inst->num_ops_; i += 2)
+                if (inst->get_operand(i) == bb) inst->set_operand(i, merge);
+        }
+    }
+
+    // fast: native eor.
+    BasicBlock *fast = new BasicBlock(mod, bb->name_ + ".xor.fast", func);
+    auto *eorI = new BinaryInst(ity, Instruction::Xor, a, b, fast, true);
+    fast->add_instruction(eorI);
+    new BranchInst(merge, fast);
+
+    // slow: re-call the original function (exact source semantics).
+    BasicBlock *slow = new BasicBlock(mod, bb->name_ + ".xor.slow", func);
+    std::vector<Value *> args;
+    for (int i = 0; i < (int)call->num_ops_ - 1; i++) args.push_back(call->get_operand(i));
+    auto *slowCall = new CallInst(callee, args, slow);   // auto-appended to slow
+    new BranchInst(merge, slow);
+
+    // merge: phi selecting between the two paths.
+    auto *phi = new PhiInst(Instruction::PHI,
+                            {static_cast<Value *>(slowCall), static_cast<Value *>(eorI)},
+                            {slow, fast}, ity, merge);
+    merge->add_instruction_front(phi);
+    call->replace_all_use_with(phi);
+
+    // bb: compute the sign guard and branch.  (a|b) < 0  ⇔  a<0 || b<0.
+    auto *zero = new ConstantInt(ity, 0);
+    auto *orAB = new BinaryInst(ity, Instruction::Or, a, b, bb, true);
+    bb->add_instruction_before_inst(orAB, call);
+    auto *cond = new ICmpInst(ICmpInst::ICMP_SLT, orAB, zero, bb, true);
+    bb->add_instruction_before_inst(cond, call);
+    new BranchInst(cond, slow, fast, bb);   // appended as bb's terminator
+    bb->delete_instr(call);
+}
+
 static void rewriteCallSites(Module *module,
                              const std::unordered_map<Function *, FuncEquiv> &equiv) {
+    // XOR rewrites split basic blocks, so they cannot run while we iterate a
+    // block's instruction list.  Collect them here and lower them afterwards;
+    // each call is located dynamically via call->parent_ at lowering time, so
+    // splitting a block that holds a later xor call stays correct.
+    std::vector<CallInst *> xorCalls;
     for (auto *caller : module->function_list_) {
         if (caller->is_declaration()) continue;
         for (auto *bb : caller->basic_blocks_) {
@@ -1457,6 +1550,12 @@ static void rewriteCallSites(Module *module,
             for (auto *call : toRewrite) {
                 auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
                 const FuncEquiv &eq = equiv.at(callee);
+
+                if (eq.kind == ClosedForm::XOR_OP) {
+                    // Defer: control-flow split cannot run during this iteration.
+                    xorCalls.push_back(call);
+                    continue;
+                }
 
                 if (eq.kind == ClosedForm::COPY_OP) {
                     call->replace_all_use_with(call->get_operand(eq.inputIdxA));
@@ -1635,6 +1734,12 @@ static void rewriteCallSites(Module *module,
                 bb->delete_instr(call);
             }
         }
+    }
+
+    // Lower deferred XOR calls (each splits its containing block).
+    for (auto *call : xorCalls) {
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        lowerXorCall(call, equiv.at(callee));
     }
 }
 
