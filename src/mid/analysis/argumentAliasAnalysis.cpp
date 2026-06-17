@@ -100,6 +100,33 @@ bool ArgumentAliasAnalysis::noAlias(Value *baseA, Value *baseB) const {
     if (!baseA || !baseB) return false;
     if (baseA == baseB)   return false;   // 同一对象
 
+    // 同一函数的两个指针形参：逐调用点看实参底层对象。形参的根集合
+    // 可能相同（例如两个调用点交换了两个数组），但若每个调用点上
+    // 这一对实参都可证明不同，则本函数任一执行里二者仍不别名。
+    auto *argA = dynamic_cast<Argument *>(baseA);
+    auto *argB = dynamic_cast<Argument *>(baseB);
+    if (argA && argB && argA->parent_ == argB->parent_) {
+        auto it = callSites_.find(argA->parent_);
+        if (it != callSites_.end() && !it->second.empty()) {
+            bool allCallSitesDistinct = true;
+            for (auto *call : it->second) {
+                if (argA->arg_no_ >= call->num_ops_ - 1 ||
+                    argB->arg_no_ >= call->num_ops_ - 1) {
+                    allCallSitesDistinct = false;
+                    break;
+                }
+                Value *actualA = underlyingObject(call->get_operand(argA->arg_no_));
+                Value *actualB = underlyingObject(call->get_operand(argB->arg_no_));
+                if (actualA == actualB || !isIdentifiedObject(actualA) ||
+                    !isIdentifiedObject(actualB)) {
+                    allCallSitesDistinct = false;
+                    break;
+                }
+            }
+            if (allCallSitesDistinct) return true;
+        }
+    }
+
     // 解析成根对象集；identified 对象自身即单元素集，参数查表，其它 unknown。
     auto rootsOf = [&](Value *v, std::set<Value *> &out) -> bool {
         if (isIdentifiedObject(v)) { out.insert(v); return true; }
