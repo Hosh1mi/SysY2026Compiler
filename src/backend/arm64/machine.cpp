@@ -250,7 +250,8 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
             addDef(mi, operands[0]);
             addUses(mi, operands[0]);
         }
-    } else if (op == "mov" || op == "fmov" || op == "mvn" || op == "sxtw") {
+    } else if (op == "mov" || op == "fmov" || op == "mvn" || op == "sxtw" ||
+               op == "uxtw") {
         mi.opcode = MOpcode::Mov;
         defFirstUseRest();
     } else if (op == "mul" || op == "madd" || op == "msub" || op == "mneg" ||

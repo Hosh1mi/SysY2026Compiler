@@ -22,6 +22,8 @@ Value* visitMul(BinaryInst *inst) {
 
     // 2. Canonicalize: constant to RHS  (mul C, x → mul x, C)
     if (cx && !cy) {
+        if (inst->get_operand(1) == x)
+            return nullptr;
         auto *new_inst = new BinaryInst(ty, Instruction::Mul, y, x, bb, true);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
@@ -45,9 +47,10 @@ Value* visitMul(BinaryInst *inst) {
         if (x_inst && x_inst->is_mul()) {
             auto *c1 = as_const_int(x_inst->get_operand(1));
             if (c1) {
+                int combined = c1->value_ * cy->value_;
                 auto *new_inst = new BinaryInst(ty, Instruction::Mul,
                     x_inst->get_operand(0),
-                    make_const_int(ty, c1->value_ * cy->value_), bb, true);
+                    make_const_int(ty, combined), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }

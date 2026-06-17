@@ -1,5 +1,8 @@
 #pragma once
 #include "../../../include/mid/ir/ir.hpp"
+#include "../../../include/mid/analysis/valueFacts.hpp"
+
+#include <cstddef>
 
 // ── Constant helpers ──────────────────────────────────────────────────
 
@@ -25,6 +28,37 @@ inline ConstantFloat* make_const_float(Type* ty, float v) {
     return new ConstantFloat(ty, v);
 }
 
+inline bool sameConstantValue(Value *lhs, Value *rhs) {
+    if (lhs == rhs) return true;
+    auto *li = dynamic_cast<ConstantInt *>(lhs);
+    auto *ri = dynamic_cast<ConstantInt *>(rhs);
+    if (li && ri) return li->value_ == ri->value_;
+    auto *lf = dynamic_cast<ConstantFloat *>(lhs);
+    auto *rf = dynamic_cast<ConstantFloat *>(rhs);
+    if (lf && rf) return lf->value_ == rf->value_;
+    return dynamic_cast<ConstantZero *>(lhs) && dynamic_cast<ConstantZero *>(rhs);
+}
+
+inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
+    if (!lhs || !rhs) return false;
+    if (lhs->op_id_ != rhs->op_id_ || lhs->num_ops_ != rhs->num_ops_)
+        return false;
+    if (lhs->type_ != rhs->type_) return false;
+    if (auto *lc = dynamic_cast<ICmpInst *>(lhs)) {
+        auto *rc = dynamic_cast<ICmpInst *>(rhs);
+        if (!rc || lc->icmp_op_ != rc->icmp_op_) return false;
+    }
+    if (auto *lc = dynamic_cast<FCmpInst *>(lhs)) {
+        auto *rc = dynamic_cast<FCmpInst *>(rhs);
+        if (!rc || lc->fcmp_op_ != rc->fcmp_op_) return false;
+    }
+    for (unsigned i = 0; i < lhs->num_ops_; ++i) {
+        if (!sameConstantValue(lhs->get_operand(i), rhs->get_operand(i)))
+            return false;
+    }
+    return true;
+}
+
 // ── Power-of-two helpers ──────────────────────────────────────────────
 
 inline bool isPowerOfTwo(int v) {
@@ -39,6 +73,7 @@ inline int log2Int(int v) {
 
 // Forward declaration for mutual recursion
 static bool isStoredValuePow2(Value *v, GlobalVariable *gv, int &k);
+static constexpr size_t kMaxValueFactStoreScan = 16;
 
 // 能否证明 v = 2^k？如能证明则设置 k 并返回 true。
 inline bool isKnownPowerOfTwo(Value *v, int &k) {
@@ -72,10 +107,14 @@ inline bool isKnownPowerOfTwo(Value *v, int &k) {
         if (!gv) return false;
         auto *func = inst->parent_->parent_;
         int commonK = -1;
+        size_t matchedStores = 0;
         for (auto *bb : func->basic_blocks_) {
             for (auto *other : bb->instr_list_) {
                 if (!other->is_store()) continue;
                 if (other->get_operand(1) != gv) continue;
+                matchedStores++;
+                if (matchedStores > kMaxValueFactStoreScan)
+                    return false;
                 int storedK = -1;
                 if (!isStoredValuePow2(other->get_operand(0), gv, storedK))
                     return false;
@@ -160,11 +199,15 @@ inline bool isProvenPowerOfTwo(Value *v) {
         if (!gv) return false;
         auto *func = inst->parent_->parent_;
         bool foundStore = false;
+        size_t matchedStores = 0;
         for (auto *bb : func->basic_blocks_) {
             for (auto *other : bb->instr_list_) {
                 if (!other->is_store()) continue;
                 if (other->get_operand(1) != gv) continue;
                 foundStore = true;
+                matchedStores++;
+                if (matchedStores > kMaxValueFactStoreScan)
+                    return false;
                 int ignoredK;
                 if (!isStoredValuePow2(other->get_operand(0), gv, ignoredK))
                     return false;
@@ -184,35 +227,7 @@ inline bool isProvenPowerOfTwo(Value *v) {
 // transform safe.  As analysis improves (range analysis, loop induction
 // variables, etc.) these functions naturally cover more cases.
 
-// Can we prove v is always non-negative (≥ 0)?
-inline bool isKnownNonNegative(Value *v) {
-    if (auto *ci = dynamic_cast<ConstantInt*>(v))
-        return ci->value_ >= 0;
-
-    auto *inst = dynamic_cast<Instruction*>(v);
-    if (!inst) return false;
-
-    // lshr always produces a non-negative result (zero-extended).
-    if (inst->op_id_ == Instruction::LShr)
-        return true;
-
-    // and with a mask whose sign bit is 0 clears any sign.
-    if (inst->op_id_ == Instruction::And) {
-        auto *mask = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-        if (!mask) mask = dynamic_cast<ConstantInt*>(inst->get_operand(0));
-        if (mask) {
-            unsigned bits = static_cast<IntegerType*>(inst->type_)->num_bits_;
-            if (mask->value_ >= 0 && (mask->value_ & (1 << (bits - 1))) == 0)
-                return true;
-        }
-    }
-
-    // zext result is always non-negative.
-    if (inst->op_id_ == Instruction::ZExt)
-        return true;
-
-    return false;
-}
+using ValueFacts::isKnownNonNegative;
 
 // Look through dominating branch conditions to prove v is a multiple of C.
 // If this BB is reached via  br (icmp eq (srem v, C), 0), this_bb, other

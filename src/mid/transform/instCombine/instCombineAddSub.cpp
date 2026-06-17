@@ -23,6 +23,8 @@ Value* visitAdd(BinaryInst *inst) {
 
     // 2. Canonicalize: constant to RHS  (add C, x → add x, C)
     if (cx && !cy) {
+        if (inst->get_operand(1) == x)
+            return nullptr;
         auto *new_inst = new BinaryInst(ty, Instruction::Add, y, x, bb, true);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
@@ -41,9 +43,12 @@ Value* visitAdd(BinaryInst *inst) {
         if (x_inst && x_inst->is_add()) {
             auto *c1 = as_const_int(x_inst->get_operand(1));
             if (c1) {
+                int combined = c1->value_ + cy->value_;
+                if (x_inst->get_operand(0) == x && combined == c1->value_)
+                    return nullptr;
                 auto *new_inst = new BinaryInst(ty, Instruction::Add,
                     x_inst->get_operand(0),
-                    make_const_int(ty, c1->value_ + cy->value_), bb, true);
+                    make_const_int(ty, combined), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -132,9 +137,10 @@ Value* visitSub(BinaryInst *inst) {
         if (x_inst && x_inst->is_add()) {
             auto *c1 = as_const_int(x_inst->get_operand(1));
             if (c1) {
+                int combined = c1->value_ - cy->value_;
                 auto *new_inst = new BinaryInst(ty, Instruction::Add,
                     x_inst->get_operand(0),
-                    make_const_int(ty, c1->value_ - cy->value_), bb, true);
+                    make_const_int(ty, combined), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -147,9 +153,10 @@ Value* visitSub(BinaryInst *inst) {
         if (x_inst && x_inst->is_sub()) {
             auto *c1 = as_const_int(x_inst->get_operand(1));
             if (c1) {
+                int combined = c1->value_ + cy->value_;
                 auto *new_inst = new BinaryInst(ty, Instruction::Sub,
                     x_inst->get_operand(0),
-                    make_const_int(ty, c1->value_ + cy->value_), bb, true);
+                    make_const_int(ty, combined), bb, true);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
