@@ -311,11 +311,47 @@ void Arm64CodeGen::generate() {
     os_ << printMachineModule(module);
 }
 
+static int globalTypeSize(Type *ty) {
+    if (!ty) return 4;
+    switch (ty->tid_) {
+    case Type::IntegerTyID: {
+        int bits = static_cast<IntegerType*>(ty)->num_bits_;
+        return bits <= 1 ? 1 : bits / 8;
+    }
+    case Type::FloatTyID:
+        return 4;
+    case Type::PointerTyID:
+        return 8;
+    case Type::ArrayTyID: {
+        auto *arr = static_cast<ArrayType*>(ty);
+        return arr->num_elements_ * globalTypeSize(arr->contained_);
+    }
+    case Type::VectorTyID: {
+        auto *vec = static_cast<VectorType*>(ty);
+        return vec->num_elements_ * globalTypeSize(vec->contained_);
+    }
+    default:
+        return 4;
+    }
+}
+
+static int globalTypeAlign(Type *ty) {
+    if (!ty) return 4;
+    if (ty->tid_ == Type::ArrayTyID)
+        return globalTypeAlign(static_cast<ArrayType*>(ty)->contained_);
+    if (ty->tid_ == Type::VectorTyID)
+        return std::min(16, globalTypeSize(ty));
+    if (ty->tid_ == Type::PointerTyID)
+        return 8;
+    return std::min(4, globalTypeSize(ty));
+}
+
 void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
     auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
 
     appendMachineLine(module, "\t.global " + gv->name_);
-    appendMachineLine(module, "\t.p2align 2");
+    appendMachineLine(module, globalTypeAlign(pointee) >= 8 ? "\t.p2align 3"
+                                                            : "\t.p2align 2");
     appendMachineLine(module, gv->name_ + ":");
 
     auto appendWordHex = [&](int bits) {
@@ -325,24 +361,7 @@ void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
     };
 
     if (auto cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
-        int size = 4;
-        Type *ty = pointee;
-        if (ty->tid_ == Type::ArrayTyID) {
-            int totalElements = 1;
-            Type *cur = ty;
-            while (auto arrTy = dynamic_cast<ArrayType*>(cur)) {
-                totalElements *= arrTy->num_elements_;
-                cur = arrTy->contained_;
-            }
-            int elemSize = 4;
-            if (cur->tid_ == Type::IntegerTyID) {
-                elemSize = static_cast<IntegerType*>(cur)->num_bits_ / 8;
-            } else if (cur->tid_ == Type::FloatTyID) {
-                elemSize = 4;
-            }
-            size = totalElements * elemSize;
-        }
-        appendMachineLine(module, "\t.zero " + std::to_string(size));
+        appendMachineLine(module, "\t.zero " + std::to_string(globalTypeSize(pointee)));
     } else if (auto ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {
         appendMachineLine(module, "\t.word " + std::to_string(ci->value_));
     } else if (auto cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {

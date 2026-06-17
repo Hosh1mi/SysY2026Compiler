@@ -3,7 +3,10 @@
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 #include <set>
+#include <string>
 #include <vector>
+
+class ArgumentAliasAnalysis;
 
 // ParallelizeLoops（plan 5.2）：把可证明 DOALL 的顶层循环外提为
 // __sysy_par_body_<id>(lo, hi)，调用点替换为 __sysy_parallel_for(id, lo, hi)，
@@ -29,9 +32,10 @@ private:
         BasicBlock *exitingBlock = nullptr; // 出口比较所在块（header 或 latch）
     };
 
-    bool matchShape(Loop &loop, LoopShape &shape);
+    bool matchShape(Loop &loop, LoopShape &shape, std::string *reason = nullptr);
     bool isLegalDoall(Loop &loop, const LoopShape &shape, Function *func,
                       AnalysisManager *AM,
+                      const ArgumentAliasAnalysis &argAA,
                       std::set<GlobalVariable *> *privatize);
     void transform(Loop &loop, const LoopShape &shape, Function *func,
                    Module *module,

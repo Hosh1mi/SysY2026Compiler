@@ -1,6 +1,7 @@
 #include "../../include/mid/opt/parallelizeLoops.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/analysis/affineAnalysis.hpp"
+#include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../include/mid/analysis/dependenceAnalysis.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
@@ -22,9 +23,56 @@ void debugPar(const std::string &msg) {
 
 // GEP 链回溯到基址
 Value *gepRootBase(Value *ptr) {
-    while (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr))
-        ptr = gep->get_operand(0);
-    return ptr;
+    return ArgumentAliasAnalysis::underlyingObject(ptr);
+}
+
+bool isAcceptedMemoryRoot(Value *root) {
+    if (dynamic_cast<GlobalVariable *>(root)) return true;
+    auto *arg = dynamic_cast<Argument *>(root);
+    return arg && dynamic_cast<PointerType *>(arg->type_);
+}
+
+std::string valueName(Value *v) {
+    return v && !v->name_.empty() ? v->name_ : "<unnamed>";
+}
+
+std::string loopName(const Loop &loop) {
+    return loop.header ? loop.header->name_ : "<no-header>";
+}
+
+bool rootsNoAlias(Value *a, Value *b, const ArgumentAliasAnalysis &argAA) {
+    if (!a || !b || a == b) return false;
+    if (dynamic_cast<GlobalVariable *>(a) && dynamic_cast<GlobalVariable *>(b))
+        return true;
+    return argAA.noAlias(a, b);
+}
+
+bool hasProvenSafeMemoryRoots(
+    const std::vector<Instruction *> &stores,
+    const std::vector<Instruction *> &accesses,
+    const ArgumentAliasAnalysis &argAA,
+    std::string *reason) {
+    auto accessRoot = [](Instruction *acc) -> Value * {
+        Value *ptr = acc->is_store() ? acc->get_operand(1) : acc->get_operand(0);
+        auto *gep = dynamic_cast<GetElementPtrInst *>(ptr);
+        return gep ? gepRootBase(gep) : nullptr;
+    };
+
+    for (auto *store : stores) {
+        Value *storeRoot = accessRoot(store);
+        for (auto *acc : accesses) {
+            Value *root = accessRoot(acc);
+            if (!storeRoot || !root || storeRoot == root) continue;
+            if (!rootsNoAlias(storeRoot, root, argAA)) {
+                if (reason)
+                    *reason = "cannot prove distinct memory roots " +
+                              valueName(storeRoot) + " and " +
+                              valueName(root);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 bool definedInLoop(Value *v, const std::set<BasicBlock *> &blocks) {
@@ -64,11 +112,18 @@ void ParallelizeLoops::execute(Module *module) {
     execute(module, AM);
 }
 
-bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
-    if (!loop.preheader) return false;
+bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
+                                  std::string *reason) {
+    auto fail = [&](const std::string &why) {
+        if (reason) *reason = why;
+        return false;
+    };
+
+    if (!loop.preheader) return fail("missing preheader");
     BasicBlock *latch = loop.singleLatch();
     BasicBlock *exitBlock = loop.singleExit();
-    if (!latch || !exitBlock) return false;
+    if (!latch) return fail("missing single latch");
+    if (!exitBlock) return fail("missing single exit");
     shape.latch = latch;
     shape.exitBlock = exitBlock;
 
@@ -76,12 +131,14 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
     PhiInst *iv = nullptr;
     for (auto inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
-        if (iv) return false;
+        if (iv) return fail("multiple header phi nodes");
         iv = static_cast<PhiInst *>(inst);
     }
-    if (!iv || iv->type_->tid_ != Type::IntegerTyID) return false;
+    if (!iv) return fail("missing header IV phi");
+    if (iv->type_->tid_ != Type::IntegerTyID)
+        return fail("IV phi is not integer");
     auto *ivTy = dynamic_cast<IntegerType *>(iv->type_);
-    if (!ivTy || ivTy->num_bits_ != 32) return false;
+    if (!ivTy || ivTy->num_bits_ != 32) return fail("IV phi is not i32");
     shape.ivPhi = iv;
 
     for (unsigned i = 0; i < iv->num_ops_; i += 2) {
@@ -91,18 +148,20 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
         else if (pred == latch)
             shape.ivNext = dynamic_cast<Instruction *>(iv->get_operand(i));
         else
-            return false;
+            return fail("IV phi has unexpected predecessor");
     }
-    if (!shape.init || !shape.ivNext) return false;
+    if (!shape.init) return fail("missing IV init");
+    if (!shape.ivNext) return fail("missing IV next");
 
     // ivNext = add(iv, 1)
-    if (!shape.ivNext->is_add()) return false;
+    if (!shape.ivNext->is_add()) return fail("IV next is not add");
     Value *a = shape.ivNext->get_operand(0), *b = shape.ivNext->get_operand(1);
     auto isOne = [](Value *v) {
         auto *c = dynamic_cast<ConstantInt *>(v);
         return c && c->value_ == 1;
     };
-    if (!((a == iv && isOne(b)) || (b == iv && isOne(a)))) return false;
+    if (!((a == iv && isOne(b)) || (b == iv && isOne(a))))
+        return fail("IV step is not +1");
 
     // 出口：header（while 形）或 latch（do-while 形）的 slt 条件分支
     for (BasicBlock *cand : {loop.header, latch}) {
@@ -120,12 +179,13 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
         shape.exitingBlock = cand;
         break;
     }
-    if (!shape.exitCmp) return false;
-    if (definedInLoop(shape.bound, loop.blocks)) return false;
+    if (!shape.exitCmp) return fail("missing i < bound exit condition");
+    if (definedInLoop(shape.bound, loop.blocks))
+        return fail("loop bound is defined in loop");
 
     // exit 块不得有 phi（含 LCSSA phi——意味着有 live-out）
     for (auto inst : exitBlock->instr_list_) {
-        if (inst->is_phi()) return false;
+        if (inst->is_phi()) return fail("exit block has phi live-out");
         break;
     }
 
@@ -135,12 +195,12 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
     // 变换只改写一条出口边，其余会留成跨函数分支。
     for (auto *bb : loop.blocksOrdered) {
         auto *term = bb->get_terminator();
-        if (!term) return false;
+        if (!term) return fail("block without terminator");
         for (unsigned i = 0; i < term->num_ops_; i++) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (!succ || loop.blocks.count(succ)) continue;
             if (bb == shape.exitingBlock && succ == exitBlock) continue;
-            return false;
+            return fail("loop has unsupported escape edge");
         }
     }
     return true;
@@ -148,45 +208,62 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape) {
 
 bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                     Function *func, AnalysisManager *AM,
+                                    const ArgumentAliasAnalysis &argAA,
                                     std::set<GlobalVariable *> *privatize) {
+    auto fail = [&](const std::string &why) {
+        debugPar("reject func=" + func->name_ + " loop=" + loopName(loop) +
+                 ": " + why);
+        return false;
+    };
+
     std::vector<Instruction *> stores, accesses;
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
-            if (dynamic_cast<CallInst *>(inst)) return false;
-            if (dynamic_cast<AllocaInst *>(inst)) return false;
+            if (dynamic_cast<CallInst *>(inst)) return fail("call in loop");
+            if (dynamic_cast<AllocaInst *>(inst)) return fail("alloca in loop");
             if (inst->is_store()) {
                 Value *ptr = inst->get_operand(1);
-                if (!dynamic_cast<GetElementPtrInst *>(ptr)) return false;
-                if (!dynamic_cast<GlobalVariable *>(gepRootBase(ptr)))
-                    return false;
+                auto *gep = dynamic_cast<GetElementPtrInst *>(ptr);
+                if (!gep) return fail("store target is not GEP");
+                Value *root = gepRootBase(gep);
+                if (!isAcceptedMemoryRoot(root))
+                    return fail("store has unsupported memory root " +
+                                valueName(root));
                 stores.push_back(inst);
                 accesses.push_back(inst);
             } else if (inst->is_load()) {
                 Value *ptr = inst->get_operand(0);
                 // 标量全局只读 load 允许；GEP 必须全局数组基址
                 if (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr)) {
-                    if (!dynamic_cast<GlobalVariable *>(gepRootBase(gep)))
-                        return false;
+                    Value *root = gepRootBase(gep);
+                    if (!isAcceptedMemoryRoot(root))
+                        return fail("load has unsupported memory root " +
+                                    valueName(root));
                 } else if (!dynamic_cast<GlobalVariable *>(ptr)) {
-                    return false;
+                    return fail("load target is not GEP/global");
                 }
                 accesses.push_back(inst);
             }
         }
     }
-    if (stores.empty()) return false; // 无写循环交给其他 pass
+    if (stores.empty()) return fail("no stores"); // 无写循环交给其他 pass
+
+    std::string aliasReason;
+    if (!hasProvenSafeMemoryRoots(stores, accesses, argAA, &aliasReason))
+        return fail(aliasReason);
 
     // 标量 live-out：循环内定义被循环外使用 → bail
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
             for (auto &use : inst->use_list_) {
                 auto *user = dynamic_cast<Instruction *>(use.val_);
-                if (user && !loop.blocks.count(user->parent_)) return false;
+                if (user && !loop.blocks.count(user->parent_))
+                    return fail("loop-defined value is used outside loop");
             }
         }
     }
 
-    // live-in 类型限制：仅 i32（指针/float 阶段一不传 ctx）
+    // live-in 类型限制：i32 和指针可通过 ctx 传递；其它类型仍保守拒绝。
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
             for (unsigned i = 0; i < inst->num_ops_; i++) {
@@ -198,7 +275,9 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 if (definedInLoop(op, loop.blocks)) continue;
                 if (op == shape.init || op == shape.bound) continue; // 形参化
                 auto *ity = dynamic_cast<IntegerType *>(op->type_);
-                if (!ity || ity->num_bits_ != 32) return false;
+                if (ity && ity->num_bits_ == 32) continue;
+                if (dynamic_cast<PointerType *>(op->type_)) continue;
+                return fail("unsupported live-in type for " + valueName(op));
             }
         }
     }
@@ -216,10 +295,11 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         if (base && isPrivatizableScratch(base, loop.blocks)) {
             // 私有拷贝放 worker 栈（静态 1MB），总量限 64KB 防溢出
             long long bytes = globalArrayBytes(base);
-            if (bytes < 0) return false;
+            if (bytes < 0) return fail("unknown privatized scratch size");
             if (!privatize->count(base)) {
                 privBytes += bytes;
-                if (privBytes > 64 * 1024) return false;
+                if (privBytes > 64 * 1024)
+                    return fail("privatized scratch exceeds stack budget");
             }
             privatize->insert(base);
             continue;
@@ -230,13 +310,15 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 SE.getSCEV(gep->get_operand(i)));
             if (rec && rec->loop() == &loop) { variesWithIV = true; break; }
         }
-        if (!variesWithIV) return false;
+        if (!variesWithIV)
+            return fail("store address does not vary with loop IV");
     }
 
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
     LoopInfo &LI = AM->getLoopInfo(func);
     AffineAnalysis AA(LI);
     DependenceAnalysis DA(LI, AA);
+    DA.setArgAlias(&argAA);
     auto basePriv = [&](Instruction *acc) {
         Value *ptr = acc->is_store() ? acc->get_operand(1) : acc->get_operand(0);
         auto *g = dynamic_cast<GlobalVariable *>(gepRootBase(ptr));
@@ -252,15 +334,18 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             for (size_t i = 0; i < r.commonLoops.size(); i++) {
                 if (r.commonLoops[i] == &loop) { idx = (int)i; break; }
             }
-            if (idx < 0 || idx >= (int)r.direction.size()) return false;
-            if (r.direction[idx] != DependenceAnalysis::DIR_EQ) return false;
+            if (idx < 0 || idx >= (int)r.direction.size())
+                return fail("dependence direction missing for loop");
+            if (r.direction[idx] != DependenceAnalysis::DIR_EQ)
+                return fail("loop carries memory dependence");
         }
     }
 
     // 编译期可知的小 trip count 不值得
     auto *ci = dynamic_cast<ConstantInt *>(shape.init);
     auto *cb = dynamic_cast<ConstantInt *>(shape.bound);
-    if (ci && cb && cb->value_ - ci->value_ < 64) return false;
+    if (ci && cb && cb->value_ - ci->value_ < 64)
+        return fail("constant trip count below parallel threshold");
 
     return true;
 }
@@ -327,8 +412,8 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     for (size_t k = 0; k < liveIns.size(); k++) {
         auto *gv = new GlobalVariable(
             "__sysy_par_ctx_" + std::to_string(id) + "_" + std::to_string(k),
-            module, module->int32_ty_, false,
-            new ConstantInt(module->int32_ty_, 0));
+            module, liveIns[k]->type_, false,
+            new ConstantZero(liveIns[k]->type_));
         ctxSlots.push_back(gv);
         ctxLoads.push_back(builder->create_load(gv));
     }
@@ -411,6 +496,9 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
     bodies_.clear();
     parallelForDecl_ = nullptr;
 
+    ArgumentAliasAnalysis argAA;
+    argAA.analyze(module);
+
     std::vector<Function *> funcs;
     for (auto f : module->function_list_)
         if (!f->is_declaration()) funcs.push_back(f);
@@ -430,11 +518,20 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
             LoopInfo &LI = AM.getLoopInfo(func);
             for (auto &lptr : LI.allLoops()) {
                 Loop *loop = lptr.get();
-                if (loop->depth != 0) continue; // 仅顶层
+                if (loop->depth != 0) {
+                    debugPar("skip func=" + func->name_ + " loop=" +
+                             loopName(*loop) + ": nested loop");
+                    continue; // 仅顶层
+                }
                 LoopShape shape;
-                if (!matchShape(*loop, shape)) continue;
+                std::string shapeReason;
+                if (!matchShape(*loop, shape, &shapeReason)) {
+                    debugPar("reject func=" + func->name_ + " loop=" +
+                             loopName(*loop) + ": " + shapeReason);
+                    continue;
+                }
                 std::set<GlobalVariable *> privatize;
-                if (!isLegalDoall(*loop, shape, func, &AM, &privatize))
+                if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize))
                     continue;
                 transform(*loop, shape, func, module, privatize);
                 AM.clear(func);
