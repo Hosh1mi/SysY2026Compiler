@@ -1174,24 +1174,19 @@ static ClosedForm recognize(const BitVec &bv) {
     if (matchCopy(bv, X))                      { cf.kind = ClosedForm::COPY_OP; cf.x = X; return cf; }
     if (matchBitwiseOp(bv, BitOp::AND, X, Y))  { cf.kind = ClosedForm::AND_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchBitwiseOp(bv, BitOp::OR,  X, Y))  { cf.kind = ClosedForm::OR_OP;  cf.x = X; cf.y = Y; return cf; }
-    // XOR_OP is intentionally NOT recognized.
-    //
-    // Source `_xor(a, b)` uses `a%2 != b%2` to detect bit mismatch.  For
-    // negative x, `x % 2 ∈ {0, -1}` (SysY/C99 srem truncates toward zero),
-    // and `-1 != 0` AND `-1 != 1` are both true.  That means the source's
-    // bit-mismatch condition fires spuriously on every iteration the
-    // negative operand contributes a sign-extended -1 byte, producing
-    // results that do not match native `xor a, b` (and that do not have
-    // a clean closed form expressible in a few IR ops, unlike AND/OR
-    // below).  Rather than emit a complex emulation, we refuse to
-    // recognize XOR — calls stay as the original `_xor` function call.
-    //
-    // The abstract domain in §D over-approximates `srem x, 2` as having
-    // its high bits set to ZERO (see bvSremByTwo), which is unsound for
-    // negative x.  So the recognizer would happily collapse `_xor` to a
-    // pure XOR closed form — but we cannot lower that to native xor
-    // without changing semantics for negative inputs.  matchBitwiseOp's
-    // XOR branch is dropped here as the safe choice.
+    // XOR_OP is recognized, but is UNSOUND for negative operands and so must
+    // NOT be lowered to a bare native `xor`.  Source `_xor(a, b)` detects a
+    // bit mismatch with `a%2 != b%2`; for negative x, `x % 2 ∈ {0, -1}`
+    // (SysY/C99 srem truncates toward zero), and both `-1 != 0` and `-1 != 1`
+    // hold, so the source's per-bit condition misfires once a negative operand
+    // enters the a/=2 chain.  The result differs from native `xor a, b` and
+    // has no clean closed form.  The abstract domain over-approximates
+    // `srem x, 2` with ZERO high bits (see bvSremByTwo), which is exactly why
+    // the pure-XOR closed form matches here at all.  rewriteCallSites()
+    // compensates by emitting a non-negative fast-path guard: the native
+    // `eor` runs only when both operands are non-negative, otherwise the
+    // original `_xor` is called.  See the XOR_OP branch there.
+    if (matchBitwiseOp(bv, BitOp::XOR, X, Y))  { cf.kind = ClosedForm::XOR_OP; cf.x = X; cf.y = Y; return cf; }
     if (matchShift(bv, X, k)) {
         // Limitation: only emit constant SHL (k < 0 in our delta sign).  We do
         // NOT recognize LSHR (k > 0) here, because the bit-vector abstraction
@@ -1400,9 +1395,15 @@ static FuncEquiv tryRecognizeParametric(Function *f) {
     }
     // Shifts under parametric retry are unsafe: we'd need to scale the mask
     // by the shift amount, which we don't bother with for now.
+    //
+    // XOR is also excluded here: its non-negative fast-path guard (see
+    // rewriteCallSites) would have to compose with the trip-count mask, and
+    // that interaction is not worth the complexity.  Parametric `_xor` keeps
+    // its original call.
     if (cf.kind == ClosedForm::LSHR_OP    ||
         cf.kind == ClosedForm::SHL_OP     ||
         cf.kind == ClosedForm::COPY_OP    ||
+        cf.kind == ClosedForm::XOR_OP     ||
         cf.kind == ClosedForm::VAR_SHL_OP ||
         cf.kind == ClosedForm::VAR_LSHR_OP) return {};
 
