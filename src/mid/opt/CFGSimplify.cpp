@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/CFGSimplify.hpp"
+#include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
@@ -193,77 +194,6 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
         return true;
     }
     return false;
-}
-
-// 删除从入口不可达的块。按可达性计算而非仅看前驱是否为空：
-// 不可达的自环/环（如 SCCP 折叠分支后留下的死循环体）前驱非空，
-// 仅靠"无前驱"判断永远删不掉，其 phi 还会被后续 pass 收缩成自引用指令。
-static void removeDeadBlocks(Function *func) {
-    auto *entry = getEntryBlock(func);
-    if (!entry) return;
-
-    // 可达性沿 terminator 的基本块操作数传播，不走 succ_bbs_：
-    // 个别 pass 改写分支目标时遗漏维护 succ/pre 链表，terminator 才是事实。
-    std::set<BasicBlock *> reachable;
-    std::queue<BasicBlock *> worklist;
-    reachable.insert(entry);
-    worklist.push(entry);
-    while (!worklist.empty()) {
-        auto *bb = worklist.front();
-        worklist.pop();
-        auto *term = bb->get_terminator();
-        if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
-            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
-            if (succ && reachable.insert(succ).second)
-                worklist.push(succ);
-        }
-    }
-
-    std::vector<BasicBlock *> dead;
-    for (auto *bb : func->basic_blocks_) {
-        if (!reachable.count(bb))
-            dead.push_back(bb);
-    }
-
-    for (auto *bb : dead) {
-        // mem2reg 后，后继中可能有 phi 引用了 bb，需要清除这些入边
-        auto *term = bb->get_terminator();
-        if (term) {
-            for (unsigned i = 0; i < term->num_ops_; ++i) {
-                auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
-                if (succ && reachable.count(succ)) {
-                    removeBBFromPhi(bb, succ);
-                    succ->remove_pre_basic_block(bb);
-                }
-            }
-        }
-
-        // 删除该块及其指令
-        std::vector<Instruction *> instrs(bb->instr_list_.begin(), bb->instr_list_.end());
-        for (auto *instr : instrs) {
-            bb->delete_instr(instr);
-        }
-    }
-
-    // 清掉存活块中残留的指向死块的链接，再统一移除死块。
-    // 死块自身的链表先清空，避免 remove_bb 解引用其中可能已失效的指针。
-    std::set<BasicBlock *> deadSet(dead.begin(), dead.end());
-    for (auto *bb : func->basic_blocks_) {
-        if (deadSet.count(bb)) continue;
-        auto isDead = [&](BasicBlock *b) { return deadSet.count(b) > 0; };
-        bb->pre_bbs_.erase(
-            std::remove_if(bb->pre_bbs_.begin(), bb->pre_bbs_.end(), isDead),
-            bb->pre_bbs_.end());
-        bb->succ_bbs_.erase(
-            std::remove_if(bb->succ_bbs_.begin(), bb->succ_bbs_.end(), isDead),
-            bb->succ_bbs_.end());
-    }
-    for (auto *bb : dead) {
-        bb->pre_bbs_.clear();
-        bb->succ_bbs_.clear();
-        bb->parent_->remove_bb(bb);
-    }
 }
 
 // 折叠常量条件分支
@@ -817,9 +747,11 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
     return changed;
 }
 
-void CFGSimplify::execute(Module *module) {
+bool CFGSimplify::runOnModule(Module *module) {
+    bool changedAny = false;
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
+        bool funcChanged = false;
 
         // 0. hoistLoopInvariantBranch is intentionally not enabled here.
         // It is conservative internally, but short-circuit CFGs generated for
@@ -832,9 +764,10 @@ void CFGSimplify::execute(Module *module) {
         bool changed = true;
         while (changed) {
             changed = false;
-            changed |= convertDiamondsToSelect(func);
+            bool iterChanged = false;
+            iterChanged |= convertDiamondsToSelect(func);
             // 2. 折叠常量分支
-            changed |= foldConstantBranches(func);
+            iterChanged |= foldConstantBranches(func);
 
             // 3. 合并空基本块
             // 需要遍历副本，因为集合在遍历中可能被修改
@@ -842,12 +775,28 @@ void CFGSimplify::execute(Module *module) {
             for (auto *bb : bbs) {
                 // 如果该块还存在且不是死块
                 if (bb->parent_ == func) {
-                    changed |= mergeEmptyBlock(bb);
+                    iterChanged |= mergeEmptyBlock(bb);
                 }
             }
 
             // 4. 删除不可达块
-            removeDeadBlocks(func);
+            const size_t before = func->basic_blocks_.size();
+            removeUnreachableBlocks(func);
+            iterChanged |= before != func->basic_blocks_.size();
+            changed = iterChanged;
+            funcChanged |= iterChanged;
         }
+        changedAny |= funcChanged;
     }
+    return changedAny;
+}
+
+void CFGSimplify::execute(Module *module) {
+    runOnModule(module);
+}
+
+PreservedAnalyses CFGSimplify::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    return runOnModule(module) ? PreservedAnalyses::none()
+                               : PreservedAnalyses::all();
 }

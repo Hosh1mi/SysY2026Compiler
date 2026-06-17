@@ -46,6 +46,8 @@ Value* visitShl(BinaryInst *inst) {
         if (inner && inner->op_id_ == Instruction::Shl) {
             auto *c1 = as_const_int(inner->get_operand(1));
             if (c1 && c1->value_ + cy->value_ < (int)bits) {
+                if (inner->get_operand(0) == x && c1->value_ == 0)
+                    return nullptr;
                 auto *new_inst = new BinaryInst(ty, Instruction::Shl,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);

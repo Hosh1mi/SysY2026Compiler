@@ -1,5 +1,8 @@
 #include "../../../include/mid/opt/instCombine.hpp"
 #include "instCombineInternal.hpp"
+
+#include <iostream>
+#include <unordered_set>
 #include <vector>
 
 // ── trySinkInstruction ──────────────────────────────────────────────
@@ -67,24 +70,47 @@ void InstCombine::execute(Module *module) {
 }
 
 void InstCombine::runOnFunction(Function *func) {
-    // Collect all instructions into the worklist
-    std::vector<Instruction*> worklist;
-    for (auto bb : func->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
-            worklist.push_back(inst);
-        }
-    }
+    auto countInstructions = [&]() -> size_t {
+        size_t total = 0;
+        for (auto *bb : func->basic_blocks_)
+            total += bb->instr_list_.size();
+        return total;
+    };
 
-    // Process until fixed point
+    auto enqueueIfAlive = [](Instruction *inst,
+                             std::vector<Instruction *> &worklist,
+                             std::unordered_set<Instruction *> &inWorklist) {
+        if (!inst || !inst->parent_) return;
+        if (!inWorklist.insert(inst).second) return;
+        worklist.push_back(inst);
+    };
+
+    const size_t initialInstrCount = countInstructions();
+    const size_t processBudget =
+        std::max<size_t>(20000, initialInstrCount * 32);
+    const size_t createBudget =
+        std::max<size_t>(4000, initialInstrCount * 16);
+    size_t processedCount = 0;
+    size_t createdCount = 0;
+    bool budgetHit = false;
+
+    std::vector<Instruction*> worklist;
+    std::unordered_set<Instruction *> inWorklist;
+    for (auto *bb : func->basic_blocks_)
+        for (auto *inst : bb->instr_list_)
+            enqueueIfAlive(inst, worklist, inWorklist);
+
     while (!worklist.empty()) {
         Instruction *inst = worklist.back();
         worklist.pop_back();
+        inWorklist.erase(inst);
 
-        // Skip instructions that were deleted by an earlier iteration
         if (!inst->parent_) continue;
-
-        // Skip terminators — they are never simplified here
         if (inst->isTerminator()) continue;
+        if (++processedCount > processBudget) {
+            budgetHit = true;
+            break;
+        }
 
         Value *replacement = nullptr;
 
@@ -152,43 +178,52 @@ void InstCombine::runOnFunction(Function *func) {
             break;
         }
 
+        auto *replacementInst = dynamic_cast<Instruction *>(replacement);
+        if (replacementInst && replacementInst->parent_ &&
+            sameInstructionShape(inst, replacementInst)) {
+            replacementInst->parent_->delete_instr(replacementInst);
+            replacement = nullptr;
+            replacementInst = nullptr;
+        }
+
         if (replacement) {
-            // Collect users *before* replace_all_use_with clears the use list
             std::vector<Instruction*> users;
             for (auto &use : inst->use_list_) {
-                if (auto *user_inst = dynamic_cast<Instruction*>(use.val_)) {
+                if (auto *user_inst = dynamic_cast<Instruction*>(use.val_))
                     users.push_back(user_inst);
-                }
             }
 
-            // Save operands *before* delete_instr drops use counts.
-            // After the old instruction is gone, operands may become
-            // single-use — we try to sink them to their remaining user.
             std::vector<Instruction*> operands;
             for (unsigned i = 0; i < inst->num_ops_; i++) {
-                if (auto *op = dynamic_cast<Instruction*>(inst->get_operand(i))) {
+                if (auto *op = dynamic_cast<Instruction*>(inst->get_operand(i)))
                     operands.push_back(op);
-                }
             }
 
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
 
-            // Revisit users — they may now be simplifiable with the new operand
-            for (auto *user : users) {
-                worklist.push_back(user);
+            for (auto *user : users)
+                enqueueIfAlive(user, worklist, inWorklist);
+
+            if (replacementInst && replacementInst->parent_) {
+                if (++createdCount > createBudget) {
+                    budgetHit = true;
+                    break;
+                }
+                enqueueIfAlive(replacementInst, worklist, inWorklist);
             }
 
-            // If the replacement is itself an instruction, visit it too
-            if (auto *new_inst = dynamic_cast<Instruction*>(replacement)) {
-                worklist.push_back(new_inst);
-            }
-
-            // Try to sink operands that just lost a use
             for (auto *op : operands) {
                 trySinkInstruction(op);
-                if (op->parent_) worklist.push_back(op);
+                enqueueIfAlive(op, worklist, inWorklist);
             }
         }
+    }
+
+    if (budgetHit) {
+        std::cerr << "[InstCombine] budget hit in @" << func->name_
+                  << " processed=" << processedCount
+                  << " created=" << createdCount
+                  << " initial_insts=" << initialInstrCount << "\n";
     }
 }

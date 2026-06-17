@@ -1,6 +1,7 @@
 #include "../../include/backend/arm64/context.hpp"
 #include "../../include/backend/arm64/helpers.hpp"
 #include "../../include/backend/arm64/magicNumber.hpp"
+#include "../../include/mid/analysis/valueFacts.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <array>
 #include <algorithm>
@@ -50,6 +51,10 @@ static bool isI32Vector4(Type *ty) {
 
 static ConstantInt *getConstIntOperand(Value *v) {
     return dynamic_cast<ConstantInt *>(v);
+}
+
+static const char *indexExtendOpcode(Value *idx, BasicBlock *ctx) {
+    return ValueFacts::isKnownNonNegative(idx, ctx) ? "uxtw" : "sxtw";
 }
 
 static uint32_t maskForWidth(unsigned width) {
@@ -1573,7 +1578,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     if (isPowerOfTwo(elemSize)) {
                         int shift = log2Int(elemSize);
                         if (shift <= 4) {
-                            std::string ext = "sxtw";
+                            std::string ext = indexExtendOpcode(idx, inst->parent_);
                             if (shift > 0)
                                 ext += " #" + std::to_string(shift);
                             emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
@@ -1581,7 +1586,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                                               addr, {addr, idxReg});
                         } else {
                             std::string scaled = allocAddrReg();
-                            emitMoveMachine(scaled, idxReg, "sxtw");
+                            emitMoveMachine(scaled, idxReg,
+                                            indexExtendOpcode(idx, inst->parent_));
                             emitRawAluMachine("\tadd " + addr + ", " + addr + ", " + scaled
                                               + ", lsl #" + std::to_string(shift),
                                               addr, {addr, scaled});
@@ -1589,7 +1595,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         }
                     } else {
                         std::string scaled = allocAddrReg();
-                        emitMoveMachine(scaled, idxReg, "sxtw");
+                        emitMoveMachine(scaled, idxReg,
+                                        indexExtendOpcode(idx, inst->parent_));
                         std::string elemReg = allocAddrReg();
                         emitIntConst(elemSize, elemReg);
                         emitBinaryMachine("mul", scaled, scaled, elemReg, MOpcode::Mul, 3);
@@ -1599,7 +1606,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     }
                 } else {
                     emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
-                                      + idxReg + ", sxtw",
+                                      + idxReg + ", " + indexExtendOpcode(idx, inst->parent_),
                                       addr, {addr, idxReg});
                 }
                 freeIntReg(idxReg);
@@ -1912,7 +1919,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 } else {
                     std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
                     std::string tmp = allocAddrReg();
-                    emitMoveMachine(tmp, r, "sxtw");
+                    emitMoveMachine(tmp, r, indexExtendOpcode(arg, inst->parent_));
                     emitStoreMemMachine(tmp, "[sp, #" + std::to_string(stackIdx * 8) + "]", {tmp, "sp"});
                     freeAddrReg(tmp);
                     stackIdx++;
