@@ -13,12 +13,10 @@ struct MachineLivenessResult {
     std::vector<std::set<std::string>> blockLiveIn;
     std::vector<std::set<std::string>> blockLiveOut;
     std::map<const MachineInstr *, std::set<std::string>> instrLiveOut;
+    std::map<std::string, std::set<std::string>> labelLiveIn;
 };
 
 class MachineLiveness {
 public:
     MachineLivenessResult analyze(const MachineFunction &func) const;
-
-private:
-    std::vector<std::vector<size_t>> computeSuccessors(const MachineFunction &func) const;
 };

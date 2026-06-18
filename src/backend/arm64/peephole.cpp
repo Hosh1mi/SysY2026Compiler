@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/peephole.hpp"
+#include "../../include/backend/arm64/liveness.hpp"
 #include <cctype>
 #include <cstdlib>
 #include <set>
@@ -597,6 +598,103 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
 		return true;
 	}
 
+	return false;
+}
+
+// Delay a pure add/sub to a fallthrough copy-back:
+//
+//   add temp, src, #imm
+//   ...
+//   b.cond exit
+//   mov dst, temp
+//
+// becomes:
+//
+//   ...
+//   b.cond exit
+//   add dst, src, #imm
+//
+// The operation now executes on exactly the path where the copy executed.
+// Source registers must remain unchanged across the move, and precise
+// instruction-CFG liveness must prove that the old temporary dies at the copy.
+static bool tryMachineDelayAddSubToCopy(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	ParsedLine alu = parseLine(block.instrs[idx].text);
+	if (alu.kind != LineKind::Instruction) return false;
+	if (alu.mnemonic != "add" && alu.mnemonic != "sub") return false;
+	if (alu.operands.size() != 3) return false;
+
+	const std::string tempReg = alu.operands[0];
+	char cls = regClass(tempReg);
+	if (cls != 'w' && cls != 'x') return false;
+	if (regClass(alu.operands[1]) != cls && alu.operands[1] != "sp")
+		return false;
+	if (alu.operands[2].empty() || alu.operands[2][0] != '#')
+		return false;
+
+	std::set<std::string> sourceRegs = block.instrs[idx].uses;
+	bool sawConditionalBranch = false;
+	std::string branchTarget;
+	int seen = 0;
+	for (size_t i = idx + 1; i < block.instrs.size() && seen < 10; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+			continue;
+		if (line.kind != LineKind::Instruction)
+			return false;
+		++seen;
+
+		bool isCopy = line.mnemonic == "mov" && line.operands.size() == 2 &&
+		              line.operands[1] == tempReg;
+		if (isCopy) {
+			if (!sawConditionalBranch) return false;
+			const std::string &dstReg = line.operands[0];
+			if (regClass(dstReg) != cls || dstReg == tempReg) return false;
+
+			auto liveIt = liveness.instrLiveOut.find(&block.instrs[i]);
+			if (liveIt == liveness.instrLiveOut.end()) return false;
+			auto targetLiveIt = liveness.labelLiveIn.find(branchTarget);
+			if (targetLiveIt == liveness.labelLiveIn.end()) return false;
+			for (const auto &def : block.instrs[idx].defs) {
+				if (liveIt->second.count(def))
+					return false;
+				if (targetLiveIt->second.count(def))
+					return false;
+			}
+
+			std::vector<std::string> operands = alu.operands;
+			operands[0] = dstReg;
+			replaceMachineInstr(block.instrs[i],
+			                    makeMachineInsn(alu.mnemonic, operands));
+			block.instrs.erase(block.instrs.begin() + idx);
+			return true;
+		}
+
+		if (lineReadsReg(line, tempReg) || lineWritesReg(line, tempReg))
+			return false;
+		for (const auto &source : sourceRegs) {
+			std::string physical = source;
+			if (!physical.empty() && physical[0] == 'r')
+				physical = std::string(1, cls) + physical.substr(1);
+			if (lineWritesReg(line, physical))
+				return false;
+		}
+
+		if (isCallBarrier(line.mnemonic) || line.mnemonic == "b" ||
+		    line.mnemonic == "ret")
+			return false;
+		if (isControlFlowBarrier(line.mnemonic)) {
+			if (sawConditionalBranch)
+				return false;
+			if (line.mnemonic.size() < 3 ||
+			    line.mnemonic[0] != 'b' || line.mnemonic[1] != '.' ||
+			    line.operands.size() != 1)
+				return false;
+			sawConditionalBranch = true;
+			branchTarget = line.operands[0];
+		}
+	}
 	return false;
 }
 
@@ -1252,6 +1350,7 @@ void peepholeOptimize(MachineFunction &func) {
 	bool changed = true;
 	while (changed) {
 		changed = false;
+		MachineLivenessResult liveness = MachineLiveness().analyze(func);
 		for (size_t b = 0; b < func.blocks.size() && !changed; ++b) {
 			for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 				if (tryMachineSelfMove(func.blocks[b], i)) {
@@ -1279,6 +1378,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineFoldAddSubMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness)) {
 					changed = true;
 					break;
 				}
