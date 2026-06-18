@@ -37,7 +37,8 @@ static char regClass(const std::string &r) {
 	if (r == "xzr") return 'x';
 	if (r == "sp") return 'x';
 	char c = r[0];
-	if ((c == 'w' || c == 'x' || c == 's' || c == 'd') && r.size() >= 2 && std::isdigit(r[1]))
+	if ((c == 'w' || c == 'x' || c == 's' || c == 'd' || c == 'q' || c == 'v') &&
+	    r.size() >= 2 && std::isdigit(r[1]))
 		return c;
 	return 0;
 }
@@ -45,21 +46,47 @@ static char regClass(const std::string &r) {
 static int regSize(char cls) {
 	if (cls == 'w' || cls == 's') return 4;
 	if (cls == 'x' || cls == 'd') return 8;
+	if (cls == 'q' || cls == 'v') return 16;
 	return 0;
+}
+
+static bool parsePhysicalReg(const std::string &reg, char &cls, std::string &num) {
+	std::string text = trim(reg);
+	if (text.size() >= 2 && text.front() == '{' && text.back() == '}')
+		text = trim(text.substr(1, text.size() - 2));
+	if (text == "wzr" || text == "xzr" || text == "sp")
+		return false;
+	if (text.size() < 2)
+		return false;
+
+	cls = text[0];
+	if (cls != 'w' && cls != 'x' && cls != 's' &&
+	    cls != 'd' && cls != 'q' && cls != 'v')
+		return false;
+
+	size_t pos = 1;
+	while (pos < text.size() && std::isdigit(text[pos]))
+		++pos;
+	if (pos == 1)
+		return false;
+	num = text.substr(1, pos - 1);
+	return true;
 }
 
 static bool samePhysicalReg(const std::string &a, const std::string &b) {
 	if (a == b) return true;
-	if (a.size() < 2 || b.size() < 2) return false;
-
-	char aCls = a[0];
-	char bCls = b[0];
+	char aCls = 0;
+	char bCls = 0;
+	std::string aNum;
+	std::string bNum;
+	if (!parsePhysicalReg(a, aCls, aNum) || !parsePhysicalReg(b, bCls, bNum))
+		return false;
 	bool sameIntFile = (aCls == 'w' || aCls == 'x') && (bCls == 'w' || bCls == 'x');
-	bool sameFloatFile = (aCls == 's' || aCls == 'd') && (bCls == 's' || bCls == 'd');
+	bool sameFloatFile = (aCls == 's' || aCls == 'd' || aCls == 'q' || aCls == 'v') &&
+	                     (bCls == 's' || bCls == 'd' || bCls == 'q' || bCls == 'v');
 	if (!sameIntFile && !sameFloatFile) return false;
 
-	if (!std::isdigit(a[1]) || !std::isdigit(b[1])) return false;
-	return a.substr(1) == b.substr(1);
+	return aNum == bNum;
 }
 
 // Parse [base, #offset], [base], [base, #-offset]
@@ -191,7 +218,9 @@ static bool lineUsesReg(const ParsedLine &l, const std::string &r) {
 
 // Does line write (not just read) a register?
 static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
-	if ((l.mnemonic == "ld1" || l.mnemonic == "st1") && l.operands.size() >= 3) {
+	if ((l.mnemonic == "ldr" || l.mnemonic == "str" ||
+	     l.mnemonic == "ld1" || l.mnemonic == "st1") &&
+	    l.operands.size() >= 3) {
 		MemOperand mem = parseMemOp(l.operands[1]);
 		if (mem.valid && samePhysicalReg(mem.base, r))
 			return true;
@@ -1179,6 +1208,54 @@ static bool isSimpleNeonMemOp(const ParsedLine &line) {
 	       line.operands[0].find('{') != std::string::npos;
 }
 
+static std::string parseFullVectorListReg(const std::string &operand) {
+	std::string text = trim(operand);
+	if (text.size() < 7 || text.front() != '{' || text.back() != '}')
+		return "";
+	text = trim(text.substr(1, text.size() - 2));
+	if (text.empty() || text[0] != 'v')
+		return "";
+
+	size_t pos = 1;
+	while (pos < text.size() && std::isdigit(text[pos]))
+		++pos;
+	if (pos == 1 || pos >= text.size() || text[pos] != '.')
+		return "";
+
+	std::string suffix = text.substr(pos);
+	if (suffix != ".16b" && suffix != ".8h" && suffix != ".4s" && suffix != ".2d")
+		return "";
+	return "q" + text.substr(1, pos - 1);
+}
+
+static bool tryMachineVectorLdStAlias(MachineBasicBlock &block, size_t idx) {
+	ParsedLine line = parseLine(block.instrs[idx].text);
+	if (line.kind != LineKind::Instruction)
+		return false;
+	if (line.mnemonic != "ld1" && line.mnemonic != "st1")
+		return false;
+	if (line.operands.size() != 2 && line.operands.size() != 3)
+		return false;
+
+	std::string qReg = parseFullVectorListReg(line.operands[0]);
+	if (qReg.empty())
+		return false;
+
+	MemOperand addr = parseMemOp(line.operands[1]);
+	if (!addr.valid || addr.offset != 0)
+		return false;
+	if (line.operands.size() == 3 && line.operands[2] != "#16")
+		return false;
+
+	std::vector<std::string> operands = {qReg, line.operands[1]};
+	if (line.operands.size() == 3)
+		operands.push_back(line.operands[2]);
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(line.mnemonic == "ld1" ? "ldr" : "str",
+	                                    operands));
+	return true;
+}
+
 static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
 
@@ -1580,6 +1657,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachinePostIndexNeon(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineVectorLdStAlias(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
