@@ -179,10 +179,19 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     // also skip loops whose body is large enough to cause register pressure when
     // unrolled (Cortex-A53 has limited registers and no OOO execution).
     int latchBodySize = 0;
+    bool hasVectorOps = false;
     for (auto inst : latch->instr_list_) {
         if (inst->isTerminator()) continue;
         if (inst->is_call() || inst->is_phi() || inst->is_alloca()) return false;
         latchBodySize++;
+        if (inst->type_->tid_ == Type::VectorTyID)
+            hasVectorOps = true;
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID) {
+                hasVectorOps = true;
+                break;
+            }
+        }
         bool canClone = dynamic_cast<BinaryInst *>(inst) ||
                         dynamic_cast<UnaryInst *>(inst) ||
                         dynamic_cast<ICmpInst *>(inst) ||
@@ -196,7 +205,12 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
                         dynamic_cast<Bitcast *>(inst);
         if (!canClone) return false;
     }
-    if (latchBodySize > MAX_LATCH_INSTS) return false;
+    // A two-way vector unroll exposes independent memory/ALU operations while
+    // growing the body much less than the default four-way scalar unroll.
+    // Permit that modestly larger source body, but keep the original bound for
+    // scalar loops.
+    int maxLatchInsts = hasVectorOps ? 12 : MAX_LATCH_INSTS;
+    if (latchBodySize > maxLatchInsts) return false;
 
     // ── Register pressure estimation ─────────────────────────────────────
     // A 4× unrolled body creates 4 interleaved SSA chains for each header
@@ -214,7 +228,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
             numIntNonIVPhis++;
     }
     int effectiveUnrollFactor = UNROLL_FACTOR;  // 4
-    if (numIntNonIVPhis > 0 && numPtrPhis >= 2)
+    if (hasVectorOps || (numIntNonIVPhis > 0 && numPtrPhis >= 2))
         effectiveUnrollFactor = 2;
 
     if (std::getenv("DEBUG_LOOP_UNROLL"))
