@@ -270,7 +270,7 @@ InsertElementInst *singleInsertElementUser(Instruction *inst) {
     return dynamic_cast<InsertElementInst*>(inst->use_list_.front().val_);
 }
 
-bool isCompleteIntSplatInsertChain(Instruction *inst, int &value) {
+bool isCompleteIntSplatInsertChain(Instruction *inst, Value *&value) {
     auto *insert = dynamic_cast<InsertElementInst*>(inst);
     if (!insert) return false;
 
@@ -281,23 +281,25 @@ bool isCompleteIntSplatInsertChain(Instruction *inst, int &value) {
     }
 
     bool seen[4] = {false, false, false, false};
-    bool haveValue = false;
-    int commonValue = 0;
+    Value *commonValue = nullptr;
 
     while (insert) {
         auto *idx = dynamic_cast<ConstantInt*>(insert->get_operand(2));
-        auto *elem = dynamic_cast<ConstantInt*>(insert->get_operand(1));
-        if (!idx || !elem || idx->value_ < 0 || idx->value_ >= 4)
+        Value *elem = insert->get_operand(1);
+        if (!idx || !elem || elem->type_->tid_ != Type::IntegerTyID ||
+            idx->value_ < 0 || idx->value_ >= 4)
             return false;
         if (seen[idx->value_])
             return false;
         seen[idx->value_] = true;
 
-        if (!haveValue) {
-            commonValue = elem->value_;
-            haveValue = true;
-        } else if (commonValue != elem->value_) {
-            return false;
+        if (!commonValue) {
+            commonValue = elem;
+        } else if (commonValue != elem) {
+            auto *commonConst = dynamic_cast<ConstantInt*>(commonValue);
+            auto *elemConst = dynamic_cast<ConstantInt*>(elem);
+            if (!commonConst || !elemConst || commonConst->value_ != elemConst->value_)
+                return false;
         }
 
         auto *baseInst = dynamic_cast<InsertElementInst*>(insert->get_operand(0));
@@ -324,9 +326,8 @@ bool isSplatInsertChainIntermediate(Instruction *inst) {
     while (auto *next = singleInsertElementUser(terminal))
         terminal = next;
 
-    int value = 0;
-    return isCompleteIntSplatInsertChain(terminal, value) &&
-           canUseMoviSplat(value);
+    Value *value = nullptr;
+    return isCompleteIntSplatInsertChain(terminal, value);
 }
 
 } // namespace
@@ -1301,12 +1302,19 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (isSplatInsertChainIntermediate(inst))
             break;
 
-        int splatValue = 0;
-        if (isCompleteIntSplatInsertChain(inst, splatValue) &&
-            canUseMoviSplat(splatValue)) {
+        Value *splatValue = nullptr;
+        if (isCompleteIntSplatInsertChain(inst, splatValue)) {
             std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
-            emitRawAluMachine("\tmovi " + rd + ".4s, #" + std::to_string(splatValue),
-                              rd, {}, MOpcode::Neon);
+            auto *constant = dynamic_cast<ConstantInt*>(splatValue);
+            if (constant && canUseMoviSplat(constant->value_)) {
+                emitRawAluMachine("\tmovi " + rd + ".4s, #" +
+                                      std::to_string(constant->value_),
+                                  rd, {}, MOpcode::Neon);
+            } else {
+                std::string ws = loadInt(splatValue);
+                emitRawAluMachine("\tdup " + rd + ".4s, " + ws,
+                                  rd, {ws}, MOpcode::Neon);
+            }
             if (!hasAssignedReg(inst)) storeVector(inst, rd);
             break;
         }

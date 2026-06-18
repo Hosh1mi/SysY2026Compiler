@@ -65,16 +65,6 @@ std::vector<std::string> operands(const MachineInstr &inst) {
     return splitOperands(t.substr(sp + 1));
 }
 
-const MachineInstr *lastRealInstruction(const MachineBasicBlock &block) {
-    for (auto it = block.instrs.rbegin(); it != block.instrs.rend(); ++it) {
-        if (!it->isLabelLike && it->opcode != MOpcode::Comment &&
-            it->opcode != MOpcode::Directive) {
-            return &*it;
-        }
-    }
-    return nullptr;
-}
-
 std::set<std::string> callerSavedRegs() {
     std::set<std::string> regs;
     for (int r = 0; r <= 18; ++r)
@@ -139,127 +129,126 @@ std::set<std::string> effectiveDefs(const MachineInstr &inst) {
 
 } // namespace
 
-std::vector<std::vector<size_t>>
-MachineLiveness::computeSuccessors(const MachineFunction &func) const {
-    std::map<std::string, size_t> labelToBlock;
-    for (size_t i = 0; i < func.blocks.size(); ++i) {
-        if (!func.blocks[i].label.empty())
-            labelToBlock[labelName(func.blocks[i].label)] = i;
-        for (const auto &inst : func.blocks[i].instrs) {
-            if (inst.opcode == MOpcode::Label) {
-                labelToBlock[labelName(inst.text)] = i;
-                break;
-            }
-        }
-    }
-
-    std::vector<std::vector<size_t>> succs(func.blocks.size());
-    for (size_t i = 0; i < func.blocks.size(); ++i) {
-        const MachineInstr *term = lastRealInstruction(func.blocks[i]);
-        auto addFallthrough = [&]() {
-            if (i + 1 < func.blocks.size())
-                succs[i].push_back(i + 1);
-        };
-        auto addTarget = [&](const std::string &target) {
-            auto it = labelToBlock.find(labelName(target));
-            if (it != labelToBlock.end())
-                succs[i].push_back(it->second);
-        };
-
-        if (!term) {
-            addFallthrough();
-            continue;
-        }
-
-        std::string op = mnemonic(*term);
-        auto ops = operands(*term);
-
-        if (term->opcode == MOpcode::Ret) {
-            continue;
-        } else if (term->opcode == MOpcode::Branch) {
-            if (op == "b") {
-                if (!ops.empty()) addTarget(ops[0]);
-            } else if (op == "cbz" || op == "cbnz") {
-                if (ops.size() >= 2) addTarget(ops[1]);
-                addFallthrough();
-            } else {
-                if (!ops.empty()) addTarget(ops[0]);
-                addFallthrough();
-            }
-        } else {
-            addFallthrough();
-        }
-
-        std::sort(succs[i].begin(), succs[i].end());
-        succs[i].erase(std::unique(succs[i].begin(), succs[i].end()), succs[i].end());
-    }
-    return succs;
-}
-
 MachineLivenessResult MachineLiveness::analyze(const MachineFunction &func) const {
     MachineLivenessResult result;
     const size_t n = func.blocks.size();
     result.blockLiveIn.resize(n);
     result.blockLiveOut.resize(n);
 
-    auto succs = computeSuccessors(func);
-    std::vector<std::set<std::string>> blockUse(n), blockDef(n);
+    struct InstrRef {
+        const MachineInstr *inst;
+    };
+    std::vector<InstrRef> flat;
+    std::map<std::string, size_t> labelToInstr;
+    std::vector<size_t> blockFirst(n, static_cast<size_t>(-1));
+    std::vector<size_t> blockLast(n, static_cast<size_t>(-1));
 
     for (size_t bi = 0; bi < n; ++bi) {
         for (const auto &inst : func.blocks[bi].instrs) {
-            auto uses = effectiveUses(inst);
-            auto defs = effectiveDefs(inst);
-
-            for (const auto &reg : uses) {
-                if (!blockDef[bi].count(reg))
-                    blockUse[bi].insert(reg);
-            }
-            blockDef[bi].insert(defs.begin(), defs.end());
+            size_t index = flat.size();
+            if (blockFirst[bi] == static_cast<size_t>(-1))
+                blockFirst[bi] = index;
+            blockLast[bi] = index;
+            flat.push_back({&inst});
+            if (inst.opcode == MOpcode::Label)
+                labelToInstr[labelName(inst.text)] = index;
         }
     }
 
+    std::vector<std::vector<size_t>> instrSuccs(flat.size());
+    std::vector<bool> unknownSuccessor(flat.size(), false);
+    for (size_t i = 0; i < flat.size(); ++i) {
+        const MachineInstr &inst = *flat[i].inst;
+        auto addNext = [&]() {
+            if (i + 1 < flat.size())
+                instrSuccs[i].push_back(i + 1);
+        };
+        auto addTarget = [&](const std::string &target) {
+            auto it = labelToInstr.find(labelName(target));
+            if (it != labelToInstr.end())
+                instrSuccs[i].push_back(it->second);
+            else
+                unknownSuccessor[i] = true;
+        };
+
+        if (inst.opcode == MOpcode::Ret) {
+            continue;
+        }
+        if (inst.opcode != MOpcode::Branch) {
+            addNext();
+            continue;
+        }
+
+        std::string op = mnemonic(inst);
+        auto ops = operands(inst);
+        if (op == "b") {
+            if (!ops.empty())
+                addTarget(ops[0]);
+            else
+                unknownSuccessor[i] = true;
+        } else if (op == "cbz" || op == "cbnz") {
+            if (ops.size() >= 2)
+                addTarget(ops[1]);
+            else
+                unknownSuccessor[i] = true;
+            addNext();
+        } else if (op == "tbz" || op == "tbnz") {
+            if (ops.size() >= 3)
+                addTarget(ops[2]);
+            else
+                unknownSuccessor[i] = true;
+            addNext();
+        } else {
+            if (!ops.empty())
+                addTarget(ops[0]);
+            else
+                unknownSuccessor[i] = true;
+            addNext();
+        }
+    }
+
+    std::vector<std::set<std::string>> instrLiveIn(flat.size());
+    std::vector<std::set<std::string>> instrLiveOut(flat.size());
+    const auto boundaryRegs = physicalBoundaryRegs();
     bool changed;
     do {
         changed = false;
-        for (size_t bi = n; bi > 0; --bi) {
-            size_t i = bi - 1;
+        for (size_t ii = flat.size(); ii > 0; --ii) {
+            size_t i = ii - 1;
             std::set<std::string> newOut;
-            for (size_t succ : succs[i]) {
-                newOut.insert(result.blockLiveIn[succ].begin(),
-                              result.blockLiveIn[succ].end());
+            for (size_t succ : instrSuccs[i]) {
+                newOut.insert(instrLiveIn[succ].begin(),
+                              instrLiveIn[succ].end());
             }
+            if (unknownSuccessor[i])
+                newOut.insert(boundaryRegs.begin(), boundaryRegs.end());
 
-            std::set<std::string> newIn = blockUse[i];
+            std::set<std::string> newIn = effectiveUses(*flat[i].inst);
+            auto defs = effectiveDefs(*flat[i].inst);
             for (const auto &reg : newOut) {
-                if (!blockDef[i].count(reg))
+                if (!defs.count(reg))
                     newIn.insert(reg);
             }
 
-            if (newIn != result.blockLiveIn[i] || newOut != result.blockLiveOut[i]) {
+            if (newIn != instrLiveIn[i] || newOut != instrLiveOut[i]) {
                 changed = true;
-                result.blockLiveIn[i] = std::move(newIn);
-                result.blockLiveOut[i] = std::move(newOut);
+                instrLiveIn[i] = std::move(newIn);
+                instrLiveOut[i] = std::move(newOut);
             }
         }
     } while (changed);
 
-    const auto boundaryRegs = physicalBoundaryRegs();
+    for (size_t i = 0; i < flat.size(); ++i) {
+        result.instrLiveOut[flat[i].inst] = instrLiveOut[i];
+        if (flat[i].inst->opcode == MOpcode::Label)
+            result.labelLiveIn[labelName(flat[i].inst->text)] = instrLiveIn[i];
+    }
+
     for (size_t bi = 0; bi < n; ++bi) {
-        std::set<std::string> live = result.blockLiveOut[bi];
-        // MachineBasicBlock currently means "label-delimited region", not a
-        // true single-entry/single-exit basic block. Keep physical registers
-        // conservatively live at region boundaries so DCE only removes values
-        // proven dead inside the region.
-        live.insert(boundaryRegs.begin(), boundaryRegs.end());
-        const auto &instrs = func.blocks[bi].instrs;
-        for (auto it = instrs.rbegin(); it != instrs.rend(); ++it) {
-            result.instrLiveOut[&*it] = live;
-            auto defs = effectiveDefs(*it);
-            auto uses = effectiveUses(*it);
-            for (const auto &reg : defs)
-                live.erase(reg);
-            live.insert(uses.begin(), uses.end());
-        }
+        if (blockFirst[bi] == static_cast<size_t>(-1))
+            continue;
+        result.blockLiveIn[bi] = instrLiveIn[blockFirst[bi]];
+        result.blockLiveOut[bi] = instrLiveOut[blockLast[bi]];
     }
 
     return result;

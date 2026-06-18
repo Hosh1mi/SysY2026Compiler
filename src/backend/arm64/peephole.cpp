@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/peephole.hpp"
+#include "../../include/backend/arm64/liveness.hpp"
 #include <cctype>
 #include <cstdlib>
 #include <set>
@@ -255,6 +256,16 @@ static bool isScratchReg(const std::string &r) {
 	return num >= kScratchRegMin && num <= kScratchRegMax;
 }
 
+static bool isCallerSavedReg(const std::string &r) {
+	if (r.size() < 2 || !std::isdigit(r[1])) return false;
+	int num = std::atoi(r.c_str() + 1);
+	if (r[0] == 'w' || r[0] == 'x')
+		return num >= 0 && num <= 18;
+	if (r[0] == 's' || r[0] == 'd')
+		return (num >= 0 && num <= 7) || (num >= 16 && num <= 31);
+	return false;
+}
+
 // ── Main optimization loop ──────────────────────────────────────────
 
 static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
@@ -343,6 +354,8 @@ static bool canPropagateCopy(const ParsedLine &line,
 	    line.mnemonic == "tst" || line.mnemonic == "ccmp") {
 		return rewriteUses({0, 1});
 	}
+	if (line.mnemonic == "str" || line.mnemonic == "stur")
+		return rewriteUses({0});
 	return false;
 }
 
@@ -390,6 +403,7 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx) {
 
 		replaceMachineInstr(block.instrs[i],
 		                    makeMachineInsn(rewritten.mnemonic, rewritten.operands));
+		block.instrs.erase(block.instrs.begin() + idx);
 		return true;
 	}
 
@@ -402,7 +416,7 @@ static bool machineRegDeadAfter(const MachineBasicBlock &block,
 	for (size_t i = idx + 1; i < block.instrs.size(); ++i) {
 		ParsedLine line = parseLine(block.instrs[i].text);
 		if (line.kind != LineKind::Instruction) continue;
-		if (isCallBarrier(line.mnemonic)) return isScratchReg(reg);
+		if (isCallBarrier(line.mnemonic)) return isCallerSavedReg(reg);
 		if (lineWritesReg(line, reg)) return true;
 		if (lineReadsReg(line, reg)) return false;
 		if (line.mnemonic == "b" || line.mnemonic == "ret" ||
@@ -597,6 +611,103 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
 		return true;
 	}
 
+	return false;
+}
+
+// Delay a pure add/sub to a fallthrough copy-back:
+//
+//   add temp, src, #imm
+//   ...
+//   b.cond exit
+//   mov dst, temp
+//
+// becomes:
+//
+//   ...
+//   b.cond exit
+//   add dst, src, #imm
+//
+// The operation now executes on exactly the path where the copy executed.
+// Source registers must remain unchanged across the move, and precise
+// instruction-CFG liveness must prove that the old temporary dies at the copy.
+static bool tryMachineDelayAddSubToCopy(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	ParsedLine alu = parseLine(block.instrs[idx].text);
+	if (alu.kind != LineKind::Instruction) return false;
+	if (alu.mnemonic != "add" && alu.mnemonic != "sub") return false;
+	if (alu.operands.size() != 3) return false;
+
+	const std::string tempReg = alu.operands[0];
+	char cls = regClass(tempReg);
+	if (cls != 'w' && cls != 'x') return false;
+	if (regClass(alu.operands[1]) != cls && alu.operands[1] != "sp")
+		return false;
+	if (alu.operands[2].empty() || alu.operands[2][0] != '#')
+		return false;
+
+	std::set<std::string> sourceRegs = block.instrs[idx].uses;
+	bool sawConditionalBranch = false;
+	std::string branchTarget;
+	int seen = 0;
+	for (size_t i = idx + 1; i < block.instrs.size() && seen < 10; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+			continue;
+		if (line.kind != LineKind::Instruction)
+			return false;
+		++seen;
+
+		bool isCopy = line.mnemonic == "mov" && line.operands.size() == 2 &&
+		              line.operands[1] == tempReg;
+		if (isCopy) {
+			if (!sawConditionalBranch) return false;
+			const std::string &dstReg = line.operands[0];
+			if (regClass(dstReg) != cls || dstReg == tempReg) return false;
+
+			auto liveIt = liveness.instrLiveOut.find(&block.instrs[i]);
+			if (liveIt == liveness.instrLiveOut.end()) return false;
+			auto targetLiveIt = liveness.labelLiveIn.find(branchTarget);
+			if (targetLiveIt == liveness.labelLiveIn.end()) return false;
+			for (const auto &def : block.instrs[idx].defs) {
+				if (liveIt->second.count(def))
+					return false;
+				if (targetLiveIt->second.count(def))
+					return false;
+			}
+
+			std::vector<std::string> operands = alu.operands;
+			operands[0] = dstReg;
+			replaceMachineInstr(block.instrs[i],
+			                    makeMachineInsn(alu.mnemonic, operands));
+			block.instrs.erase(block.instrs.begin() + idx);
+			return true;
+		}
+
+		if (lineReadsReg(line, tempReg) || lineWritesReg(line, tempReg))
+			return false;
+		for (const auto &source : sourceRegs) {
+			std::string physical = source;
+			if (!physical.empty() && physical[0] == 'r')
+				physical = std::string(1, cls) + physical.substr(1);
+			if (lineWritesReg(line, physical))
+				return false;
+		}
+
+		if (isCallBarrier(line.mnemonic) || line.mnemonic == "b" ||
+		    line.mnemonic == "ret")
+			return false;
+		if (isControlFlowBarrier(line.mnemonic)) {
+			if (sawConditionalBranch)
+				return false;
+			if (line.mnemonic.size() < 3 ||
+			    line.mnemonic[0] != 'b' || line.mnemonic[1] != '.' ||
+			    line.operands.size() != 1)
+				return false;
+			sawConditionalBranch = true;
+			branchTarget = line.operands[0];
+		}
+	}
 	return false;
 }
 
@@ -1248,12 +1359,90 @@ static bool tryMachineFallthroughBranch(MachineFunction &func,
 	return true;
 }
 
+// A fallthrough edge that copies into a shared return block can return
+// directly without first materializing the shared block's input register:
+//
+//   mov temp, src; return_label: mov result, temp; ret
+//     -> mov result, src; ret; return_label: mov result, temp; ret
+static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
+                                         size_t blockIdx,
+                                         size_t instrIdx) {
+	auto &block = func.blocks[blockIdx];
+	ParsedLine copy = parseLine(block.instrs[instrIdx].text);
+	if (copy.kind != LineKind::Instruction) return false;
+	if (copy.mnemonic != "mov" && copy.mnemonic != "fmov") return false;
+	if (copy.operands.size() != 2) return false;
+	const std::string tempReg = copy.operands[0];
+	const std::string srcReg = copy.operands[1];
+	if (!regClass(tempReg) || regClass(tempReg) != regClass(srcReg)) return false;
+
+	size_t returnMoveBlock = 0, returnMoveInstr = 0;
+	bool crossedLabel = false;
+	bool foundReturnMove = false;
+	for (size_t b = blockIdx; b < func.blocks.size() && !foundReturnMove; ++b) {
+		const auto &instrs = func.blocks[b].instrs;
+		size_t begin = (b == blockIdx) ? instrIdx + 1 : 0;
+		for (size_t i = begin; i < instrs.size(); ++i) {
+			ParsedLine line = parseLine(instrs[i].text);
+			if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+				continue;
+			if (line.kind == LineKind::Label) {
+				crossedLabel = true;
+				continue;
+			}
+			if (line.kind != LineKind::Instruction) return false;
+			if (!crossedLabel ||
+			    (line.mnemonic != "mov" && line.mnemonic != "fmov") ||
+			    line.operands.size() != 2 || line.operands[1] != tempReg)
+				return false;
+			returnMoveBlock = b;
+			returnMoveInstr = i;
+			foundReturnMove = true;
+			break;
+		}
+	}
+	if (!foundReturnMove) return false;
+
+	ParsedLine returnMove =
+		parseLine(func.blocks[returnMoveBlock].instrs[returnMoveInstr].text);
+	if (returnMove.mnemonic != copy.mnemonic) return false;
+	if (regClass(returnMove.operands[0]) != regClass(tempReg)) return false;
+
+	bool foundRet = false;
+	for (size_t b = returnMoveBlock; b < func.blocks.size() && !foundRet; ++b) {
+		const auto &instrs = func.blocks[b].instrs;
+		size_t begin = (b == returnMoveBlock) ? returnMoveInstr + 1 : 0;
+		for (size_t i = begin; i < instrs.size(); ++i) {
+			ParsedLine line = parseLine(instrs[i].text);
+			if (line.kind == LineKind::Empty || line.kind == LineKind::Comment)
+				continue;
+			if (line.kind != LineKind::Instruction || line.mnemonic != "ret")
+				return false;
+			foundRet = true;
+			break;
+		}
+	}
+	if (!foundRet) return false;
+
+	replaceMachineInstr(block.instrs[instrIdx],
+	                    makeMachineInsn(copy.mnemonic,
+	                                    {returnMove.operands[0], srcReg}));
+	MachineInstr ret = parseMachineInstr("\tret", block.instrs[instrIdx].originalIndex);
+	block.instrs.insert(block.instrs.begin() + instrIdx + 1, std::move(ret));
+	return true;
+}
+
 void peepholeOptimize(MachineFunction &func) {
 	bool changed = true;
 	while (changed) {
 		changed = false;
+		MachineLivenessResult liveness = MachineLiveness().analyze(func);
 		for (size_t b = 0; b < func.blocks.size() && !changed; ++b) {
 			for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
+				if (tryMachineFoldCopyIntoReturn(func, b, i)) {
+					changed = true;
+					break;
+				}
 				if (tryMachineSelfMove(func.blocks[b], i)) {
 					changed = true;
 					break;
@@ -1279,6 +1468,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineFoldAddSubMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness)) {
 					changed = true;
 					break;
 				}
