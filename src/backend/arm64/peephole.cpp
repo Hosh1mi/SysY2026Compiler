@@ -246,14 +246,7 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 	if (!l.operands.empty()) {
 		const std::string &dst = l.operands[0];
 		if (dst == r) return true;
-		// ARM64 register aliasing: wN and xN share the same physical register,
-		// as do sN and dN. A write to either width clobbers the other.
-		if (dst.size() >= 2 && r.size() >= 2) {
-			char clsDst = dst[0], clsR = r[0];
-			bool sameFile = ((clsDst == 'w' || clsDst == 'x') && (clsR == 'w' || clsR == 'x')) ||
-			                ((clsDst == 's' || clsDst == 'd') && (clsR == 's' || clsR == 'd'));
-			if (sameFile && dst.substr(1) == r.substr(1)) return true;
-		}
+		if (samePhysicalReg(dst, r)) return true;
 	}
 	return false;
 }
@@ -339,6 +332,7 @@ static bool machineRegDeadAfter(const MachineBasicBlock &block,
                                 size_t idx,
                                 const std::string &reg);
 static bool isControlFlowBarrier(const std::string &mnemonic);
+static bool setsFlags(const std::string &mnemonic);
 
 static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
@@ -365,6 +359,76 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	replaceMachineInstr(block.instrs[idx + 1],
 	                    makeMachineInsn("mov", {dstReg, srcReg}));
 	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool isRetargetablePureDef(const ParsedLine &line) {
+	if (line.kind != LineKind::Instruction || line.operands.empty())
+		return false;
+	if (!regClass(line.operands[0]))
+		return false;
+	if (setsFlags(line.mnemonic) || isCallBarrier(line.mnemonic) ||
+	    isControlFlowBarrier(line.mnemonic))
+		return false;
+
+	static const std::set<std::string> mnemonics = {
+		"add", "sub", "and", "orr", "eor", "bic",
+		"asr", "lsl", "lsr", "neg", "clz",
+		"mul", "madd", "msub", "mneg",
+		"sdiv", "udiv",
+		"fadd", "fsub", "fmul", "fdiv", "fneg",
+		"scvtf", "fcvtzs"
+	};
+	return mnemonics.count(line.mnemonic) != 0;
+}
+
+static bool tryMachineRetargetCopyDest(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine producer = parseLine(block.instrs[idx].text);
+	ParsedLine copy = parseLine(block.instrs[idx + 1].text);
+	if (!isRetargetablePureDef(producer)) return false;
+	if (copy.kind != LineKind::Instruction) return false;
+	if (copy.mnemonic != "mov" && copy.mnemonic != "fmov") return false;
+	if (copy.operands.size() != 2) return false;
+
+	const std::string &tempReg = producer.operands[0];
+	const std::string &dstReg = copy.operands[0];
+	const std::string &copySrc = copy.operands[1];
+	if (!samePhysicalReg(copySrc, tempReg)) return false;
+	if (samePhysicalReg(dstReg, tempReg)) {
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+		return true;
+	}
+
+	if (dstReg == "sp" || dstReg == "wzr" || dstReg == "xzr")
+		return false;
+	char tempCls = regClass(tempReg);
+	char dstCls = regClass(dstReg);
+	if (!tempCls || !dstCls || tempCls != dstCls)
+		return false;
+	if (tempCls != 'w' && tempCls != 'x' && tempCls != 's' && tempCls != 'd')
+		return false;
+	if (copy.mnemonic == "mov" && (tempCls == 's' || tempCls == 'd'))
+		return false;
+	if (copy.mnemonic == "fmov" && tempCls != 's' && tempCls != 'd')
+		return false;
+
+	auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx + 1]);
+	if (liveIt == liveness.instrLiveOut.end())
+		return false;
+	for (const auto &def : block.instrs[idx].defs) {
+		if (liveIt->second.count(def))
+			return false;
+	}
+
+	std::vector<std::string> operands = producer.operands;
+	operands[0] = dstReg;
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(producer.mnemonic, operands));
+	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
 }
 
@@ -1609,6 +1673,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineForwardMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineRetargetCopyDest(func.blocks[b], i, liveness)) {
 					changed = true;
 					break;
 				}
