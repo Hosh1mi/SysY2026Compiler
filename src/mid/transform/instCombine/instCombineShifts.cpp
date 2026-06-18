@@ -6,6 +6,7 @@
 
 Value* visitShl(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -51,6 +52,8 @@ Value* visitShl(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Shl,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);
+                copySemFlags(inst, new_inst);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -66,6 +69,7 @@ Value* visitShl(BinaryInst *inst) {
 
 Value* visitLShr(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -107,6 +111,8 @@ Value* visitLShr(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::LShr,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);
+                copySemFlags(inst, new_inst);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -122,6 +128,7 @@ Value* visitLShr(BinaryInst *inst) {
 
 Value* visitAShr(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -152,6 +159,8 @@ Value* visitAShr(BinaryInst *inst) {
     if (cy && cy->value_ >= (int)bits) {
         auto *new_inst = new BinaryInst(ty, Instruction::AShr,
             x, make_const_int(ty, bits - 1), bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -165,6 +174,8 @@ Value* visitAShr(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::AShr,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ + cy->value_), bb, true);
+                copySemFlags(inst, new_inst);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }

@@ -53,6 +53,9 @@ public:
     void setSemFlag(SemFlag f)   { sem_flags_ |=  static_cast<uint32_t>(f); }
     void clearSemFlag(SemFlag f) { sem_flags_ &= ~static_cast<uint32_t>(f); }
     bool hasSemFlag(SemFlag f) const { return (sem_flags_ & static_cast<uint32_t>(f)) != 0; }
+    void copySemFlagsFrom(const Value *other) {
+        if (other) sem_flags_ = other->sem_flags_;
+    }
 
     Type* type_;
     std::string name_;

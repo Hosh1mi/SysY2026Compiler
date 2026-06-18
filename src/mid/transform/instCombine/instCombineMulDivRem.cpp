@@ -6,6 +6,7 @@
 
 Value* visitMul(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -25,6 +26,8 @@ Value* visitMul(BinaryInst *inst) {
         if (inst->get_operand(1) == x)
             return nullptr;
         auto *new_inst = new BinaryInst(ty, Instruction::Mul, y, x, bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -51,6 +54,7 @@ Value* visitMul(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Mul,
                     x_inst->get_operand(0),
                     make_const_int(ty, combined), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -74,6 +78,7 @@ Value* visitMul(BinaryInst *inst) {
                 if ((op0 == x && op1 == inst) || (op0 == inst && op1 == x)) {
                     auto *new_mul = new BinaryInst(ty, Instruction::Mul,
                         x, make_const_int(ty, cy->value_ + 1), bb, true);
+                    stampIntegerFacts(new_mul);
                     bb->add_instruction_before_inst(new_mul, user);
                     user->replace_all_use_with(new_mul);
                     user->parent_->delete_instr(user);
@@ -85,6 +90,7 @@ Value* visitMul(BinaryInst *inst) {
                 if (user->get_operand(0) == inst && user->get_operand(1) == x) {
                     auto *new_mul = new BinaryInst(ty, Instruction::Mul,
                         x, make_const_int(ty, cy->value_ - 1), bb, true);
+                    stampIntegerFacts(new_mul);
                     bb->add_instruction_before_inst(new_mul, user);
                     user->replace_all_use_with(new_mul);
                     user->parent_->delete_instr(user);
@@ -101,6 +107,7 @@ Value* visitMul(BinaryInst *inst) {
         int shift = log2Int(cy->value_);
         auto *shl = new BinaryInst(ty, Instruction::Shl, x,
             make_const_int(ty, shift), bb, true);
+        stampIntegerFacts(shl);
         bb->add_instruction_before_inst(shl, inst);
         return shl;
     }
@@ -114,6 +121,7 @@ Value* visitMul(BinaryInst *inst) {
 
 Value* visitSDiv(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -144,6 +152,7 @@ Value* visitSDiv(BinaryInst *inst) {
     if (cy && cy->value_ == -1) {
         auto *neg = new BinaryInst(ty, Instruction::Sub,
             make_const_int(ty, 0), x, bb, true);
+        stampIntegerFacts(neg);
         bb->add_instruction_before_inst(neg, inst);
         return neg;
     }
@@ -156,6 +165,7 @@ Value* visitSDiv(BinaryInst *inst) {
         if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
             auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                             make_const_int(ty, k), bb, true);
+            stampIntegerFacts(ashr);
             bb->add_instruction_before_inst(ashr, inst);
             return ashr;
         }
@@ -168,6 +178,7 @@ Value* visitSDiv(BinaryInst *inst) {
             if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
                 auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                                 make_const_int(ty, k), bb, true);
+                stampIntegerFacts(ashr);
                 bb->add_instruction_before_inst(ashr, inst);
                 return ashr;
             }
@@ -186,6 +197,7 @@ Value* visitSDiv(BinaryInst *inst) {
         bb->add_instruction_before_inst(k_inst, inst);
         auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                         k_inst, bb, true);
+        stampIntegerFacts(ashr);
         bb->add_instruction_before_inst(ashr, inst);
         return ashr;
     }
@@ -199,6 +211,7 @@ Value* visitSDiv(BinaryInst *inst) {
 
 Value* visitSRem(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -242,6 +255,7 @@ Value* visitSRem(BinaryInst *inst) {
                 if (cmp_with_zero) {
                     auto *andInst = new BinaryInst(ty, Instruction::And,
                         x, make_const_int(ty, cy->value_ - 1), bb, true);
+                    stampIntegerFacts(andInst);
                     bb->add_instruction_before_inst(andInst, inst);
                     return andInst;
                 }
@@ -255,6 +269,7 @@ Value* visitSRem(BinaryInst *inst) {
         if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
             auto *andInst = new BinaryInst(ty, Instruction::And,
                 x, make_const_int(ty, cy->value_ - 1), bb, true);
+            stampIntegerFacts(andInst);
             bb->add_instruction_before_inst(andInst, inst);
             return andInst;
         }
