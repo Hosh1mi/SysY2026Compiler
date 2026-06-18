@@ -1,13 +1,26 @@
 #include "../../include/mid/opt/loopUnroll.hpp"
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 #include <vector>
 
 static const int UNROLL_FACTOR   = 4;
 static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
+static const int MAX_STRUCTURED_LOOP_INSTS = 24;
+
+static bool debugStructuredReject(Function *func, Loop &loop,
+                                  const char *reason) {
+    if (std::getenv("DEBUG_LOOP_UNROLL")) {
+        std::cerr << "[LoopUnroll] func=" << func->name_
+                  << " header=" << (loop.header ? loop.header->name_ : "<none>")
+                  << " structured-reject=" << reason << "\n";
+    }
+    return false;
+}
 
 // ── Instruction cloning ───────────────────────────────────────────────────
 
@@ -19,51 +32,110 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     };
 
     if (auto *bi = dynamic_cast<BinaryInst *>(orig))
-        return new BinaryInst(bi->type_, bi->op_id_,
-                               remap(bi->get_operand(0)),
-                               remap(bi->get_operand(1)), destBB);
+        {
+            auto *inst = new BinaryInst(bi->type_, bi->op_id_,
+                                        remap(bi->get_operand(0)),
+                                        remap(bi->get_operand(1)), destBB);
+            inst->copySemFlagsFrom(bi);
+            return inst;
+        }
 
     if (auto *ui = dynamic_cast<UnaryInst *>(orig))
-        return new UnaryInst(ui->type_, ui->op_id_,
-                              remap(ui->get_operand(0)), destBB);
+        {
+            auto *inst = new UnaryInst(ui->type_, ui->op_id_,
+                                       remap(ui->get_operand(0)), destBB);
+            inst->copySemFlagsFrom(ui);
+            return inst;
+        }
 
     if (auto *ci = dynamic_cast<ICmpInst *>(orig))
-        return new ICmpInst(ci->icmp_op_,
-                             remap(ci->get_operand(0)),
-                             remap(ci->get_operand(1)), destBB);
+        {
+            auto *inst = new ICmpInst(ci->icmp_op_,
+                                      remap(ci->get_operand(0)),
+                                      remap(ci->get_operand(1)), destBB);
+            inst->copySemFlagsFrom(ci);
+            return inst;
+        }
 
     if (auto *fi = dynamic_cast<FCmpInst *>(orig))
-        return new FCmpInst(fi->fcmp_op_,
-                             remap(fi->get_operand(0)),
-                             remap(fi->get_operand(1)), destBB);
+        {
+            auto *inst = new FCmpInst(fi->fcmp_op_,
+                                      remap(fi->get_operand(0)),
+                                      remap(fi->get_operand(1)), destBB);
+            inst->copySemFlagsFrom(fi);
+            return inst;
+        }
 
     if (auto *gi = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> idxs;
         for (unsigned i = 1; i < gi->num_ops_; i++)
             idxs.push_back(remap(gi->get_operand(i)));
-        return new GetElementPtrInst(remap(gi->get_operand(0)), idxs, destBB);
+        auto *inst = new GetElementPtrInst(remap(gi->get_operand(0)), idxs, destBB);
+        inst->copySemFlagsFrom(gi);
+        return inst;
     }
 
     if (auto *li = dynamic_cast<LoadInst *>(orig))
-        return new LoadInst(remap(li->get_operand(0)), destBB);
+        {
+            auto *inst = new LoadInst(remap(li->get_operand(0)), destBB);
+            inst->copySemFlagsFrom(li);
+            return inst;
+        }
 
     if (auto *si = dynamic_cast<StoreInst *>(orig))
-        return new StoreInst(remap(si->get_operand(0)),
-                              remap(si->get_operand(1)), destBB);
+        {
+            auto *inst = new StoreInst(remap(si->get_operand(0)),
+                                       remap(si->get_operand(1)), destBB);
+            inst->copySemFlagsFrom(si);
+            return inst;
+        }
 
     if (auto *zi = dynamic_cast<ZextInst *>(orig))
-        return new ZextInst(zi->op_id_, remap(zi->get_operand(0)), zi->dest_ty_, destBB);
+        {
+            auto *inst = new ZextInst(zi->op_id_, remap(zi->get_operand(0)),
+                                      zi->dest_ty_, destBB);
+            inst->copySemFlagsFrom(zi);
+            return inst;
+        }
 
     if (auto *fp = dynamic_cast<FpToSiInst *>(orig))
-        return new FpToSiInst(fp->op_id_, remap(fp->get_operand(0)), fp->dest_ty_, destBB);
+        {
+            auto *inst = new FpToSiInst(fp->op_id_, remap(fp->get_operand(0)),
+                                        fp->dest_ty_, destBB);
+            inst->copySemFlagsFrom(fp);
+            return inst;
+        }
 
     if (auto *sf = dynamic_cast<SiToFpInst *>(orig))
-        return new SiToFpInst(sf->op_id_, remap(sf->get_operand(0)), sf->dest_ty_, destBB);
+        {
+            auto *inst = new SiToFpInst(sf->op_id_, remap(sf->get_operand(0)),
+                                        sf->dest_ty_, destBB);
+            inst->copySemFlagsFrom(sf);
+            return inst;
+        }
 
     if (auto *bc = dynamic_cast<Bitcast *>(orig))
-        return new Bitcast(bc->op_id_, remap(bc->get_operand(0)), bc->dest_ty_, destBB);
+        {
+            auto *inst = new Bitcast(bc->op_id_, remap(bc->get_operand(0)),
+                                     bc->dest_ty_, destBB);
+            inst->copySemFlagsFrom(bc);
+            return inst;
+        }
 
     return nullptr; // unsupported (phi, branch, call, alloca …)
+}
+
+static Value *mapLoopValue(
+    Value *val,
+    const std::unordered_map<Value *, Value *> &valueMap,
+    const std::unordered_map<BasicBlock *, BasicBlock *> &bbMap) {
+    if (auto it = valueMap.find(val); it != valueMap.end())
+        return it->second;
+    if (auto *bb = dynamic_cast<BasicBlock *>(val)) {
+        auto bit = bbMap.find(bb);
+        return bit == bbMap.end() ? nullptr : bit->second;
+    }
+    return val;
 }
 
 // ── Core unrolling ────────────────────────────────────────────────────────
@@ -378,6 +450,324 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
     return true;
 }
 
+bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module) {
+    if (loop.blocks.size() <= 2)
+        return false;
+    if (loop.blocks.size() > 4)
+        return debugStructuredReject(func, loop, "too-many-blocks");
+
+    BasicBlock *header = loop.header;
+    BasicBlock *latch = loop.singleLatch();
+    BasicBlock *preheader = loop.preheader;
+    BasicBlock *exitBB = loop.singleExit();
+    if (!header || !latch || !preheader || !exitBB)
+        return debugStructuredReject(func, loop, "missing-structural-block");
+    if (loop.exiting.size() != 1 || loop.exiting[0] != latch)
+        return debugStructuredReject(func, loop, "multiple-exiting-blocks");
+
+    auto *latchTerm = dynamic_cast<BranchInst *>(latch->get_terminator());
+    if (!latchTerm || latchTerm->num_ops_ != 3)
+        return debugStructuredReject(func, loop, "latch-not-cond-branch");
+    auto *continueSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(1));
+    auto *exitSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(2));
+    if (continueSucc != header || exitSucc != exitBB) {
+        continueSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(2));
+        exitSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(1));
+    }
+    if (continueSucc != header || exitSucc != exitBB)
+        return debugStructuredReject(func, loop, "latch-successors");
+
+    std::vector<PhiInst *> headerPhis;
+    std::unordered_map<PhiInst *, Value *> initVals;
+    std::unordered_map<PhiInst *, Value *> latchVals;
+    for (auto *inst : header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi->num_ops_ != 4)
+            return debugStructuredReject(func, loop, "non-canonical-header-phi");
+        Value *init = nullptr;
+        Value *back = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *src = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (src == preheader)
+                init = phi->get_operand(i);
+            else if (src == latch)
+                back = phi->get_operand(i);
+            else
+                return debugStructuredReject(func, loop, "header-phi-not-preheader-latch");
+        }
+        if (!init || !back)
+            return debugStructuredReject(func, loop, "header-phi-missing-edge");
+        headerPhis.push_back(phi);
+        initVals[phi] = init;
+        latchVals[phi] = back;
+    }
+    if (headerPhis.empty())
+        return debugStructuredReject(func, loop, "no-header-phis");
+
+    auto *cmpInst = dynamic_cast<ICmpInst *>(latchTerm->get_operand(0));
+    if (!cmpInst)
+        return debugStructuredReject(func, loop, "latch-no-icmp");
+    auto pred = cmpInst->icmp_op_;
+    if (pred != ICmpInst::ICMP_SLT && pred != ICmpInst::ICMP_SLE &&
+        pred != ICmpInst::ICMP_SGT && pred != ICmpInst::ICMP_SGE)
+        return debugStructuredReject(func, loop, "unsupported-predicate");
+
+    PhiInst *ivPhi = nullptr;
+    int strideVal = 0;
+    bool ivIsLeft = true;
+    Value *bound = nullptr;
+    for (auto *phi : headerPhis) {
+        if (phi->type_->tid_ != Type::IntegerTyID)
+            continue;
+        auto *upd = dynamic_cast<Instruction *>(latchVals[phi]);
+        if (!upd || upd->parent_ != latch || (!upd->is_add() && !upd->is_sub()))
+            continue;
+        if (upd->is_add()) {
+            auto *c0 = dynamic_cast<ConstantInt *>(upd->get_operand(0));
+            auto *c1 = dynamic_cast<ConstantInt *>(upd->get_operand(1));
+            if (upd->get_operand(0) == phi && c1 && c1->value_ > 0)
+                strideVal = c1->value_;
+            else if (upd->get_operand(1) == phi && c0 && c0->value_ > 0)
+                strideVal = c0->value_;
+            else
+                continue;
+        } else {
+            auto *c1 = dynamic_cast<ConstantInt *>(upd->get_operand(1));
+            if (upd->get_operand(0) != phi || !c1 || c1->value_ <= 0)
+                continue;
+            strideVal = -c1->value_;
+        }
+
+        if (cmpInst->get_operand(0) == phi || cmpInst->get_operand(0) == upd) {
+            ivIsLeft = true;
+            bound = cmpInst->get_operand(1);
+        } else if (cmpInst->get_operand(1) == phi || cmpInst->get_operand(1) == upd) {
+            ivIsLeft = false;
+            bound = cmpInst->get_operand(0);
+        } else {
+            continue;
+        }
+        ivPhi = phi;
+        break;
+    }
+    if (!ivPhi || !bound)
+        return debugStructuredReject(func, loop, "no-iv");
+    if (auto *boundInst = dynamic_cast<Instruction *>(bound))
+        if (loop.blocks.count(boundInst->parent_))
+            return debugStructuredReject(func, loop, "variant-bound");
+
+    int bodyInstCount = 0;
+    int condBranchBlocks = 0;
+    for (auto *bb : loop.blocks) {
+        if (bb != header) {
+            for (auto *inst : bb->instr_list_) {
+                if (!inst->is_phi())
+                    break;
+                return debugStructuredReject(func, loop, "non-header-phi");
+            }
+        }
+        for (auto *inst : bb->instr_list_) {
+            if (inst->is_phi() || inst->isTerminator())
+                continue;
+            if (inst->is_call() || inst->is_alloca())
+                return debugStructuredReject(func, loop, "unsupported-inst");
+            bool canClone = dynamic_cast<BinaryInst *>(inst) ||
+                            dynamic_cast<UnaryInst *>(inst) ||
+                            dynamic_cast<ICmpInst *>(inst) ||
+                            dynamic_cast<FCmpInst *>(inst) ||
+                            dynamic_cast<GetElementPtrInst *>(inst) ||
+                            dynamic_cast<LoadInst *>(inst) ||
+                            dynamic_cast<StoreInst *>(inst) ||
+                            dynamic_cast<ZextInst *>(inst) ||
+                            dynamic_cast<FpToSiInst *>(inst) ||
+                            dynamic_cast<SiToFpInst *>(inst) ||
+                            dynamic_cast<Bitcast *>(inst);
+            if (!canClone)
+                return debugStructuredReject(func, loop, "unsupported-inst");
+            ++bodyInstCount;
+        }
+        auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
+        if (term && term->num_ops_ == 3 && bb != latch)
+            ++condBranchBlocks;
+    }
+    if (bodyInstCount > 16 || bodyInstCount > MAX_STRUCTURED_LOOP_INSTS)
+        return debugStructuredReject(func, loop, "too-many-body-insts");
+    if (condBranchBlocks > 1)
+        return debugStructuredReject(func, loop, "too-many-branches");
+
+    int N = 0;
+    if (loop.blocks.size() <= 3 && bodyInstCount <= 12) {
+        N = 4;
+    } else if (loop.blocks.size() <= 4 && bodyInstCount <= 16) {
+        N = 2;
+    } else {
+        return debugStructuredReject(func, loop, "profitability");
+    }
+    if (bodyInstCount * N > 32)
+        return debugStructuredReject(func, loop, "clone-budget");
+
+    int guardAdj = (N - 1) * strideVal;
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        if (strideVal > 0 && cb->value_ < guardAdj)
+            return debugStructuredReject(func, loop, "bound-underflow");
+    }
+
+    Value *boundMain = nullptr;
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - guardAdj);
+    } else {
+        auto *adjC = new ConstantInt(module->int32_ty_, guardAdj);
+        auto *sub = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                   bound, adjC, preheader, true);
+        preheader->add_instruction_before_terminator(sub);
+        boundMain = sub;
+    }
+
+    auto *headerMain = new BasicBlock(module, "unroll_main_hdr", func);
+    std::unordered_map<PhiInst *, PhiInst *> mainPhis;
+    for (int i = (int)headerPhis.size() - 1; i >= 0; --i) {
+        auto *phi = headerPhis[i];
+        auto *mainPhi = PhiInst::create_phi(phi->type_, headerMain);
+        headerMain->add_instruction_front(mainPhi);
+        mainPhi->addIncoming(initVals[phi], preheader);
+        mainPhis[phi] = mainPhi;
+    }
+
+    ICmpInst *cmpMain = ivIsLeft
+                            ? new ICmpInst(pred, mainPhis[ivPhi], boundMain, headerMain)
+                            : new ICmpInst(pred, boundMain, mainPhis[ivPhi], headerMain);
+    auto *remCheck = new BasicBlock(module, "unroll_rem_guard", func);
+    ICmpInst *cmpRem = ivIsLeft
+                           ? new ICmpInst(pred, mainPhis[ivPhi], bound, remCheck)
+                           : new ICmpInst(pred, bound, mainPhis[ivPhi], remCheck);
+
+    std::vector<std::unordered_map<BasicBlock *, BasicBlock *>> iterBBMaps(N);
+    for (int iter = 0; iter < N; ++iter) {
+        for (auto *oldBB : loop.blocksOrdered) {
+            auto *newBB = new BasicBlock(module,
+                                         "unroll_" + std::to_string(iter) + "_" + oldBB->name_,
+                                         func);
+            iterBBMaps[iter][oldBB] = newBB;
+        }
+    }
+
+    auto headerCloneFor = [&](int iter) { return iterBBMaps[iter][header]; };
+
+    std::unordered_map<PhiInst *, Value *> currentPhiVals;
+    for (auto *phi : headerPhis)
+        currentPhiVals[phi] = mainPhis[phi];
+
+    for (int iter = 0; iter < N; ++iter) {
+        std::unordered_map<Value *, Value *> valueMap;
+        for (auto *phi : headerPhis)
+            valueMap[phi] = currentPhiVals[phi];
+
+        auto &bbMap = iterBBMaps[iter];
+        for (auto *oldBB : loop.blocksOrdered) {
+            auto *newBB = bbMap[oldBB];
+            for (auto *oldInst : oldBB->instr_list_) {
+                if (oldInst->is_phi())
+                    continue;
+                if (oldInst->isTerminator()) {
+                    auto *oldBr = dynamic_cast<BranchInst *>(oldInst);
+                    if (!oldBr)
+                        return false;
+                    if (oldBB == latch) {
+                        if (iter + 1 < N)
+                            new BranchInst(headerCloneFor(iter + 1), newBB);
+                        else
+                            new BranchInst(headerMain, newBB);
+                        continue;
+                    }
+                    if (oldBr->num_ops_ == 1) {
+                        auto *dest = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(0), valueMap, bbMap));
+                        if (!dest) return false;
+                        new BranchInst(dest, newBB);
+                    } else {
+                        auto *cond = mapLoopValue(oldBr->get_operand(0), valueMap, bbMap);
+                        auto *ifTrue = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(1), valueMap, bbMap));
+                        auto *ifFalse = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(2), valueMap, bbMap));
+                        if (!cond || !ifTrue || !ifFalse) return false;
+                        new BranchInst(cond, ifTrue, ifFalse, newBB);
+                    }
+                    continue;
+                }
+
+                auto *newInst = cloneInst(oldInst, newBB, valueMap);
+                if (!newInst)
+                    return false;
+                valueMap[oldInst] = newInst;
+            }
+        }
+
+        for (auto *phi : headerPhis) {
+            auto *mapped = mapLoopValue(latchVals[phi], valueMap, bbMap);
+            if (!mapped)
+                return debugStructuredReject(func, loop, "latch-map-fail");
+            currentPhiVals[phi] = mapped;
+        }
+    }
+
+    for (auto *phi : headerPhis)
+        mainPhis[phi]->addIncoming(currentPhiVals[phi], iterBBMaps[N - 1][latch]);
+
+    new BranchInst(cmpMain, headerCloneFor(0), remCheck, headerMain);
+    new BranchInst(cmpRem, header, exitBB, remCheck);
+
+    auto *preBr = preheader->get_terminator();
+    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+        if (preBr->get_operand(i) == header)
+            preBr->set_operand(i, headerMain);
+    }
+    preheader->remove_succ_basic_block(header);
+    preheader->add_succ_basic_block(headerMain);
+    header->remove_pre_basic_block(preheader);
+    headerMain->add_pre_basic_block(preheader);
+
+    for (auto *phi : headerPhis) {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == preheader) {
+                phi->set_operand(i, mainPhis[phi]);
+                phi->set_operand(i + 1, remCheck);
+                break;
+            }
+        }
+    }
+
+    std::unordered_map<Value *, Value *> remapToState;
+    for (auto *phi : headerPhis) {
+        remapToState[phi] = mainPhis[phi];
+        remapToState[latchVals[phi]] = mainPhis[phi];
+    }
+    for (auto *inst : exitBB->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        Value *fromLatch = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == latch) {
+                fromLatch = phi->get_operand(i);
+                break;
+            }
+        }
+        if (!fromLatch) continue;
+        auto it = remapToState.find(fromLatch);
+        if (it == remapToState.end()) {
+            if (dynamic_cast<Constant *>(fromLatch))
+                phi->addIncoming(fromLatch, remCheck);
+            else
+                return false;
+        } else {
+            phi->addIncoming(it->second, remCheck);
+        }
+    }
+
+    return true;
+}
+
 // ── Do-while (rotated single-block) unrolling ─────────────────────────────
 //
 // 形态：loop = { B }，B: phis…, body…, ivUpdate, cmp(ivUpdate, bound),
@@ -682,8 +1072,11 @@ void LoopUnroll::runOnFunction(Function *func) {
               [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
     for (auto *loop : loops) {
-        if (!tryUnroll(*loop, func, func->parent_))
-            tryUnrollDoWhile(*loop, func, func->parent_);
+        if (tryUnroll(*loop, func, func->parent_))
+            continue;
+        if (tryUnrollStructured(*loop, func, func->parent_))
+            continue;
+        tryUnrollDoWhile(*loop, func, func->parent_);
     }
 
     func->set_instr_name();

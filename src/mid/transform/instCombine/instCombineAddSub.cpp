@@ -7,6 +7,7 @@
 
 Value* visitAdd(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -26,6 +27,8 @@ Value* visitAdd(BinaryInst *inst) {
         if (inst->get_operand(1) == x)
             return nullptr;
         auto *new_inst = new BinaryInst(ty, Instruction::Add, y, x, bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -49,6 +52,7 @@ Value* visitAdd(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Add,
                     x_inst->get_operand(0),
                     make_const_int(ty, combined), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -67,6 +71,7 @@ Value* visitAdd(BinaryInst *inst) {
                 // (x << k) + x
                 auto *mul = new BinaryInst(ty, Instruction::Mul,
                     y, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                stampIntegerFacts(mul);
                 bb->add_instruction_before_inst(mul, inst);
                 return mul;
             }
@@ -77,6 +82,7 @@ Value* visitAdd(BinaryInst *inst) {
                 // x + (x << k)
                 auto *mul = new BinaryInst(ty, Instruction::Mul,
                     x, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
+                stampIntegerFacts(mul);
                 bb->add_instruction_before_inst(mul, inst);
                 return mul;
             }
@@ -96,6 +102,7 @@ Value* visitAdd(BinaryInst *inst) {
         // If x is a multiple of 2^k, its low k bits are zero → x & C == 0.
         if (isKnownMultipleOf(x, k, bb)) {
             auto *or_inst = new BinaryInst(ty, Instruction::Or, x, y, bb, true);
+            stampIntegerFacts(or_inst);
             bb->add_instruction_before_inst(or_inst, inst);
             return or_inst;
         }
@@ -110,6 +117,7 @@ Value* visitAdd(BinaryInst *inst) {
 
 Value* visitSub(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -144,6 +152,7 @@ Value* visitSub(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Add,
                     x_inst->get_operand(0),
                     make_const_int(ty, combined), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -160,6 +169,7 @@ Value* visitSub(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Sub,
                     x_inst->get_operand(0),
                     make_const_int(ty, combined), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -174,6 +184,7 @@ Value* visitSub(BinaryInst *inst) {
             if (amt && xi->get_operand(0) == y) {
                 auto *mul = new BinaryInst(ty, Instruction::Mul,
                     y, make_const_int(ty, (1 << amt->value_) - 1), bb, true);
+                stampIntegerFacts(mul);
                 bb->add_instruction_before_inst(mul, inst);
                 return mul;
             }

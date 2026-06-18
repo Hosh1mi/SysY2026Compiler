@@ -10,6 +10,6 @@ public:
     std::string name() const override { return "CorrelatedValuePropagation"; }
 
 private:
-    bool runOnModule(Module *module);
-    bool runOnFunction(Function *func);
+    bool runOnModule(Module *module, AnalysisManager &AM);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
 };

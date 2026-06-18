@@ -20,6 +20,11 @@ enum class SemFlag : uint32_t {
     ArgNoCapture    = 1u << 5,  // Argument：指针不逃逸出 callee（暂保留，未启用）
     // (3) 源级结构信息
     SrcConstArray   = 1u << 6,  // AllocaInst：来自源级 `const` 数组声明
+    // (4) 整数 IR 语义位
+    NoSignedWrap    = 1u << 7,  // add/sub/mul/shl：有符号不溢出
+    NoUnsignedWrap  = 1u << 8,  // add/sub/mul/shl：无符号不溢出
+    Exact           = 1u << 9,  // ashr/lshr/div：无信息丢失（如被 2^k 整除）
+    Disjoint        = 1u << 10, // or：两侧置位集合互斥
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {

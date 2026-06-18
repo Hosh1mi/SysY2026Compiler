@@ -136,6 +136,20 @@ std::string print_fcmp_type(FCmpInst::FCmpOp op) {
 
 //============================ 各指令 print() ============================
 
+static std::string print_binary_semantics(const BinaryInst *inst) {
+    std::string sem;
+    if (inst->hasSemFlag(SemFlag::NoUnsignedWrap))
+        sem += " nuw";
+    if (inst->hasSemFlag(SemFlag::NoSignedWrap))
+        sem += " nsw";
+    if ((inst->op_id_ == Instruction::AShr || inst->op_id_ == Instruction::LShr) &&
+        inst->hasSemFlag(SemFlag::Exact))
+        sem += " exact";
+    if (inst->op_id_ == Instruction::Or && inst->hasSemFlag(SemFlag::Disjoint))
+        sem += " disjoint";
+    return sem;
+}
+
 // %v = add i32 %a, %b
 std::string BinaryInst::print() {
     std::string instr_ir;
@@ -143,6 +157,7 @@ std::string BinaryInst::print() {
     instr_ir += this->name_;
     instr_ir += " = ";
     instr_ir += instr_id2string_[this->op_id_];
+    instr_ir += print_binary_semantics(this);
     instr_ir += " ";
     instr_ir += this->operands_[0]->type_->print();
     instr_ir += " ";

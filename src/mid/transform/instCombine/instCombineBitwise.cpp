@@ -6,6 +6,7 @@
 
 Value* visitAnd(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -24,6 +25,8 @@ Value* visitAnd(BinaryInst *inst) {
     // 2. Canonicalize: constant to RHS  (and C, x → and x, C)
     if (cx && !cy) {
         auto *new_inst = new BinaryInst(ty, Instruction::And, y, x, bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -52,6 +55,7 @@ Value* visitAnd(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::And,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ & cy->value_), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -67,6 +71,7 @@ Value* visitAnd(BinaryInst *inst) {
 
 Value* visitOr(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -84,6 +89,8 @@ Value* visitOr(BinaryInst *inst) {
     // 2. Canonicalize: constant to RHS  (or C, x → or x, C)
     if (cx && !cy) {
         auto *new_inst = new BinaryInst(ty, Instruction::Or, y, x, bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -112,6 +119,7 @@ Value* visitOr(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Or,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ | cy->value_), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }
@@ -127,6 +135,7 @@ Value* visitOr(BinaryInst *inst) {
 
 Value* visitXor(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
+    stampIntegerFacts(inst);
 
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -144,6 +153,8 @@ Value* visitXor(BinaryInst *inst) {
     // 2. Canonicalize: constant to RHS  (xor C, x → xor x, C)
     if (cx && !cy) {
         auto *new_inst = new BinaryInst(ty, Instruction::Xor, y, x, bb, true);
+        copySemFlags(inst, new_inst);
+        stampIntegerFacts(new_inst);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
@@ -167,6 +178,7 @@ Value* visitXor(BinaryInst *inst) {
                 auto *new_inst = new BinaryInst(ty, Instruction::Xor,
                     inner->get_operand(0),
                     make_const_int(ty, c1->value_ ^ cy->value_), bb, true);
+                stampIntegerFacts(new_inst);
                 bb->add_instruction_before_inst(new_inst, inst);
                 return new_inst;
             }

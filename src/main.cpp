@@ -8,6 +8,7 @@
 #include "include/mid/opt/linearBlockMerge.hpp"
 #include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/constFold.hpp"
+#include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
@@ -168,6 +169,13 @@ static void addCfgCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<CFGSimplify>());
 }
 
+static void addCorrelatedCleanup(PassManager &pm) {
+    pm.addPass(std::make_unique<CorrelatedValuePropagation>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+}
+
 static void addDeepCleanup(PassManager &pm) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
@@ -237,6 +245,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addSsaPreparation(pm);
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
+    addCorrelatedCleanup(pm);
     // Second stamp: refresh attributes and immutable-load facts after the
     // global promotion / Mem2Reg / cleanup sequence, then feed loop+GVN.
     pm.addPass(std::make_unique<SemanticMarkerStamp>());
@@ -247,7 +256,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<TailDuplication>());
     pm.addPass(std::make_unique<UnifyExitNodes>());
-    addCfgCleanup(pm);
+    addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
 
     if (optLevel >= 2) {

@@ -44,6 +44,7 @@ inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
     if (lhs->op_id_ != rhs->op_id_ || lhs->num_ops_ != rhs->num_ops_)
         return false;
     if (lhs->type_ != rhs->type_) return false;
+    if (lhs->sem_flags_ != rhs->sem_flags_) return false;
     if (auto *lc = dynamic_cast<ICmpInst *>(lhs)) {
         auto *rc = dynamic_cast<ICmpInst *>(rhs);
         if (!rc || lc->icmp_op_ != rc->icmp_op_) return false;
@@ -228,6 +229,108 @@ inline bool isProvenPowerOfTwo(Value *v) {
 // variables, etc.) these functions naturally cover more cases.
 
 using ValueFacts::isKnownNonNegative;
+
+inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx);
+
+inline void copySemFlags(Value *from, Value *to) {
+    if (from && to)
+        to->copySemFlagsFrom(from);
+}
+
+inline bool setSemFlagIfMissing(Value *v, SemFlag flag) {
+    if (!v || v->hasSemFlag(flag))
+        return false;
+    v->setSemFlag(flag);
+    return true;
+}
+
+inline bool operandsAreDisjointBits(Value *lhs, Value *rhs, BasicBlock *ctx) {
+    auto *cr = dynamic_cast<ConstantInt *>(rhs);
+    if (cr && cr->value_ > 0) {
+        int k = 1;
+        while (k < 31 && (1 << k) <= cr->value_) ++k;
+        return isKnownMultipleOf(lhs, k, ctx);
+    }
+    auto *cl = dynamic_cast<ConstantInt *>(lhs);
+    if (cl && cl->value_ > 0) {
+        int k = 1;
+        while (k < 31 && (1 << k) <= cl->value_) ++k;
+        return isKnownMultipleOf(rhs, k, ctx);
+    }
+    return false;
+}
+
+inline void stampOrDisjoint(BinaryInst *inst) {
+    if (!inst || inst->op_id_ != Instruction::Or) return;
+    if (operandsAreDisjointBits(inst->get_operand(0), inst->get_operand(1),
+                                inst->parent_))
+        inst->setSemFlag(SemFlag::Disjoint);
+}
+
+inline void stampAshrExact(BinaryInst *inst) {
+    if (!inst || inst->op_id_ != Instruction::AShr) return;
+    auto *shift = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+    if (!shift || shift->value_ <= 0) return;
+    if (isKnownMultipleOf(inst->get_operand(0), shift->value_, inst->parent_))
+        inst->setSemFlag(SemFlag::Exact);
+}
+
+inline bool canProveAddOneNoWrap(BinaryInst *inst) {
+    if (!inst || inst->op_id_ != Instruction::Add || !inst->parent_)
+        return false;
+    auto *c = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+    if (!c || c->value_ != 1) return false;
+
+    auto *bb = inst->parent_;
+    auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
+    auto checkCmp = [&](ICmpInst *cmp) -> bool {
+        if (!cmp) return false;
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SLT && cmp->get_operand(0) == inst->get_operand(0))
+            return true;
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SGT && cmp->get_operand(1) == inst->get_operand(0))
+            return true;
+        return false;
+    };
+    if (term && term->num_ops_ == 3 && checkCmp(dynamic_cast<ICmpInst *>(term->get_operand(0))))
+        return true;
+
+    for (auto *pred : bb->pre_bbs_) {
+        auto *predTerm = dynamic_cast<BranchInst *>(pred->get_terminator());
+        if (!predTerm || predTerm->num_ops_ != 3 || predTerm->get_operand(1) != bb)
+            continue;
+        if (checkCmp(dynamic_cast<ICmpInst *>(predTerm->get_operand(0))))
+            return true;
+    }
+    return false;
+}
+
+inline void stampAddNoWrap(BinaryInst *inst) {
+    if (!inst || inst->op_id_ != Instruction::Add) return;
+    auto *rhs = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+    if (!rhs || rhs->value_ != 1) return;
+    if (!canProveAddOneNoWrap(inst))
+        return;
+    inst->setSemFlag(SemFlag::NoSignedWrap);
+    if (isKnownNonNegative(inst->get_operand(0), inst->parent_))
+        inst->setSemFlag(SemFlag::NoUnsignedWrap);
+}
+
+inline void stampIntegerFacts(BinaryInst *inst) {
+    if (!inst || inst->type_->tid_ != Type::IntegerTyID) return;
+    switch (inst->op_id_) {
+    case Instruction::Add:
+        stampAddNoWrap(inst);
+        break;
+    case Instruction::AShr:
+        stampAshrExact(inst);
+        break;
+    case Instruction::Or:
+        stampOrDisjoint(inst);
+        break;
+    default:
+        break;
+    }
+}
 
 // Look through dominating branch conditions to prove v is a multiple of C.
 // If this BB is reached via  br (icmp eq (srem v, C), 0), this_bb, other

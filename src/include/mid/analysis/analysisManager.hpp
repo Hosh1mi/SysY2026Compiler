@@ -1,6 +1,7 @@
 #pragma once
 
 #include "basicAliasAnalysis.hpp"
+#include "lazyValueInfo.hpp"
 #include "loopInfo.hpp"
 #include "preservedAnalyses.hpp"
 #include "scalarEvolution.hpp"
@@ -12,6 +13,7 @@
 class AnalysisManager {
 public:
     BasicAliasAnalysis &getBasicAA(Module *module);
+    LazyValueInfo &getLazyValueInfo(Function *func);
     LoopInfo &getLoopInfo(Function *func);
     ScalarEvolution &getScalarEvolution(Function *func);
 
@@ -22,6 +24,7 @@ public:
 
 private:
     struct FunctionCache {
+        std::unique_ptr<LazyValueInfo> lazyValueInfo;
         std::unique_ptr<LoopInfo> loopInfo;
         std::unique_ptr<ScalarEvolution> scalarEvolution;
     };
