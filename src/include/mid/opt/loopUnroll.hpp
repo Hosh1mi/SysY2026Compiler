@@ -1,4 +1,5 @@
 #pragma once
+#include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
@@ -17,8 +18,9 @@ public:
     std::string name() const override { return "LoopUnroll"; }
 
 private:
-    void runOnFunction(Function *func);
-    bool tryUnroll(Loop &loop, Function *func, Module *module);
+    void runOnFunction(Function *func, BasicAliasAnalysis &BAA);
+    bool tryUnroll(Loop &loop, Function *func, Module *module,
+                   BasicAliasAnalysis &BAA);
     bool tryUnrollStructured(Loop &loop, Function *func, Module *module);
     bool tryUnrollDoWhile(Loop &loop, Function *func, Module *module);
     Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
