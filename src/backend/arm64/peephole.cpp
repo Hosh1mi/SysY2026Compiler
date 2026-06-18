@@ -191,6 +191,11 @@ static bool lineUsesReg(const ParsedLine &l, const std::string &r) {
 
 // Does line write (not just read) a register?
 static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
+	if ((l.mnemonic == "ld1" || l.mnemonic == "st1") && l.operands.size() >= 3) {
+		MemOperand mem = parseMemOp(l.operands[1]);
+		if (mem.valid && samePhysicalReg(mem.base, r))
+			return true;
+	}
 	// Stores, compares, branches do not write a register destination
 	if (l.mnemonic == "str" || l.mnemonic == "stp" ||
 		l.mnemonic == "cmp" || l.mnemonic == "fcmp" ||
@@ -1168,6 +1173,81 @@ static bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
 	return true;
 }
 
+static bool isSimpleNeonMemOp(const ParsedLine &line) {
+	return (line.mnemonic == "ld1" || line.mnemonic == "st1") &&
+	       line.operands.size() == 2 &&
+	       line.operands[0].find('{') != std::string::npos;
+}
+
+static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine mem = parseLine(block.instrs[idx].text);
+	if (mem.kind != LineKind::Instruction)
+		return false;
+	if (!isSimpleNeonMemOp(mem)) return false;
+
+	MemOperand addr = parseMemOp(mem.operands[1]);
+	if (!addr.valid || addr.offset != 0) return false;
+	if (addr.base.empty() || addr.base == "sp") return false;
+
+	std::string postBase = addr.base;
+	{
+		size_t begin = idx > 4 ? idx - 4 : 0;
+		for (size_t copyIdx = idx; copyIdx-- > begin;) {
+			ParsedLine copy = parseLine(block.instrs[copyIdx].text);
+			if (copy.kind != LineKind::Instruction)
+				break;
+			if (copy.mnemonic != "mov" || copy.operands.size() != 2 ||
+			    copy.operands[0] != addr.base || regClass(copy.operands[1]) != 'x')
+				continue;
+
+			bool clobbered = false;
+			for (size_t j = copyIdx + 1; j < idx; ++j) {
+				ParsedLine between = parseLine(block.instrs[j].text);
+				if (between.kind != LineKind::Instruction ||
+				    lineWritesReg(between, addr.base) ||
+				    lineWritesReg(between, copy.operands[1])) {
+					clobbered = true;
+					break;
+				}
+			}
+			if (!clobbered) {
+				postBase = copy.operands[1];
+				break;
+			}
+		}
+	}
+	if (postBase.empty() || postBase == "sp") return false;
+
+	size_t addIdx = idx + 1;
+	bool foundAdd = false;
+	const size_t scanEnd = std::min(block.instrs.size(), idx + 6);
+	for (; addIdx < scanEnd; ++addIdx) {
+		ParsedLine line = parseLine(block.instrs[addIdx].text);
+		if (line.kind != LineKind::Instruction)
+			return false;
+		if (line.mnemonic == "add" && line.operands.size() == 3 &&
+		    line.operands[0] == postBase && line.operands[1] == postBase &&
+		    line.operands[2] == "#16") {
+			foundAdd = true;
+			break;
+		}
+		if (lineReadsReg(line, postBase) || lineWritesReg(line, postBase))
+			return false;
+	}
+	if (!foundAdd)
+		return false;
+
+	std::vector<std::string> operands = mem.operands;
+	operands[1] = "[" + postBase + "]";
+	operands.push_back("#16");
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(mem.mnemonic, operands));
+	block.instrs.erase(block.instrs.begin() + addIdx);
+	return true;
+}
+
 static std::string labelName(const MachineInstr &inst) {
 	ParsedLine line = parseLine(inst.text);
 	if (line.kind != LineKind::Label) return "";
@@ -1496,6 +1576,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineDeadStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachinePostIndexNeon(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
