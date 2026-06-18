@@ -562,6 +562,11 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (!total_init || !total_latch) return debugReject("cannot find total init/latch incoming");
     if (!isLoopInvariant(total_init, loop.blocks)) return debugReject("total init is not invariant");
 
+    if (tryFoldModularRecurrence(loop, module, latch, r_phi, total_phi,
+                                 loop_exit, N, total_init, total_latch,
+                                 ivInit, ivStride))
+        return true;
+
     if (tryFoldAffineSum(loop, module, SE, latch, r_phi, total_phi,
                          loop_exit, N, total_init, total_latch,
                          ivInit, ivStride))
@@ -750,6 +755,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
 void LoopRepFold::runOnFunction(Function *func, AnalysisManager *AM) {
     if (func->basic_blocks_.empty() || !AM) return;
+    modFolded_.clear();
 
     // 折叠成功后 CFG 已变（仿射路径还会整体删块），Loop 快照过期 →
     // 失效缓存、重新分析再扫，直到无折叠机会。
