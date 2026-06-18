@@ -28,4 +28,13 @@ private:
                           BasicBlock *latch, PhiInst *ivPhi, PhiInst *totalPhi,
                           BasicBlock *loopExit, Value *bound, Value *totalInit,
                           Value *totalLatch, long long ivInit, long long ivStride);
+    // 模仿射递推折叠：total = (total + c) % m（c>0,m>0 常量，IV 0/1）。
+    // 闭式 (total0 + c*N) % m 仅在 total0>=0 且无 i32 溢出时与逐次截断取模相等，
+    // 故插入"非负 + 不溢出"运行时守卫，守卫不成立时回退原循环（永远正确）。
+    bool tryFoldModularRecurrence(Loop &loop, Module *module, BasicBlock *latch,
+                                  PhiInst *ivPhi, PhiInst *totalPhi,
+                                  BasicBlock *loopExit, Value *bound,
+                                  Value *totalInit, Value *totalLatch,
+                                  long long ivInit, long long ivStride);
+    std::set<BasicBlock *> modFolded_; // 已折叠的 header，防止重扫无限折叠
 };
