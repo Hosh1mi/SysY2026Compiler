@@ -635,16 +635,21 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 valMap[oldAlloca] = newAlloca;
             } else if (auto *oldLoad = dynamic_cast<LoadInst*>(oldInst)) {
                 new LoadInst(mapValue(oldLoad->get_operand(0), valMap, bbMap), newBB);
-                valMap[oldLoad] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldLoad);
+                valMap[oldLoad] = newInst;
             } else if (auto *oldStore = dynamic_cast<StoreInst*>(oldInst)) {
                 new StoreInst(mapValue(oldStore->get_operand(0), valMap, bbMap),
                               mapValue(oldStore->get_operand(1), valMap, bbMap), newBB);
+                newBB->instr_list_.back()->copySemFlagsFrom(oldStore);
             } else if (auto *oldGEP = dynamic_cast<GetElementPtrInst*>(oldInst)) {
                 vector<Value*> idxs;
                 for (unsigned i = 1; i < oldGEP->num_ops_; ++i)
                     idxs.push_back(mapValue(oldGEP->get_operand(i), valMap, bbMap));
                 new GetElementPtrInst(mapValue(oldGEP->get_operand(0), valMap, bbMap), idxs, newBB);
-                valMap[oldGEP] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldGEP);
+                valMap[oldGEP] = newInst;
             } else if (auto *oldCall = dynamic_cast<CallInst*>(oldInst)) {
                 vector<Value*> newArgs;
                 for (unsigned i = 0; i < oldCall->num_ops_ - 1; ++i)
@@ -652,53 +657,73 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 auto *calleeFunc = dynamic_cast<Function*>(
                     mapValue(oldCall->get_operand(oldCall->num_ops_ - 1), valMap, bbMap));
                 new CallInst(calleeFunc, newArgs, newBB);
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldCall);
                 if (!oldCall->is_void())
-                    valMap[oldCall] = newBB->instr_list_.back();
+                    valMap[oldCall] = newInst;
             } else if (auto *oldBin = dynamic_cast<BinaryInst*>(oldInst)) {
                 new BinaryInst(oldBin->type_, oldBin->op_id_,
                                mapValue(oldBin->get_operand(0), valMap, bbMap),
                                mapValue(oldBin->get_operand(1), valMap, bbMap), newBB);
-                valMap[oldBin] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldBin);
+                valMap[oldBin] = newInst;
             } else if (auto *oldICmp = dynamic_cast<ICmpInst*>(oldInst)) {
                 new ICmpInst(oldICmp->icmp_op_,
                              mapValue(oldICmp->get_operand(0), valMap, bbMap),
                              mapValue(oldICmp->get_operand(1), valMap, bbMap), newBB);
-                valMap[oldICmp] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldICmp);
+                valMap[oldICmp] = newInst;
             } else if (auto *oldFCmp = dynamic_cast<FCmpInst*>(oldInst)) {
                 new FCmpInst(oldFCmp->fcmp_op_,
                              mapValue(oldFCmp->get_operand(0), valMap, bbMap),
                              mapValue(oldFCmp->get_operand(1), valMap, bbMap), newBB);
-                valMap[oldFCmp] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldFCmp);
+                valMap[oldFCmp] = newInst;
             } else if (auto *oldZExt = dynamic_cast<ZextInst*>(oldInst)) {
                 new ZextInst(oldZExt->op_id_,
                              mapValue(oldZExt->get_operand(0), valMap, bbMap),
                              oldZExt->dest_ty_, newBB);
-                valMap[oldZExt] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldZExt);
+                valMap[oldZExt] = newInst;
             } else if (auto *oldFpToSi = dynamic_cast<FpToSiInst*>(oldInst)) {
                 new FpToSiInst(oldFpToSi->op_id_,
                                mapValue(oldFpToSi->get_operand(0), valMap, bbMap),
                                oldFpToSi->dest_ty_, newBB);
-                valMap[oldFpToSi] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldFpToSi);
+                valMap[oldFpToSi] = newInst;
             } else if (auto *oldSiToFp = dynamic_cast<SiToFpInst*>(oldInst)) {
                 new SiToFpInst(oldSiToFp->op_id_,
                                mapValue(oldSiToFp->get_operand(0), valMap, bbMap),
                                oldSiToFp->dest_ty_, newBB);
-                valMap[oldSiToFp] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldSiToFp);
+                valMap[oldSiToFp] = newInst;
             } else if (auto *oldBitCast = dynamic_cast<Bitcast*>(oldInst)) {
                 new Bitcast(oldBitCast->op_id_,
                             mapValue(oldBitCast->get_operand(0), valMap, bbMap),
                             oldBitCast->dest_ty_, newBB);
-                valMap[oldBitCast] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldBitCast);
+                valMap[oldBitCast] = newInst;
             } else if (auto *oldSelect = dynamic_cast<SelectInst*>(oldInst)) {
                 new SelectInst(mapValue(oldSelect->get_operand(0), valMap, bbMap),
                                mapValue(oldSelect->get_operand(1), valMap, bbMap),
                                mapValue(oldSelect->get_operand(2), valMap, bbMap),
                                newBB);
-                valMap[oldSelect] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldSelect);
+                valMap[oldSelect] = newInst;
             } else if (auto *oldUnary = dynamic_cast<UnaryInst*>(oldInst)) {
                 new UnaryInst(oldUnary->type_, oldUnary->op_id_,
                               mapValue(oldUnary->get_operand(0), valMap, bbMap), newBB);
-                valMap[oldUnary] = newBB->instr_list_.back();
+                auto *newInst = newBB->instr_list_.back();
+                newInst->copySemFlagsFrom(oldUnary);
+                valMap[oldUnary] = newInst;
             } else {
                 assert(0 && "unhandled instruction type during inlining");
             }

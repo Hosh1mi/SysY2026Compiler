@@ -19,6 +19,7 @@ public:
 private:
     void runOnFunction(Function *func);
     bool tryUnroll(Loop &loop, Function *func, Module *module);
+    bool tryUnrollStructured(Loop &loop, Function *func, Module *module);
     bool tryUnrollDoWhile(Loop &loop, Function *func, Module *module);
     Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
                            const std::unordered_map<Value *, Value *> &vmap);
