@@ -1,5 +1,6 @@
 #pragma once
 #include "../../../include/mid/ir/ir.hpp"
+#include "../../../include/mid/analysis/rangeAnalysis.hpp"
 #include "../../../include/mid/analysis/valueFacts.hpp"
 
 #include <cstddef>
@@ -332,6 +333,10 @@ inline void stampIntegerFacts(BinaryInst *inst) {
     }
 }
 
+inline void stampIntegerFacts(Instruction *inst) {
+    stampIntegerFacts(dynamic_cast<BinaryInst *>(inst));
+}
+
 // Look through dominating branch conditions to prove v is a multiple of C.
 // If this BB is reached via  br (icmp eq (srem v, C), 0), this_bb, other
 // then v % C == 0, i.e. v is a multiple of C.
@@ -397,10 +402,12 @@ inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx = nullptr) {
         if (amask && (amask->value_ & mask) == 0) return true;
     }
 
-    // Also try branch-condition analysis.
+// Also try branch-condition analysis.
     if (ctx) return isKnownMultipleOfFromBranch(v, k, ctx);
     return false;
 }
+
+extern thread_local RangeAnalysis *gInstCombineRangeAnalysis;
 
 // ── Per-opcode visit functions ────────────────────────────────────────
 // Each returns a replacement Value*, or nullptr if no simplification.

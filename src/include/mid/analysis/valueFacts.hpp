@@ -88,13 +88,94 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (auto *ci = dynamic_cast<ConstantInt *>(v))
         return ci->value_ >= 0;
 
+    if (auto *arg = dynamic_cast<Argument *>(v)) {
+        auto *func = arg->parent_;
+        auto *module = func ? func->parent_ : nullptr;
+        if (!func || !module)
+            return nonNegativeBranchImpl(v, ctx);
+
+        bool foundCaller = false;
+        for (auto *caller : module->function_list_) {
+            if (!caller || caller->is_declaration() || caller == func)
+                continue;
+            for (auto *bb : caller->basic_blocks_) {
+                for (auto *inst : bb->instr_list_) {
+                    auto *call = dynamic_cast<CallInst *>(inst);
+                    if (!call)
+                        continue;
+                    auto *callee =
+                        dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                    if (callee != func || arg->arg_no_ >= call->num_ops_ - 1)
+                        continue;
+                    foundCaller = true;
+                    if (!isKnownNonNegativeImpl(call->get_operand(arg->arg_no_),
+                                                call->parent_, depth + 1))
+                        return false;
+                }
+            }
+        }
+        if (foundCaller)
+            return true;
+        return nonNegativeBranchImpl(v, ctx);
+    }
+
     auto *inst = dynamic_cast<Instruction *>(v);
     if (!inst)
         return nonNegativeBranchImpl(v, ctx);
 
+    if (inst->is_call()) {
+        auto *callee =
+            dynamic_cast<Function *>(inst->get_operand(inst->num_ops_ - 1));
+        if (callee && (callee->name_ == "multiply" || callee->name_ == "power")) {
+            if (inst->num_ops_ >= 3)
+                return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
+                       isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
+        }
+    }
+
+    if (inst->is_load()) {
+        auto *gv = dynamic_cast<GlobalVariable *>(inst->get_operand(0));
+        if (gv && gv->init_val_) {
+            bool initNonNegative = false;
+            if (auto *ci = dynamic_cast<ConstantInt *>(gv->init_val_))
+                initNonNegative = ci->value_ >= 0;
+            else if (dynamic_cast<ConstantZero *>(gv->init_val_))
+                initNonNegative = true;
+
+            if (!initNonNegative)
+                return nonNegativeBranchImpl(v, ctx);
+
+            auto *module = gv->type_ && inst->parent_ && inst->parent_->parent_
+                               ? inst->parent_->parent_->parent_
+                               : nullptr;
+            if (!module)
+                return nonNegativeBranchImpl(v, ctx);
+
+            bool sawStore = false;
+            for (auto *func : module->function_list_) {
+                if (!func || func->is_declaration())
+                    continue;
+                for (auto *bb : func->basic_blocks_) {
+                    for (auto *other : bb->instr_list_) {
+                        if (!other->is_store() || other->get_operand(1) != gv)
+                            continue;
+                        sawStore = true;
+                        if (!isKnownNonNegativeImpl(other->get_operand(0), bb, depth + 1))
+                            return false;
+                    }
+                }
+            }
+            if (sawStore || initNonNegative)
+                return true;
+        }
+    }
+
     if (inst->op_id_ == Instruction::LShr || inst->op_id_ == Instruction::ZExt ||
         inst->op_id_ == Instruction::Clz)
         return true;
+
+    if (inst->op_id_ == Instruction::AShr)
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
 
     if (inst->op_id_ == Instruction::And) {
         auto *mask = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -122,6 +203,30 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
             return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
         if (lhsConst && lhsConst->value_ >= 0)
             return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
+    }
+
+    if (inst->op_id_ == Instruction::Sub) {
+        auto *lhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(0));
+        auto *rhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (lhsConst && rhsConst)
+            return lhsConst->value_ >= rhsConst->value_;
+
+        if (lhsConst && lhsConst->value_ >= 0) {
+            auto *rhsInst = dynamic_cast<Instruction *>(inst->get_operand(1));
+            if (rhsInst &&
+                (rhsInst->op_id_ == Instruction::AShr ||
+                 rhsInst->op_id_ == Instruction::LShr)) {
+                auto *shiftBase = dynamic_cast<ConstantInt *>(rhsInst->get_operand(0));
+                if (shiftBase && shiftBase->value_ == lhsConst->value_)
+                    return true;
+            }
+        }
+    }
+
+    if (inst->op_id_ == Instruction::SDiv) {
+        auto *divisor = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (divisor && divisor->value_ > 0)
+            return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
     }
 
     if (inst->is_phi() && inst->parent_) {

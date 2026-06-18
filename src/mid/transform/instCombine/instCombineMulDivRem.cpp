@@ -238,6 +238,46 @@ Value* visitSRem(BinaryInst *inst) {
         return make_const_int(ty, 0);
     }
 
+    if (cy && cy->value_ > 0 && gInstCombineRangeAnalysis &&
+        x->type_ && x->type_->tid_ == Type::IntegerTyID) {
+        auto range = gInstCombineRangeAnalysis->getRange(x, bb);
+        if (range.valid && !range.isTop && !range.isBottom) {
+            long long mod = cy->value_;
+            if (range.lower >= 0 && range.upper < mod) {
+                return x;
+            }
+
+            long long doubleMod = 0;
+            if (mod <= std::numeric_limits<long long>::max() / 2) {
+                doubleMod = mod * 2;
+                if (range.lower >= mod && range.upper < doubleMod) {
+                    auto *subInst = new BinaryInst(ty, Instruction::Sub, x,
+                                                   make_const_int(ty, cy->value_),
+                                                   bb, true);
+                    stampIntegerFacts(subInst);
+                    bb->add_instruction_before_inst(subInst, inst);
+                    return subInst;
+                }
+
+                if (range.lower >= 0 && range.upper < doubleMod) {
+                    auto *cmpInst = new ICmpInst(ICmpInst::ICMP_SGE, x,
+                                                 make_const_int(ty, mod), bb, true);
+                    bb->add_instruction_before_inst(cmpInst, inst);
+
+                    auto *subInst = new BinaryInst(ty, Instruction::Sub, x,
+                                                   make_const_int(ty, mod), bb, true);
+                    stampIntegerFacts(subInst);
+                    bb->add_instruction_before_inst(subInst, inst);
+
+                    auto *selInst = new SelectInst(cmpInst, subInst, x, ty);
+                    stampIntegerFacts(selInst);
+                    bb->add_instruction_before_inst(selInst, inst);
+                    return selInst;
+                }
+            }
+        }
+    }
+
     // 4. srem x, 2^k  →  and x, 2^k-1
     //
     // (a) When the sole user is  icmp eq/ne …, 0  the transform is always
@@ -266,7 +306,10 @@ Value* visitSRem(BinaryInst *inst) {
     //     or x is an exact multiple of 2^k.
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
-        if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+        bool nonNegative = isKnownNonNegative(x);
+        if (!nonNegative && gInstCombineRangeAnalysis)
+            nonNegative = gInstCombineRangeAnalysis->isKnownNonNegative(x, bb);
+        if (nonNegative || isKnownMultipleOf(x, k, bb)) {
             auto *andInst = new BinaryInst(ty, Instruction::And,
                 x, make_const_int(ty, cy->value_ - 1), bb, true);
             stampIntegerFacts(andInst);

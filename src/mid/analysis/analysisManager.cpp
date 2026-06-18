@@ -53,6 +53,19 @@ LoopInfo &AnalysisManager::getLoopInfo(Function *func) {
     return *cache.loopInfo;
 }
 
+RangeAnalysis &AnalysisManager::getRangeAnalysis(Function *func) {
+    auto &cache = functionCaches_[func];
+    if (!cache.rangeAnalysis) {
+        debug("miss", "RangeAnalysis", func ? func->name_ : "<null>");
+        LoopInfo &LI = getLoopInfo(func);
+        ScalarEvolution &SE = getScalarEvolution(func);
+        cache.rangeAnalysis = std::make_unique<RangeAnalysis>(func, this, LI, SE);
+    } else {
+        debug("hit", "RangeAnalysis", func ? func->name_ : "<null>");
+    }
+    return *cache.rangeAnalysis;
+}
+
 ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.scalarEvolution) {
@@ -65,6 +78,18 @@ ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
     return *cache.scalarEvolution;
 }
 
+bool AnalysisManager::isRangeAnalysisActive(Function *func) const {
+    return activeRangeAnalyses_.count(func) != 0;
+}
+
+void AnalysisManager::enterRangeAnalysis(Function *func) {
+    if (func) activeRangeAnalyses_.insert(func);
+}
+
+void AnalysisManager::leaveRangeAnalysis(Function *func) {
+    if (func) activeRangeAnalyses_.erase(func);
+}
+
 void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
                                               const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
@@ -74,12 +99,14 @@ void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
     }
 
     if (!pa.preservesLoopInfo()) {
+        cache.rangeAnalysis.reset();
         cache.scalarEvolution.reset();
         cache.loopInfo.reset();
         return;
     }
 
     if (!pa.preservesSCEV()) {
+        cache.rangeAnalysis.reset();
         cache.scalarEvolution.reset();
     }
 }

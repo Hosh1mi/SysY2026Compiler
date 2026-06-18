@@ -4,10 +4,12 @@
 #include "lazyValueInfo.hpp"
 #include "loopInfo.hpp"
 #include "preservedAnalyses.hpp"
+#include "rangeAnalysis.hpp"
 #include "scalarEvolution.hpp"
 
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 class AnalysisManager {
@@ -15,7 +17,11 @@ public:
     BasicAliasAnalysis &getBasicAA(Module *module);
     LazyValueInfo &getLazyValueInfo(Function *func);
     LoopInfo &getLoopInfo(Function *func);
+    RangeAnalysis &getRangeAnalysis(Function *func);
     ScalarEvolution &getScalarEvolution(Function *func);
+    bool isRangeAnalysisActive(Function *func) const;
+    void enterRangeAnalysis(Function *func);
+    void leaveRangeAnalysis(Function *func);
 
     void invalidate(Module *module, const PreservedAnalyses &pa);
     void invalidateFunction(Function *func, const PreservedAnalyses &pa);
@@ -26,6 +32,7 @@ private:
     struct FunctionCache {
         std::unique_ptr<LazyValueInfo> lazyValueInfo;
         std::unique_ptr<LoopInfo> loopInfo;
+        std::unique_ptr<RangeAnalysis> rangeAnalysis;
         std::unique_ptr<ScalarEvolution> scalarEvolution;
     };
 
@@ -35,4 +42,5 @@ private:
     Module *basicAAModule_ = nullptr;
     std::unique_ptr<BasicAliasAnalysis> basicAA_;
     std::map<Function *, FunctionCache> functionCaches_;
+    std::set<Function *> activeRangeAnalyses_;
 };
