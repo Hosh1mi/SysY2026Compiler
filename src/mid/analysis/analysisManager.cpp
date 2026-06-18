@@ -29,6 +29,18 @@ BasicAliasAnalysis &AnalysisManager::getBasicAA(Module *module) {
     return *basicAA_;
 }
 
+LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
+    auto &cache = functionCaches_[func];
+    if (!cache.lazyValueInfo) {
+        debug("miss", "LazyValueInfo", func ? func->name_ : "<null>");
+        cache.lazyValueInfo = std::make_unique<LazyValueInfo>();
+    } else {
+        debug("hit", "LazyValueInfo", func ? func->name_ : "<null>");
+    }
+    cache.lazyValueInfo->analyze(func);
+    return *cache.lazyValueInfo;
+}
+
 LoopInfo &AnalysisManager::getLoopInfo(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.loopInfo) {
@@ -56,6 +68,10 @@ ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
 void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
                                               const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
+
+    if (!pa.preservesLVI()) {
+        cache.lazyValueInfo.reset();
+    }
 
     if (!pa.preservesLoopInfo()) {
         cache.scalarEvolution.reset();
