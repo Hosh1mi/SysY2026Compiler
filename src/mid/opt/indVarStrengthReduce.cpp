@@ -607,15 +607,9 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     if (inLoopHeaderPreds != 1)
         return;
 
-    // Skip loops that already contain vector operations — converting
-    // GEPs to pointer phis in these loops causes register spills because
-    // the new phis compete with vector registers.
-    for (auto bb : loop.blocks) {
-        for (auto inst : bb->instr_list_) {
-            if (inst->type_->tid_ == Type::VectorTyID) return;
-        }
-    }
-
+    // Vectorized loops use the same affine recurrence proof as scalar loops.
+    // Keep them eligible here; the candidate checks below still require a
+    // materializable start address and a bounded constant pointer stride.
     auto ivs = findBasicIVs(loop);
     if (ivs.empty()) return;
 

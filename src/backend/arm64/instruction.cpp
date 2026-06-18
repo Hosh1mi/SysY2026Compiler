@@ -472,12 +472,23 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                 emitMachineInstr(std::move(ld));
             };
             auto pinMulOperand = [&](Value *val, LoadInst *load) {
-                std::string tmp = allocNEONReg();
                 if (load) {
+                    std::string tmp = allocNEONReg();
                     emitVectorLoadInto(load, tmp);
                     return tmp;
                 }
                 std::string reg = loadVector(val);
+
+                // An allocated SSA source is already pinned for the duration
+                // of this instruction.  Reuse it directly unless it aliases
+                // the destructive accumulator destination; the interference
+                // graph normally prevents that alias, while the explicit
+                // check keeps instruction selection correct independently of
+                // allocator details.
+                if (hasAssignedReg(val) && reg != rd)
+                    return reg;
+
+                std::string tmp = allocNEONReg();
                 emitRawAluMachine("\tmov " + tmp + ".16b, " + reg + ".16b",
                                   tmp, {reg}, MOpcode::Neon);
                 return tmp;
