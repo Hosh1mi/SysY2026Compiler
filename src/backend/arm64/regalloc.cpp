@@ -860,13 +860,20 @@ void Arm64RegAlloc::allocate() {
                 for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
                     if (!usedRegs.count(r)) freeRegs.push_back(r);
             } else {
+                // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
+                // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
+                // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
+                // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
+                // 保存/恢复由 mergePromotedConstRegs 统一接管。
                 for (int r = 10; r <= 15; ++r)
+                    if (!usedRegs.count(r)) freeRegs.push_back(r);
+                for (int r = 28; r >= 19; --r)
                     if (!usedRegs.count(r)) freeRegs.push_back(r);
             }
             std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
             for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
             std::sort(ranked.begin(), ranked.end());
-            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)4});
+            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
             for (size_t i = 0; i < n; ++i)
                 promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
         }
