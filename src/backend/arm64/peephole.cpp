@@ -906,33 +906,67 @@ static bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
 
 	ParsedLine store = parseLine(block.instrs[idx].text);
-	ParsedLine load = parseLine(block.instrs[idx + 1].text);
-	if (store.kind != LineKind::Instruction || load.kind != LineKind::Instruction)
+	if (store.kind != LineKind::Instruction || store.mnemonic != "str" ||
+	    store.operands.size() != 2)
 		return false;
-	if (store.mnemonic != "str" || load.mnemonic != "ldr") return false;
-	if (store.operands.size() != 2 || load.operands.size() != 2) return false;
 
 	MemOperand storeMem = parseMemOp(store.operands[1]);
-	MemOperand loadMem = parseMemOp(load.operands[1]);
-	if (!storeMem.valid || !loadMem.valid) return false;
-	if (storeMem.base != "x29" || loadMem.base != "x29") return false;
-	if (storeMem.offset != loadMem.offset) return false;
-
 	const std::string &src = store.operands[0];
-	const std::string &dst = load.operands[0];
 	char cls = regClass(src);
+	const MachineInstr &storeMI = block.instrs[idx];
+	if (!storeMem.valid || storeMem.base != "x29" ||
+	    !storeMI.memOffsetKnown || storeMI.memBase != "r29" ||
+	    storeMI.memWidth <= 0)
+		return false;
 	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
-	if (regClass(dst) != cls) return false;
 
-	if (samePhysicalReg(src, dst)) {
-		block.instrs.erase(block.instrs.begin() + idx + 1);
-		return true;
+	auto overlapsStoredSlot = [&](const MachineInstr &mi) {
+		if (!mi.memOffsetKnown || mi.memBase != storeMI.memBase || mi.memWidth <= 0)
+			return true;
+		long long storeBegin = storeMI.memOffset;
+		long long storeEnd = storeBegin + storeMI.memWidth;
+		long long otherBegin = mi.memOffset;
+		long long otherEnd = otherBegin + mi.memWidth;
+		return storeBegin < otherEnd && otherBegin < storeEnd;
+	};
+
+	for (size_t loadIdx = idx + 1; loadIdx < block.instrs.size(); ++loadIdx) {
+		MachineInstr &mi = block.instrs[loadIdx];
+		ParsedLine line = parseLine(mi.text);
+		if (line.kind != LineKind::Instruction || mi.isCall || mi.isBarrier)
+			return false;
+
+		bool exactSlotLoad = mi.mayLoad && line.mnemonic == "ldr" &&
+		                     line.operands.size() == 2 && mi.memOffsetKnown &&
+		                     mi.memBase == storeMI.memBase &&
+		                     mi.memOffset == storeMI.memOffset &&
+		                     mi.memWidth == storeMI.memWidth;
+		if (exactSlotLoad) {
+			const std::string &dst = line.operands[0];
+			if (regClass(dst) != cls) return false;
+			if (samePhysicalReg(src, dst)) {
+				block.instrs.erase(block.instrs.begin() + loadIdx);
+				return true;
+			}
+
+			std::string movMnemonic =
+			    (cls == 's' || cls == 'd') ? "fmov" : "mov";
+			replaceMachineInstr(mi, makeMachineInsn(movMnemonic, {dst, src}));
+			return true;
+		}
+
+		// A write to the saved value makes the old register value unavailable.
+		// Check this after a matching load so `str w9; ...; ldr w9` can simply
+		// discard the reload.
+		if (lineWritesReg(line, src)) return false;
+
+		// Spill slots are private to this frame, but an unclassified store may
+		// itself use a frame-derived scratch address.  Only step over stores whose
+		// precise frame range is known and disjoint.
+		if (mi.mayStore && overlapsStoredSlot(mi)) return false;
 	}
 
-	std::string movMnemonic = (cls == 's' || cls == 'd') ? "fmov" : "mov";
-	replaceMachineInstr(block.instrs[idx + 1],
-	                    makeMachineInsn(movMnemonic, {dst, src}));
-	return true;
+	return false;
 }
 
 static bool isControlFlowBarrier(const std::string &mnemonic) {
