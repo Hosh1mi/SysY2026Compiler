@@ -53,6 +53,7 @@ public:
     AliasResult alias(const MemoryLocation &a, const MemoryLocation &b) const;
     AliasResult alias(Value *a, Value *b) const;
     ModRefInfo getModRefInfo(Instruction *inst, Value *ptr) const;
+    ModRefInfo getCallModRef(CallInst *call, Value *ptr) const;
     ModRefInfo getFunctionModRef(Function *func, Value *ptrOrGlobal = nullptr) const;
 
     bool isPure(Function *func) const;

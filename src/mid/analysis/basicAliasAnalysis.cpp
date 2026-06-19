@@ -340,15 +340,55 @@ ModRefInfo BasicAliasAnalysis::getModRefInfo(Instruction *inst, Value *ptr) cons
     }
 
     if (inst->is_call()) {
-        auto *call = static_cast<CallInst *>(inst);
-        auto *callee = dynamic_cast<Function *>(
-            call->get_operand(call->num_ops_ - 1));
-        if (!callee || callee->is_declaration()) return ModRefInfo::ModRef;
-        if (isPure(callee)) return ModRefInfo::NoModRef;
-        return getFunctionModRef(callee, ptr);
+        return getCallModRef(static_cast<CallInst *>(inst), ptr);
     }
 
     return ModRefInfo::NoModRef;
+}
+
+ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
+    if (!call || !ptr) return ModRefInfo::ModRef;
+
+    auto *callee = dynamic_cast<Function *>(
+        call->get_operand(call->num_ops_ - 1));
+    if (!callee) return ModRefInfo::ModRef;
+    if (callee->hasSemFlag(SemFlag::FnPure) || isPure(callee))
+        return ModRefInfo::NoModRef;
+    if (callee->is_declaration()) {
+        return callee->hasSemFlag(SemFlag::FnReadOnly)
+                   ? ModRefInfo::Ref
+                   : ModRefInfo::ModRef;
+    }
+
+    auto it = summaries_.find(callee);
+    if (it == summaries_.end()) return ModRefInfo::ModRef;
+
+    const FunctionSummary &summary = it->second;
+    MemoryLocation query = getMemoryLocation(ptr);
+    ModRefInfo result = ModRefInfo::NoModRef;
+    for (const auto &record : summary.locationEffects) {
+        MemoryLocation effectLoc = record.loc;
+        PointerInfo effectInfo = getPointerInfo(record.loc.ptr);
+        if (auto *formal = dynamic_cast<Argument *>(effectInfo.base)) {
+            if (formal->parent_ != callee ||
+                formal->arg_no_ >= call->num_ops_ - 1) {
+                return ModRefInfo::ModRef;
+            }
+
+            // For call-site disambiguation the actual underlying object is
+            // sufficient.  Discarding a formal GEP's offset is conservative:
+            // it can lose NoAlias for two ranges of the same object, but it
+            // cannot invent NoAlias between distinct objects.
+            effectLoc = getMemoryLocation(call->get_operand(formal->arg_no_));
+        }
+
+        if (alias(effectLoc, query) != AliasResult::NoAlias)
+            result = combineModRef(result, record.effect);
+    }
+
+    if (result == ModRefInfo::NoModRef && summary.hasUnknownMemoryEffect)
+        return ModRefInfo::ModRef;
+    return result;
 }
 
 bool BasicAliasAnalysis::isPure(Function *func) const {
