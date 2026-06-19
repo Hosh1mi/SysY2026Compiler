@@ -11,6 +11,7 @@
 //   §G  Module-level driver
 
 #include "../../include/mid/opt/bitFuncRecognize.hpp"
+#include "../../include/mid/analysis/constantEvaluator.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
@@ -551,12 +552,10 @@ private:
 
         if (a.knownConcrete && b.knownConcrete) {
             int av = a.concreteVal, bv = b.concreteVal, rv = 0;
+            if (ConstantEvaluator::foldIntegerBinary(op, av, bv, rv)) {
+                state[bi] = vsConst(rv); return true;
+            }
             switch (op) {
-                case Instruction::Add:  rv = av + bv; break;
-                case Instruction::Sub:  rv = av - bv; break;
-                case Instruction::Mul:  rv = av * bv; break;
-                case Instruction::SDiv: if (!bv) { failReason = "div0"; return false; } rv = av / bv; break;
-                case Instruction::SRem: if (!bv) { failReason = "rem0"; return false; } rv = av % bv; break;
                 case Instruction::And:  rv = av & bv; break;
                 case Instruction::Or:   rv = av | bv; break;
                 case Instruction::Xor:  rv = av ^ bv; break;

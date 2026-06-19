@@ -55,11 +55,39 @@ struct MagicNumber {
     MagicStrat strat;
 };
 
+struct SignedDivisorInfo {
+    int32_t value = 0;
+    uint32_t magnitude = 0;
+    bool reducible = false;
+    bool powerOfTwo = false;
+    int shift = 0;
+
+    bool usesMagic() const {
+        return reducible && magnitude > 1 && !powerOfTwo;
+    }
+};
+
+inline SignedDivisorInfo analyzeDivisor(int32_t divisor) {
+    SignedDivisorInfo info;
+    info.value = divisor;
+    if (divisor == 0 || divisor == INT32_MIN)
+        return info;
+    info.reducible = true;
+    info.magnitude = divisor < 0
+        ? 0u - static_cast<uint32_t>(divisor)
+        : static_cast<uint32_t>(divisor);
+    info.powerOfTwo = (info.magnitude & (info.magnitude - 1)) == 0;
+    if (info.powerOfTwo)
+        info.shift = __builtin_ctz(info.magnitude);
+    return info;
+}
+
 inline MagicNumber getMagic(int32_t d) {
-    assert(abs(d) > 1);
+    SignedDivisorInfo info = analyzeDivisor(d);
+    assert(info.usesMagic());
 
     int32_t p = 31;
-    uint32_t ad = std::abs(d);
+    uint32_t ad = info.magnitude;
     uint32_t t = 0x80000000U + ((uint32_t)d >> 31);
     uint32_t anc = t - 1 - t % ad;
     uint32_t q1 = 0x80000000U / anc;

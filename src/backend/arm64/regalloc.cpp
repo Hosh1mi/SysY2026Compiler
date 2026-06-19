@@ -824,20 +824,20 @@ void Arm64RegAlloc::allocate() {
             for (auto inst : bb->instr_list_) {
                 if (inst->op_id_ == Instruction::SRem) {
                     auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
-                        int32_t abs_d = ci->value_ > 0 ? ci->value_ : -ci->value_;
-                        if (abs_d > 1 && (abs_d & (abs_d - 1)) != 0) {
-                            addCandidate(Magic::getMagic(abs_d).multiplier, w);
-                            addCandidate(abs_d, w);  // msub 还需要正幅值除数
-                        }
+                    Magic::SignedDivisorInfo info = ci
+                        ? Magic::analyzeDivisor(ci->value_)
+                        : Magic::SignedDivisorInfo{};
+                    if (info.usesMagic()) {
+                        addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
+                        addCandidate(static_cast<int>(info.magnitude), w);
                     }
                 } else if (inst->op_id_ == Instruction::SDiv) {
                     auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    if (ci && ci->value_ != INT32_MIN) {
-                        int32_t abs_d = ci->value_ > 0 ? ci->value_ : -ci->value_;
-                        if (abs_d > 1 && (abs_d & (abs_d - 1)) != 0)
-                            addCandidate(Magic::getMagic(ci->value_).multiplier, w);
-                    }
+                    Magic::SignedDivisorInfo info = ci
+                        ? Magic::analyzeDivisor(ci->value_)
+                        : Magic::SignedDivisorInfo{};
+                    if (info.usesMagic())
+                        addCandidate(Magic::getMagic(ci->value_).multiplier, w);
                 } else if (inst->op_id_ == Instruction::Add ||
                            inst->op_id_ == Instruction::Sub ||
                            inst->op_id_ == Instruction::ICmp) {

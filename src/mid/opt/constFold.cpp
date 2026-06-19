@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/constFold.hpp"
+#include "../../include/mid/analysis/constantEvaluator.hpp"
 
 void ConstantFold::execute(Module *module) {
     bool changed = true;
@@ -83,32 +84,15 @@ Constant* ConstantFold::foldBinary(BinaryInst *bin, Module *module) {
         int v0 = int0->value_;
         int v1 = static_cast<ConstantInt*>(op1)->value_;
         int result;
-        switch (bin->op_id_) {
-            case Instruction::Add:  result = v0 + v1; break;
-            case Instruction::Sub:  result = v0 - v1; break;
-            case Instruction::Mul:  result = v0 * v1; break;
-            case Instruction::SDiv:
-                if (v1 == 0) return nullptr; // 除零不折叠
-                result = v0 / v1; break;
-            case Instruction::SRem:
-                if (v1 == 0) return nullptr;
-                result = v0 % v1; break;
-            default: return nullptr; // 不支持的操作
-        }
+        if (!ConstantEvaluator::foldIntegerBinary(bin->op_id_, v0, v1, result))
+            return nullptr;
         return new ConstantInt(bin->type_, result);
     } else { // 浮点运算
         float v0 = static_cast<ConstantFloat*>(op0)->value_;
         float v1 = static_cast<ConstantFloat*>(op1)->value_;
         float result;
-        switch (bin->op_id_) {
-            case Instruction::FAdd: result = v0 + v1; break;
-            case Instruction::FSub: result = v0 - v1; break;
-            case Instruction::FMul: result = v0 * v1; break;
-            case Instruction::FDiv:
-                if (v1 == 0.0f) return nullptr;
-                result = v0 / v1; break;
-            default: return nullptr;
-        }
+        if (!ConstantEvaluator::foldFloatBinary(bin->op_id_, v0, v1, result))
+            return nullptr;
         return new ConstantFloat(bin->type_, result);
     }
 }

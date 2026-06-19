@@ -18,7 +18,11 @@ Value* visitMul(BinaryInst *inst) {
 
     // 1. Constant fold: C1 * C2 → C3
     if (cx && cy) {
-        return make_const_int(ty, cx->value_ * cy->value_);
+        int result;
+        if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
+                                                 cy->value_, result))
+            return make_const_int(ty, result);
+        return nullptr;
     }
 
     // 2. Canonicalize: constant to RHS  (mul C, x → mul x, C)
@@ -50,7 +54,10 @@ Value* visitMul(BinaryInst *inst) {
         if (x_inst && x_inst->is_mul()) {
             auto *c1 = as_const_int(x_inst->get_operand(1));
             if (c1) {
-                int combined = c1->value_ * cy->value_;
+                int combined;
+                if (!ConstantEvaluator::foldIntegerBinary(
+                        Instruction::Mul, c1->value_, cy->value_, combined))
+                    return nullptr;
                 auto *new_inst = new BinaryInst(ty, Instruction::Mul,
                     x_inst->get_operand(0),
                     make_const_int(ty, combined), bb, true);
@@ -133,8 +140,11 @@ Value* visitSDiv(BinaryInst *inst) {
 
     // 1. Constant fold: C1 / C2 → C3  (guard division by zero)
     if (cx && cy) {
-        if (cy->value_ == 0) return nullptr;
-        return make_const_int(ty, cx->value_ / cy->value_);
+        int result;
+        if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
+                                                 cy->value_, result))
+            return make_const_int(ty, result);
+        return nullptr;
     }
 
     // 2. Identity: x / 1 → x
@@ -142,13 +152,7 @@ Value* visitSDiv(BinaryInst *inst) {
         return x;
     }
 
-    // 3. Zero dividend: 0 / x → 0  (x ≠ 0)
-    if (cx && cx->value_ == 0) {
-        if (cy && cy->value_ == 0) return nullptr;
-        return make_const_int(ty, 0);
-    }
-
-    // 4. x / -1  →  sub 0, x
+    // 3. x / -1  →  sub 0, x
     if (cy && cy->value_ == -1) {
         auto *neg = new BinaryInst(ty, Instruction::Sub,
             make_const_int(ty, 0), x, bb, true);
@@ -157,49 +161,36 @@ Value* visitSDiv(BinaryInst *inst) {
         return neg;
     }
 
-    // 5. sdiv x, 2^k  →  ashr x, k   (constant power-of-2 divisor)
+    // 4. sdiv x, 2^k  →  ashr x, k   (constant power-of-2 divisor)
     //    Exact when x ≥ 0 (no sign issue) or x is a multiple of 2^k
     //    (no remainder to lose — ashr matches sdiv even for negative x).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
-        if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+        bool exact = isKnownMultipleOf(x, k, bb);
+        if (isKnownNonNegative(x) || exact) {
             auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                             make_const_int(ty, k), bb, true);
+            if (exact) ashr->setSemFlag(SemFlag::Exact);
             stampIntegerFacts(ashr);
             bb->add_instruction_before_inst(ashr, inst);
             return ashr;
         }
     }
 
-    // 6. sdiv x, pow2_var  →  ashr x, k   (variable divisor proven = 2^k)
+    // 5. sdiv x, pow2_var  →  ashr x, k   (variable divisor proven = 2^k)
     if (!cy) {
         int k;
         if (isKnownPowerOfTwo(y, k) && k > 0) {
-            if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+            bool exact = isKnownMultipleOf(x, k, bb);
+            if (isKnownNonNegative(x) || exact) {
                 auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                                 make_const_int(ty, k), bb, true);
+                if (exact) ashr->setSemFlag(SemFlag::Exact);
                 stampIntegerFacts(ashr);
                 bb->add_instruction_before_inst(ashr, inst);
                 return ashr;
             }
         }
-    }
-
-    // 7. sdiv x, pow2_var  →  ashr x, (31 - clz(y))
-    //    Divisor is provably a power of 2 but k is not statically known
-    //    (e.g. loaded from a global that receives varying 2^k stores).
-    //    Compute k = 31 - clz(y) at runtime, then ashr.
-    if (!cy && isKnownNonNegative(x) && isProvenPowerOfTwo(y)) {
-        auto *clz = new UnaryInst(ty, Instruction::Clz, y, bb, true);
-        bb->add_instruction_before_inst(clz, inst);
-        auto *k_inst = new BinaryInst(ty, Instruction::Sub,
-                           make_const_int(ty, 31), clz, bb, true);
-        bb->add_instruction_before_inst(k_inst, inst);
-        auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
-                        k_inst, bb, true);
-        stampIntegerFacts(ashr);
-        bb->add_instruction_before_inst(ashr, inst);
-        return ashr;
     }
 
     return nullptr;
@@ -223,8 +214,11 @@ Value* visitSRem(BinaryInst *inst) {
 
     // 1. Constant fold: C1 % C2 → C3  (guard division by zero)
     if (cx && cy) {
-        if (cy->value_ == 0) return nullptr;
-        return make_const_int(ty, cx->value_ % cy->value_);
+        int result;
+        if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
+                                                 cy->value_, result))
+            return make_const_int(ty, result);
+        return nullptr;
     }
 
     // 2. Identity: x % 1 → 0
@@ -232,13 +226,7 @@ Value* visitSRem(BinaryInst *inst) {
         return make_const_int(ty, 0);
     }
 
-    // 3. Zero dividend: 0 % x → 0  (x ≠ 0)
-    if (cx && cx->value_ == 0) {
-        if (cy && cy->value_ == 0) return nullptr;
-        return make_const_int(ty, 0);
-    }
-
-    // 4. srem x, 2^k  →  and x, 2^k-1
+    // 3. srem x, 2^k  →  and x, 2^k-1
     //
     // (a) When the sole user is  icmp eq/ne …, 0  the transform is always
     //     safe: we only care about zero / non-zero, and  (x & mask) == 0
@@ -266,7 +254,9 @@ Value* visitSRem(BinaryInst *inst) {
     //     or x is an exact multiple of 2^k.
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
-        if (isKnownNonNegative(x) || isKnownMultipleOf(x, k, bb)) {
+        if (isKnownMultipleOf(x, k, bb))
+            return make_const_int(ty, 0);
+        if (isKnownNonNegative(x)) {
             auto *andInst = new BinaryInst(ty, Instruction::And,
                 x, make_const_int(ty, cy->value_ - 1), bb, true);
             stampIntegerFacts(andInst);
@@ -295,7 +285,11 @@ Value* visitFMul(BinaryInst *inst) {
 
     // 1. Constant fold: C1 * C2 → C3
     if (cx && cy) {
-        return make_const_float(ty, cx->value_ * cy->value_);
+        float result;
+        if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
+                                               cy->value_, result))
+            return make_const_float(ty, result);
+        return nullptr;
     }
 
     // 2. Canonicalize: constant to RHS  (fmul C, x → fmul x, C)
@@ -308,11 +302,6 @@ Value* visitFMul(BinaryInst *inst) {
     // 3. Identity: x * 1.0 → x
     if (cy && cy->value_ == 1.0f) {
         return x;
-    }
-
-    // 4. Zero: x * 0.0 → 0.0  (ignoring NaN * 0.0 edge case)
-    if (cy && cy->value_ == 0.0f) {
-        return make_const_float(ty, 0.0f);
     }
 
     return nullptr;
@@ -334,19 +323,16 @@ Value* visitFDiv(BinaryInst *inst) {
 
     // 1. Constant fold: C1 / C2 → C3  (guard division by zero)
     if (cx && cy) {
-        if (cy->value_ == 0.0f) return nullptr;
-        return make_const_float(ty, cx->value_ / cy->value_);
+        float result;
+        if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
+                                               cy->value_, result))
+            return make_const_float(ty, result);
+        return nullptr;
     }
 
     // 2. Identity: x / 1.0 → x
     if (cy && cy->value_ == 1.0f) {
         return x;
-    }
-
-    // 3. Zero dividend: 0.0 / x → 0.0  (ignoring 0.0/0.0 edge case)
-    if (cx && cx->value_ == 0.0f) {
-        if (cy && cy->value_ == 0.0f) return nullptr;
-        return make_const_float(ty, 0.0f);
     }
 
     return nullptr;

@@ -800,18 +800,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         if (inst->op_id_ == Instruction::SDiv) {
             if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
                 int32_t d = ci->value_;
+                Magic::SignedDivisorInfo divisor = Magic::analyzeDivisor(d);
 
-                if (d == 0) {
-                    // 除以 0：让 sdiv 产生实现定义结果，fall-through
-                } else {
-                    // 安全计算绝对值——INT32_MIN 的 -d 会溢出，特判排除
-                    // 若 d == INT32_MIN，abs_d = 0，后续条件不成立，自动 fall-through
-                    int32_t abs_d = (d > 0) ? d
-                                : (d == INT32_MIN ? 0 : -d);
-
+                if (divisor.reducible) {
                     // 正/负 2 的幂统一处理
-                    if (abs_d > 0 && (abs_d & (abs_d - 1)) == 0) {
-                        int k = __builtin_ctz(abs_d);
+                    if (divisor.powerOfTwo) {
+                        int k = divisor.shift;
                         std::string rNum    = loadInt(v1);
                         // rNum 的最后一次读和 rResult 的首次写在同一条指令上，
                         // 因此 rResult 直接用分配寄存器即使与 rNum 同号也安全
@@ -840,7 +834,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                         emitted = true;
                     }
                     // 非 2 的幂除数：magic number 优化
-                    else if (abs_d > 1) {
+                    else if (divisor.usesMagic()) {
                         Magic::MagicNumber mag = Magic::getMagic(d);
 
                         std::string wNum = loadInt(v1);
@@ -1068,13 +1062,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto v2 = inst->get_operand(1);
         if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
             int32_t divisor = ci->value_;
-            if (divisor == 0) {
-                // Fall through to the hardware sdiv+msub sequence.
-            } else if (divisor == 1 || divisor == -1) {
+            Magic::SignedDivisorInfo divisorInfo = Magic::analyzeDivisor(divisor);
+            if (divisorInfo.reducible && divisorInfo.magnitude == 1) {
                 storeInt(inst, "wzr");
                 break;
-            } else if (divisor != INT32_MIN) {
-                int32_t absDivisor = divisor > 0 ? divisor : -divisor;
+            } else if (divisorInfo.reducible) {
+                int32_t absDivisor = static_cast<int32_t>(divisorInfo.magnitude);
 
                 if (absDivisor == 2) {
                     std::string rNum = loadInt(v1);
@@ -1088,7 +1081,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                                          MOpcode::FlagUse, {rResult}, {rResult}, 1, false, true);
                     storeInt(inst, rResult);
                     break;
-                } else if ((absDivisor & (absDivisor - 1)) == 0) {
+                } else if (divisorInfo.powerOfTwo) {
                     std::string rNum = loadInt(v1);
                     std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
 
@@ -1105,7 +1098,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                                          MOpcode::FlagUse, {rResult}, {rResult}, 1, false, true);
                     storeInt(inst, rResult);
                     break;
-                } else if (absDivisor > 1) {
+                } else if (divisorInfo.usesMagic()) {
                     Magic::MagicNumber mag = Magic::getMagic(absDivisor);
                     std::string wNum = loadInt(v1);
                     std::string wMagic = intConstReg(mag.multiplier);

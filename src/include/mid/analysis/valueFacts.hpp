@@ -2,9 +2,126 @@
 
 #include "../ir/ir.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 
 namespace ValueFacts {
+
+struct KnownBits {
+    uint32_t zero = 0;
+    uint32_t one = 0;
+};
+
+inline uint32_t widthMask(unsigned bits) {
+    return bits >= 32 ? UINT32_MAX : ((1u << bits) - 1u);
+}
+
+inline unsigned integerBitWidth(Value *v) {
+    if (!v || !v->type_ || v->type_->tid_ != Type::IntegerTyID)
+        return 0;
+    return static_cast<IntegerType *>(v->type_)->num_bits_;
+}
+
+inline unsigned countKnownTrailingZeros(uint32_t knownZero, unsigned bits) {
+    unsigned count = 0;
+    while (count < bits && (knownZero & (1u << count)))
+        ++count;
+    return count;
+}
+
+inline KnownBits computeKnownBitsImpl(Value *v, int depth) {
+    const unsigned bits = integerBitWidth(v);
+    if (bits == 0 || bits > 32 || depth > 8)
+        return {};
+    const uint32_t mask = widthMask(bits);
+
+    if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
+        const uint32_t value = static_cast<uint32_t>(ci->value_) & mask;
+        return {static_cast<uint32_t>(~value) & mask, value};
+    }
+
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst)
+        return {};
+
+    if (inst->op_id_ == Instruction::Select) {
+        KnownBits t = computeKnownBitsImpl(inst->get_operand(1), depth + 1);
+        KnownBits f = computeKnownBitsImpl(inst->get_operand(2), depth + 1);
+        return {t.zero & f.zero, t.one & f.one};
+    }
+
+    if (inst->op_id_ == Instruction::ZExt) {
+        Value *src = inst->get_operand(0);
+        const unsigned srcBits = integerBitWidth(src);
+        if (srcBits == 0 || srcBits > bits)
+            return {};
+        KnownBits known = computeKnownBitsImpl(src, depth + 1);
+        known.zero |= mask & ~widthMask(srcBits);
+        return known;
+    }
+
+    if (inst->num_ops_ < 2)
+        return {};
+    KnownBits lhs = computeKnownBitsImpl(inst->get_operand(0), depth + 1);
+    KnownBits rhs = computeKnownBitsImpl(inst->get_operand(1), depth + 1);
+
+    switch (inst->op_id_) {
+    case Instruction::And:
+        return {(lhs.zero | rhs.zero) & mask, (lhs.one & rhs.one) & mask};
+    case Instruction::Or:
+        return {(lhs.zero & rhs.zero) & mask, (lhs.one | rhs.one) & mask};
+    case Instruction::Xor:
+        return {((lhs.zero & rhs.zero) | (lhs.one & rhs.one)) & mask,
+                ((lhs.zero & rhs.one) | (lhs.one & rhs.zero)) & mask};
+    case Instruction::Add:
+    case Instruction::Sub: {
+        unsigned lowZeros = std::min(countKnownTrailingZeros(lhs.zero, bits),
+                                     countKnownTrailingZeros(rhs.zero, bits));
+        return {lowZeros == 32 ? UINT32_MAX : ((1u << lowZeros) - 1u), 0};
+    }
+    case Instruction::Mul: {
+        unsigned lowZeros = std::min(
+            bits, countKnownTrailingZeros(lhs.zero, bits) +
+                      countKnownTrailingZeros(rhs.zero, bits));
+        return {lowZeros == 32 ? UINT32_MAX : ((1u << lowZeros) - 1u), 0};
+    }
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr: {
+        auto *amount = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (!amount || amount->value_ < 0 ||
+            static_cast<unsigned>(amount->value_) >= bits)
+            return {};
+        unsigned shift = static_cast<unsigned>(amount->value_);
+        if (inst->op_id_ == Instruction::Shl) {
+            uint32_t low = shift == 0 ? 0 : ((1u << shift) - 1u);
+            return {((lhs.zero << shift) | low) & mask,
+                    (lhs.one << shift) & mask};
+        }
+        uint32_t high = shift == 0 ? 0 : mask & ~widthMask(bits - shift);
+        KnownBits result{(lhs.zero >> shift) & mask, (lhs.one >> shift) & mask};
+        if (inst->op_id_ == Instruction::LShr) {
+            result.zero |= high;
+        } else {
+            uint32_t sign = 1u << (bits - 1);
+            if (lhs.zero & sign) result.zero |= high;
+            if (lhs.one & sign) result.one |= high;
+        }
+        return result;
+    }
+    default:
+        return {};
+    }
+}
+
+inline KnownBits computeKnownBits(Value *v) {
+    return computeKnownBitsImpl(v, 0);
+}
+
+inline bool hasKnownZeroBits(Value *v, uint32_t mask) {
+    return (computeKnownBits(v).zero & mask) == mask;
+}
 
 inline ICmpInst::ICmpOp swapCmp(ICmpInst::ICmpOp op) {
     switch (op) {
@@ -22,7 +139,7 @@ inline ICmpInst::ICmpOp swapCmp(ICmpInst::ICmpOp op) {
 }
 
 inline bool nonNegativeBranchImpl(Value *v, BasicBlock *ctx) {
-    if (!ctx)
+    if (!ctx || ctx->pre_bbs_.size() != 1)
         return false;
 
     for (auto *pred : ctx->pre_bbs_) {
@@ -92,6 +209,11 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (!inst)
         return nonNegativeBranchImpl(v, ctx);
 
+    const unsigned bits = integerBitWidth(v);
+    if (bits > 0 && bits <= 32 &&
+        hasKnownZeroBits(v, 1u << (bits - 1)))
+        return true;
+
     if (inst->op_id_ == Instruction::LShr || inst->op_id_ == Instruction::ZExt ||
         inst->op_id_ == Instruction::Clz)
         return true;
@@ -115,65 +237,80 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
         return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1) &&
                isKnownNonNegativeImpl(inst->get_operand(2), ctx, depth + 1);
 
-    if (inst->op_id_ == Instruction::Add) {
-        auto *rhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(1));
-        auto *lhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(0));
-        if (rhsConst && rhsConst->value_ >= 0)
-            return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
-        if (lhsConst && lhsConst->value_ >= 0)
-            return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
-    }
+    if (inst->op_id_ == Instruction::Add &&
+        inst->hasSemFlag(SemFlag::NoSignedWrap))
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
+               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
 
-    if (inst->is_phi() && inst->parent_) {
+    // A bounded increasing induction variable stays non-negative when the
+    // loop's taken edge dominates its backedge and the constant upper bound
+    // leaves enough room for the update.  The explicit bound check is what
+    // makes this independent of signed-overflow assumptions.
+    if (inst->is_phi() && inst->parent_ && inst->num_ops_ == 4) {
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ == 4) {
-            Value *initValue = nullptr;
-            Value *backValue = nullptr;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                Value *incomingValue = phi->get_operand(i);
-                auto *update = dynamic_cast<BinaryInst *>(incomingValue);
-                int step = 0;
-                bool isPositiveStep = false;
-                if (update && update->is_add()) {
-                    auto *rhsConst = dynamic_cast<ConstantInt *>(update->get_operand(1));
-                    auto *lhsConst = dynamic_cast<ConstantInt *>(update->get_operand(0));
-                    if (update->get_operand(0) == phi && rhsConst) {
-                        step = rhsConst->value_;
-                        isPositiveStep = true;
-                    } else if (update->get_operand(1) == phi && lhsConst) {
-                        step = lhsConst->value_;
-                        isPositiveStep = true;
-                    }
-                }
-                if (isPositiveStep && step > 0) {
-                    backValue = incomingValue;
-                } else {
-                    initValue = incomingValue;
-                }
+        Value *init = nullptr;
+        BinaryInst *update = nullptr;
+        BasicBlock *backedge = nullptr;
+        int64_t step = 0;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *candidate = dynamic_cast<BinaryInst *>(phi->get_operand(i));
+            auto *incomingBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            ConstantInt *stepConst = nullptr;
+            if (candidate && candidate->op_id_ == Instruction::Add) {
+                if (candidate->get_operand(0) == phi)
+                    stepConst = dynamic_cast<ConstantInt *>(candidate->get_operand(1));
+                else if (candidate->get_operand(1) == phi)
+                    stepConst = dynamic_cast<ConstantInt *>(candidate->get_operand(0));
             }
-            if (!initValue || !backValue ||
-                !isKnownNonNegativeImpl(initValue, ctx, depth + 1))
-                return nonNegativeBranchImpl(v, ctx);
+            if (stepConst && stepConst->value_ > 0 && incomingBB &&
+                candidate->parent_ == incomingBB) {
+                if (update) return nonNegativeBranchImpl(v, ctx);
+                update = candidate;
+                backedge = incomingBB;
+                step = stepConst->value_;
+            } else {
+                init = phi->get_operand(i);
+            }
+        }
 
-            auto *update = dynamic_cast<BinaryInst *>(backValue);
-            if (update && update->is_add()) {
-                auto *term = dynamic_cast<BranchInst *>(inst->parent_->get_terminator());
-                auto *cmp = term && term->num_ops_ == 3
-                                ? dynamic_cast<ICmpInst *>(term->get_operand(0))
-                                : nullptr;
-                if (cmp) {
-                    ICmpInst::ICmpOp predOp = cmp->icmp_op_;
-                    Value *bound = nullptr;
-                    if (cmp->get_operand(0) == phi) {
-                        bound = cmp->get_operand(1);
-                    } else if (cmp->get_operand(1) == phi) {
-                        predOp = swapCmp(predOp);
-                        bound = cmp->get_operand(0);
-                    }
-                    if ((predOp == ICmpInst::ICMP_SLT || predOp == ICmpInst::ICMP_SLE) &&
-                        isKnownNonNegativeImpl(bound, inst->parent_, depth + 1))
-                        return true;
+        auto *term = dynamic_cast<BranchInst *>(inst->parent_->get_terminator());
+        auto *cmp = term && term->num_ops_ == 3
+                        ? dynamic_cast<ICmpInst *>(term->get_operand(0))
+                        : nullptr;
+        if (init && update && cmp &&
+            isKnownNonNegativeImpl(init, ctx, depth + 1)) {
+            ICmpInst::ICmpOp pred = cmp->icmp_op_;
+            Value *boundValue = nullptr;
+            if (cmp->get_operand(0) == phi) {
+                boundValue = cmp->get_operand(1);
+            } else if (cmp->get_operand(1) == phi) {
+                pred = swapCmp(pred);
+                boundValue = cmp->get_operand(0);
+            }
+            auto *bound = dynamic_cast<ConstantInt *>(boundValue);
+            auto *taken = dynamic_cast<BasicBlock *>(term->get_operand(1));
+            Function *func = inst->parent_->parent_;
+            if (taken && backedge && func->dominates(taken, backedge)) {
+                bool noOverflow = false;
+                bool nonNegativeBound = false;
+                if (bound) {
+                    int64_t maxPhi = pred == ICmpInst::ICMP_SLT
+                        ? static_cast<int64_t>(bound->value_) - 1
+                        : static_cast<int64_t>(bound->value_);
+                    nonNegativeBound = maxPhi >= 0;
+                    noOverflow = maxPhi + step <=
+                                 std::numeric_limits<int32_t>::max();
+                } else if (pred == ICmpInst::ICMP_SLT && step == 1) {
+                    // For any signed i32 bound, phi < bound proves
+                    // phi <= INT_MAX-1, so incrementing once cannot overflow.
+                    nonNegativeBound =
+                        isKnownNonNegativeImpl(boundValue, inst->parent_, depth + 1);
+                    noOverflow = true;
                 }
+                bool upperBound = pred == ICmpInst::ICMP_SLT ||
+                                  pred == ICmpInst::ICMP_SLE;
+                if (upperBound && nonNegativeBound && noOverflow)
+                    return true;
             }
         }
     }
@@ -183,6 +320,58 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
 
 inline bool isKnownNonNegative(Value *v, BasicBlock *ctx = nullptr) {
     return isKnownNonNegativeImpl(v, ctx, 0);
+}
+
+inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {
+    if (!ctx || ctx->pre_bbs_.size() != 1 || k <= 0 || k >= 32)
+        return false;
+    auto *br = ctx->pre_bbs_.front()->get_terminator();
+    if (!br || br->op_id_ != Instruction::Br || br->num_ops_ != 3 ||
+        br->get_operand(1) != ctx)
+        return false;
+    auto *cond = dynamic_cast<ICmpInst *>(br->get_operand(0));
+    if (!cond || cond->icmp_op_ != ICmpInst::ICMP_EQ)
+        return false;
+    Value *fact = cond->get_operand(0);
+    auto *zero = dynamic_cast<ConstantInt *>(cond->get_operand(1));
+    if (!zero || zero->value_ != 0) {
+        zero = dynamic_cast<ConstantInt *>(cond->get_operand(0));
+        fact = cond->get_operand(1);
+    }
+    if (!zero || zero->value_ != 0)
+        return false;
+
+    auto *factInst = dynamic_cast<Instruction *>(fact);
+    if (!factInst)
+        return false;
+    uint32_t lowMask = (1u << k) - 1u;
+    if (factInst->op_id_ == Instruction::SRem && factInst->get_operand(0) == v) {
+        auto *divisor = dynamic_cast<ConstantInt *>(factInst->get_operand(1));
+        return divisor &&
+               (static_cast<uint32_t>(divisor->value_) & lowMask) == 0;
+    }
+    if (factInst->op_id_ == Instruction::And) {
+        Value *other = factInst->get_operand(0);
+        auto *andMask = dynamic_cast<ConstantInt *>(factInst->get_operand(1));
+        if (!andMask) {
+            andMask = dynamic_cast<ConstantInt *>(factInst->get_operand(0));
+            other = factInst->get_operand(1);
+        }
+        return other == v && andMask &&
+               (static_cast<uint32_t>(andMask->value_) & lowMask) == lowMask;
+    }
+    return false;
+}
+
+inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx = nullptr) {
+    if (k <= 0)
+        return true;
+    const unsigned bits = integerBitWidth(v);
+    if (bits == 0 || k > static_cast<int>(bits) || k >= 32)
+        return false;
+    uint32_t lowMask = (1u << k) - 1u;
+    return hasKnownZeroBits(v, lowMask) ||
+           isKnownMultipleOfFromBranch(v, k, ctx);
 }
 
 } // namespace ValueFacts
