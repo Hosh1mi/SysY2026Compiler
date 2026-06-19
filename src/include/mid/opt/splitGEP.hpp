@@ -1,25 +1,27 @@
 #pragma once
+#include "../analysis/loopInfo.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
-#include <set>
-#include <vector>
 
+// SplitGEP — strength-reduce 2D+ array row addresses.
+//
+// A multi-dimensional access like `A[i][j]` lowers to a single GEP whose
+// outer-dimension multiply (`i * rowStride`) is invisible to the mid-end: it
+// only materializes when the backend expands the GEP, so it is recomputed on
+// every inner-loop iteration and cannot be CSE'd across accesses to the same
+// row. This pass peels the loop-invariant index prefix into a standalone GEP
+// hoisted to the loop preheader (computed once per outer iteration) and
+// rewrites the access to index off that hoisted row base.
+//
+// Runs after ParallelizeLoops / LoopVectorize so those passes still see the
+// original flat GEP shape their pattern matching depends on.
 class SplitGEP : public Pass {
 public:
     void execute(Module *module) override;
+    PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
+    bool convergenceRelevant() const override { return false; }
     std::string name() const override { return "SplitGEP"; }
 
 private:
-    struct Loop {
-        BasicBlock *header;
-        BasicBlock *latch;
-        std::set<BasicBlock*> blocks;
-    };
-
-    void runOnFunction(Function *func);
-    std::vector<Loop> findLoops(Function *func);
-    bool isVariant(Value *v, const std::set<BasicBlock*> &loopBlocks,
-                   std::set<Value*> &variantCache,
-                   std::set<Value*> &invariantCache);
-    bool runOnLoop(const Loop &loop);
+    bool runOnLoop(Loop *loop, LoopInfo &LI);
 };

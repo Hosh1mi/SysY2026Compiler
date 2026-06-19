@@ -32,6 +32,7 @@
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
 #include "include/mid/opt/loopInterchange.hpp"
+#include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
 #include "include/mid/opt/unifyExitNodes.hpp"
 #include "include/mid/opt/globalScalarPromotion.hpp"
@@ -237,6 +238,11 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
+    // Peel loop-invariant 2D-array row bases (`&A[i][0]`) into preheader-hoisted
+    // GEPs. Runs last in the loop pipeline: the earlier passes (parallelize,
+    // vectorize, IVSR) keep matching/strength-reducing the original flat GEPs,
+    // while the trailing GVN/cleanup dedups the hoisted row bases.
+    pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
 }
 
