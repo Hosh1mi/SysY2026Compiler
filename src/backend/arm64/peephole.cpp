@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/liveness.hpp"
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -1306,6 +1307,69 @@ static bool isSimpleNeonMemOp(const ParsedLine &line) {
 	       line.operands[0].find('{') != std::string::npos;
 }
 
+static bool parseHashImmediate(const std::string &operand, int &value) {
+	std::string text = trim(operand);
+	if (text.size() < 2 || text[0] != '#') return false;
+	char *end = nullptr;
+	long parsed = std::strtol(text.c_str() + 1, &end, 0);
+	if (!end || *end != '\0') return false;
+	if (parsed < std::numeric_limits<int>::min() ||
+	    parsed > std::numeric_limits<int>::max())
+		return false;
+	value = static_cast<int>(parsed);
+	return true;
+}
+
+static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
+	ParsedLine mem = parseLine(block.instrs[idx].text);
+	if (mem.kind != LineKind::Instruction) return false;
+	if (mem.mnemonic != "ldr" && mem.mnemonic != "str") return false;
+	if (mem.operands.size() != 2) return false;
+
+	char valueClass = regClass(mem.operands[0]);
+	if (valueClass != 'w' && valueClass != 'x' && valueClass != 's' &&
+	    valueClass != 'd' && valueClass != 'q')
+		return false;
+
+	MemOperand addr = parseMemOp(mem.operands[1]);
+	if (!addr.valid || addr.offset != 0) return false;
+	if (regClass(addr.base) != 'x' || addr.base == "sp") return false;
+	// Base/data overlap with writeback is constrained-unpredictable for some
+	// load/store encodings, so keep those cases in their original form.
+	if (samePhysicalReg(mem.operands[0], addr.base)) return false;
+
+	const size_t scanEnd = std::min(block.instrs.size(), idx + 6);
+	for (size_t addIdx = idx + 1; addIdx < scanEnd; ++addIdx) {
+		ParsedLine line = parseLine(block.instrs[addIdx].text);
+		if (line.kind != LineKind::Instruction) return false;
+
+		if ((line.mnemonic == "add" || line.mnemonic == "sub") &&
+		    line.operands.size() == 3 && line.operands[0] == addr.base &&
+		    line.operands[1] == addr.base) {
+			int amount = 0;
+			if (!parseHashImmediate(line.operands[2], amount) || amount <= 0)
+				return false;
+			int writeback = line.mnemonic == "add" ? amount : -amount;
+			if (writeback < -256 || writeback > 255) return false;
+
+			std::vector<std::string> operands = mem.operands;
+			operands.push_back("#" + std::to_string(writeback));
+			replaceMachineInstr(block.instrs[idx],
+			                    makeMachineInsn(mem.mnemonic, operands));
+			block.instrs.erase(block.instrs.begin() + addIdx);
+			return true;
+		}
+
+		// Folding moves the pointer update before intervening instructions.
+		// Keep it local to non-trapping instructions independent of the base.
+		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
+		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		    lineUsesReg(line, addr.base))
+			return false;
+	}
+	return false;
+}
+
 static std::string parseFullVectorListReg(const std::string &operand) {
 	std::string text = trim(operand);
 	if (text.size() < 7 || text.front() != '{' || text.back() != '}')
@@ -1408,7 +1472,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			foundAdd = true;
 			break;
 		}
-		if (lineReadsReg(line, postBase) || lineWritesReg(line, postBase))
+		if (lineUsesReg(line, postBase))
 			return false;
 	}
 	if (!foundAdd)
@@ -1755,6 +1819,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineDeadStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachinePostIndexScalar(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
