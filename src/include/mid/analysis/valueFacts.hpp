@@ -123,16 +123,6 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (!inst)
         return nonNegativeBranchImpl(v, ctx);
 
-    if (inst->is_call()) {
-        auto *callee =
-            dynamic_cast<Function *>(inst->get_operand(inst->num_ops_ - 1));
-        if (callee && (callee->name_ == "multiply" || callee->name_ == "power")) {
-            if (inst->num_ops_ >= 3)
-                return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
-                       isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
-        }
-    }
-
     if (inst->is_load()) {
         auto *gv = dynamic_cast<GlobalVariable *>(inst->get_operand(0));
         if (gv && gv->init_val_) {
