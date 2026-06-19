@@ -113,6 +113,7 @@ inline bool isKnownPowerOfTwo(Value *v, int &k) {
 
 using ValueFacts::isKnownNonNegative;
 using ValueFacts::isKnownMultipleOf;
+using ValueFacts::knownAbsBound;
 
 inline void copySemFlags(Value *from, Value *to) {
     if (from && to)

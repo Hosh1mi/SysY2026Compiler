@@ -374,4 +374,62 @@ inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx = nullptr) {
            isKnownMultipleOfFromBranch(v, k, ctx);
 }
 
+// 计算 |v| 的一个上界：若能证明 |v| <= bound 则设置 bound 并返回 true。
+// 主要驱动"被除数幅值已小于除数"的除/余化简（x%C→x、x/C→0），其中最关键的
+// 来源是 srem(_, C)：其结果幅值恒 < |C|，因此 (x%C)%C 这类内联后产生的冗余取余
+// 可被折叠回单次取余。
+inline bool knownAbsBound(Value *v, uint32_t &bound) {
+    if (!v)
+        return false;
+    const unsigned bits = integerBitWidth(v);
+    if (bits == 0 || bits > 32)
+        return false;
+
+    if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
+        int64_t a = ci->value_ < 0 ? -static_cast<int64_t>(ci->value_)
+                                   : static_cast<int64_t>(ci->value_);
+        bound = static_cast<uint32_t>(a);
+        return true;
+    }
+
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst)
+        return false;
+
+    // srem(_, C)：|结果| <= |C| - 1（与被除数、C 的符号都无关）
+    if (inst->op_id_ == Instruction::SRem) {
+        if (auto *c = dynamic_cast<ConstantInt *>(inst->get_operand(1))) {
+            if (c->value_ != 0) {
+                int64_t mag = c->value_ < 0 ? -static_cast<int64_t>(c->value_)
+                                            : static_cast<int64_t>(c->value_);
+                bound = static_cast<uint32_t>(mag - 1);
+                return true;
+            }
+        }
+    }
+
+    // and x, mask（mask 为非负常量）：结果落在 [0, mask]
+    if (inst->op_id_ == Instruction::And) {
+        auto *m = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (!m)
+            m = dynamic_cast<ConstantInt *>(inst->get_operand(0));
+        if (m && m->value_ >= 0) {
+            bound = static_cast<uint32_t>(m->value_);
+            return true;
+        }
+    }
+
+    // 由 known bits 兜底：符号位已知为 0 ⇒ 非负，上界 = 未证零的低位全 1。
+    // 自动覆盖 zext / lshr / and 掩码等来源。
+    KnownBits kb = computeKnownBits(v);
+    uint32_t mask = widthMask(bits);
+    uint32_t signBit = 1u << (bits - 1);
+    if (kb.zero & signBit) {
+        bound = (~kb.zero) & mask;
+        return true;
+    }
+
+    return false;
+}
+
 } // namespace ValueFacts

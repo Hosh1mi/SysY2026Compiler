@@ -161,6 +161,15 @@ Value* visitSDiv(BinaryInst *inst) {
         return neg;
     }
 
+    // 3b. |x| < |C|  ⇒  x / C == 0  (截断向零，被除数幅值小于除数则商为 0)
+    if (cy && cy->value_ != 0) {
+        uint32_t b;
+        int64_t cmag = cy->value_ < 0 ? -static_cast<int64_t>(cy->value_)
+                                      : static_cast<int64_t>(cy->value_);
+        if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
+            return make_const_int(ty, 0);
+    }
+
     // 4. sdiv x, 2^k  →  ashr x, k   (constant power-of-2 divisor)
     //    Exact when x ≥ 0 (no sign issue) or x is a multiple of 2^k
     //    (no remainder to lose — ashr matches sdiv even for negative x).
@@ -224,6 +233,16 @@ Value* visitSRem(BinaryInst *inst) {
     // 2. Identity: x % 1 → 0
     if (cy && cy->value_ == 1) {
         return make_const_int(ty, 0);
+    }
+
+    // 2b. |x| < |C|  ⇒  x % C == x  (被除数幅值已小于除数，取余即其自身)
+    //     关键收益：内联产生的 (x % C) % C —— 内层 srem 保证 |·| < |C| —— 折回 x。
+    if (cy && cy->value_ != 0) {
+        uint32_t b;
+        int64_t cmag = cy->value_ < 0 ? -static_cast<int64_t>(cy->value_)
+                                      : static_cast<int64_t>(cy->value_);
+        if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
+            return x;
     }
 
     // 3. srem x, 2^k  →  and x, 2^k-1
