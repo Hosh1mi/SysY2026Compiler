@@ -143,6 +143,13 @@ void AnalysisManager::invalidateFunction(Function *func,
     invalidateFunctionCache(it->second, pa);
 }
 
+void AnalysisManager::clearRangeAnalyses() {
+    debug("clear", "RangeAnalysis", "all functions");
+    activeRangeAnalyses_.clear();
+    for (auto &entry : functionCaches_)
+        entry.second.rangeAnalysis.reset();
+}
+
 void AnalysisManager::clear(Function *func) {
     debug("clear", "function", func ? func->name_ : "<null>");
     functionCaches_.erase(func);

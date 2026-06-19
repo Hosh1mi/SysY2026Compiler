@@ -218,8 +218,12 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
 
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
-            if (gInstCombineRangeAnalysis)
+            if (AM) {
+                AM->clearRangeAnalyses();
+                gInstCombineRangeAnalysis = &AM->getRangeAnalysis(func);
+            } else if (gInstCombineRangeAnalysis) {
                 gInstCombineRangeAnalysis->clearCache();
+            }
 
             for (auto *user : users)
                 enqueueIfAlive(user, worklist, inWorklist);

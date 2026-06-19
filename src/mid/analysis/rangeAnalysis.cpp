@@ -396,6 +396,11 @@ RangeAnalysis::IntRange RangeAnalysis::getBinaryRange(BinaryInst *bin, BasicBloc
         if (divisor <= 0) return IntRange::top();
         return IntRange::bounded(lhs.lower / divisor, lhs.upper / divisor);
     }
+    case Instruction::SRem: {
+        if (!rhs.isSingleton() || rhs.lower <= 0) return IntRange::top();
+        if (!lhs.knownNonNegative()) return IntRange::top();
+        return IntRange::bounded(0, rhs.lower - 1);
+    }
     case Instruction::Shl: {
         if (!lhs.knownNonNegative() || !rhs.isSingleton()) return IntRange::top();
         long long shift = rhs.lower;

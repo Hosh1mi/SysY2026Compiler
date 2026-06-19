@@ -25,6 +25,7 @@ public:
 
     void invalidate(Module *module, const PreservedAnalyses &pa);
     void invalidateFunction(Function *func, const PreservedAnalyses &pa);
+    void clearRangeAnalyses();
     void clear(Function *func);
     void clear();
 
