@@ -239,6 +239,13 @@ Value* visitXor(BinaryInst *inst);
 
 // CmpSelect
 Value* visitICmp(ICmpInst *inst);
+Value* visitFCmp(FCmpInst *inst);
 Value* visitSelect(SelectInst *inst);
 ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op);
 Value* foldICmpAddSub(ICmpInst *inst);
+
+// Cast / Phi  (constant-folding cases migrated from the former ConstantFold)
+// visitCast takes the base Instruction* because ZExt/SItoFP/FPtoSI are not
+// UnaryInst subclasses — they derive straight from Instruction.
+Value* visitCast(Instruction *inst);
+Value* visitPhi(PhiInst *inst);

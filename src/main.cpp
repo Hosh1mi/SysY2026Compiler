@@ -7,7 +7,6 @@
 #include "include/mid/opt/deadCodeEliminate.hpp"
 #include "include/mid/opt/linearBlockMerge.hpp"
 #include "include/mid/opt/deadStoreEliminate.hpp"
-#include "include/mid/opt/constFold.hpp"
 #include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
@@ -160,7 +159,6 @@ static void addCanonicalCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<LinearBlockMerge>());
     pm.addPass(std::make_unique<SCCP>());
-    pm.addPass(std::make_unique<ConstantFold>());
     pm.addPass(std::make_unique<InstCombine>());
     pm.addPass(std::make_unique<DeadStoreEliminate>());
     pm.addPass(std::make_unique<DeadCodeEliminate>());

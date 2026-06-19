@@ -88,6 +88,38 @@ Value* visitICmp(ICmpInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// visitFCmp  —  floating-point comparison simplifications
+// ═══════════════════════════════════════════════════════════════════════
+
+Value* visitFCmp(FCmpInst *inst) {
+    Value *x = inst->get_operand(0);
+    Value *y = inst->get_operand(1);
+    Type *ty = inst->type_;  // i1
+
+    ConstantFloat *cx = as_const_float(x);
+    ConstantFloat *cy = as_const_float(y);
+
+    // Constant fold: evaluate at compile time (ordered/unordered share the
+    // same result for finite constants; NaN-producing constants do not occur).
+    if (cx && cy) {
+        float a = cx->value_, b = cy->value_;
+        bool result;
+        switch (inst->fcmp_op_) {
+            case FCmpInst::FCMP_OEQ: case FCmpInst::FCMP_UEQ: result = (a == b); break;
+            case FCmpInst::FCMP_ONE: case FCmpInst::FCMP_UNE: result = (a != b); break;
+            case FCmpInst::FCMP_OGT: case FCmpInst::FCMP_UGT: result = (a >  b); break;
+            case FCmpInst::FCMP_OGE: case FCmpInst::FCMP_UGE: result = (a >= b); break;
+            case FCmpInst::FCMP_OLT: case FCmpInst::FCMP_ULT: result = (a <  b); break;
+            case FCmpInst::FCMP_OLE: case FCmpInst::FCMP_ULE: result = (a <= b); break;
+            default: return nullptr;
+        }
+        return make_const_int(ty, result ? 1 : 0);
+    }
+
+    return nullptr;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // visitSelect  —  select instruction simplifications
 // ═══════════════════════════════════════════════════════════════════════
 

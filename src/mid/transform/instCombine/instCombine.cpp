@@ -171,8 +171,21 @@ void InstCombine::runOnFunction(Function *func) {
         case Instruction::ICmp:
             replacement = visitICmp(static_cast<ICmpInst*>(inst));
             break;
+        case Instruction::FCmp:
+            replacement = visitFCmp(static_cast<FCmpInst*>(inst));
+            break;
         case Instruction::Select:
             replacement = visitSelect(static_cast<SelectInst*>(inst));
+            break;
+        // Cast / Phi  (constant folding migrated from ConstantFold)
+        case Instruction::ZExt:
+        case Instruction::SItoFP:
+        case Instruction::FPtoSI:
+        case Instruction::Clz:
+            replacement = visitCast(inst);
+            break;
+        case Instruction::PHI:
+            replacement = visitPhi(static_cast<PhiInst*>(inst));
             break;
         default:
             break;
