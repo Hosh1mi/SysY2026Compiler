@@ -568,30 +568,47 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     // --- Fusion confirmed ---
                     BinaryInst *mulInst = static_cast<BinaryInst*>(inst);
 
-                    // 1. Load mul operands and pin to w8 / w16.
-                    //    w8 is never returned by allocIntReg (pool is w10-w15).
-                    //    w16 is the fallback — we re-mark it after each
-                    //    intervening instruction to prevent re-use.
+                    // When the Add/Sub immediately follows the mul (nothing in
+                    // between), the accumulator and both mul operands are all
+                    // live at the fused point, so the allocator has already
+                    // given them distinct registers — we can feed the fused op
+                    // straight from the operands' assigned registers and skip
+                    // the two defensive `mov w8/w16` copies entirely. Pinning to
+                    // scratch is only needed when intervening instructions
+                    // (emitted in step 2) might clobber a reused operand reg.
+                    bool adjacent = (std::next(mulIt) == scan);
+
+                    // 1. Load mul operands.  When pinning, copy into w8 / w16
+                    //    (w8 is never returned by allocIntReg, pool is w10-w15;
+                    //    w16 is re-marked after each intervening instruction).
                     resetRegs();
                     std::string rA = loadInt(mulInst->get_operand(0));
                     std::string rB = loadInt(mulInst->get_operand(1));
-                    emitMoveMachine("w8", rA);
-                    emitMoveMachine("w16", rB);
+                    std::string rA2, rB2;
+                    if (adjacent) {
+                        // loadInt marked rA/rB used → the accumulator and result
+                        // allocations below cannot collide with them.
+                        rA2 = rA;
+                        rB2 = rB;
+                    } else {
+                        emitMoveMachine("w8", rA);
+                        emitMoveMachine("w16", rB);
 
-                    // 2. Emit intervening instructions.  Each calls resetRegs(),
-                    //    so we re-pin w16 in usedIntRegs_ to keep it alive.
-                    for (auto mid = std::next(mulIt); mid != scan; ++mid) {
-                        if ((*mid)->is_phi()) continue;
-                        emitInstruction(*mid);
-                        if (!usedIntRegs_.count(16))
-                            usedIntRegs_.insert(16);
+                        // 2. Emit intervening instructions.  Each calls
+                        //    resetRegs(), so re-pin w16 to keep it alive.
+                        for (auto mid = std::next(mulIt); mid != scan; ++mid) {
+                            if ((*mid)->is_phi()) continue;
+                            emitInstruction(*mid);
+                            if (!usedIntRegs_.count(16))
+                                usedIntRegs_.insert(16);
+                        }
+                        resetRegs();
+                        rA2 = "w8";
+                        rB2 = "w16";
                     }
 
-                    // 3. Emit fused madd / msub / mneg using pinned operands
+                    // 3. Emit fused madd / msub / mneg.
                     {
-                        resetRegs();
-                        std::string rA2 = "w8";
-                        std::string rB2 = "w16";
                         Value *accOp = (op0 == inst) ? op1 : op0;
                         std::string rAcc = loadInt(accOp);
                         std::string rd = allocIntReg();
