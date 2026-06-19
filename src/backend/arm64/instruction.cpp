@@ -1077,38 +1077,32 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 int32_t absDivisor = divisor > 0 ? divisor : -divisor;
 
                 if (absDivisor == 2) {
-                    std::string r = loadInt(v1);
-                    // rd 在 tst 读 r 之前就被写入，rd 与 r 同号时必须走 scratch
-                    std::string rd = (hasAssignedReg(inst) && assignedReg(inst) != r)
-                                         ? assignedReg(inst) : allocIntReg();
-                    emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
-                    emitMachineInstrLine("\ttst " + r + ", " + r,
-                                         MOpcode::Cmp, {}, {r}, 1, true);
-                    emitMachineInstrLine("\tcneg " + rd + ", " + rd + ", mi",
-                                         MOpcode::FlagUse, {rd}, {rd}, 1, false, true);
-                    storeInt(inst, rd);
+                    std::string rNum = loadInt(v1);
+                    std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+
+                    emitMachineInstrLine("\ttst " + rNum + ", " + rNum,
+                                         MOpcode::Cmp, {}, {rNum}, 1, true);
+                    emitRawAluMachine("\tand " + rResult + ", " + rNum + ", #1",
+                                      rResult, {rNum});
+                    emitMachineInstrLine("\tcneg " + rResult + ", " + rResult + ", mi",
+                                         MOpcode::FlagUse, {rResult}, {rResult}, 1, false, true);
+                    storeInt(inst, rResult);
                     break;
                 } else if ((absDivisor & (absDivisor - 1)) == 0) {
-                    int k = __builtin_ctz(absDivisor);
                     std::string rNum = loadInt(v1);
-                    std::string rSign = allocIntReg();
-                    std::string rQ = allocIntReg();
-
-                    emitRawAluMachine("\tasr " + rSign + ", " + rNum + ", #31",
-                                      rSign, {rNum});
-                    emitRawAluMachine("\tand " + rSign + ", " + rSign + ", #"
-                                          + std::to_string(absDivisor - 1),
-                                      rSign, {rSign});
-                    emitBinaryMachine("add", rQ, rNum, rSign);
-                    emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #"
-                                          + std::to_string(k),
-                                      rQ, {rQ});
-                    emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #"
-                                          + std::to_string(k),
-                                      rQ, {rQ});
-
                     std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                    emitBinaryMachine("sub", rResult, rNum, rQ);
+
+                    // |INT_MIN| wraps to INT_MIN, but masking a power-of-two
+                    // remainder still produces zero, so no special case is needed.
+                    emitMachineInstrLine("\tcmp " + rNum + ", #0",
+                                         MOpcode::Cmp, {}, {rNum}, 1, true);
+                    emitMachineInstrLine("\tcneg " + rResult + ", " + rNum + ", mi",
+                                         MOpcode::FlagUse, {rResult}, {rNum}, 1, false, true);
+                    emitRawAluMachine("\tand " + rResult + ", " + rResult + ", #"
+                                          + std::to_string(absDivisor - 1),
+                                      rResult, {rResult});
+                    emitMachineInstrLine("\tcneg " + rResult + ", " + rResult + ", mi",
+                                         MOpcode::FlagUse, {rResult}, {rResult}, 1, false, true);
                     storeInt(inst, rResult);
                     break;
                 } else if (absDivisor > 1) {
