@@ -1,12 +1,13 @@
 #pragma once
 
 #include "../ir/ir.hpp"
+#include "loopInfo.hpp"
 
 #include <optional>
 
 class LazyValueInfo {
 public:
-    void analyze(Function *func);
+    void analyze(Function *func, const LoopInfo *loopInfo = nullptr);
 
     Constant *getConstant(Value *value, Instruction *cxtI = nullptr);
     Constant *getConstantOnEdge(Value *value, BasicBlock *fromBB,
@@ -28,4 +29,5 @@ public:
 private:
     Function *function_ = nullptr;
     Module *module_ = nullptr;
+    const LoopInfo *loopInfo_ = nullptr;
 };

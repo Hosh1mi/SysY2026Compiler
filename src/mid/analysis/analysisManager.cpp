@@ -37,7 +37,7 @@ LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
     } else {
         debug("hit", "LazyValueInfo", func ? func->name_ : "<null>");
     }
-    cache.lazyValueInfo->analyze(func);
+    cache.lazyValueInfo->analyze(func, &getLoopInfo(func));
     return *cache.lazyValueInfo;
 }
 

@@ -31,6 +31,7 @@ struct QueryState {
     BasicBlock *fromEdge = nullptr;
     BasicBlock *toEdge = nullptr;
     bool useBlockValue = true;
+    const LoopInfo *loopInfo = nullptr;
     int depth = 0;
     std::unordered_set<Value *> activeValues;
     std::unordered_set<PredicateQueryKey, PredicateQueryKeyHash> activePredicates;
@@ -108,8 +109,49 @@ static void collectEdgeFacts(BasicBlock *fromBB, BasicBlock *toBB,
     recordAssumedBool(br->get_operand(0), trueDest == toBB, boolFacts, cmpFacts);
 }
 
+static bool isSameOrNestedLoop(const Loop *inner, const Loop *outer) {
+    if (!outer) return true;
+    for (const Loop *loop = inner; loop; loop = loop->parent)
+        if (loop == outer) return true;
+    return false;
+}
+
+static void collectDominatingEdgeFacts(const QueryState &state,
+                                       BoolFactMap &boolFacts,
+                                       ICmpFactMap &cmpFacts) {
+    if (!state.func || !state.block || !state.loopInfo)
+        return;
+
+    Loop *contextLoop = state.loopInfo->getLoopFor(state.block);
+    for (auto *bb : state.func->basic_blocks_) {
+        auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
+        if (!br || br->num_ops_ != 3 || !bb->parent_)
+            continue;
+
+        Loop *branchLoop = state.loopInfo->getLoopFor(bb);
+        // A fact established in a loop iteration is not valid after leaving
+        // that loop: the same SSA instruction may execute again with the next
+        // iteration's phi values.
+        if (!isSameOrNestedLoop(contextLoop, branchLoop))
+            continue;
+
+        auto recordIfDominating = [&](unsigned successorIndex, bool assumed) {
+            auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(successorIndex));
+            if (!succ || succ->pre_bbs_.size() != 1 || succ->pre_bbs_.front() != bb)
+                return;
+            if (!state.loopInfo->dominates(succ, state.block))
+                return;
+            recordAssumedBool(br->get_operand(0), assumed, boolFacts, cmpFacts);
+        };
+
+        recordIfDominating(1, true);
+        recordIfDominating(2, false);
+    }
+}
+
 static void gatherFacts(const QueryState &state, BoolFactMap &boolFacts,
                         ICmpFactMap &cmpFacts) {
+    collectDominatingEdgeFacts(state, boolFacts, cmpFacts);
     if (state.fromEdge && state.toEdge) {
         collectEdgeFacts(state.fromEdge, state.toEdge, boolFacts, cmpFacts);
         return;
@@ -322,15 +364,17 @@ static Constant *evaluateConstant(Value *value, QueryState &state) {
 
 } // namespace
 
-void LazyValueInfo::analyze(Function *func) {
+void LazyValueInfo::analyze(Function *func, const LoopInfo *loopInfo) {
     function_ = func;
     module_ = func ? func->parent_ : nullptr;
+    loopInfo_ = loopInfo;
 }
 
 Constant *LazyValueInfo::getConstant(Value *value, Instruction *cxtI) {
     QueryState state;
     state.func = function_;
     state.module = module_;
+    state.loopInfo = loopInfo_;
     state.block = cxtI ? cxtI->parent_ : nullptr;
     return evaluateConstant(value, state);
 }
@@ -340,6 +384,7 @@ Constant *LazyValueInfo::getConstantOnEdge(Value *value, BasicBlock *fromBB,
     QueryState state;
     state.func = function_;
     state.module = module_;
+    state.loopInfo = loopInfo_;
     state.block = toBB;
     state.fromEdge = fromBB;
     state.toEdge = toBB;
@@ -353,6 +398,7 @@ std::optional<bool> LazyValueInfo::getPredicateAt(ICmpInst::ICmpOp pred,
     QueryState state;
     state.func = function_;
     state.module = module_;
+    state.loopInfo = loopInfo_;
     state.block = cxtI ? cxtI->parent_ : nullptr;
     state.useBlockValue = useBlockValue;
     return evaluatePredicate(pred, lhs, rhs, state);
@@ -366,6 +412,7 @@ std::optional<bool> LazyValueInfo::getPredicateOnEdge(ICmpInst::ICmpOp pred,
     QueryState state;
     state.func = function_;
     state.module = module_;
+    state.loopInfo = loopInfo_;
     state.block = toBB;
     state.fromEdge = fromBB;
     state.toEdge = toBB;
@@ -379,4 +426,5 @@ void LazyValueInfo::eraseBlock(BasicBlock *) {}
 void LazyValueInfo::clear() {
     function_ = nullptr;
     module_ = nullptr;
+    loopInfo_ = nullptr;
 }
