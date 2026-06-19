@@ -9,10 +9,9 @@
 
 namespace {
 
-// 体积上限：克隆整循环，过大时寄存器压力/代码膨胀得不偿失（A53）
 constexpr int MAX_UNSWITCH_INSTS = 64;
-// 每函数预算：unswitch 链式触发是 2^k 克隆，封顶防失控
 constexpr int MAX_UNSWITCH_PER_FUNC = 8;
+constexpr int MAX_UNSWITCH_GROWTH_PER_FUNC = 192;
 
 Value *mapValue(Value *v, const std::unordered_map<Value *, Value *> &m) {
     auto it = m.find(v);
@@ -67,8 +66,10 @@ bool SimpleLoopUnswitch::runOnFunction(Function *func) {
 
     bool changed = false;
     int budget = MAX_UNSWITCH_PER_FUNC;
+    int &growthUsed = growthUsed_[func];
     bool progress = true;
-    while (progress && budget > 0) {
+    while (progress && budget > 0 &&
+           growthUsed < MAX_UNSWITCH_GROWTH_PER_FUNC) {
         progress = false;
 
         LoopInfo LI;
@@ -82,10 +83,13 @@ bool SimpleLoopUnswitch::runOnFunction(Function *func) {
                   [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
         for (auto *loop : loops) {
-            if (tryUnswitch(*loop, func)) {
+            int clonedInsts = 0;
+            int remainingGrowth = MAX_UNSWITCH_GROWTH_PER_FUNC - growthUsed;
+            if (tryUnswitch(*loop, func, remainingGrowth, &clonedInsts)) {
                 changed = true;
                 progress = true;
                 budget--;
+                growthUsed += clonedInsts;
                 func->set_instr_name();
                 break; // CFG 已变，重新分析
             }
@@ -152,7 +156,10 @@ Instruction *SimpleLoopUnswitch::cloneInst(
     return nullptr;
 }
 
-bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
+bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
+                                     int remainingGrowth,
+                                     int *clonedInsts) {
+    if (clonedInsts) *clonedInsts = 0;
     if (!loop.children.empty())
         return false;
 
@@ -204,6 +211,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
     for (auto *bb : loop.blocks)
         instCount += (int)bb->instr_list_.size();
     if (instCount > MAX_UNSWITCH_INSTS) return false;
+    if (instCount > remainingGrowth) return false;
 
     // ── 合法性：循环内定义的循环外使用必须全部经 exit phi（LCSSA 形）──
     //    且克隆要求所有指令类型可克隆
@@ -354,6 +362,8 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func) {
     retargetIncoming(cloneHeader, preheader, phFalse);
 
     removeUnreachableBlocks(func);
+
+    if (clonedInsts) *clonedInsts = instCount;
 
     return true;
 }

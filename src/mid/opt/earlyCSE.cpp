@@ -275,7 +275,16 @@ static void early_cse_dfs(BasicBlock *bb,
                     continue;
                 }
             }
-            local_mem.clear();
+            for (auto mi = local_mem.begin(); mi != local_mem.end();) {
+                ModRefInfo mr = BAA.getModRefInfo(inst, mi->first);
+                if (isModSet(mr)) {
+                    mi = local_mem.erase(mi);
+                    continue;
+                }
+                if (isRefSet(mr))
+                    mi->second.has_been_read = true;
+                ++mi;
+            }
             activeMods.push_back({inst, inst});
             for (auto si = expr_map.begin(); si != expr_map.end(); ) {
                 if (si->first.op_id == Instruction::Load &&

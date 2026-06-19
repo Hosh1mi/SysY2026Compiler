@@ -45,12 +45,14 @@
 #include "include/backend/arm64/parallelRuntime.hpp"
 #include "include/mid/opt/parallelizeLoops.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -274,6 +276,52 @@ static void configureBackend(Arm64CodeGen &codegen, const DriverOptions &options
     codegen.setDumpPreMachineInstr(options.dumpPreMachineInstr);
 }
 
+static Function *calledFunction(Instruction *inst) {
+    auto *call = dynamic_cast<CallInst *>(inst);
+    if (!call || call->num_ops_ == 0)
+        return nullptr;
+    return dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+}
+
+static bool hasParallelForCall(Module *module) {
+    for (auto *func : module->function_list_) {
+        if (func->is_declaration())
+            continue;
+        for (auto *bb : func->basic_blocks_) {
+            for (auto *inst : bb->instr_list_) {
+                Function *callee = calledFunction(inst);
+                if (callee && callee->name_ == "__sysy_parallel_for")
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+static std::vector<int> parallelBodyIds(Module *module) {
+    std::vector<int> ids;
+    const std::string prefix = "__sysy_par_body_";
+    for (auto *func : module->function_list_) {
+        if (func->name_.rfind(prefix, 0) != 0)
+            continue;
+        std::string suffix = func->name_.substr(prefix.size());
+        if (suffix.empty())
+            continue;
+        bool numeric = true;
+        for (char ch : suffix) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                numeric = false;
+                break;
+            }
+        }
+        if (numeric)
+            ids.push_back(std::stoi(suffix));
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
 } // namespace
 
 extern unique_ptr<CompUnitAST> root;
@@ -319,27 +367,21 @@ int main(int argc, char **argv) {
         codegen.generate();
         {
             // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
-            int nBodies = 0;
-            bool hasParallel = false;
-            for (auto *f : m->function_list_) {
-                if (f->name_ == "__sysy_parallel_for" && f->is_declaration())
-                    hasParallel = true;
-                if (f->name_.rfind("__sysy_par_body_", 0) == 0)
-                    nBodies++;
-            }
+            bool hasParallel = hasParallelForCall(m.get());
+            std::vector<int> bodyIds = parallelBodyIds(m.get());
             if (hasParallel) {
                 *out << "\n\t.text\n\t.align 2\n"
                      << "\t.global __sysy_par_dispatch\n"
                      << "__sysy_par_dispatch:\n";
-                for (int i = 0; i < nBodies; i++)
-                    *out << "\tcmp w0, #" << i << "\n"
-                         << "\tb.eq .Lsysy_disp_" << i << "\n";
+                for (int id : bodyIds)
+                    *out << "\tcmp w0, #" << id << "\n"
+                         << "\tb.eq .Lsysy_disp_" << id << "\n";
                 *out << "\tret\n";
-                for (int i = 0; i < nBodies; i++)
-                    *out << ".Lsysy_disp_" << i << ":\n"
+                for (int id : bodyIds)
+                    *out << ".Lsysy_disp_" << id << ":\n"
                          << "\tmov w0, w1\n"
                          << "\tmov w1, w2\n"
-                         << "\tb __sysy_par_body_" << i << "\n";
+                         << "\tb __sysy_par_body_" << id << "\n";
                 *out << kSysyParallelRuntimeAsm;
             }
         }

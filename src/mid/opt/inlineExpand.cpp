@@ -16,6 +16,7 @@ void InlineExpand::execute(Module *module) {
     };
 
     vector<WorkItem> worklist;
+    unordered_map<Function *, int> recursiveGrowth;
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
         for (auto bb : func->basic_blocks_) {
@@ -42,6 +43,9 @@ void InlineExpand::execute(Module *module) {
         int selfCallBudget = 0;
         if (recursive) {
             int weightedCost = estimateInlineCost(callee);
+            int &callerGrowth = recursiveGrowth[caller];
+            if (callerGrowth + weightedCost > INLINE_COST_BUDGET)
+                continue;
             bool callInLoop = isCallInLoop(call);
             int foldBenefit = estimateConstantFoldBenefit(call, callee);
             selfCallBudget = item.recursiveBudget > 0
@@ -50,6 +54,7 @@ void InlineExpand::execute(Module *module) {
                                                                  callInLoop,
                                                                  foldBenefit);
             selfCallBudget -= weightedCost;
+            callerGrowth += weightedCost;
         }
 
         vector<CallInst*> newCalls = performInline(call);
@@ -306,10 +311,11 @@ int InlineExpand::estimateRecursiveInlineBudget(int weightedCost,
     if (weightedCost > INLINE_RECURSIVE_HOT_COST && benefit <= weightedCost)
         return 0;
 
-    int budget = benefit;
-    if (callInLoop)
-        budget *= LOOP_MULTIPLIER;
-    budget += foldBenefit;
+    // savedOverhead already includes the loop-frequency multiplier.  Applying
+    // it again here makes the recursive peeling depth grow quadratically with
+    // the hot-loop heuristic and can turn a small recursive helper into a very
+    // large caller.  Keep the budget in the same units as weightedCost.
+    int budget = benefit + foldBenefit;
 
     return std::min(budget, INLINE_COST_BUDGET);
 }

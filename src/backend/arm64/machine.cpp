@@ -254,6 +254,41 @@ void addDef(MachineInstr &mi, const std::string &text) {
         mi.defs.insert(regs[0]);
 }
 
+void addPostIndexBaseDef(MachineInstr &mi,
+                         const std::vector<std::string> &operands) {
+    if (operands.size() < 3)
+        return;
+
+    std::string memOperand;
+    for (const auto &operand : operands) {
+        if (operand.find('[') != std::string::npos) {
+            memOperand = operand;
+            break;
+        }
+    }
+    if (memOperand.empty())
+        return;
+
+    size_t lbr = memOperand.find('[');
+    size_t rbr = memOperand.find(']', lbr);
+    if (lbr == std::string::npos || rbr == std::string::npos || rbr <= lbr + 1)
+        return;
+    if (rbr + 1 < memOperand.size() && memOperand[rbr + 1] == '!')
+        return;
+
+    int ignored = 0;
+    if (!parseImmediate(operands.back(), ignored))
+        return;
+
+    std::string inside = memOperand.substr(lbr + 1, rbr - lbr - 1);
+    auto addrParts = splitOperands(inside);
+    if (addrParts.empty())
+        return;
+    auto regs = extractRegs(addrParts[0]);
+    if (!regs.empty() && regs[0] != "zr")
+        mi.defs.insert(regs[0]);
+}
+
 bool touchesStackPointer(const MachineInstr &mi) {
     return mi.defs.count("sp") || mi.uses.count("sp");
 }
@@ -404,6 +439,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.mayLoad = true;
         mi.latency = 4;
         defFirstUseRest();
+        addPostIndexBaseDef(mi, operands);
     } else if (op == "ldp") {
         mi.opcode = MOpcode::PairLoad;
         mi.mayLoad = true;
@@ -415,6 +451,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         mi.opcode = MOpcode::Store;
         mi.mayStore = true;
         addUses(mi, rest);
+        addPostIndexBaseDef(mi, operands);
     } else if (op == "stp") {
         mi.opcode = MOpcode::PairStore;
         mi.mayStore = true;

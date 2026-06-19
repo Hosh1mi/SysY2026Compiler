@@ -37,7 +37,8 @@ static char regClass(const std::string &r) {
 	if (r == "xzr") return 'x';
 	if (r == "sp") return 'x';
 	char c = r[0];
-	if ((c == 'w' || c == 'x' || c == 's' || c == 'd') && r.size() >= 2 && std::isdigit(r[1]))
+	if ((c == 'w' || c == 'x' || c == 's' || c == 'd' || c == 'q' || c == 'v') &&
+	    r.size() >= 2 && std::isdigit(r[1]))
 		return c;
 	return 0;
 }
@@ -45,21 +46,47 @@ static char regClass(const std::string &r) {
 static int regSize(char cls) {
 	if (cls == 'w' || cls == 's') return 4;
 	if (cls == 'x' || cls == 'd') return 8;
+	if (cls == 'q' || cls == 'v') return 16;
 	return 0;
+}
+
+static bool parsePhysicalReg(const std::string &reg, char &cls, std::string &num) {
+	std::string text = trim(reg);
+	if (text.size() >= 2 && text.front() == '{' && text.back() == '}')
+		text = trim(text.substr(1, text.size() - 2));
+	if (text == "wzr" || text == "xzr" || text == "sp")
+		return false;
+	if (text.size() < 2)
+		return false;
+
+	cls = text[0];
+	if (cls != 'w' && cls != 'x' && cls != 's' &&
+	    cls != 'd' && cls != 'q' && cls != 'v')
+		return false;
+
+	size_t pos = 1;
+	while (pos < text.size() && std::isdigit(text[pos]))
+		++pos;
+	if (pos == 1)
+		return false;
+	num = text.substr(1, pos - 1);
+	return true;
 }
 
 static bool samePhysicalReg(const std::string &a, const std::string &b) {
 	if (a == b) return true;
-	if (a.size() < 2 || b.size() < 2) return false;
-
-	char aCls = a[0];
-	char bCls = b[0];
+	char aCls = 0;
+	char bCls = 0;
+	std::string aNum;
+	std::string bNum;
+	if (!parsePhysicalReg(a, aCls, aNum) || !parsePhysicalReg(b, bCls, bNum))
+		return false;
 	bool sameIntFile = (aCls == 'w' || aCls == 'x') && (bCls == 'w' || bCls == 'x');
-	bool sameFloatFile = (aCls == 's' || aCls == 'd') && (bCls == 's' || bCls == 'd');
+	bool sameFloatFile = (aCls == 's' || aCls == 'd' || aCls == 'q' || aCls == 'v') &&
+	                     (bCls == 's' || bCls == 'd' || bCls == 'q' || bCls == 'v');
 	if (!sameIntFile && !sameFloatFile) return false;
 
-	if (!std::isdigit(a[1]) || !std::isdigit(b[1])) return false;
-	return a.substr(1) == b.substr(1);
+	return aNum == bNum;
 }
 
 // Parse [base, #offset], [base], [base, #-offset]
@@ -191,6 +218,13 @@ static bool lineUsesReg(const ParsedLine &l, const std::string &r) {
 
 // Does line write (not just read) a register?
 static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
+	if ((l.mnemonic == "ldr" || l.mnemonic == "str" ||
+	     l.mnemonic == "ld1" || l.mnemonic == "st1") &&
+	    l.operands.size() >= 3) {
+		MemOperand mem = parseMemOp(l.operands[1]);
+		if (mem.valid && samePhysicalReg(mem.base, r))
+			return true;
+	}
 	// Stores, compares, branches do not write a register destination
 	if (l.mnemonic == "str" || l.mnemonic == "stp" ||
 		l.mnemonic == "cmp" || l.mnemonic == "fcmp" ||
@@ -212,14 +246,7 @@ static bool lineWritesReg(const ParsedLine &l, const std::string &r) {
 	if (!l.operands.empty()) {
 		const std::string &dst = l.operands[0];
 		if (dst == r) return true;
-		// ARM64 register aliasing: wN and xN share the same physical register,
-		// as do sN and dN. A write to either width clobbers the other.
-		if (dst.size() >= 2 && r.size() >= 2) {
-			char clsDst = dst[0], clsR = r[0];
-			bool sameFile = ((clsDst == 'w' || clsDst == 'x') && (clsR == 'w' || clsR == 'x')) ||
-			                ((clsDst == 's' || clsDst == 'd') && (clsR == 's' || clsR == 'd'));
-			if (sameFile && dst.substr(1) == r.substr(1)) return true;
-		}
+		if (samePhysicalReg(dst, r)) return true;
 	}
 	return false;
 }
@@ -305,6 +332,7 @@ static bool machineRegDeadAfter(const MachineBasicBlock &block,
                                 size_t idx,
                                 const std::string &reg);
 static bool isControlFlowBarrier(const std::string &mnemonic);
+static bool setsFlags(const std::string &mnemonic);
 
 static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
@@ -331,6 +359,76 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	replaceMachineInstr(block.instrs[idx + 1],
 	                    makeMachineInsn("mov", {dstReg, srcReg}));
 	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
+static bool isRetargetablePureDef(const ParsedLine &line) {
+	if (line.kind != LineKind::Instruction || line.operands.empty())
+		return false;
+	if (!regClass(line.operands[0]))
+		return false;
+	if (setsFlags(line.mnemonic) || isCallBarrier(line.mnemonic) ||
+	    isControlFlowBarrier(line.mnemonic))
+		return false;
+
+	static const std::set<std::string> mnemonics = {
+		"add", "sub", "and", "orr", "eor", "bic",
+		"asr", "lsl", "lsr", "neg", "clz",
+		"mul", "madd", "msub", "mneg",
+		"sdiv", "udiv",
+		"fadd", "fsub", "fmul", "fdiv", "fneg",
+		"scvtf", "fcvtzs"
+	};
+	return mnemonics.count(line.mnemonic) != 0;
+}
+
+static bool tryMachineRetargetCopyDest(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine producer = parseLine(block.instrs[idx].text);
+	ParsedLine copy = parseLine(block.instrs[idx + 1].text);
+	if (!isRetargetablePureDef(producer)) return false;
+	if (copy.kind != LineKind::Instruction) return false;
+	if (copy.mnemonic != "mov" && copy.mnemonic != "fmov") return false;
+	if (copy.operands.size() != 2) return false;
+
+	const std::string &tempReg = producer.operands[0];
+	const std::string &dstReg = copy.operands[0];
+	const std::string &copySrc = copy.operands[1];
+	if (!samePhysicalReg(copySrc, tempReg)) return false;
+	if (samePhysicalReg(dstReg, tempReg)) {
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+		return true;
+	}
+
+	if (dstReg == "sp" || dstReg == "wzr" || dstReg == "xzr")
+		return false;
+	char tempCls = regClass(tempReg);
+	char dstCls = regClass(dstReg);
+	if (!tempCls || !dstCls || tempCls != dstCls)
+		return false;
+	if (tempCls != 'w' && tempCls != 'x' && tempCls != 's' && tempCls != 'd')
+		return false;
+	if (copy.mnemonic == "mov" && (tempCls == 's' || tempCls == 'd'))
+		return false;
+	if (copy.mnemonic == "fmov" && tempCls != 's' && tempCls != 'd')
+		return false;
+
+	auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx + 1]);
+	if (liveIt == liveness.instrLiveOut.end())
+		return false;
+	for (const auto &def : block.instrs[idx].defs) {
+		if (liveIt->second.count(def))
+			return false;
+	}
+
+	std::vector<std::string> operands = producer.operands;
+	operands[0] = dstReg;
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(producer.mnemonic, operands));
+	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
 }
 
@@ -1168,6 +1266,129 @@ static bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
 	return true;
 }
 
+static bool isSimpleNeonMemOp(const ParsedLine &line) {
+	return (line.mnemonic == "ld1" || line.mnemonic == "st1") &&
+	       line.operands.size() == 2 &&
+	       line.operands[0].find('{') != std::string::npos;
+}
+
+static std::string parseFullVectorListReg(const std::string &operand) {
+	std::string text = trim(operand);
+	if (text.size() < 7 || text.front() != '{' || text.back() != '}')
+		return "";
+	text = trim(text.substr(1, text.size() - 2));
+	if (text.empty() || text[0] != 'v')
+		return "";
+
+	size_t pos = 1;
+	while (pos < text.size() && std::isdigit(text[pos]))
+		++pos;
+	if (pos == 1 || pos >= text.size() || text[pos] != '.')
+		return "";
+
+	std::string suffix = text.substr(pos);
+	if (suffix != ".16b" && suffix != ".8h" && suffix != ".4s" && suffix != ".2d")
+		return "";
+	return "q" + text.substr(1, pos - 1);
+}
+
+static bool tryMachineVectorLdStAlias(MachineBasicBlock &block, size_t idx) {
+	ParsedLine line = parseLine(block.instrs[idx].text);
+	if (line.kind != LineKind::Instruction)
+		return false;
+	if (line.mnemonic != "ld1" && line.mnemonic != "st1")
+		return false;
+	if (line.operands.size() != 2 && line.operands.size() != 3)
+		return false;
+
+	std::string qReg = parseFullVectorListReg(line.operands[0]);
+	if (qReg.empty())
+		return false;
+
+	MemOperand addr = parseMemOp(line.operands[1]);
+	if (!addr.valid || addr.offset != 0)
+		return false;
+	if (line.operands.size() == 3 && line.operands[2] != "#16")
+		return false;
+
+	std::vector<std::string> operands = {qReg, line.operands[1]};
+	if (line.operands.size() == 3)
+		operands.push_back(line.operands[2]);
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(line.mnemonic == "ld1" ? "ldr" : "str",
+	                                    operands));
+	return true;
+}
+
+static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine mem = parseLine(block.instrs[idx].text);
+	if (mem.kind != LineKind::Instruction)
+		return false;
+	if (!isSimpleNeonMemOp(mem)) return false;
+
+	MemOperand addr = parseMemOp(mem.operands[1]);
+	if (!addr.valid || addr.offset != 0) return false;
+	if (addr.base.empty() || addr.base == "sp") return false;
+
+	std::string postBase = addr.base;
+	{
+		size_t begin = idx > 4 ? idx - 4 : 0;
+		for (size_t copyIdx = idx; copyIdx-- > begin;) {
+			ParsedLine copy = parseLine(block.instrs[copyIdx].text);
+			if (copy.kind != LineKind::Instruction)
+				break;
+			if (copy.mnemonic != "mov" || copy.operands.size() != 2 ||
+			    copy.operands[0] != addr.base || regClass(copy.operands[1]) != 'x')
+				continue;
+
+			bool clobbered = false;
+			for (size_t j = copyIdx + 1; j < idx; ++j) {
+				ParsedLine between = parseLine(block.instrs[j].text);
+				if (between.kind != LineKind::Instruction ||
+				    lineWritesReg(between, addr.base) ||
+				    lineWritesReg(between, copy.operands[1])) {
+					clobbered = true;
+					break;
+				}
+			}
+			if (!clobbered) {
+				postBase = copy.operands[1];
+				break;
+			}
+		}
+	}
+	if (postBase.empty() || postBase == "sp") return false;
+
+	size_t addIdx = idx + 1;
+	bool foundAdd = false;
+	const size_t scanEnd = std::min(block.instrs.size(), idx + 6);
+	for (; addIdx < scanEnd; ++addIdx) {
+		ParsedLine line = parseLine(block.instrs[addIdx].text);
+		if (line.kind != LineKind::Instruction)
+			return false;
+		if (line.mnemonic == "add" && line.operands.size() == 3 &&
+		    line.operands[0] == postBase && line.operands[1] == postBase &&
+		    line.operands[2] == "#16") {
+			foundAdd = true;
+			break;
+		}
+		if (lineReadsReg(line, postBase) || lineWritesReg(line, postBase))
+			return false;
+	}
+	if (!foundAdd)
+		return false;
+
+	std::vector<std::string> operands = mem.operands;
+	operands[1] = "[" + postBase + "]";
+	operands.push_back("#16");
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(mem.mnemonic, operands));
+	block.instrs.erase(block.instrs.begin() + addIdx);
+	return true;
+}
+
 static std::string labelName(const MachineInstr &inst) {
 	ParsedLine line = parseLine(inst.text);
 	if (line.kind != LineKind::Label) return "";
@@ -1455,6 +1676,10 @@ void peepholeOptimize(MachineFunction &func) {
 					changed = true;
 					break;
 				}
+				if (tryMachineRetargetCopyDest(func.blocks[b], i, liveness)) {
+					changed = true;
+					break;
+				}
 				if (tryMachineAndTBZ(func.blocks[b], i)) {
 					changed = true;
 					break;
@@ -1496,6 +1721,14 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineDeadStore(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachinePostIndexNeon(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineVectorLdStAlias(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}

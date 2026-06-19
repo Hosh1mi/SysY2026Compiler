@@ -13,6 +13,8 @@ public:
 
 private:
     bool runOnFunction(Function *func);
+    bool eliminateUnreachableFunctions(Module *module);
+    bool eliminateUnusedGlobals(Module *module);
     bool eliminateDeadInstructions(Function *func);
     bool eliminateTrivialPhis(Function *func);
 

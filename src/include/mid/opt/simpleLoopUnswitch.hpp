@@ -21,7 +21,10 @@ public:
 
 private:
     bool runOnFunction(Function *func);
-    bool tryUnswitch(Loop &loop, Function *func);
+    bool tryUnswitch(Loop &loop, Function *func, int remainingGrowth,
+                     int *clonedInsts);
     Instruction *cloneInst(Instruction *oldInst, BasicBlock *newBB,
                            std::unordered_map<Value *, Value *> &valMap);
+
+    std::unordered_map<Function *, int> growthUsed_;
 };

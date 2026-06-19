@@ -22,6 +22,39 @@ static bool debugStructuredReject(Function *func, Loop &loop,
     return false;
 }
 
+// A two-way vector unroll initially keeps each iteration's store next to its
+// computation.  When alias analysis proves that the first store cannot affect
+// any load in the second iteration, sink it next to the second store.  This
+// exposes both load/compute chains to the machine scheduler without changing
+// memory order unless the crossed accesses are proven disjoint.
+static bool clusterTwoVectorStores(BasicBlock *body,
+                                   BasicAliasAnalysis &BAA) {
+    if (!body) return false;
+
+    std::vector<std::list<Instruction *>::iterator> stores;
+    for (auto it = body->instr_list_.begin(); it != body->instr_list_.end(); ++it) {
+        auto *store = dynamic_cast<StoreInst *>(*it);
+        if (!store || store->get_operand(0)->type_->tid_ != Type::VectorTyID)
+            continue;
+        stores.push_back(it);
+    }
+    if (stores.size() != 2) return false;
+
+    auto first = stores[0];
+    auto second = stores[1];
+    Value *storedPtr = (*first)->get_operand(1);
+    for (auto it = std::next(first); it != second; ++it) {
+        Instruction *inst = *it;
+        if (inst->is_call() || inst->is_store()) return false;
+        if (!inst->is_load()) continue;
+        if (BAA.alias(storedPtr, inst->get_operand(0)) != AliasResult::NoAlias)
+            return false;
+    }
+
+    body->instr_list_.splice(second, body->instr_list_, first);
+    return true;
+}
+
 // ── Instruction cloning ───────────────────────────────────────────────────
 
 Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
@@ -140,7 +173,8 @@ static Value *mapLoopValue(
 
 // ── Core unrolling ────────────────────────────────────────────────────────
 
-bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
+bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
+                           BasicAliasAnalysis &BAA) {
     // Only handle simple 2-BB loops: header + latch
     if (loop.blocks.size() != 2) return false;
 
@@ -406,6 +440,9 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module) {
         for (auto phi : headerPhis)
             iterMap[phi] = curPhiVals[phi];
     }
+
+    if (N == 2 && hasVectorOps)
+        clusterTwoVectorStores(unrolledBody, BAA);
 
     // 4. Branch in unrolledBody → headerMain (back-edge)
     new BranchInst(headerMain, unrolledBody);
@@ -1055,7 +1092,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
 // ── Entry points ──────────────────────────────────────────────────────────
 
-void LoopUnroll::runOnFunction(Function *func) {
+void LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 
     LoopInfo LI;
@@ -1072,7 +1109,7 @@ void LoopUnroll::runOnFunction(Function *func) {
               [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
     for (auto *loop : loops) {
-        if (tryUnroll(*loop, func, func->parent_))
+        if (tryUnroll(*loop, func, func->parent_, BAA))
             continue;
         if (tryUnrollStructured(*loop, func, func->parent_))
             continue;
@@ -1083,7 +1120,9 @@ void LoopUnroll::runOnFunction(Function *func) {
 }
 
 void LoopUnroll::execute(Module *module) {
+    BasicAliasAnalysis BAA;
+    BAA.analyze(module);
     for (auto func : module->function_list_)
         if (!func->is_declaration())
-            runOnFunction(func);
+            runOnFunction(func, BAA);
 }

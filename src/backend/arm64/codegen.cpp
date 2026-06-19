@@ -337,8 +337,10 @@ static int globalTypeSize(Type *ty) {
 
 static int globalTypeAlign(Type *ty) {
     if (!ty) return 4;
-    if (ty->tid_ == Type::ArrayTyID)
-        return globalTypeAlign(static_cast<ArrayType*>(ty)->contained_);
+    if (ty->tid_ == Type::ArrayTyID) {
+        int elemAlign = globalTypeAlign(static_cast<ArrayType*>(ty)->contained_);
+        return globalTypeSize(ty) >= 16 ? std::max(16, elemAlign) : elemAlign;
+    }
     if (ty->tid_ == Type::VectorTyID)
         return std::min(16, globalTypeSize(ty));
     if (ty->tid_ == Type::PointerTyID)
@@ -346,12 +348,18 @@ static int globalTypeAlign(Type *ty) {
     return std::min(4, globalTypeSize(ty));
 }
 
+static int p2AlignForBytes(int align) {
+    if (align >= 16) return 4;
+    if (align >= 8) return 3;
+    return 2;
+}
+
 void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
     auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
 
     appendMachineLine(module, "\t.global " + gv->name_);
-    appendMachineLine(module, globalTypeAlign(pointee) >= 8 ? "\t.p2align 3"
-                                                            : "\t.p2align 2");
+    appendMachineLine(module, "\t.p2align " +
+                                  std::to_string(p2AlignForBytes(globalTypeAlign(pointee))));
     appendMachineLine(module, gv->name_ + ":");
 
     auto appendWordHex = [&](int bits) {

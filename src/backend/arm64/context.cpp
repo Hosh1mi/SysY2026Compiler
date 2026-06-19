@@ -378,27 +378,25 @@ void Arm64FuncContext::emitPrologue() {
     emitMachineLine("\t.p2align 2");
     emitMachineLine(func_->name_ + ":");
 
-    // Allocate slots for arguments that actually need them.
-    // Pre-colored args (leaf functions, assigned to their incoming register)
-    // stay in w0-w7/s0-s7 and never need a stack slot.
+    // Allocate slots only for arguments that remain memory-resident or arrive
+    // on the caller's stack.  Register-to-register argument shuffles are
+    // resolved as parallel copies below, including cycles, without stack slots.
     {
         int intArgIdx = 0, floatArgIdx = 0;
         for (auto arg : func_->arguments_) {
             if (isFloat(arg->type_)) {
                 if (floatArgIdx < 8) {
                     std::string src = "s" + std::to_string(floatArgIdx++);
-                    if (hasAssignedReg(arg) && assignedReg(arg) == src)
-                        continue; // pre-colored — no slot needed
+                    if (hasAssignedReg(arg))
+                        continue;
                 }
             } else {
                 if (intArgIdx < 8) {
                     bool isPtr = (arg->type_->tid_ == Type::PointerTyID ||
                                 arg->type_->tid_ == Type::ArrayTyID);
                     std::string reg = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
-                    if (hasAssignedReg(arg)) {
-                        std::string dst = assignedReg(arg, isPtr);
-                        if (dst == reg) continue; // pre-colored — no slot needed
-                    }
+                    if (hasAssignedReg(arg))
+                        continue;
                 }
             }
             getSlot(arg);
@@ -505,8 +503,9 @@ void Arm64FuncContext::emitPrologue() {
    // ----- load arguments (including register arguments and stack arguments) -----
    // 入参搬移是一组并行拷贝：某个参数分配到的目标寄存器可能正是后续参数的
    // 入参寄存器（如 arg2 分配到 w3，而 arg3 经 w3 传入），不能边遍历边发射
-   // mov。先把所有需要落栈的参数 spill（此时入参寄存器还保有原值），再按
-   // "目标不挡未读源"的顺序发射 mov；出现拷贝环时从栈槽重载打破。
+   // mov。先保存真正需要常驻内存的参数（此时入参寄存器还保有原值），再按
+   // "目标不挡未读源"的顺序发射 mov；出现拷贝环时用后端保留的临时寄存器
+   // 保存一个源值来打破环。
    int intRegIdx = 0;     // x0-x7 / w0-w7
    int floatRegIdx = 0;   // s0-s7
    int stackOffset = 0;   // stack argument offset (relative to x29+16)
@@ -528,9 +527,7 @@ void Arm64FuncContext::emitPrologue() {
                     if (dst == src) {
                         // Pre-colored to incoming register — no spill needed
                     } else {
-                        int slot = getSlot(arg);
-                        emitStoreRegMachine(src, slot);
-                        argMoves.push_back({dst, src, slot, true});
+                        argMoves.push_back({dst, src, 0, true});
                     }
                 } else {
                     int slot = getSlot(arg);
@@ -564,9 +561,7 @@ void Arm64FuncContext::emitPrologue() {
                     if (dst == reg) {
                         // Pre-colored to incoming register — no spill needed
                     } else {
-                        int slot = getSlot(arg);
-                        emitStoreRegMachine(reg, slot);
-                        argMoves.push_back({dst, reg, slot, false});
+                        argMoves.push_back({dst, reg, 0, false});
                     }
                 } else {
                     int slot = getSlot(arg);
@@ -624,9 +619,29 @@ void Arm64FuncContext::emitPrologue() {
             break;
         }
         if (!progress) {
-            // 拷贝环（如 arg0→w1 且 arg1→w0）：spill 阶段已保存原值，从栈槽重载
-            emitLoadRegMachine(argMoves.front().dst, argMoves.front().slot);
-            argMoves.erase(argMoves.begin());
+            // Every remaining source is a register, so lack of progress means
+            // the parallel-copy graph contains a cycle.  Save one source in a
+            // register that is excluded from allocation, then make that edge
+            // acyclic.  Preserve the source width for integer arguments.
+            ArgMove &move = argMoves.front();
+            std::string scratch;
+            if (move.isFloat) {
+                scratch = "s17";
+                emitMoveMachine(scratch, move.src, "fmov");
+            } else {
+                scratch = (!move.src.empty() && move.src[0] == 'x') ? "x16" : "w16";
+                emitMoveMachine(scratch, move.src);
+            }
+            std::string savedId = regId(move.src);
+            for (auto &pending : argMoves) {
+                if (regId(pending.src) != savedId)
+                    continue;
+                if (pending.isFloat)
+                    pending.src = "s17";
+                else
+                    pending.src = (!pending.src.empty() && pending.src[0] == 'x')
+                                      ? "x16" : "w16";
+            }
         }
     }
 }
