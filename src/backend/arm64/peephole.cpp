@@ -789,6 +789,65 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
 	return false;
 }
 
+// Fold a copy that only exists to seed a self-incrementing add/sub:
+//
+//   mov Xd, Xs
+//   ... (Xd not read, Xs and Xd not written)
+//   add/sub Xd, Xd, #imm
+//
+// becomes:
+//
+//   ...
+//   add/sub Xd, Xs, #imm
+//
+// The move's only consumer is the ALU op, which then overwrites Xd, so once
+// the source feeds the add/sub directly the copy is dead. This is the mirror
+// of tryMachineFoldAddSubMov for the reversed (copy-before-op) order, e.g. an
+// unrolled pointer bump lowered as a snapshot copy plus a constant advance.
+static bool tryMachineFoldMovIntoAddSub(MachineBasicBlock &block, size_t idx) {
+	ParsedLine copy = parseLine(block.instrs[idx].text);
+	if (copy.kind != LineKind::Instruction) return false;
+	if (copy.mnemonic != "mov" || copy.operands.size() != 2) return false;
+
+	const std::string dstReg = copy.operands[0];
+	const std::string srcReg = copy.operands[1];
+	if (dstReg == srcReg || samePhysicalReg(dstReg, srcReg)) return false;
+	char cls = regClass(dstReg);
+	if (cls != 'w' && cls != 'x') return false;
+	if (regClass(srcReg) != cls) return false;
+	if (srcReg == "sp" || srcReg == "wzr" || srcReg == "xzr") return false;
+
+	auto window = machineInstructionWindow(block, idx + 1, 6);
+	for (size_t aluIdx : window) {
+		ParsedLine line = parseLine(block.instrs[aluIdx].text);
+		if (line.kind != LineKind::Instruction) continue;
+		if (isCallBarrier(line.mnemonic) || isControlFlowBarrier(line.mnemonic))
+			return false;
+		// The source value must survive unchanged until it is read directly.
+		if (lineWritesReg(line, srcReg)) return false;
+
+		bool isSelfAddSub =
+		    (line.mnemonic == "add" || line.mnemonic == "sub") &&
+		    line.operands.size() == 3 &&
+		    line.operands[0] == dstReg && line.operands[1] == dstReg &&
+		    !line.operands[2].empty() && line.operands[2][0] == '#';
+		if (isSelfAddSub) {
+			std::vector<std::string> newOperands = line.operands;
+			newOperands[1] = srcReg;
+			replaceMachineInstr(block.instrs[aluIdx],
+			                    makeMachineInsn(line.mnemonic, newOperands));
+			block.instrs.erase(block.instrs.begin() + idx);
+			return true;
+		}
+		// Any other read of the copied value, or a redefinition of Xd before
+		// the add/sub, means the move is still live (or already dead via a
+		// different path); leave it untouched.
+		if (lineUsesReg(line, dstReg) || lineWritesReg(line, dstReg))
+			return false;
+	}
+	return false;
+}
+
 // Delay a pure add/sub to a fallthrough copy-back:
 //
 //   add temp, src, #imm
@@ -1937,6 +1996,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineFoldAddSubMov(func.blocks[b], i)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineFoldMovIntoAddSub(func.blocks[b], i)) {
 					changed = true;
 					break;
 				}
