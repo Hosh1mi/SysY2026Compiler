@@ -221,12 +221,18 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-// enableSimdParallel：是否启用与目标平台 SIMD/并行运行时强相关的循环变换。
-// ARM(A53, NEON + 并行 runtime)开启；RISC-V(BOOM, 无 SIMD、暂无并行 runtime)
-// 关闭——LoopVectorize 会产出向量 IR(InsertElement)、ParallelizeLoops 依赖
-// ARM 专属 dispatch/runtime,二者都不适用于当前 RISC-V 后端。
-static void addLoopPipeline(PassManager &pm, bool enableSimdParallel) {
-    // pm.addPass(std::make_unique<UnifyExitNodes>());
+// ARM64 后端中端管线。目标相关 pass 在这里显式列出，避免目标能力通过
+// 布尔参数间接拼装而导致 ARM/RISC-V 管线错配。
+static void buildArm64Pipeline(PassManager &pm, int optLevel) {
+    if (optLevel < 1)
+        return;
+
+    addSsaPreparation(pm);
+    addScalarNormalization(pm);
+    addInterproceduralAndGlobals(pm);
+    addCorrelatedCleanup(pm);
+    pm.addPass(std::make_unique<SemanticMarkerStamp>());
+
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.beginRepeatGroup(/*maxRounds=*/8);
     pm.addPass(std::make_unique<LoopSimplify>());
@@ -240,32 +246,15 @@ static void addLoopPipeline(PassManager &pm, bool enableSimdParallel) {
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
     pm.addPass(std::make_unique<LoopInterchange>());
-    if (enableSimdParallel) {
-        pm.addPass(std::make_unique<ParallelizeLoops>());
-        pm.addPass(std::make_unique<LoopVectorize>());
-    }
+    pm.addPass(std::make_unique<ParallelizeLoops>());
+    pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
     pm.addPass(std::make_unique<LoopVectorize>());
-    // Peel loop-invariant 2D-array row bases (`&A[i][0]`) into preheader-hoisted
-    // GEPs. Runs last in the loop pipeline: the earlier passes (parallelize,
-    // vectorize, IVSR) keep matching/strength-reducing the original flat GEPs,
-    // while the trailing GVN/cleanup dedups the hoisted row bases.
     pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
-}
 
-// 中端优化管线的公共主体。enableSimdParallel 控制目标相关的 SIMD/并行变换。
-static void buildPipelineCommon(PassManager &pm, bool enableSimdParallel) {
-    addSsaPreparation(pm);
-    addScalarNormalization(pm);
-    addInterproceduralAndGlobals(pm);
-    addCorrelatedCleanup(pm);
-    // Second stamp: refresh attributes and immutable-load facts after the
-    // global promotion / Mem2Reg / cleanup sequence, then feed loop+GVN.
-    pm.addPass(std::make_unique<SemanticMarkerStamp>());
-    addLoopPipeline(pm, enableSimdParallel);
     pm.addPass(std::make_unique<GVN>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CodeSink>());
@@ -276,19 +265,45 @@ static void buildPipelineCommon(PassManager &pm, bool enableSimdParallel) {
     pm.addPass(std::make_unique<LateValueCleanup>());
 }
 
-// ARM64 后端中端管线：启用 NEON 向量化与并行 runtime 相关变换。
-static void buildArm64Pipeline(PassManager &pm, int optLevel) {
-    if (optLevel < 1)
-        return;
-    buildPipelineCommon(pm, /*enableSimdParallel=*/true);
-}
-
-// RISC-V 后端中端管线：目标无 SIMD、暂无并行 runtime，关闭向量化与并行化，
-// 其余标量/循环/全局优化与 ARM 共用。
+// RISC-V 后端中端管线。BOOM v3 无 SIMD，且当前没有 RISC-V 并行
+// runtime，因此本函数不加入 LoopVectorize 或 ParallelizeLoops。
 static void buildRiscvPipeline(PassManager &pm, int optLevel) {
     if (optLevel < 1)
         return;
-    buildPipelineCommon(pm, /*enableSimdParallel=*/false);
+
+    addSsaPreparation(pm);
+    addScalarNormalization(pm);
+    addInterproceduralAndGlobals(pm);
+    addCorrelatedCleanup(pm);
+    pm.addPass(std::make_unique<SemanticMarkerStamp>());
+
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.beginRepeatGroup(/*maxRounds=*/8);
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
+    pm.addPass(std::make_unique<SimpleLoopUnswitch>());
+    pm.addPass(std::make_unique<LoopRotate>());
+    pm.addPass(std::make_unique<PhiOpSink>());
+    pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
+    pm.addPass(std::make_unique<LICM>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LoopDeletion>());
+    pm.endRepeatGroup();
+    pm.addPass(std::make_unique<LoopInterchange>());
+    pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    pm.addPass(std::make_unique<LoopRepFold>());
+    pm.addPass(std::make_unique<LoopUnroll>());
+    pm.addPass(std::make_unique<SplitGEP>());
+    addDeepCleanup(pm);
+
+    pm.addPass(std::make_unique<GVN>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CodeSink>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<TailDuplication>());
+    pm.addPass(std::make_unique<UnifyExitNodes>());
+    addCorrelatedCleanup(pm);
+    pm.addPass(std::make_unique<LateValueCleanup>());
 }
 
 static void buildOptimizationPipeline(PassManager &pm, int optLevel) {

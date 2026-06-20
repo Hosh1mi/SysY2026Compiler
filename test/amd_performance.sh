@@ -1,21 +1,31 @@
 #!/bin/bash
-# amd_performance.sh — 交叉编译环境 (aarch64-linux-gnu-gcc + qemu), 测试 performance (含计时)
-# 输出: test/results/result_performance.txt
+# amd_performance.sh — RV64GC 交叉编译环境，测试 performance（含计时）
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-RESULT_FILE="$PROJ_DIR/test/results/result_performance_${TIMESTAMP}.txt"
-LIB_DIR="$PROJ_DIR/lib"
+RESULT_FILE="$RESULT_DIR/result_riscv_performance_${TIMESTAMP}.txt"
+RUNTIME_DIR="$BUILD_DIR/riscv-runtime"
+TMP_DIR="$BUILD_DIR/riscv-performance"
 TEST_DIR="$PROJ_DIR/test/performance"
 
-mkdir -p "$RESULT_DIR"
+mkdir -p "$RESULT_DIR" "$RUNTIME_DIR" "$TMP_DIR"
 
 if [ ! -f "$BUILD_DIR/compiler" ]; then
     echo "Error: compiler not found at $BUILD_DIR/compiler"
     echo "Run 'cd build && cmake .. && make -j4' first."
+    exit 1
+fi
+
+if ! riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -O2 \
+    -c "$PROJ_DIR/lib/sylib.c" -o "$RUNTIME_DIR/sylib.o"; then
+    echo "Error: failed to build the RISC-V runtime"
+    exit 1
+fi
+if ! riscv64-linux-gnu-ar rcs "$RUNTIME_DIR/libsysy.a" "$RUNTIME_DIR/sylib.o"; then
+    echo "Error: failed to archive the RISC-V runtime"
     exit 1
 fi
 
@@ -57,8 +67,11 @@ for sy in "$TEST_DIR"/*.sy; do
     num=$(echo "$base" | grep -oE '^[0-9]+' || echo "$base")
     name=$(echo "$base" | sed 's/^[0-9]*_//')
 
-    # 1. SysY -> ARM64 asm
-    ./compiler -S "$sy" -o "/tmp/${base}.s" -O1 2>/dev/null
+    asm="$TMP_DIR/${base}.s"
+    elf="$TMP_DIR/${base}.elf"
+
+    # 1. SysY -> RV64GC asm. Performance tests must use -O1.
+    ./compiler -O1 -S "$sy" -o "$asm" 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "${RED}CE${RESET} ${num} ${name}"
         echo "$base : CE" >> "$RESULT_FILE"
@@ -67,8 +80,8 @@ for sy in "$TEST_DIR"/*.sy; do
     fi
 
     # 2. Cross-assemble + static link
-    aarch64-linux-gnu-gcc "/tmp/${base}.s" -o "/tmp/${base}.elf" \
-        -L "$LIB_DIR" -lsysy -static 2>/dev/null
+    riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d "$asm" -o "$elf" \
+        -L "$RUNTIME_DIR" -lsysy -static 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "${RED}LE${RESET} ${num} ${name}"
         echo "$base : LE" >> "$RESULT_FILE"
@@ -79,9 +92,9 @@ for sy in "$TEST_DIR"/*.sy; do
     # 3. Run with qemu + timing
     start_ns=$(date +%s%N 2>/dev/null)
     if [ -f "$infile" ]; then
-        outtext=$(qemu-aarch64 "/tmp/${base}.elf" < "$infile" 2>/dev/null)
+        outtext=$(qemu-riscv64-static "$elf" < "$infile" 2>/dev/null)
     else
-        outtext=$(qemu-aarch64 "/tmp/${base}.elf" 2>/dev/null)
+        outtext=$(qemu-riscv64-static "$elf" 2>/dev/null)
     fi
     exitcode=$?
     end_ns=$(date +%s%N 2>/dev/null)
@@ -115,7 +128,7 @@ for sy in "$TEST_DIR"/*.sy; do
         FAIL=$((FAIL + 1))
     fi
 
-    rm -f "/tmp/${base}.s" "/tmp/${base}.elf"
+    rm -f "$asm" "$elf"
 done
 
 echo ""
