@@ -986,7 +986,8 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
             // Walk back one level to find the root binop
             if (auto *bi = dynamic_cast<BinaryInst*>(val)) {
                 if (bi->op_id_ == Instruction::SDiv ||
-                    bi->op_id_ == Instruction::SRem) {
+                    bi->op_id_ == Instruction::SRem ||
+                    bi->op_id_ == Instruction::FDiv) {
                     return false;
                 }
             }
@@ -1569,14 +1570,14 @@ void LoopVectorize::emitVectorizedLoop(
                 patternA = false; break;
             }
         }
-        // Reject SDiv/SRem/FDiv and all float binops.
-        // These also prevent VECTOR_IR packing, so scalar unrolling
-        // would only increase register pressure without benefit.
+        // Reject division: integer SDiv/SRem and float FDiv have no NEON
+        // vector form on the target, so they prevent VECTOR_IR packing and
+        // scalar unrolling would only increase register pressure.
+        // Float add/sub/mul lower to vector fadd/fsub/fmul (.4s) and are kept.
         if (auto *bi = dynamic_cast<BinaryInst*>(origInst)) {
             if (bi->op_id_ == Instruction::SDiv ||
                 bi->op_id_ == Instruction::SRem ||
-                bi->op_id_ == Instruction::FDiv ||
-                bi->type_->tid_ == Type::FloatTyID) {
+                bi->op_id_ == Instruction::FDiv) {
                 patternA = false; break;
             }
         }
@@ -1950,7 +1951,12 @@ void LoopVectorize::emitVectorizedLoop(
 
             auto *rootBinop = dynamic_cast<BinaryInst*>(vec[0]->storedVal);
             if (!rootBinop) continue;
-            // Only integer NEON-supported opcodes; skip float
+            // Integer-only here. Float element-wise loops are vectorized via
+            // pattern A (vector load → vector binop → vector store). This
+            // scalar-unroll + emitPack4 path packs arbitrary scalar lanes via
+            // float InsertElement, which the backend lowers incorrectly under
+            // non-deterministic register allocation (lanes land in the wrong
+            // NEON register / a stale W reg is reused), so float stays scalar.
             if (rootBinop->type_->tid_ == Type::FloatTyID) continue;
             if (rootBinop->op_id_ != Instruction::Add &&
                 rootBinop->op_id_ != Instruction::Sub &&
