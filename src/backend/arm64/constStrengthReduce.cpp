@@ -190,38 +190,55 @@ bool Arm64FuncContext::tryEmitMulConst(Instruction *inst, Value *v1, Value *v2) 
     return false;
 }
 
-// ── Add/Sub：立即数折叠 [0,4095]，发射到调用方已分配的 rd，返回是否命中立即数形 ──
+// ── Add/Sub：立即数折叠，发射到调用方已分配的 rd，返回是否命中立即数形 ──
 bool Arm64FuncContext::tryEmitAddSubImm(Instruction *inst, Value *v1, Value *v2,
                                         const std::string &rd) {
+    // AArch64 add/sub immediate accepts imm12, optionally shifted left by 12.
+    // A negative source constant is represented by swapping add and sub; keep
+    // the magnitude in int64_t so INT_MIN never overflows during negation.
+    auto emitImmediate = [&](const char *positiveOpcode, const char *negativeOpcode,
+                             Value *source, int32_t value) -> bool {
+        int64_t signedValue = static_cast<int64_t>(value);
+        bool negative = signedValue < 0;
+        uint64_t magnitude = static_cast<uint64_t>(negative ? -signedValue : signedValue);
+
+        uint64_t encoded = magnitude;
+        bool shifted = false;
+        if (encoded > 4095) {
+            if ((encoded & 0xfffU) != 0)
+                return false;
+            encoded >>= 12;
+            shifted = true;
+        }
+        if (encoded > 4095)
+            return false;
+
+        std::string r = loadInt(source);
+        std::string immediate = "#" + std::to_string(encoded);
+        if (shifted)
+            immediate += ", lsl #12";
+        const char *opcode = negative ? negativeOpcode : positiveOpcode;
+        emitMachineInstrLine("\t" + std::string(opcode) + " " + rd + ", " + r + ", " + immediate,
+                             MOpcode::Alu, {rd}, {r});
+        return true;
+    };
+
     if (inst->op_id_ == Instruction::Add) {
         if (auto ci = dynamic_cast<ConstantInt *>(v2)) {
-            if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                std::string r1 = loadInt(v1);
-                emitMachineInstrLine("\tadd " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
-                                     MOpcode::Alu, {rd}, {r1});
+            if (emitImmediate("add", "sub", v1, ci->value_))
                 return true;
-            }
         }
-        if (dynamic_cast<ConstantInt *>(v1)) {
-            auto ci = static_cast<ConstantInt *>(v1);
-            if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                std::string r2 = loadInt(v2);
-                emitMachineInstrLine("\tadd " + rd + ", " + r2 + ", #" + std::to_string(ci->value_),
-                                     MOpcode::Alu, {rd}, {r2});
+        if (auto ci = dynamic_cast<ConstantInt *>(v1)) {
+            if (emitImmediate("add", "sub", v2, ci->value_))
                 return true;
-            }
         }
     } else if (inst->op_id_ == Instruction::Sub) {
         // Skip immediate form when v1 is zero: sub rd, wzr, #imm is illegal
         // (ARM64 sub(immediate) uses the WSP encoding slot, WZR not allowed).
         if (!(dynamic_cast<ConstantInt *>(v1) && static_cast<ConstantInt *>(v1)->value_ == 0)) {
             if (auto ci = dynamic_cast<ConstantInt *>(v2)) {
-                if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                    std::string r1 = loadInt(v1);
-                    emitMachineInstrLine("\tsub " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
-                                         MOpcode::Alu, {rd}, {r1});
+                if (emitImmediate("sub", "add", v1, ci->value_))
                     return true;
-                }
             }
         }
     }

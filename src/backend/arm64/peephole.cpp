@@ -818,6 +818,72 @@ static bool deadAfterConsumer(const MachineBasicBlock &block,
 	return machineRegDeadAfter(block, consumerIdx, removedReg);
 }
 
+static bool tryMachineShiftedAddSubFusion(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine shift = parseLine(block.instrs[idx].text);
+	if (shift.kind != LineKind::Instruction || shift.mnemonic != "lsl" ||
+	    shift.operands.size() != 3)
+		return false;
+
+	const std::string &shiftDst = shift.operands[0];
+	const std::string &shiftSrc = shift.operands[1];
+	char cls = regClass(shiftDst);
+	if ((cls != 'w' && cls != 'x') || regClass(shiftSrc) != cls)
+		return false;
+
+	const std::string &amountText = shift.operands[2];
+	if (amountText.size() < 2 || amountText[0] != '#') return false;
+	char *end = nullptr;
+	long amount = std::strtol(amountText.c_str() + 1, &end, 10);
+	long maxAmount = cls == 'w' ? 31 : 63;
+	if (!end || *end != '\0' || amount < 0 || amount > maxAmount)
+		return false;
+
+	ParsedLine consumer = parseLine(block.instrs[idx + 1].text);
+	if (consumer.kind != LineKind::Instruction ||
+	    (consumer.mnemonic != "add" && consumer.mnemonic != "sub") ||
+	    consumer.operands.size() != 3)
+		return false;
+
+	const std::string &dst = consumer.operands[0];
+	const std::string &lhs = consumer.operands[1];
+	const std::string &rhs = consumer.operands[2];
+	if (regClass(dst) != cls) return false;
+
+	std::string base;
+	if (consumer.mnemonic == "add") {
+		if (samePhysicalReg(lhs, shiftDst))
+			base = rhs;
+		else if (samePhysicalReg(rhs, shiftDst))
+			base = lhs;
+		else
+			return false;
+	} else {
+		if (!samePhysicalReg(rhs, shiftDst)) return false;
+		base = lhs;
+	}
+
+	if (regClass(base) != cls || samePhysicalReg(base, shiftDst))
+		return false;
+	if (!samePhysicalReg(shiftDst, dst)) {
+		auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx + 1]);
+		if (liveIt == liveness.instrLiveOut.end() || block.instrs[idx].defs.empty())
+			return false;
+		for (const auto &def : block.instrs[idx].defs)
+			if (liveIt->second.count(def)) return false;
+	}
+
+	replaceMachineInstr(block.instrs[idx + 1],
+	                    makeMachineInsn(consumer.mnemonic,
+	                                    {dst, base, shiftSrc,
+	                                     "lsl #" + std::to_string(amount)}));
+	block.instrs.erase(block.instrs.begin() + idx);
+	return true;
+}
+
 static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx) {
 	if (idx + 1 >= block.instrs.size()) return false;
 
@@ -1795,6 +1861,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineShiftedAddSubFusion(func.blocks[b], i, liveness)) {
 					changed = true;
 					break;
 				}
