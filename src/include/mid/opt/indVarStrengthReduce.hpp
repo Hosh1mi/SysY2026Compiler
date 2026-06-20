@@ -31,6 +31,12 @@ private:
         int coeff = 0;
         long long constOffset = 0;
         const SCEV *offset = nullptr; // one materializable loop-invariant non-constant term
+        // Optional loop-invariant runtime multiplier on the IV coefficient: when
+        // set, the IV-linear term is `coeff * coeffVal * IV` (coeffVal a single
+        // loop-invariant SSA value). Enables strength reduction of addresses with
+        // a variable stride such as `A[j*colsize + i]`, where the per-iteration
+        // pointer step is a runtime value rather than a compile-time constant.
+        Value *coeffVal = nullptr;
     };
 
     // loop-invariant test

@@ -303,10 +303,17 @@ bool CorrelatedValuePropagation::runOnFunction(Function *func,
                                          func->basic_blocks_.end());
         for (auto *bb : blocks) {
             if (bb->parent_ != func) continue;
-            changed |= simplifyPhisInBlock(bb, LVI);
-            changed |= foldInstructionsInBlock(bb, LVI);
+            bool blockChanged = simplifyPhisInBlock(bb, LVI);
+            if (!blockChanged)
+                blockChanged = foldInstructionsInBlock(bb, LVI);
+            if (blockChanged) {
+                changed = true;
+                break;
+            }
         }
         changedAny |= changed;
+        if (changed)
+            AM.invalidateFunction(func, PreservedAnalyses::none());
     } while (changed);
     return changedAny;
 }

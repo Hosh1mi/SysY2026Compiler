@@ -41,6 +41,12 @@ Value* visitAnd(BinaryInst *inst) {
         return make_const_int(ty, 0);
     }
 
+    // Every selected bit is already known zero.
+    if (cy && ValueFacts::hasKnownZeroBits(
+                  x, static_cast<uint32_t>(cy->value_))) {
+        return make_const_int(ty, 0);
+    }
+
     // 5. Idempotence: x & x → x
     if (x == y) {
         return x;

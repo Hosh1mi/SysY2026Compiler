@@ -824,20 +824,20 @@ void Arm64RegAlloc::allocate() {
             for (auto inst : bb->instr_list_) {
                 if (inst->op_id_ == Instruction::SRem) {
                     auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
-                        int32_t abs_d = ci->value_ > 0 ? ci->value_ : -ci->value_;
-                        if (abs_d > 1 && (abs_d & (abs_d - 1)) != 0) {
-                            addCandidate(Magic::getMagic(abs_d).multiplier, w);
-                            addCandidate(abs_d, w);  // msub 还需要正幅值除数
-                        }
+                    Magic::SignedDivisorInfo info = ci
+                        ? Magic::analyzeDivisor(ci->value_)
+                        : Magic::SignedDivisorInfo{};
+                    if (info.usesMagic()) {
+                        addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
+                        addCandidate(static_cast<int>(info.magnitude), w);
                     }
                 } else if (inst->op_id_ == Instruction::SDiv) {
                     auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    if (ci && ci->value_ != INT32_MIN) {
-                        int32_t abs_d = ci->value_ > 0 ? ci->value_ : -ci->value_;
-                        if (abs_d > 1 && (abs_d & (abs_d - 1)) != 0)
-                            addCandidate(Magic::getMagic(ci->value_).multiplier, w);
-                    }
+                    Magic::SignedDivisorInfo info = ci
+                        ? Magic::analyzeDivisor(ci->value_)
+                        : Magic::SignedDivisorInfo{};
+                    if (info.usesMagic())
+                        addCandidate(Magic::getMagic(ci->value_).multiplier, w);
                 } else if (inst->op_id_ == Instruction::Add ||
                            inst->op_id_ == Instruction::Sub ||
                            inst->op_id_ == Instruction::ICmp) {
@@ -860,13 +860,20 @@ void Arm64RegAlloc::allocate() {
                 for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
                     if (!usedRegs.count(r)) freeRegs.push_back(r);
             } else {
+                // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
+                // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
+                // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
+                // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
+                // 保存/恢复由 mergePromotedConstRegs 统一接管。
                 for (int r = 10; r <= 15; ++r)
+                    if (!usedRegs.count(r)) freeRegs.push_back(r);
+                for (int r = 28; r >= 19; --r)
                     if (!usedRegs.count(r)) freeRegs.push_back(r);
             }
             std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
             for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
             std::sort(ranked.begin(), ranked.end());
-            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)4});
+            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
             for (size_t i = 0; i < n; ++i)
                 promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
         }

@@ -1,7 +1,6 @@
 #include "../../include/mid/opt/splitGEP.hpp"
-#include "../../include/mid/ir/ir.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/instruction.hpp"
-#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -11,227 +10,145 @@ static bool isSplitGEPDebugEnabled() {
     return enabled;
 }
 
-void SplitGEP::execute(Module *module) {
-    for (auto *f : module->function_list_) {
-        if (f->is_declaration()) continue;
-        // Temporary: only process first function
-        runOnFunction(f);
-    }
+// A value is invariant in `loop` iff it is not an instruction defined inside
+// the loop body. Constants, globals, allocas and arguments are never inside.
+static bool isInvariantInLoop(Value *v, Loop *loop) {
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst) return true;
+    return loop->blocks.count(inst->parent_) == 0;
 }
 
-// ── simple loop detection via back-edges ────────────────────────────
+bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI) {
+    BasicBlock *preheader = loop->preheader;
+    if (!preheader) return false;
 
-std::vector<SplitGEP::Loop> SplitGEP::findLoops(Function *func) {
-    std::vector<Loop> loops;
-
-    for (auto *bb : func->basic_blocks_) {
-        if (bb->instr_list_.empty()) continue;
-        auto *term = bb->get_terminator();
-        if (!term || !term->is_br()) continue;
-
-        // Unconditional back-edge: br label %target where target dominates bb
-        if (term->num_ops_ == 1) {
-            auto *target = static_cast<BasicBlock*>(term->get_operand(0));
-            // Simple heuristic: target comes before bb in function order
-            auto itT = std::find(func->basic_blocks_.begin(),
-                                 func->basic_blocks_.end(), target);
-            auto itB = std::find(func->basic_blocks_.begin(),
-                                 func->basic_blocks_.end(), bb);
-            if (itT > itB) continue; // not a back-edge
-
-            // Find the header: must be a conditional branch
-            if (target->instr_list_.empty()) continue;
-            auto *hdrTerm = target->get_terminator();
-            if (!hdrTerm || hdrTerm->num_ops_ != 3) continue;
-
-            Loop loop;
-            loop.header = target;
-            loop.latch  = bb;
-
-            // Collect the natural loop by walking predecessors from the latch
-            // back to the header.
-            std::vector<BasicBlock*> worklist = {bb};
-            std::set<BasicBlock*> visited = {target, bb};
-            while (!worklist.empty()) {
-                auto *cur = worklist.back(); worklist.pop_back();
-                for (auto *pred : cur->pre_bbs_) {
-                    if (visited.insert(pred).second)
-                        worklist.push_back(pred);
-                }
-            }
-            loop.blocks = visited;
-            loops.push_back(loop);
-        }
-    }
-    return loops;
-}
-
-// ── invariant / variant analysis ─────────────────────────────────────
-
-bool SplitGEP::isVariant(Value *v, const std::set<BasicBlock*> &loopBlocks,
-                          std::set<Value*> &variantCache,
-                          std::set<Value*> &invariantCache) {
-    if (variantCache.count(v)) return true;
-    if (invariantCache.count(v)) return false;
-
-    // Constants and globals are always invariant
-    if (dynamic_cast<ConstantInt*>(v) || dynamic_cast<ConstantFloat*>(v) ||
-        dynamic_cast<ConstantZero*>(v)   || dynamic_cast<GlobalVariable*>(v) ||
-        dynamic_cast<AllocaInst*>(v)     || dynamic_cast<Function*>(v))
-    {
-        invariantCache.insert(v);
+    // ScalarExpandedInterchange emits se_* loops whose address shapes its later
+    // consumers assume stay intact; splitting them can expose non-equivalent
+    // pointer recurrences.
+    if (loop->header && loop->header->name_.rfind("se_", 0) == 0)
         return false;
-    }
 
-    auto *inst = dynamic_cast<Instruction*>(v);
-    if (!inst) {
-        invariantCache.insert(v);
-        return false;
-    }
-
-    // Phi nodes at the header → the IV itself is variant
-    if (inst->is_phi()) {
-        auto *phi = static_cast<PhiInst*>(inst);
-        // Check if this phi is in the loop header
-        if (loopBlocks.count(phi->parent_) == 0 &&
-            std::find(loopBlocks.begin(), loopBlocks.end(), phi->parent_) == loopBlocks.end())
-        {
-            // Phi not in loop → check if it's the header's phi
-            // If the phi's parent is the header and one incoming is from the latch
-            BasicBlock *header = nullptr;
-            // We need to check if this phi is in the loop header.
-            // For now, if the parent is not in loop blocks, it's invariant.
-            invariantCache.insert(v);
-            return false;
-        }
-        variantCache.insert(v);
-        return true;
-    }
-
-    // Instruction in the loop: variant if any operand is variant
-    if (loopBlocks.count(inst->parent_)) {
-        bool anyVariant = false;
-        for (unsigned i = 0; i < inst->num_ops_; i++) {
-            Value *op = inst->get_operand(i);
-            if (!op) continue;
-            if (isVariant(op, loopBlocks, variantCache, invariantCache)) {
-                anyVariant = true;
-                // Don't break — need to fill caches completely
-            }
-        }
-        if (anyVariant) {
-            variantCache.insert(v);
-            return true;
-        }
-        invariantCache.insert(v);
-        return false;
-    }
-
-    // Instruction defined outside the loop → invariant
-    invariantCache.insert(v);
-    return false;
-}
-
-// ── split GEPs in one loop ──────────────────────────────────────────
-
-bool SplitGEP::runOnLoop(const Loop &loop) {
+    Module *mod = preheader->parent_->parent_;
     bool changed = false;
 
-    // ScalarExpandedInterchange emits se_* loops with address shapes that its
-    // later consumers assume stay intact. Splitting those GEPs can expose
-    // non-equivalent pointer recurrences after vectorization/IVSR.
-    if (loop.header && loop.header->name_.rfind("se_", 0) == 0)
-        return false;
+    for (auto *bb : loop->blocksOrdered) {
+        // Only handle GEPs whose innermost containing loop is exactly `loop`,
+        // so a nested access is peeled once, at the deepest level where its
+        // row index is invariant.
+        if (LI.getLoopFor(bb) != loop) continue;
 
-    for (auto *bb : loop.blocks) {
-        std::vector<Instruction*> insts(bb->instr_list_.begin(),
-                                        bb->instr_list_.end());
-
+        std::vector<Instruction *> insts(bb->instr_list_.begin(),
+                                         bb->instr_list_.end());
         for (auto *inst : insts) {
             if (!inst->is_gep()) continue;
-            auto *gep = static_cast<GetElementPtrInst*>(inst);
+            auto *gep = static_cast<GetElementPtrInst *>(inst);
             unsigned numIndices = gep->num_ops_ - 1;
             if (numIndices < 2) continue;
 
-            std::set<Value*> variantCache, invariantCache;
+            // Longest prefix of indices that are invariant in this loop.
             unsigned splitIdx = 0;
             for (unsigned i = 1; i <= numIndices; i++) {
-                Value *idx = gep->get_operand(i);
-                if (isVariant(idx, loop.blocks, variantCache, invariantCache))
-                    break;
+                if (!isInvariantInLoop(gep->get_operand(i), loop)) break;
                 splitIdx = i;
             }
+            // Need a non-empty invariant prefix and a non-empty variant suffix.
             if (splitIdx == 0 || splitIdx == numIndices) continue;
+            // Peeling a constant outermost index buys nothing (its byte offset
+            // folds either way) and re-splitting a leading-`[0]` suffix would
+            // churn degenerate GEPs; require a real invariant value to hoist.
+            if (dynamic_cast<ConstantInt *>(gep->get_operand(1))) continue;
 
-            // Build invariant prefix GEP
-            std::vector<Value*> prefixIdxs;
+            // Invariant prefix GEP: &A[i] (for a 2D access A[i][j]).
+            std::vector<Value *> prefixIdxs;
             for (unsigned i = 1; i <= splitIdx; i++)
                 prefixIdxs.push_back(gep->get_operand(i));
-            auto *prefixGEP = new GetElementPtrInst(
-                gep->get_operand(0), prefixIdxs, bb, true);
-            bool inserted = bb->add_instruction_before_inst(prefixGEP, inst);
-            if (!inserted) {
+            auto *prefixGEP =
+                new GetElementPtrInst(gep->get_operand(0), prefixIdxs, bb, true);
+
+            // The prefix must still address an aggregate (a row), otherwise the
+            // suffix has nothing to descend into.
+            auto *prefixPtrTy = dynamic_cast<PointerType *>(prefixGEP->type_);
+            if (!prefixPtrTy || prefixPtrTy->contained_->tid_ != Type::ArrayTyID) {
                 prefixGEP->remove_use_of_ops();
                 delete prefixGEP;
                 continue;
             }
 
-            auto *prefixPtrTy = dynamic_cast<PointerType*>(prefixGEP->type_);
-            if (!prefixPtrTy || prefixPtrTy->contained_->tid_ != Type::ArrayTyID) {
-                bb->delete_instr(prefixGEP);
+            // Hoisting the row base into the preheader is only valid if every
+            // operand's definition dominates the preheader. "Invariant in the
+            // loop" (defined outside the loop body) normally implies this, but
+            // guard explicitly to stay robust against irreducible/rotated shapes.
+            bool dominatesPreheader = true;
+            for (Value *op : prefixIdxs) {
+                auto *opInst = dynamic_cast<Instruction *>(op);
+                if (opInst && !LI.dominates(opInst->parent_, preheader)) {
+                    dominatesPreheader = false;
+                    break;
+                }
+            }
+            if (auto *baseInst = dynamic_cast<Instruction *>(gep->get_operand(0)))
+                if (!LI.dominates(baseInst->parent_, preheader))
+                    dominatesPreheader = false;
+            if (!dominatesPreheader) {
+                prefixGEP->remove_use_of_ops();
+                delete prefixGEP;
                 continue;
             }
 
-            // Build variant suffix GEP with normal GEP semantics. Since the
-            // prefix result still points to an aggregate object, the suffix
-            // must start with 0 before continuing with the remaining indices.
-            std::vector<Value*> suffixIdxs;
-            suffixIdxs.push_back(new ConstantInt(bb->parent_->parent_->int32_ty_, 0));
+            // Hoist the row base into the preheader: computed once per entry to
+            // this loop (i.e. once per outer-loop iteration) and shared by every
+            // access that peels to the same prefix (GVN later dedups them).
+            if (!preheader->add_instruction_before_terminator(prefixGEP)) {
+                prefixGEP->remove_use_of_ops();
+                delete prefixGEP;
+                continue;
+            }
+            prefixGEP->parent_ = preheader;
+
+            // Variant suffix GEP. The prefix result still points at the row
+            // aggregate, so the suffix re-enters it with a leading 0 before the
+            // remaining (variant) indices: &(*prefix)[0][j].
+            std::vector<Value *> suffixIdxs;
+            suffixIdxs.push_back(new ConstantInt(mod->int32_ty_, 0));
             for (unsigned i = splitIdx + 1; i <= numIndices; i++)
                 suffixIdxs.push_back(gep->get_operand(i));
             auto *suffixGEP = new GetElementPtrInst(prefixGEP, suffixIdxs, bb, true);
-            inserted = bb->add_instruction_before_inst(suffixGEP, inst);
-            if (!inserted) {
-                bb->delete_instr(prefixGEP);
+            if (!bb->add_instruction_before_inst(suffixGEP, inst)) {
                 suffixGEP->remove_use_of_ops();
                 delete suffixGEP;
+                preheader->delete_instr(prefixGEP);
                 continue;
             }
 
             if (isSplitGEPDebugEnabled()) {
                 std::cerr << "[SplitGEP] function=" << bb->parent_->name_
-                          << " loop_header=" << loop.header->name_
-                          << " bb=" << bb->name_
-                          << " gep=%" << gep->name_
-                          << " splitIdx=" << splitIdx
-                          << " numIndices=" << numIndices
+                          << " loop_header=" << loop->header->name_
+                          << " gep=%" << gep->name_ << " splitIdx=" << splitIdx
                           << " prefix=%" << prefixGEP->name_
-                          << " suffix=%" << suffixGEP->name_
-                          << "\n";
+                          << " suffix=%" << suffixGEP->name_ << "\n";
             }
 
-            // Replace original GEP with suffix GEP
             inst->replace_all_use_with(suffixGEP);
             bb->delete_instr(inst);
-
             changed = true;
         }
     }
-
     return changed;
 }
 
-// ── entry point per function ─────────────────────────────────────────
+PreservedAnalyses SplitGEP::execute(Module *module, AnalysisManager &AM) {
+    bool changed = false;
+    for (auto *f : module->function_list_) {
+        if (f->is_declaration()) continue;
+        LoopInfo &LI = AM.getLoopInfo(f);
+        for (const auto &loop : LI.allLoops())
+            changed |= runOnLoop(loop.get(), LI);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
 
-void SplitGEP::runOnFunction(Function *func) {
-    auto loops = findLoops(func);
-    // Process innermost loops first (those with the smallest body)
-    // so the invariant prefix of one loop can be further split by an outer loop.
-    std::sort(loops.begin(), loops.end(),
-        [](const Loop &a, const Loop &b) {
-            return a.blocks.size() < b.blocks.size();
-        });
-
-    for (auto &loop : loops)
-        runOnLoop(loop);
+void SplitGEP::execute(Module *module) {
+    // SplitGEP requires LoopInfo and is only meaningful through the
+    // AnalysisManager-aware entry point.
+    (void)module;
 }

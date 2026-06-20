@@ -12,7 +12,7 @@ void PassManager::addPass(std::unique_ptr<Pass> pass) {
 void PassManager::beginRepeatGroup(int maxRounds) {
     RepeatGroup g;
     g.begin = passes.size();
-    g.end   = passes.size(); // endRepeatGroup 回填
+    g.end   = passes.size();
     g.maxRounds = maxRounds;
     groups_.push_back(g);
 }

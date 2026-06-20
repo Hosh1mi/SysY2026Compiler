@@ -147,6 +147,13 @@ AliasResult BasicAliasAnalysis::alias(const MemoryLocation &a,
                                       const MemoryLocation &b) const {
     if (!a.ptr || !b.ptr) return AliasResult::MayAlias;
 
+    // A pointer must-aliases itself: identical SSA values address the same
+    // location, regardless of whether the symbolic offset is a constant. This
+    // is important when the pointer carries a variable index (e.g. a flat GEP),
+    // where getPointerInfo() reports hasConstantOffset == false.
+    if (a.ptr == b.ptr && a.sizeBytes >= 0 && a.sizeBytes == b.sizeBytes)
+        return AliasResult::MustAlias;
+
     PointerInfo pa = getPointerInfo(a.ptr);
     PointerInfo pb = getPointerInfo(b.ptr);
     AliasResult result = AliasResult::MayAlias;

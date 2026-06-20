@@ -62,6 +62,20 @@ private:
     void emitEpilogue();
     void emitBlock(BasicBlock *bb);
     void emitInstruction(Instruction *inst);
+
+    // ── constant strength reduction (constStrengthReduce.cpp) ──────────────
+    // Each tryEmit* lowers a constant-operand integer op to a cheaper machine
+    // sequence and returns true when it emitted (false → caller uses the
+    // generic path).  emitGepIndexStep lowers one GEP index level's address
+    // arithmetic, mutating the running address register `addr`.
+    bool tryEmitMulConst(Instruction *inst, Value *v1, Value *v2);
+    bool tryEmitSDivConst(Instruction *inst, Value *v1, Value *v2);
+    bool tryEmitSRemConst(Instruction *inst, Value *v1, Value *v2);
+    bool tryEmitAddSubImm(Instruction *inst, Value *v1, Value *v2,
+                          const std::string &rd);
+    bool tryEmitLogicalConst(Instruction *inst, Value *v1, Value *v2);
+    void emitGepIndexStep(std::string &addr, Value *idx, int elemSize,
+                          Instruction *inst);
     void emitLivePromotedConstsFrom(BasicBlock *bb, Instruction *after);
     bool promotedConstReachableBeforeClobber(BasicBlock *bb, Instruction *after,
                                              int val,

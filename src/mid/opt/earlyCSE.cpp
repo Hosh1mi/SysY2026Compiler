@@ -44,6 +44,11 @@ struct ActiveMemoryMod {
     Value *token = nullptr;
 };
 
+// Sentinel for a loop-carried memory definition.  It can participate in load
+// versioning but never carries a forwardable stored value.
+static int loop_sentinel_storage;
+static Value *const LOOP_SENTINEL = reinterpret_cast<Value*>(&loop_sentinel_storage);
+
 static bool isEarlyCSEAADebugEnabled() {
     static bool enabled = std::getenv("DEBUG_EARLY_CSE_AA") != nullptr;
     return enabled;
@@ -72,6 +77,23 @@ static Value *latestModFor(Value *ptr,
     for (auto it = activeMods.rbegin(); it != activeMods.rend(); ++it) {
         if (mayModPtr(BAA, it->inst, ptr))
             return it->token;
+    }
+    return nullptr;
+}
+
+static Value *storedValueFromLatestMod(
+    Value *ptr, const std::vector<ActiveMemoryMod> &activeMods,
+    const BasicAliasAnalysis &BAA, BasicBlock *requiredStoreBlock) {
+    for (auto it = activeMods.rbegin(); it != activeMods.rend(); ++it) {
+        if (!mayModPtr(BAA, it->inst, ptr))
+            continue;
+        if (it->token == LOOP_SENTINEL)
+            return nullptr;
+        auto *store = dynamic_cast<StoreInst *>(it->inst);
+        if (!store || store->parent_ != requiredStoreBlock ||
+            store->get_operand(1) != ptr)
+            return nullptr;
+        return store->get_operand(0);
     }
     return nullptr;
 }
@@ -121,11 +143,6 @@ analyze_loops(Function *func) {
     }
     return loop_mods;
 }
-
-// ---------- Sentinel for "loop-varying" defining store ----------
-// Any unique non-null pointer works; we only compare by pointer equality in signatures.
-static int loop_sentinel_storage;
-static Value *const LOOP_SENTINEL = reinterpret_cast<Value*>(&loop_sentinel_storage);
 
 // ---------- Core DFS ----------
 static const std::unordered_map<Value*, Value*> empty_vn_map;
@@ -226,6 +243,21 @@ static void early_cse_dfs(BasicBlock *bb,
                 inst->replace_all_use_with(mem_it->second.stored_val);
                 to_delete.push_back(inst);
                 continue;
+            }
+
+            // Forward across one CFG edge only.  Requiring the defining store
+            // in the load block's direct predecessor avoids skipping writes
+            // from sibling paths that reconverge at an intermediate join.
+            // A loop sentinel, may-alias store, or writable call also blocks
+            // the forwarding conservatively.
+            if (bb->pre_bbs_.size() <= 1) {
+                BasicBlock *pred = bb->pre_bbs_.empty() ? nullptr : bb->pre_bbs_.front();
+                if (Value *stored =
+                        storedValueFromLatestMod(ptr, activeMods, BAA, pred)) {
+                    inst->replace_all_use_with(stored);
+                    to_delete.push_back(inst);
+                    continue;
+                }
             }
 
             Value *def_store = latestModFor(ptr, activeMods, BAA);

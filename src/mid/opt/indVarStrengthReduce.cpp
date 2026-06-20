@@ -401,6 +401,17 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
             LinearIVExpr term = linearizeSCEVForIV(op, iv, loop, SE);
             if (!term.valid) return invalid;
 
+            // A variable IV coefficient cannot be summed with any other IV term:
+            // `j*colsize + 2*j` would scale the IV by `colsize+2`, which this
+            // single-(coeff,coeffVal) representation cannot express. Require that
+            // the runtime-coefficient term, if present, is the only IV term.
+            bool resultHasIV = result.coeff != 0 || result.coeffVal;
+            bool termHasIV = term.coeff != 0 || term.coeffVal;
+            if ((result.coeffVal || term.coeffVal) && resultHasIV && termHasIV)
+                return invalid;
+            if (term.coeffVal)
+                result.coeffVal = term.coeffVal;
+
             long long coeff = static_cast<long long>(result.coeff) + term.coeff;
             if (!fitsInt(coeff)) return invalid;
             result.coeff = static_cast<int>(coeff);
@@ -420,19 +431,29 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
         bool sawIVTerm = false;
         LinearIVExpr ivTerm;
         long long multiplier = 1;
+        Value *multiplierVal = nullptr; // one loop-invariant variable multiplier
 
         for (auto *op : mul->operands()) {
             LinearIVExpr term = linearizeSCEVForIV(op, iv, loop, SE);
             if (!term.valid) return invalid;
 
-            if (term.coeff == 0) {
-                if (term.offset) return invalid;
+            if (term.coeff == 0 && !term.coeffVal) {
+                if (term.offset) {
+                    // A loop-invariant *variable* factor: accept at most one, and
+                    // only when it is a single SSA value (SCEVUnknown) so it can
+                    // drive a runtime pointer stride. Anything more complex bails.
+                    auto *unk = dynamic_cast<const SCEVUnknown *>(term.offset);
+                    if (!unk || multiplierVal || term.constOffset != 0)
+                        return invalid;
+                    multiplierVal = unk->value();
+                    continue;
+                }
                 multiplier *= term.constOffset;
                 if (!fitsInt(multiplier)) return invalid;
                 continue;
             }
 
-            if (sawIVTerm || term.offset) return invalid;
+            if (sawIVTerm || term.offset || term.coeffVal) return invalid;
             sawIVTerm = true;
             ivTerm = term;
         }
@@ -447,6 +468,7 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
         result.valid = true;
         result.coeff = static_cast<int>(coeff);
         result.constOffset = constOffset;
+        result.coeffVal = multiplierVal;
         return result;
     }
 
@@ -624,6 +646,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             GetElementPtrInst *gep;
             unsigned ivOpIdx;
             int coeff;
+            Value *coeffVal; // runtime IV-coefficient (variable stride), or null
             std::vector<LinearIVExpr> indexExprs;
             bool useLinearizedGEP;
         };
@@ -644,7 +667,13 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 }
 
                 auto initExprCanMaterialize = [&](LinearIVExpr expr) -> bool {
-                    if (expr.coeff != 0) {
+                    if (expr.coeffVal) {
+                        // Variable IV coefficient: the IV-start `coeffVal*coeff*init`
+                        // is computed at runtime in the preheader (always possible
+                        // for an i32 init). Drop the IV part, check the remainder.
+                        expr.coeff = 0;
+                        expr.coeffVal = nullptr;
+                    } else if (expr.coeff != 0) {
                         if (initCI) {
                             long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
                             if (!fitsInt(ivStart)) return false;
@@ -664,7 +693,9 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 if (gepInfo.valid) {
                     LinearIVExpr flatExpr =
                         linearizeSCEVForIV(gepInfo.elementOffset, iv, loop, SE);
-                    if (flatExpr.valid && flatExpr.coeff != 0) {
+                    // Variable-stride (coeffVal) GEPs are handled by the per-index
+                    // flat path below, which captures the runtime coefficient.
+                    if (flatExpr.valid && flatExpr.coeff != 0 && !flatExpr.coeffVal) {
                         bool ok = true;
                         std::vector<LinearIVExpr> indexExprs;
                         indexExprs.reserve(gep->num_ops_ - 1);
@@ -689,7 +720,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                             debugLinearizedGEP(func, loop.header, gep, gepInfo,
                                                flatExpr.coeff);
                             candidates.push_back(
-                                {gep, 0, flatExpr.coeff, indexExprs, true});
+                                {gep, 0, flatExpr.coeff, nullptr, indexExprs, true});
                             continue;
                         }
                     }
@@ -698,6 +729,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 unsigned ivOpIdx = 0;
                 int ivDependentIndexes = 0;
                 int coeff = 0;
+                Value *coeffVal = nullptr;
                 std::vector<LinearIVExpr> indexExprs;
                 indexExprs.reserve(gep->num_ops_ - 1);
 
@@ -714,10 +746,11 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                         break;
                     }
 
-                    if (expr.coeff != 0) {
+                    if (expr.coeff != 0 || expr.coeffVal) {
                         ivDependentIndexes++;
                         ivOpIdx = i;
                         coeff = expr.coeff;
+                        coeffVal = expr.coeffVal;
                     }
                     indexExprs.push_back(expr);
                 }
@@ -732,7 +765,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                     }
                 }
                 if (!ok) continue;
-                candidates.push_back({gep, ivOpIdx, coeff, indexExprs, false});
+                candidates.push_back({gep, ivOpIdx, coeff, coeffVal, indexExprs, false});
             }
         }
 
@@ -755,26 +788,55 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             int ivStrideVal = 1;
             if (auto *ci = dynamic_cast<ConstantInt*>(iv.stride))
                 ivStrideVal = ci->value_;
+            // Constant factor of the per-iteration element stride. With a runtime
+            // coefficient the true stride is `effectiveStride * coeffVal`; without
+            // one it is the whole stride.
             long long effectiveStride64 = static_cast<long long>(ivStrideVal) *
                                           elemStride * c.coeff;
             if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
             if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
             int effectiveStride = static_cast<int>(effectiveStride64);
-            if (std::abs(effectiveStride) > 16)
+            // The magnitude heuristic only applies to compile-time strides. A
+            // variable stride trades a per-iteration multiply for a pointer
+            // step, which is profitable regardless of its (unknown) magnitude.
+            if (!c.coeffVal && std::abs(effectiveStride) > 16)
                 continue;
 
             if (std::getenv("DEBUG_IVSR"))
                 std::cerr << "[IVSR] func=" << func->name_
                           << " header=" << loop.header->name_
                           << " gep=%" << gep->name_
-                          << " stride=" << effectiveStride << "\n";
+                          << " stride=" << effectiveStride
+                          << (c.coeffVal ? "*<var>" : "") << "\n";
 
             std::vector<Value *> initIndices;
             bool failed = false;
             for (unsigned i = 1; i < gep->num_ops_; i++) {
                 LinearIVExpr expr = c.indexExprs[i - 1];
                 Value *ivStartVal = nullptr; // 非常量初值时的运行期 coeff*init
-                if (expr.coeff != 0) {
+                if (expr.coeffVal) {
+                    // IV-start = coeffVal * coeff * init, evaluated at runtime.
+                    // For a zero init it contributes nothing.
+                    auto *initZero = dynamic_cast<ConstantInt *>(iv.initVal);
+                    if (!initZero || initZero->value_ != 0) {
+                        builder->set_insert_point(preheader);
+                        Value *m = expr.coeffVal;
+                        if (expr.coeff != 1) {
+                            auto *mc = builder->create_imul(
+                                expr.coeffVal,
+                                new ConstantInt(module->int32_ty_, expr.coeff));
+                            preheader->remove_instr(mc);
+                            preheader->add_instruction_before_terminator(mc);
+                            m = mc;
+                        }
+                        auto *mul = builder->create_imul(m, iv.initVal);
+                        preheader->remove_instr(mul);
+                        preheader->add_instruction_before_terminator(mul);
+                        ivStartVal = mul;
+                    }
+                    expr.coeff = 0;
+                    expr.coeffVal = nullptr;
+                } else if (expr.coeff != 0) {
                     if (initCI) {
                         long long ivStart = static_cast<long long>(expr.coeff) * initCI->value_;
                         if (!fitsInt(ivStart)) {
@@ -833,9 +895,27 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
             addrPhi->addIncoming(initGEP, preheader);
 
+            // 步进量：常量步长直接用立即数；变量步长 = effectiveStride * coeffVal，
+            // 在 preheader 中一次性算好（循环不变），latch 内仅做指针步进。
+            Value *stepIdx = nullptr;
+            if (c.coeffVal) {
+                stepIdx = c.coeffVal;
+                if (effectiveStride != 1) {
+                    builder->set_insert_point(preheader);
+                    auto *mc = builder->create_imul(
+                        c.coeffVal,
+                        new ConstantInt(module->int32_ty_, effectiveStride));
+                    preheader->remove_instr(mc);
+                    preheader->add_instruction_before_terminator(mc);
+                    stepIdx = mc;
+                }
+            } else {
+                stepIdx = new ConstantInt(module->int32_ty_, effectiveStride);
+            }
+
             // 在 latch 中创建步进指令（在 br 之前）
             builder->set_insert_point(iv.latch);
-            auto *incrGEP = builder->create_gep(addrPhi, {new ConstantInt(module->int32_ty_, effectiveStride)});
+            auto *incrGEP = builder->create_gep(addrPhi, {stepIdx});
             iv.latch->remove_instr(incrGEP);
             iv.latch->add_instruction_before_terminator(incrGEP);
 

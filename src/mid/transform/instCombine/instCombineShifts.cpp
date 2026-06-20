@@ -19,8 +19,10 @@ Value* visitShl(BinaryInst *inst) {
 
     // 1. Constant fold: C1 << C2 → C3
     if (cx && cy) {
+        if (cy->value_ < 0) return nullptr;
         if (cy->value_ < (int)bits)
-            return make_const_int(ty, cx->value_ << cy->value_);
+            return make_const_int(ty, static_cast<int32_t>(
+                static_cast<uint32_t>(cx->value_) << cy->value_));
         return make_const_int(ty, 0);
     }
 
@@ -82,6 +84,7 @@ Value* visitLShr(BinaryInst *inst) {
 
     // 1. Constant fold: C1 >>> C2 → C3
     if (cx && cy) {
+        if (cy->value_ < 0) return nullptr;
         if (cy->value_ < (int)bits) {
             // Logical shift: treat value as unsigned
             unsigned uval = (unsigned)(cx->value_);
@@ -141,6 +144,7 @@ Value* visitAShr(BinaryInst *inst) {
 
     // 1. Constant fold: C1 >> C2 (arithmetic) → C3
     if (cx && cy) {
+        if (cy->value_ < 0) return nullptr;
         if (cy->value_ < (int)bits)
             return make_const_int(ty, cx->value_ >> cy->value_);
         // Overshift: fill with sign bit

@@ -1,5 +1,7 @@
 #pragma once
 #include "../../mid/ir/ir.hpp"
+#include "../../mid/analysis/valueFacts.hpp"
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
@@ -111,4 +113,51 @@ inline std::vector<int> collectAssignedNEONRegs(const std::map<Value*, std::stri
 
 inline std::string bbLabel(Function *f, BasicBlock *bb) {
     return f->name_ + "_" + bb->name_;
+}
+
+// ── ARM64 immediate / addressing encoding helpers ────────────────────────────
+// Shared by instruction selection and the constant-strength-reduction module.
+
+// Pick the index-extension form for a GEP/address index: an index proven
+// non-negative can be zero-extended (uxtw), otherwise sign-extend (sxtw).
+inline const char *indexExtendOpcode(Value *idx, BasicBlock *ctx) {
+    return ValueFacts::isKnownNonNegative(idx, ctx) ? "uxtw" : "sxtw";
+}
+
+inline uint32_t maskForWidth(unsigned width) {
+    return width >= 32 ? UINT32_MAX : ((1u << width) - 1u);
+}
+
+inline uint32_t rotateRightWithin(uint32_t value, unsigned rot, unsigned width) {
+    uint32_t mask = maskForWidth(width);
+    value &= mask;
+    rot %= width;
+    if (rot == 0) return value;
+    return ((value >> rot) | (value << (width - rot))) & mask;
+}
+
+inline uint32_t replicatePattern(uint32_t pattern, unsigned width) {
+    uint32_t result = 0;
+    for (unsigned pos = 0; pos < 32; pos += width)
+        result |= pattern << pos;
+    return result;
+}
+
+// True when `imm` is encodable as an AArch64 32-bit logical (and/orr/eor)
+// immediate — i.e. a rotated, replicated run of ones over a 2/4/8/16/32-bit
+// element (all-zeros and all-ones are excluded, they are not encodable).
+inline bool isLogicalImm32(uint32_t imm) {
+    if (imm == 0 || imm == UINT32_MAX) return false;
+
+    for (unsigned width = 2; width <= 32; width <<= 1) {
+        for (unsigned ones = 1; ones < width; ++ones) {
+            uint32_t base = static_cast<uint32_t>((1ull << ones) - 1ull);
+            for (unsigned rot = 0; rot < width; ++rot) {
+                uint32_t pattern = rotateRightWithin(base, rot, width);
+                if (replicatePattern(pattern, width) == imm)
+                    return true;
+            }
+        }
+    }
+    return false;
 }

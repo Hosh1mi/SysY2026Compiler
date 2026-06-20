@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/sccp.hpp"
+#include "../../include/mid/analysis/constantEvaluator.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <iostream>
@@ -128,12 +129,10 @@ static LatticeValue meet(const LatticeValue &a, const LatticeValue &b) {
 
 static int evalBinOp(Instruction::OpID op, int a, int b, bool &valid) {
     valid = true;
+    int result = 0;
+    if (ConstantEvaluator::foldIntegerBinary(op, a, b, result))
+        return result;
     switch (op) {
-    case Instruction::Add:  return a + b;
-    case Instruction::Sub:  return a - b;
-    case Instruction::Mul:  return a * b;
-    case Instruction::SDiv: return b ? a / b : (valid = false, 0);
-    case Instruction::SRem: return b ? a % b : (valid = false, 0);
     case Instruction::And:  return a & b;
     case Instruction::Or:   return a | b;
     case Instruction::Xor:  return a ^ b;

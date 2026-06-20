@@ -113,19 +113,19 @@ bool Arm64FuncContext::instructionUsesPromotedConst(Instruction *inst, int val) 
 
     if (inst->op_id_ == Instruction::SRem) {
         auto *ci = dynamic_cast<ConstantInt *>(inst->get_operand(1));
-        if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
-            int32_t absDivisor = ci->value_ > 0 ? ci->value_ : -ci->value_;
-            if (absDivisor > 1 && (absDivisor & (absDivisor - 1)) != 0) {
-                Magic::MagicNumber mag = Magic::getMagic(absDivisor);
-                if (val == mag.multiplier || val == absDivisor)
+        if (ci) {
+            Magic::SignedDivisorInfo info = Magic::analyzeDivisor(ci->value_);
+            if (info.usesMagic()) {
+                Magic::MagicNumber mag = Magic::getMagic(info.magnitude);
+                if (val == mag.multiplier || val == static_cast<int>(info.magnitude))
                     return true;
             }
         }
     } else if (inst->op_id_ == Instruction::SDiv) {
         auto *ci = dynamic_cast<ConstantInt *>(inst->get_operand(1));
-        if (ci && ci->value_ != 0 && ci->value_ != INT32_MIN) {
-            int32_t absDivisor = ci->value_ > 0 ? ci->value_ : -ci->value_;
-            if (absDivisor > 1 && (absDivisor & (absDivisor - 1)) != 0) {
+        if (ci) {
+            Magic::SignedDivisorInfo info = Magic::analyzeDivisor(ci->value_);
+            if (info.usesMagic()) {
                 Magic::MagicNumber mag = Magic::getMagic(ci->value_);
                 if (val == mag.multiplier)
                     return true;

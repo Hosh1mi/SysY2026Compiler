@@ -53,44 +53,6 @@ static ConstantInt *getConstIntOperand(Value *v) {
     return dynamic_cast<ConstantInt *>(v);
 }
 
-static const char *indexExtendOpcode(Value *idx, BasicBlock *ctx) {
-    return ValueFacts::isKnownNonNegative(idx, ctx) ? "uxtw" : "sxtw";
-}
-
-static uint32_t maskForWidth(unsigned width) {
-    return width >= 32 ? UINT32_MAX : ((1u << width) - 1u);
-}
-
-static uint32_t rotateRightWithin(uint32_t value, unsigned rot, unsigned width) {
-    uint32_t mask = maskForWidth(width);
-    value &= mask;
-    rot %= width;
-    if (rot == 0) return value;
-    return ((value >> rot) | (value << (width - rot))) & mask;
-}
-
-static uint32_t replicatePattern(uint32_t pattern, unsigned width) {
-    uint32_t result = 0;
-    for (unsigned pos = 0; pos < 32; pos += width)
-        result |= pattern << pos;
-    return result;
-}
-
-static bool isLogicalImm32(uint32_t imm) {
-    if (imm == 0 || imm == UINT32_MAX) return false;
-
-    for (unsigned width = 2; width <= 32; width <<= 1) {
-        for (unsigned ones = 1; ones < width; ++ones) {
-            uint32_t base = static_cast<uint32_t>((1ull << ones) - 1ull);
-            for (unsigned rot = 0; rot < width; ++rot) {
-                uint32_t pattern = rotateRightWithin(base, rot, width);
-                if (replicatePattern(pattern, width) == imm)
-                    return true;
-            }
-        }
-    }
-    return false;
-}
 
 static bool isLoadI32InBlock(Value *v, BasicBlock *bb, LoadInst *&load) {
     load = dynamic_cast<LoadInst *>(v);
@@ -568,30 +530,47 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     // --- Fusion confirmed ---
                     BinaryInst *mulInst = static_cast<BinaryInst*>(inst);
 
-                    // 1. Load mul operands and pin to w8 / w16.
-                    //    w8 is never returned by allocIntReg (pool is w10-w15).
-                    //    w16 is the fallback — we re-mark it after each
-                    //    intervening instruction to prevent re-use.
+                    // When the Add/Sub immediately follows the mul (nothing in
+                    // between), the accumulator and both mul operands are all
+                    // live at the fused point, so the allocator has already
+                    // given them distinct registers — we can feed the fused op
+                    // straight from the operands' assigned registers and skip
+                    // the two defensive `mov w8/w16` copies entirely. Pinning to
+                    // scratch is only needed when intervening instructions
+                    // (emitted in step 2) might clobber a reused operand reg.
+                    bool adjacent = (std::next(mulIt) == scan);
+
+                    // 1. Load mul operands.  When pinning, copy into w8 / w16
+                    //    (w8 is never returned by allocIntReg, pool is w10-w15;
+                    //    w16 is re-marked after each intervening instruction).
                     resetRegs();
                     std::string rA = loadInt(mulInst->get_operand(0));
                     std::string rB = loadInt(mulInst->get_operand(1));
-                    emitMoveMachine("w8", rA);
-                    emitMoveMachine("w16", rB);
+                    std::string rA2, rB2;
+                    if (adjacent) {
+                        // loadInt marked rA/rB used → the accumulator and result
+                        // allocations below cannot collide with them.
+                        rA2 = rA;
+                        rB2 = rB;
+                    } else {
+                        emitMoveMachine("w8", rA);
+                        emitMoveMachine("w16", rB);
 
-                    // 2. Emit intervening instructions.  Each calls resetRegs(),
-                    //    so we re-pin w16 in usedIntRegs_ to keep it alive.
-                    for (auto mid = std::next(mulIt); mid != scan; ++mid) {
-                        if ((*mid)->is_phi()) continue;
-                        emitInstruction(*mid);
-                        if (!usedIntRegs_.count(16))
-                            usedIntRegs_.insert(16);
+                        // 2. Emit intervening instructions.  Each calls
+                        //    resetRegs(), so re-pin w16 to keep it alive.
+                        for (auto mid = std::next(mulIt); mid != scan; ++mid) {
+                            if ((*mid)->is_phi()) continue;
+                            emitInstruction(*mid);
+                            if (!usedIntRegs_.count(16))
+                                usedIntRegs_.insert(16);
+                        }
+                        resetRegs();
+                        rA2 = "w8";
+                        rB2 = "w16";
                     }
 
-                    // 3. Emit fused madd / msub / mneg using pinned operands
+                    // 3. Emit fused madd / msub / mneg.
                     {
-                        resetRegs();
-                        std::string rA2 = "w8";
-                        std::string rB2 = "w16";
                         Value *accOp = (op0 == inst) ? op1 : op0;
                         std::string rAcc = loadInt(accOp);
                         std::string rd = allocIntReg();
@@ -777,252 +756,24 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         bool emitted = false;
 
-        // =====================================================================
-        // SDiv 常量强度削减
-        // =====================================================================
-        if (inst->op_id_ == Instruction::SDiv) {
-            if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-                int32_t d = ci->value_;
-
-                if (d == 0) {
-                    // 除以 0：让 sdiv 产生实现定义结果，fall-through
-                } else {
-                    // 安全计算绝对值——INT32_MIN 的 -d 会溢出，特判排除
-                    // 若 d == INT32_MIN，abs_d = 0，后续条件不成立，自动 fall-through
-                    int32_t abs_d = (d > 0) ? d
-                                : (d == INT32_MIN ? 0 : -d);
-
-                    // 正/负 2 的幂统一处理
-                    if (abs_d > 0 && (abs_d & (abs_d - 1)) == 0) {
-                        int k = __builtin_ctz(abs_d);
-                        std::string rNum    = loadInt(v1);
-                        // rNum 的最后一次读和 rResult 的首次写在同一条指令上，
-                        // 因此 rResult 直接用分配寄存器即使与 rNum 同号也安全
-                        std::string rResult = hasAssignedReg(inst) ? assignedReg(inst)
-                                                                   : allocIntReg();
-
-                        if (k == 1) {
-                            // ÷2:  barrel-shifter folds bias into add
-                            //   bias = rNum >>> 31  (0 or 1)
-                            emitRawAluMachine("\tadd " + rResult + ", " + rNum + ", " + rNum + ", lsr #31",
-                                              rResult, {rNum});
-                        } else {
-                            std::string rTmp = allocIntReg();
-                            emitRawAluMachine("\tasr " + rTmp + ", " + rNum + ", #31",
-                                              rTmp, {rNum});
-                            emitRawAluMachine("\tbic " + rTmp + ", " + rTmp + ", " + rTmp + ", lsl #" + std::to_string(k),
-                                              rTmp, {rTmp});
-                            emitBinaryMachine("add", rResult, rNum, rTmp);
-                        }
-                        emitRawAluMachine("\tasr " + rResult + ", " + rResult + ", #" + std::to_string(k),
-                                          rResult, {rResult});
-                        if (d < 0)
-                            emitUnaryMachine("neg", rResult, rResult);
-
-                        storeInt(inst, rResult);
-                        emitted = true;
-                    }
-                    // 非 2 的幂除数：magic number 优化
-                    else if (abs_d > 1) {
-                        Magic::MagicNumber mag = Magic::getMagic(d);
-
-                        std::string wNum = loadInt(v1);
-                        std::string wMagic = intConstReg(mag.multiplier);
-
-                        std::string xTemp = allocAddrReg();
-                        std::string wHi = "w" + xTemp.substr(1);
-
-                        emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
-                                          xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
-
-                        if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
-                            // 取高 32 位与 >>shift 合并为一条 64 位 asr
-                            emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
-                                                  + std::to_string(32 + mag.shift),
-                                              xTemp, {xTemp});
-                        } else {
-                            emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
-                                              xTemp, {xTemp});
-                            if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
-                                emitBinaryMachine("add", wHi, wHi, wNum);
-                            else
-                                emitBinaryMachine("sub", wHi, wHi, wNum);
-                            emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
-                                                  + std::to_string(mag.shift),
-                                              wHi, {wHi});
-                        }
-                        // 末条指令同时完成 wNum 的最后一次读，可直接写入分配寄存器
-                        std::string wResult = hasAssignedReg(inst) ? assignedReg(inst)
-                                                                   : allocIntReg();
-                        emitRawAluMachine("\tadd " + wResult + ", " + wHi + ", " + wNum + ", lsr #31",
-                                          wResult, {wHi, wNum});
-
-                        storeInt(inst, wResult);
-                        emitted = true;
-                    }
-                }
-            }
-        }
-
-        // =====================================================================
-        // Mul 常量强度削减
-        // 覆盖 0、±1、±2^k、±(2^k+1)、±(2^k-1) 六族因数
-        // =====================================================================
-        if (!emitted && inst->op_id_ == Instruction::Mul) {
-            // 乘法可交换——优先在 v2 找常量，找不到再看 v1
-            ConstantInt* ci  = dynamic_cast<ConstantInt*>(v2);
-            Value*       var = v1;
-            if (!ci) { ci = dynamic_cast<ConstantInt*>(v1); var = v2; }
-
-            if (ci) {
-                int32_t factor = ci->value_;
-
-                if (factor == 0) {
-                    storeInt(inst, "wzr");
-                    emitted = true;
-                } else if (factor == 1) {
-                    std::string r = loadInt(var);
-                    storeInt(inst, r);
-                    emitted = true;
-                } else if (factor == -1) {
-                    // × -1：negate
-                    // 以下各情形 rd 的写入都不早于 r 的最后一次读（同指令内
-                    // 读先于写），因此 rd 直接用分配寄存器、与 r 同号也安全
-                    std::string r  = loadInt(var);
-                    std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                    emitUnaryMachine("neg", rd, r);
-                    storeInt(inst, rd);
-                    emitted = true;
-                } else if (factor == INT32_MIN) {
-                    std::string r  = loadInt(var);
-                    std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                    emitRawAluMachine("\tlsl " + rd + ", " + r + ", #31",
-                                      rd, {r});
-                    storeInt(inst, rd);
-                    emitted = true;
-                } else {
-                    bool     negative = (factor < 0);
-                    uint32_t abs_f    = negative
-                        ? (0u - static_cast<uint32_t>(factor))
-                        : static_cast<uint32_t>(factor);
-
-                    // 情形 A：abs_f = 2^k
-                    //   正：lsl rd, r, #k
-                    //   负：lsl rd, r, #k  +  neg          各 1 条
-                    if ((abs_f & (abs_f - 1)) == 0) {
-                        int k = __builtin_ctz(abs_f);
-                        std::string r  = loadInt(var);
-                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                        emitRawAluMachine("\tlsl " + rd + ", " + r + ", #" + std::to_string(k),
-                                          rd, {r});
-                        if (negative)
-                            emitUnaryMachine("neg", rd, rd);
-                        storeInt(inst, rd);
-                        emitted = true;
-                    }
-
-                    // 情形 B：abs_f = 2^k + 1（如 3,5,9,17,33…）
-                    //   正：add rd, r, r, lsl #k            1 条
-                    //   负：add rd, r, r, lsl #k  +  neg    2 条
-                    else if (enableRegAlloc_ &&
-                             (abs_f - 1) > 0 &&
-                             (((abs_f - 1) & (abs_f - 2)) == 0))
-                    {
-                        uint32_t m1 = abs_f - 1;
-                        int k = __builtin_ctz(m1);
-                        std::string r  = loadInt(var);
-                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                        emitRawAluMachine("\tadd " + rd + ", " + r + ", "
-                                          + r + ", lsl #" + std::to_string(k),
-                                          rd, {r});
-                        if (negative)
-                            emitUnaryMachine("neg", rd, rd);
-                        storeInt(inst, rd);
-                        emitted = true;
-                    }
-
-                    // 情形 C：abs_f = 2^k - 1（如 3,7,15,31,63…）
-                    //   正：lsl tmp, r, #k  ;  sub rd, tmp, r    2 条
-                    //   负：factor = 1 - 2^k，即 r - r<<k
-                    //       sub rd, r, r, lsl #k                 1 条  ← 关键优化
-                    else if (enableRegAlloc_ &&
-                             (abs_f + 1) > 0 &&
-                             (((abs_f + 1) & abs_f) == 0))
-                    {
-                        uint32_t p1 = abs_f + 1;
-                        int k = __builtin_ctz(p1);
-                        std::string r  = loadInt(var);
-                        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                        if (negative) {
-                            // r*(1 - 2^k) = r - r*2^k
-                            emitRawAluMachine("\tsub " + rd + ", " + r + ", "
-                                              + r + ", lsl #" + std::to_string(k),
-                                              rd, {r});
-                        } else {
-                            std::string rTmp = allocIntReg();
-                            emitRawAluMachine("\tlsl " + rTmp + ", " + r + ", #"
-                                              + std::to_string(k),
-                                              rTmp, {r});
-                            emitBinaryMachine("sub", rd, rTmp, r);
-                        }
-                        storeInt(inst, rd);
-                        emitted = true;
-                    }
-                    // 其余常量：fall-through 到通用 mul
-                }
-            }
-        }
+        // 常量强度削减集中在 constStrengthReduce.cpp；此处仅按 opcode 分派。
+        if (inst->op_id_ == Instruction::SDiv)
+            emitted = tryEmitSDivConst(inst, v1, v2);
+        else if (inst->op_id_ == Instruction::Mul)
+            emitted = tryEmitMulConst(inst, v1, v2);
 
         // =====================================================================
         // 通用路径（Add / Sub / Mul 无法优化，或 SDiv 非常量 / 非 2^k 除数）
         // =====================================================================
         if (!emitted) {
-            const char* opcode = nullptr;
-            bool usedImm = false;
             std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-
-            // Try immediate forms for Add/Sub before loading both operands
-            if (inst->op_id_ == Instruction::Add) {
-                opcode = "add";
-                if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                        std::string r1 = loadInt(v1);
-                        emitMachineInstrLine(
-                            "\tadd " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
-                            MOpcode::Alu, {rd}, {r1});
-                        usedImm = true;
-                    }
-                }
-                if (!usedImm && dynamic_cast<ConstantInt*>(v1)) {
-                    auto ci = static_cast<ConstantInt*>(v1);
-                    if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                        std::string r2 = loadInt(v2);
-                        emitMachineInstrLine(
-                            "\tadd " + rd + ", " + r2 + ", #" + std::to_string(ci->value_),
-                            MOpcode::Alu, {rd}, {r2});
-                        usedImm = true;
-                    }
-                }
-            } else if (inst->op_id_ == Instruction::Sub) {
-                opcode = "sub";
-                // Skip immediate form when v1 is zero: sub rd, wzr, #imm is illegal
-                // ARM64 sub(immediate) uses the WSP encoding slot, so WZR is not allowed.
-                if (!(dynamic_cast<ConstantInt*>(v1) && static_cast<ConstantInt*>(v1)->value_ == 0)) {
-                    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-                        if (ci->value_ >= 0 && ci->value_ <= 4095) {
-                            std::string r1 = loadInt(v1);
-                            emitMachineInstrLine(
-                                "\tsub " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
-                                MOpcode::Alu, {rd}, {r1});
-                            usedImm = true;
-                        }
-                    }
-                }
-            }
+            // 先试 Add/Sub 立即数形（细节见 constStrengthReduce.cpp）
+            bool usedImm = tryEmitAddSubImm(inst, v1, v2, rd);
 
             if (!usedImm) {
                 std::string r1 = loadInt(v1);
                 std::string r2 = loadInt(v2);
+                const char* opcode = nullptr;
                 switch (inst->op_id_) {
                     case Instruction::Add:  opcode = "add";  break;
                     case Instruction::Sub:  opcode = "sub";  break;
@@ -1049,88 +800,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::SRem: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
-            int32_t divisor = ci->value_;
-            if (divisor == 0) {
-                // Fall through to the hardware sdiv+msub sequence.
-            } else if (divisor == 1 || divisor == -1) {
-                storeInt(inst, "wzr");
-                break;
-            } else if (divisor != INT32_MIN) {
-                int32_t absDivisor = divisor > 0 ? divisor : -divisor;
-
-                if (absDivisor == 2) {
-                    std::string r = loadInt(v1);
-                    // rd 在 tst 读 r 之前就被写入，rd 与 r 同号时必须走 scratch
-                    std::string rd = (hasAssignedReg(inst) && assignedReg(inst) != r)
-                                         ? assignedReg(inst) : allocIntReg();
-                    emitRawAluMachine("\tand " + rd + ", " + r + ", #1", rd, {r});
-                    emitMachineInstrLine("\ttst " + r + ", " + r,
-                                         MOpcode::Cmp, {}, {r}, 1, true);
-                    emitMachineInstrLine("\tcneg " + rd + ", " + rd + ", mi",
-                                         MOpcode::FlagUse, {rd}, {rd}, 1, false, true);
-                    storeInt(inst, rd);
-                    break;
-                } else if ((absDivisor & (absDivisor - 1)) == 0) {
-                    int k = __builtin_ctz(absDivisor);
-                    std::string rNum = loadInt(v1);
-                    std::string rSign = allocIntReg();
-                    std::string rQ = allocIntReg();
-
-                    emitRawAluMachine("\tasr " + rSign + ", " + rNum + ", #31",
-                                      rSign, {rNum});
-                    emitRawAluMachine("\tand " + rSign + ", " + rSign + ", #"
-                                          + std::to_string(absDivisor - 1),
-                                      rSign, {rSign});
-                    emitBinaryMachine("add", rQ, rNum, rSign);
-                    emitRawAluMachine("\tasr " + rQ + ", " + rQ + ", #"
-                                          + std::to_string(k),
-                                      rQ, {rQ});
-                    emitRawAluMachine("\tlsl " + rQ + ", " + rQ + ", #"
-                                          + std::to_string(k),
-                                      rQ, {rQ});
-
-                    std::string rResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                    emitBinaryMachine("sub", rResult, rNum, rQ);
-                    storeInt(inst, rResult);
-                    break;
-                } else if (absDivisor > 1) {
-                    Magic::MagicNumber mag = Magic::getMagic(absDivisor);
-                    std::string wNum = loadInt(v1);
-                    std::string wMagic = intConstReg(mag.multiplier);
-                    std::string xTemp = allocAddrReg();
-                    std::string wHi = "w" + xTemp.substr(1);
-
-                    emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
-                                      xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
-
-                    if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
-                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #"
-                                              + std::to_string(32 + mag.shift),
-                                          xTemp, {xTemp});
-                    } else {
-                        emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #32",
-                                          xTemp, {xTemp});
-                        if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
-                            emitBinaryMachine("add", wHi, wHi, wNum);
-                        else
-                            emitBinaryMachine("sub", wHi, wHi, wNum);
-                        emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #"
-                                              + std::to_string(mag.shift),
-                                          wHi, {wHi});
-                    }
-                    emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
-                                      wHi, {wHi, wNum});
-
-                    std::string wD = intConstReg(absDivisor);
-                    std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-                    emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNum,
-                                      wResult, {wHi, wD, wNum}, MOpcode::Mul, 3);
-                    storeInt(inst, wResult);
-                    break;
-                }
-            }
-        }
+        // 常量除数取余的强度削减集中在 constStrengthReduce.cpp
+        if (tryEmitSRemConst(inst, v1, v2))
+            break;
 
         // ---- 通用 SRem (变量除数或未优化情况) ----
         std::string ra = loadInt(v1);
@@ -1152,60 +824,21 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
 
+        // 常量短路 + logical-immediate 折叠集中在 constStrengthReduce.cpp
+        if (tryEmitLogicalConst(inst, v1, v2))
+            break;
+
+        // 通用：两操作数均非常量
         const char *opcode;
         if (inst->op_id_ == Instruction::And)      opcode = "and";
         else if (inst->op_id_ == Instruction::Or)   opcode = "orr";
         else                                        opcode = "eor";
 
-        ConstantInt *ci = dynamic_cast<ConstantInt*>(v2);
-        Value *var = v1;
-        if (!ci) {
-            ci = dynamic_cast<ConstantInt*>(v1);
-            var = v2;
-        }
-
-        if (ci) {
-            uint32_t imm = static_cast<uint32_t>(ci->value_);
-
-            if (inst->op_id_ == Instruction::And && imm == 0) {
-                storeInt(inst, "wzr");
-                break;
-            }
-            if (inst->op_id_ == Instruction::And && imm == UINT32_MAX) {
-                std::string r = loadInt(var);
-                storeInt(inst, r);
-                break;
-            }
-            if ((inst->op_id_ == Instruction::Or || inst->op_id_ == Instruction::Xor) &&
-                imm == 0) {
-                std::string r = loadInt(var);
-                storeInt(inst, r);
-                break;
-            }
-            if (inst->op_id_ == Instruction::Or && imm == UINT32_MAX) {
-                std::string allOnes = intConstReg(ci->value_);
-                storeInt(inst, allOnes);
-                break;
-            }
-
-            std::string r = loadInt(var);
-            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-            if (isLogicalImm32(imm)) {
-                emitRawAluMachine("\t" + std::string(opcode) + " " + rd + ", " + r
-                                      + ", #" + std::to_string(imm),
-                                  rd, {r});
-            } else {
-                std::string r2 = intConstReg(ci->value_);
-                emitBinaryMachine(opcode, rd, r, r2);
-            }
-            storeInt(inst, rd);
-        } else {
-            std::string r1 = loadInt(v1);
-            std::string r2 = loadInt(v2);
-            std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-            emitBinaryMachine(opcode, rd, r1, r2);
-            storeInt(inst, rd);
-        }
+        std::string r1 = loadInt(v1);
+        std::string r2 = loadInt(v2);
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        emitBinaryMachine(opcode, rd, r1, r2);
+        storeInt(inst, rd);
         break;
     }
 
@@ -1567,69 +1200,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
             // 否则是基本类型，不再更新（后续索引非法，但一般不会出现）
             
-            if (auto ci = dynamic_cast<ConstantInt*>(idx)) {
-                int offset = ci->value_ * elemSize;
-                if (offset != 0) {
-                    if (offset > 0 && offset <= 4095) {
-                        emitRawAluMachine("\tadd " + addr + ", " + addr + ", #" + std::to_string(offset),
-                                          addr, {addr});
-                    } else if (offset < 0 && -offset <= 4095) {
-                        emitRawAluMachine("\tsub " + addr + ", " + addr + ", #" + std::to_string(-offset),
-                                          addr, {addr});
-                    } else {
-                        emitIntConst(abs(offset), "x17");
-                        if (offset > 0)
-                            emitBinaryMachine("add", addr, addr, "x17");
-                        else
-                            emitBinaryMachine("sub", addr, addr, "x17");
-                    }
-                }
-            } else {
-                std::string idxReg = loadInt(idx);
-                auto isPowerOfTwo = [](int n) { return n > 0 && (n & (n - 1)) == 0; };
-                auto log2Int = [](int n) {
-                    int shift = 0;
-                    while ((1 << shift) < n) shift++;
-                    return shift;
-                };
-
-                if (elemSize > 1) {
-                    if (isPowerOfTwo(elemSize)) {
-                        int shift = log2Int(elemSize);
-                        if (shift <= 4) {
-                            std::string ext = indexExtendOpcode(idx, inst->parent_);
-                            if (shift > 0)
-                                ext += " #" + std::to_string(shift);
-                            emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
-                                              + idxReg + ", " + ext,
-                                              addr, {addr, idxReg});
-                        } else {
-                            std::string scaled = allocAddrReg();
-                            emitMoveMachine(scaled, idxReg,
-                                            indexExtendOpcode(idx, inst->parent_));
-                            emitRawAluMachine("\tadd " + addr + ", " + addr + ", " + scaled
-                                              + ", lsl #" + std::to_string(shift),
-                                              addr, {addr, scaled});
-                            freeAddrReg(scaled);
-                        }
-                    } else {
-                        std::string scaled = allocAddrReg();
-                        emitMoveMachine(scaled, idxReg,
-                                        indexExtendOpcode(idx, inst->parent_));
-                        std::string elemReg = allocAddrReg();
-                        emitIntConst(elemSize, elemReg);
-                        emitBinaryMachine("mul", scaled, scaled, elemReg, MOpcode::Mul, 3);
-                        emitBinaryMachine("add", addr, addr, scaled);
-                        freeAddrReg(elemReg);
-                        freeAddrReg(scaled);  // scaled 可以释放了，因为结果已累加到 addr
-                    }
-                } else {
-                    emitRawAluMachine("\tadd " + addr + ", " + addr + ", "
-                                      + idxReg + ", " + indexExtendOpcode(idx, inst->parent_),
-                                      addr, {addr, idxReg});
-                }
-                freeIntReg(idxReg);
-            }
+            // 单层下标的常量驱动地址削减集中在 constStrengthReduce.cpp
+            emitGepIndexStep(addr, idx, elemSize, inst);
         }
         if (!useAssignedAddr)
             storeAddr(inst, addr);

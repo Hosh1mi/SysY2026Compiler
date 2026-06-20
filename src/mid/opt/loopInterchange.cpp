@@ -21,7 +21,6 @@ bool debugEnabled() {
     return std::getenv("DEBUG_LOOP_INTERCHANGE") != nullptr;
 }
 
-// 收集 L（含所有子循环）体内的 load/store 访问与它们的 GEP。
 void collectAccesses(Loop *L, std::vector<Instruction *> &accs,
                      std::vector<GetElementPtrInst *> &geps) {
     for (auto *bb : L->blocksOrdered) {
@@ -37,7 +36,6 @@ void collectAccesses(Loop *L, std::vector<Instruction *> &accs,
     }
 }
 
-// K 的最深规范后代循环（用于收益对比的"当前最内可测循环"）。
 Loop *deepestCanonicalDescendant(Loop *K) {
     Loop *best = nullptr;
     int bestDepth = -1;
@@ -54,8 +52,6 @@ Loop *deepestCanonicalDescendant(Loop *K) {
     return best;
 }
 
-// 块内"内存计算切片"：块里所有 store 的同块反向切片（不含 phi）。
-// 这是要被包进 k-子循环的循环体实际工作；控制(IV 自增/比较/分支)不在其中。
 std::vector<Instruction *> storeSlice(BasicBlock *B) {
     std::set<Instruction *> inW;
     std::vector<Instruction *> work;
@@ -87,8 +83,6 @@ bool isCloneableType(Instruction *inst) {
 
 using ValMap = std::unordered_map<Value *, Value *>;
 
-// 克隆切片：unionW 成员要重算（递归克隆），kIV 重映射到 localk，
-// 其它值（常量/参数/全局/外层 IV 等支配值）原样引用。
 Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
                     const std::set<Instruction *> &unionW, PhiInst *kIV,
                     Value *localk, bool &ok);
@@ -148,7 +142,7 @@ Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
     if (!inst) return v;
     if (unionW.count(inst))
         return cloneInstInto(inst, dest, vm, unionW, kIV, localk, ok);
-    return v;   // 支配该处的可用值，原样引用
+    return v;   
 }
 
 void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
@@ -161,7 +155,6 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     newT->add_pre_basic_block(pred);
 }
 
-// 把 succ 里所有 phi 的 incoming-block 从 oldPred 改成 newPred。
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -171,7 +164,6 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
     }
 }
 
-// ── 变换：把并行循环 K 下沉到最内 ──────────────────────────────────────────
 bool applyParallelSink(Function *func, Loop *K) {
     Module  *module = func->parent_;
     Type    *i32    = module->int32_ty_;
@@ -190,7 +182,6 @@ bool applyParallelSink(Function *func, Loop *K) {
     BasicBlock *bodyEntry = K->blocks.count(t1) ? t1 : (K->blocks.count(t2) ? t2 : nullptr);
     if (!bodyEntry) return false;
 
-    // 收集 store 块及其切片。
     std::vector<BasicBlock *> storeBlocks;
     std::unordered_map<BasicBlock *, std::vector<Instruction *>> slices;
     std::set<Instruction *> unionW;
@@ -207,11 +198,9 @@ bool applyParallelSink(Function *func, Loop *K) {
     }
     if (storeBlocks.empty()) return false;
 
-    // ── 校验（变换前，全部满足才动手）──────────────────────────────────────
     for (auto *w : unionW)
         if (!isCloneableType(w)) return false;
-
-    // 切片必须是块内 phi 之后、控制尾之前的连续段。
+  
     for (auto *bb : storeBlocks) {
         auto &W = slices[bb];
         std::set<Instruction *> inW(W.begin(), W.end());
@@ -222,12 +211,11 @@ bool applyParallelSink(Function *func, Loop *K) {
             passedPhi = true;
             (void)passedPhi;
             if (inst == lastW) { seenLast = true; break; }
-            if (!inW.count(inst)) return false;   // 控制指令夹在切片中间
+            if (!inW.count(inst)) return false;   
         }
         if (!seenLast) return false;
     }
 
-    // unionW 的值只能被 unionW 内部使用（store 无结果）；否则分配会破坏活跃值。
     for (auto *w : unionW) {
         if (w->is_store()) continue;
         for (auto &u : w->use_list_) {
@@ -235,8 +223,7 @@ bool applyParallelSink(Function *func, Loop *K) {
             if (!user || !unionW.count(user)) return false;
         }
     }
-
-    // kIV 的使用只能在 unionW 或将被删除的 kHeader/kLatch 里（变换后须变死）。
+    
     for (auto &u : kIV->use_list_) {
         auto *user = dynamic_cast<Instruction *>(u.val_);
         if (!user) return false;
@@ -244,8 +231,7 @@ bool applyParallelSink(Function *func, Loop *K) {
         if (user->parent_ == kHeader || user->parent_ == kLatch) continue;
         return false;
     }
-
-    // unionW 指令的非切片操作数（除 kIV）必须支配其所在块。
+  
     for (auto *w : unionW) {
         for (unsigned i = 0; i < w->num_ops_; i++) {
             auto *op = dynamic_cast<Instruction *>(w->get_operand(i));
@@ -253,8 +239,7 @@ bool applyParallelSink(Function *func, Loop *K) {
             if (!func->dominates(op->parent_, w->parent_)) return false;
         }
     }
-
-    // ── Phase A：每个 store 块 → 拆出控制尾 + 包一层 k-子循环（克隆切片）──────
+    
     auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 2000); };
     auto newBB = [&](const std::string &tag) {
         return new BasicBlock(module, "li_" + tag + "_" + bbNum(), func);
@@ -265,8 +250,7 @@ bool applyParallelSink(Function *func, Loop *K) {
     for (auto *B : storeBlocks) {
         auto &W = slices[B];
         Instruction *lastW = W.back();
-
-        // 控制尾 = lastW 之后的所有指令（含终止符）。
+        
         std::vector<Instruction *> tail;
         bool after = false;
         for (auto *inst : B->instr_list_) {
@@ -282,10 +266,8 @@ bool applyParallelSink(Function *func, Loop *K) {
             if (auto *s = dynamic_cast<BasicBlock *>(origTerm->get_operand(i)))
                 origSuccs.push_back(s);
 
-        // 把控制尾整体搬到 bTail（保留 use 关系）。
         for (auto *inst : tail) { B->remove_instr(inst); bTail->add_instruction(inst); }
-
-        // 后继的 pre/succ 与 phi 入边：B → bTail。
+        
         for (auto *s : origSuccs) {
             B->remove_succ_basic_block(s);
             s->remove_pre_basic_block(B);
@@ -293,41 +275,35 @@ bool applyParallelSink(Function *func, Loop *K) {
             s->add_pre_basic_block(bTail);
             retargetPhiPred(s, B, bTail);
         }
-
-        // k-子循环块。
+        
         BasicBlock *skH = newBB("kH");
         BasicBlock *skB = newBB("kB");
         BasicBlock *skL = newBB("kL");
 
-        // B → skH（B 现保留 phi + 原切片，稍后 Phase B 删切片）。
         new BranchInst(skH, B);
         B->add_succ_basic_block(skH);
         skH->add_pre_basic_block(B);
-
-        // skH: phi localk; cmp; br skB, bTail
+        
         auto *localk = PhiInst::create_phi(i32, skH);
         localk->add_phi_pair_operand(c0, B);
         skH->add_instruction_front(localk);
         auto *cmp = new ICmpInst(ICmpInst::ICMP_SLT, localk, kBound, skH);
         new BranchInst(cmp, skB, bTail, skH);
-        skH->add_pre_basic_block(skL);   // 来自回边
-
-        // skB: 克隆切片（kIV→localk），br skL
+        skH->add_pre_basic_block(skL);   
+        
         ValMap vm;
         bool ok = true;
         for (auto *w : W) {
             cloneInstInto(w, skB, vm, unionW, kIV, localk, ok);
-            if (!ok) return false;   // 校验已保证可克隆，不应触发
+            if (!ok) return false;   
         }
         new BranchInst(skL, skB);
-
-        // skL: inc; br skH
+        
         auto *inc = new BinaryInst(i32, Instruction::Add, localk, c1, skL);
         localk->add_phi_pair_operand(inc, skL);
         new BranchInst(skH, skL);
     }
 
-    // ── Phase B：删除原切片（消费者先删，迭代到零使用）──────────────────────
     std::set<Instruction *> pending = unionW;
     bool progress = true;
     while (progress && !pending.empty()) {
@@ -343,16 +319,14 @@ bool applyParallelSink(Function *func, Loop *K) {
             }
         }
     }
-    if (!pending.empty()) return false;   // 理论上不会发生
-
-    // ── 降级 K：preheader→bodyEntry，latch→kExit；K.header 变不可达。 ────────
+    if (!pending.empty()) return false;   
+    
     replaceBranchTarget(kPre, kHeader, bodyEntry);
     replaceBranchTarget(kLatch, kHeader, kExit);
 
     removeUnreachableBlocks(func);
     return true;
 }
-
 } // namespace
 
 void LoopInterchange::execute(Module *module) {
@@ -407,8 +381,7 @@ bool LoopInterchange::runOnFunction(Function *func) {
             if (!K->preheader || !K->singleLatch() || !K->singleExit()) {
                 dbg(K, "not single pre/latch/exit"); continue;
             }
-            // K 头除规范 IV 外不得有其它 phi：那是 K 携带的标量循环依赖
-            // （reduction 等），内存依赖分析看不到，下沉会破坏语义。
+            
             bool scalarCarried = false;
             for (auto *inst : K->header->instr_list_) {
                 if (!inst->is_phi()) break;
@@ -438,7 +411,7 @@ bool LoopInterchange::runOnFunction(Function *func) {
         if (!applyParallelSink(func, target)) {
             if (debugEnabled())
                 std::cerr << "[LoopInterchange] applyParallelSink bailed\n";
-            break;   // 无法变换：避免死循环
+            break;   
         }
         everChanged = true;
     }

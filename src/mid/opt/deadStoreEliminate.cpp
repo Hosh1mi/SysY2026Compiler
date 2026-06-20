@@ -98,8 +98,13 @@ bool DeadStoreEliminate::isRedundantStore(StoreInst *store,
                 break;
             if (!afterLoad)
                 continue;
-            if (isModSet(AA.getModRefInfo(inst, storePtr)))
+            if (isModSet(AA.getModRefInfo(inst, storePtr))) {
+                if (auto *interStore = dynamic_cast<StoreInst *>(inst)) {
+                    if (interStore->get_operand(0) == store->get_operand(0))
+                        continue;
+                }
                 return false;
+            }
         }
     }
 
