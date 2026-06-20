@@ -360,6 +360,141 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     return true;
 }
 
+// ── 模仿射递推折叠 ───────────────────────────────────────────────────────────
+// 识别 while (i < N) { total = (total + c) % m; i++ }（i:0/+1，c>0,m>0 常量）。
+// 保留原循环作慢路径，在 preheader 前插入守卫：
+//   total0 >= 0 && N >= 1 && N <= (INT_MAX - m)/c
+// 守卫成立时走快路径 total_final = (total0 % m + c*N) % m（全 i32 不溢出，且
+// 被除数恒非负 ⇒ C 截断取模 == 数学取模 ⇒ 与逐次迭代严格相等）；否则走原循环。
+bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
+                                           BasicBlock *latch, PhiInst *ivPhi,
+                                           PhiInst *totalPhi, BasicBlock *loopExit,
+                                           Value *bound, Value *totalInit,
+                                           Value *totalLatch, long long ivInit,
+                                           long long ivStride) {
+    (void)latch;
+    (void)ivPhi;
+    // 仅规范 0/+1 IV：此时 trip count 恰为 N（当 N>=1）。
+    if (ivInit != 0 || ivStride != 1) return false;
+    if (modFolded_.count(loop.header)) return false;
+
+    // total_latch 必须恰为 srem(add(total_phi, c), m)，c>0, m>0 常量。
+    auto *rem = dynamic_cast<BinaryInst *>(totalLatch);
+    if (!rem || !rem->is_rem()) return false;
+    if (!loop.blocks.count(rem->parent_)) return false;
+    auto *mCI = dynamic_cast<ConstantInt *>(rem->get_operand(1));
+    if (!mCI || mCI->value_ <= 0) return false;
+    long long m = mCI->value_;
+
+    auto *add = dynamic_cast<BinaryInst *>(rem->get_operand(0));
+    if (!add || !add->is_add() || !loop.blocks.count(add->parent_)) return false;
+    Value *addL = add->get_operand(0), *addR = add->get_operand(1);
+    ConstantInt *cCI = nullptr;
+    if (addL == totalPhi) cCI = dynamic_cast<ConstantInt *>(addR);
+    else if (addR == totalPhi) cCI = dynamic_cast<ConstantInt *>(addL);
+    if (!cCI || cCI->value_ <= 0) return false;
+    long long c = cCI->value_;
+
+    // total_phi 在循环内只能被那个 add 使用 → 递推确为 (total+c)%m。
+    for (auto &use : totalPhi->use_list_) {
+        auto *u = dynamic_cast<Instruction *>(use.val_);
+        if (!u || !u->parent_ || !loop.blocks.count(u->parent_)) continue;
+        if (u != add) return false;
+    }
+
+    // 除 total_phi 外，循环内任何值（含 IV）不得被循环外使用：折叠后快路径
+    // 不执行循环，这些值在外部将变为 undefined。
+    for (auto *bb : loop.blocks)
+        for (auto *inst : bb->instr_list_) {
+            if (inst == totalPhi) continue;
+            for (auto &use : inst->use_list_) {
+                auto *u = dynamic_cast<Instruction *>(use.val_);
+                if (u && u->parent_ && !loop.blocks.count(u->parent_))
+                    return false;
+            }
+        }
+
+    // 出口必须是循环专属（唯一前驱为 header）且暂不含 phi（保持简单、安全）。
+    if (loopExit->pre_bbs_.size() != 1 || loopExit->pre_bbs_[0] != loop.header)
+        return false;
+    if (!loopExit->instr_list_.empty() &&
+        loopExit->instr_list_.front()->is_phi())
+        return false;
+
+    // preheader 必须以无条件 br 跳向 header。
+    BasicBlock *PH = loop.preheader;
+    auto *phTerm = PH->get_terminator();
+    if (!phTerm || !phTerm->is_br() || phTerm->num_ops_ != 1) return false;
+    if (phTerm->get_operand(0) != loop.header) return false;
+
+    // 防溢出上界：c*N <= INT_MAX - m  →  N <= (INT_MAX - m)/c。
+    long long BOUND = ((long long)std::numeric_limits<int>::max() - m) / c;
+    if (BOUND < 1) return false;
+
+    Function *func = loop.header->parent_;
+    auto *i32 = module->int32_ty_;
+    auto *i1 = module->int1_ty_;
+
+    // ── 1. preheader 守卫：(total0>=0) && (N>=1) && (N<=BOUND) ──
+    auto *zero = new ConstantInt(i32, 0);
+    auto *one = new ConstantInt(i32, 1);
+    auto *boundC = new ConstantInt(i32, (int)BOUND);
+    auto *condA = new ICmpInst(ICmpInst::ICMP_SGE, totalInit, zero, PH, true);
+    auto *condN1 = new ICmpInst(ICmpInst::ICMP_SGE, bound, one, PH, true);
+    auto *condN2 = new ICmpInst(ICmpInst::ICMP_SLE, bound, boundC, PH, true);
+    auto *and1 = new BinaryInst(i1, Instruction::And, condA, condN1, PH, true);
+    auto *cond = new BinaryInst(i1, Instruction::And, and1, condN2, PH, true);
+    PH->add_instruction_before_terminator(condA);
+    PH->add_instruction_before_terminator(condN1);
+    PH->add_instruction_before_terminator(condN2);
+    PH->add_instruction_before_terminator(and1);
+    PH->add_instruction_before_terminator(cond);
+
+    // ── 2. fast 块：total_final = (total0 % m + c*N) % m ──
+    auto *fast = new BasicBlock(module, loop.header->name_ + ".modfold.fast", func);
+    auto *cM = new ConstantInt(i32, (int)m);
+    auto *cC = new ConstantInt(i32, (int)c);
+    auto *a0 = new BinaryInst(i32, Instruction::SRem, totalInit, cM, fast, true);
+    auto *cn = new BinaryInst(i32, Instruction::Mul, cC, bound, fast, true);
+    auto *sum = new BinaryInst(i32, Instruction::Add, a0, cn, fast, true);
+    auto *tot = new BinaryInst(i32, Instruction::SRem, sum, cM, fast, true);
+    fast->add_instruction(a0);
+    fast->add_instruction(cn);
+    fast->add_instruction(sum);
+    fast->add_instruction(tot);
+    new BranchInst(loopExit, fast); // fast → loopExit（自动追加为终止指令）
+
+    // ── 3. 改写 preheader 终止指令：br cond, fast, header ──
+    PH->delete_instr(phTerm);
+    new BranchInst(cond, fast, loop.header, PH);
+    PH->add_succ_basic_block(fast);
+    fast->add_pre_basic_block(PH);
+    fast->add_succ_basic_block(loopExit);
+    loopExit->add_pre_basic_block(fast);
+
+    // ── 4. 出口合并：exit_phi = [total_phi(来自header), tot(来自fast)]，
+    //        改写 total_phi 的全部循环外使用。 ──
+    std::vector<Value *> vals = {totalPhi, tot};
+    std::vector<BasicBlock *> bbs = {loop.header, fast};
+    auto *exitPhi = new PhiInst(Instruction::PHI, vals, bbs, i32, loopExit);
+    loopExit->add_instruction_front(exitPhi);
+
+    std::vector<std::pair<Instruction *, unsigned>> toReplace;
+    for (auto &use : totalPhi->use_list_) {
+        auto *u = dynamic_cast<Instruction *>(use.val_);
+        if (u && u != exitPhi && u->parent_ && !loop.blocks.count(u->parent_))
+            toReplace.push_back({u, use.arg_no_});
+    }
+    for (auto &[u, argNo] : toReplace) u->set_operand(argNo, exitPhi);
+
+    modFolded_.insert(loop.header);
+    if (std::getenv("DEBUG_LOOP_REPFOLD"))
+        std::cerr << "[LoopRepFold] modular fold func=" << func->name_
+                  << " header=" << loop.header->name_ << " c=" << c
+                  << " m=" << m << "\n";
+    return true;
+}
+
 // ── 主变换 ──────────────────────────────────────────────────────────────────
 
 bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
@@ -426,6 +561,11 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     }
     if (!total_init || !total_latch) return debugReject("cannot find total init/latch incoming");
     if (!isLoopInvariant(total_init, loop.blocks)) return debugReject("total init is not invariant");
+
+    if (tryFoldModularRecurrence(loop, module, latch, r_phi, total_phi,
+                                 loop_exit, N, total_init, total_latch,
+                                 ivInit, ivStride))
+        return true;
 
     if (tryFoldAffineSum(loop, module, SE, latch, r_phi, total_phi,
                          loop_exit, N, total_init, total_latch,
@@ -615,6 +755,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
 void LoopRepFold::runOnFunction(Function *func, AnalysisManager *AM) {
     if (func->basic_blocks_.empty() || !AM) return;
+    modFolded_.clear();
 
     // 折叠成功后 CFG 已变（仿射路径还会整体删块），Loop 快照过期 →
     // 失效缓存、重新分析再扫，直到无折叠机会。

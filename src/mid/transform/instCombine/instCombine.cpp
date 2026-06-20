@@ -1,9 +1,12 @@
 #include "../../../include/mid/opt/instCombine.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "instCombineInternal.hpp"
 
 #include <iostream>
 #include <unordered_set>
 #include <vector>
+
+thread_local RangeAnalysis *gInstCombineRangeAnalysis = nullptr;
 
 // ── trySinkInstruction ──────────────────────────────────────────────
 // If inst has exactly one user and that user is in a different block,
@@ -65,11 +68,20 @@ static void trySinkInstruction(Instruction *inst) {
 void InstCombine::execute(Module *module) {
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
-        runOnFunction(func);
+        runOnFunction(func, nullptr);
     }
 }
 
-void InstCombine::runOnFunction(Function *func) {
+PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
+    bool changed = false;
+    for (auto func : module->function_list_) {
+        if (func->is_declaration()) continue;
+        changed |= runOnFunction(func, &AM);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     auto countInstructions = [&]() -> size_t {
         size_t total = 0;
         for (auto *bb : func->basic_blocks_)
@@ -93,6 +105,10 @@ void InstCombine::runOnFunction(Function *func) {
     size_t processedCount = 0;
     size_t createdCount = 0;
     bool budgetHit = false;
+    bool changed = false;
+
+    RangeAnalysis *savedRangeAnalysis = gInstCombineRangeAnalysis;
+    gInstCombineRangeAnalysis = AM ? &AM->getRangeAnalysis(func) : nullptr;
 
     std::vector<Instruction*> worklist;
     std::unordered_set<Instruction *> inWorklist;
@@ -200,6 +216,7 @@ void InstCombine::runOnFunction(Function *func) {
         }
 
         if (replacement) {
+            changed = true;
             std::vector<Instruction*> users;
             for (auto &use : inst->use_list_) {
                 if (auto *user_inst = dynamic_cast<Instruction*>(use.val_))
@@ -214,6 +231,12 @@ void InstCombine::runOnFunction(Function *func) {
 
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
+            if (AM) {
+                AM->clearRangeAnalyses();
+                gInstCombineRangeAnalysis = &AM->getRangeAnalysis(func);
+            } else if (gInstCombineRangeAnalysis) {
+                gInstCombineRangeAnalysis->clearCache();
+            }
 
             for (auto *user : users)
                 enqueueIfAlive(user, worklist, inWorklist);
@@ -233,10 +256,13 @@ void InstCombine::runOnFunction(Function *func) {
         }
     }
 
+    gInstCombineRangeAnalysis = savedRangeAnalysis;
+
     if (budgetHit) {
         std::cerr << "[InstCombine] budget hit in @" << func->name_
                   << " processed=" << processedCount
                   << " created=" << createdCount
                   << " initial_insts=" << initialInstrCount << "\n";
     }
+    return changed;
 }

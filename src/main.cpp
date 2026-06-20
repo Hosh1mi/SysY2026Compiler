@@ -247,6 +247,7 @@ static void addLoopPipeline(PassManager &pm, bool enableSimdParallel) {
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
+    pm.addPass(std::make_unique<LoopVectorize>());
     // Peel loop-invariant 2D-array row bases (`&A[i][0]`) into preheader-hoisted
     // GEPs. Runs last in the loop pipeline: the earlier passes (parallelize,
     // vectorize, IVSR) keep matching/strength-reducing the original flat GEPs,

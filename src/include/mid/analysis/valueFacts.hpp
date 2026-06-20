@@ -205,6 +205,37 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (auto *ci = dynamic_cast<ConstantInt *>(v))
         return ci->value_ >= 0;
 
+    if (auto *arg = dynamic_cast<Argument *>(v)) {
+        auto *func = arg->parent_;
+        auto *module = func ? func->parent_ : nullptr;
+        if (!func || !module)
+            return nonNegativeBranchImpl(v, ctx);
+
+        bool foundCaller = false;
+        for (auto *caller : module->function_list_) {
+            if (!caller || caller->is_declaration() || caller == func)
+                continue;
+            for (auto *bb : caller->basic_blocks_) {
+                for (auto *inst : bb->instr_list_) {
+                    auto *call = dynamic_cast<CallInst *>(inst);
+                    if (!call)
+                        continue;
+                    auto *callee =
+                        dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                    if (callee != func || arg->arg_no_ >= call->num_ops_ - 1)
+                        continue;
+                    foundCaller = true;
+                    if (!isKnownNonNegativeImpl(call->get_operand(arg->arg_no_),
+                                                call->parent_, depth + 1))
+                        return false;
+                }
+            }
+        }
+        if (foundCaller)
+            return true;
+        return nonNegativeBranchImpl(v, ctx);
+    }
+
     auto *inst = dynamic_cast<Instruction *>(v);
     if (!inst)
         return nonNegativeBranchImpl(v, ctx);
@@ -217,6 +248,9 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (inst->op_id_ == Instruction::LShr || inst->op_id_ == Instruction::ZExt ||
         inst->op_id_ == Instruction::Clz)
         return true;
+
+    if (inst->op_id_ == Instruction::AShr)
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
 
     if (inst->op_id_ == Instruction::And) {
         auto *mask = dynamic_cast<ConstantInt *>(inst->get_operand(1));

@@ -2,7 +2,7 @@
 #include "ir.hpp"
 #include "../../frontend/ast/ast.hpp"
 #include <map>
-
+#define ENABLE_PROFILING_HOOKS
 class Scope {
 public:
     // enter a new scope

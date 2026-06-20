@@ -3,3 +3,6 @@ docs/
 test/
 .*
 *.md
+*.txt
+*.pdf
+*.o

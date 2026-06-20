@@ -16,6 +16,24 @@ static bool isScalarIntGlobal(GlobalVariable *gv) {
     return pt->contained_->tid_ == Type::IntegerTyID;
 }
 
+// Promotion is sound only if no callee can observe the global. A callee can
+// observe it only by naming it directly (handled by the call check) or through
+// a pointer to it. The latter is impossible exactly when the global's address
+// never escapes — i.e. every use is a direct `load gv` (operand 0) or
+// `store v, gv` (operand 1). Any other use (GEP base, call arg, storing the
+// address itself) means the address escaped: refuse promotion so we never
+// redirect the direct accesses while an escaped pointer keeps the stale global.
+static bool scalarGlobalAddressEscapes(GlobalVariable *gv) {
+    for (auto &use : gv->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user) return true;
+        if (user->is_load() && use.arg_no_ == 0) continue;
+        if (user->is_store() && use.arg_no_ == 1) continue;
+        return true;
+    }
+    return false;
+}
+
 static bool hasBlockingCall(Function *func) {
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
@@ -24,10 +42,20 @@ static bool hasBlockingCall(Function *func) {
 
             auto *callee = dynamic_cast<Function *>(
                 call->get_operand(call->num_ops_ - 1));
-            if (!callee || callee->is_declaration())
+            // Indirect call: unknown target, conservatively block.
+            if (!callee)
                 return true;
+            // SysY runtime library functions (declarations) are separately
+            // compiled and cannot name a user-defined global; a scalar int
+            // global's address never escapes (no `&` in SysY), so such calls
+            // can never read or write a promotable scalar global. Crossing
+            // them is safe.
+            if (callee->is_declaration())
+                continue;
             if (callee->hasSemFlag(SemFlag::FnPure))
                 continue;
+            // A user-defined non-pure function may load/store the global
+            // directly; conservatively block promotion in this function.
             return true;
         }
     }
@@ -47,6 +75,15 @@ static void promoteInFunction(Function *func) {
     std::vector<std::pair<LoadInst *, GlobalVariable *>>   origLoads;
     std::vector<std::pair<StoreInst *, GlobalVariable *>>  origStores;
 
+    std::unordered_map<GlobalVariable *, bool> promotableCache;
+    auto promotable = [&](GlobalVariable *gv) -> bool {
+        auto it = promotableCache.find(gv);
+        if (it != promotableCache.end()) return it->second;
+        bool ok = isScalarIntGlobal(gv) && !scalarGlobalAddressEscapes(gv);
+        promotableCache[gv] = ok;
+        return ok;
+    };
+
     auto noteGlobal = [&](GlobalVariable *gv) {
         if (seenGlobals.insert(gv).second) usedGlobals.push_back(gv);
     };
@@ -55,14 +92,14 @@ static void promoteInFunction(Function *func) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_load()) {
                 auto *gv = dynamic_cast<GlobalVariable *>(inst->get_operand(0));
-                if (gv && isScalarIntGlobal(gv)) {
+                if (gv && promotable(gv)) {
                     noteGlobal(gv);
                     origLoads.push_back({static_cast<LoadInst *>(inst), gv});
                 }
             }
             if (inst->is_store()) {
                 auto *gv = dynamic_cast<GlobalVariable *>(inst->get_operand(1));
-                if (gv && isScalarIntGlobal(gv)) {
+                if (gv && promotable(gv)) {
                     noteGlobal(gv);
                     origStores.push_back({static_cast<StoreInst *>(inst), gv});
                 }

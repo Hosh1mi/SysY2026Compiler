@@ -83,7 +83,43 @@ Value* visitICmp(ICmpInst *inst) {
         }
     }
 
-    // 4. Fold add/sub with constant into the comparison
+    // // 4. icmp eq/ne (srem x, 2), 1  ->  (x > 0) && ((x & 1) == 1)
+    // if (cy && cy->value_ == 1 &&
+    //     (pred == ICmpInst::ICMP_EQ || pred == ICmpInst::ICMP_NE)) {
+    //     auto *srem = dynamic_cast<BinaryInst *>(x);
+    //     auto *divisor = srem ? as_const_int(srem->get_operand(1)) : nullptr;
+    //     if (srem && srem->op_id_ == Instruction::SRem && divisor &&
+    //         divisor->value_ == 2) {
+    //         Value *src = srem->get_operand(0);
+    //         auto *mask = new BinaryInst(src->type_, Instruction::And, src,
+    //                                     make_const_int(src->type_, 1), bb, true);
+    //         stampIntegerFacts(mask);
+    //         bb->add_instruction_before_inst(mask, inst);
+
+    //         auto *odd = new ICmpInst(ICmpInst::ICMP_EQ, mask,
+    //                                  make_const_int(src->type_, 1), bb, true);
+    //         bb->add_instruction_before_inst(odd, inst);
+
+    //         auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, src,
+    //                                       make_const_int(src->type_, 0), bb, true);
+    //         bb->add_instruction_before_inst(positive, inst);
+
+    //         auto *match = new BinaryInst(ty, Instruction::And, positive, odd, bb, true);
+    //         stampIntegerFacts(match);
+    //         bb->add_instruction_before_inst(match, inst);
+
+    //         if (pred == ICmpInst::ICMP_EQ)
+    //             return match;
+
+    //         auto *negated = new BinaryInst(ty, Instruction::Xor, match,
+    //                                        make_const_int(ty, 1), bb, true);
+    //         stampIntegerFacts(negated);
+    //         bb->add_instruction_before_inst(negated, inst);
+    //         return negated;
+    //     }
+    // }
+
+    // 5. Fold add/sub with constant into the comparison
     return foldICmpAddSub(inst);
 }
 
