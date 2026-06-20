@@ -433,6 +433,82 @@ static bool tryMachineRetargetCopyDest(
 	return true;
 }
 
+// Split a NEON register operand into its number and arrangement, e.g.
+// "v10.4s" → num="10", arr=".4s".  Returns false for anything that is not a
+// v-register with a lane arrangement.
+static bool splitVectorOperand(const std::string &op, std::string &num,
+                               std::string &arr) {
+	if (op.size() < 4 || op[0] != 'v' || !std::isdigit((unsigned char)op[1]))
+		return false;
+	size_t dot = op.find('.');
+	if (dot == std::string::npos || dot == 1)
+		return false;
+	num = op.substr(1, dot - 1);
+	for (char c : num)
+		if (!std::isdigit((unsigned char)c)) return false;
+	arr = op.substr(dot); // includes the leading '.'
+	return true;
+}
+
+// NEON-arrangement-aware counterpart of tryMachineRetargetCopyDest.
+//
+//   <vec-op> vX.<arr>, ...        ; pure vector def (destination is write-only)
+//   mov      vY.16b, vX.16b       ; full-width copy of the result
+//     →  <vec-op> vY.<arr>, ...   (copy removed)
+//
+// The scalar retarget pass refuses the 'v' register class on purpose: it would
+// splice the copy's destination spelling (always `.16b`) onto the producer,
+// corrupting a lane arrangement such as `.4s`.  Here we keep the producer's
+// arrangement and swap only the register number.  Accumulating forms
+// (mla / mls) and lane inserts read their destination, so they are excluded —
+// renaming the destination there would change which prior value is folded in.
+static bool tryMachineRetargetVectorCopyDest(
+    MachineBasicBlock &block, size_t idx,
+    const MachineLivenessResult &liveness) {
+	if (idx + 1 >= block.instrs.size()) return false;
+
+	ParsedLine producer = parseLine(block.instrs[idx].text);
+	ParsedLine copy = parseLine(block.instrs[idx + 1].text);
+	if (producer.kind != LineKind::Instruction || producer.operands.empty())
+		return false;
+	if (copy.kind != LineKind::Instruction || copy.mnemonic != "mov" ||
+	    copy.operands.size() != 2)
+		return false;
+
+	static const std::set<std::string> vecPureDef = {
+		"movi", "dup", "add", "sub", "mul",
+		"fadd", "fsub", "fmul",
+		"and", "orr", "eor", "bic",
+		"sshl", "sshr", "ushr"};
+	if (!vecPureDef.count(producer.mnemonic)) return false;
+
+	std::string prodNum, prodArr, dstNum, dstArr, srcNum, srcArr;
+	if (!splitVectorOperand(producer.operands[0], prodNum, prodArr)) return false;
+	if (!splitVectorOperand(copy.operands[0], dstNum, dstArr)) return false;
+	if (!splitVectorOperand(copy.operands[1], srcNum, srcArr)) return false;
+	// The copy must be a full-width move of the producer's exact result.
+	if (dstArr != ".16b" || srcArr != ".16b" || srcNum != prodNum) return false;
+
+	if (dstNum == prodNum) { // degenerate self-copy
+		block.instrs.erase(block.instrs.begin() + idx + 1);
+		return true;
+	}
+
+	// The producer's destination must be dead after the copy; otherwise the
+	// rename would drop a still-needed value.
+	auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx + 1]);
+	if (liveIt == liveness.instrLiveOut.end()) return false;
+	for (const auto &def : block.instrs[idx].defs)
+		if (liveIt->second.count(def)) return false;
+
+	std::vector<std::string> operands = producer.operands;
+	operands[0] = "v" + dstNum + prodArr;
+	replaceMachineInstr(block.instrs[idx],
+	                    makeMachineInsn(producer.mnemonic, operands));
+	block.instrs.erase(block.instrs.begin() + idx + 1);
+	return true;
+}
+
 static bool canPropagateCopy(const ParsedLine &line,
                              const std::string &tempReg,
                              const std::string &srcReg,
@@ -1841,6 +1917,10 @@ void peepholeOptimize(MachineFunction &func) {
 					break;
 				}
 				if (tryMachineRetargetCopyDest(func.blocks[b], i, liveness)) {
+					changed = true;
+					break;
+				}
+				if (tryMachineRetargetVectorCopyDest(func.blocks[b], i, liveness)) {
 					changed = true;
 					break;
 				}
