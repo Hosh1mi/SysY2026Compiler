@@ -1803,8 +1803,6 @@ void LoopVectorize::emitVectorizedLoop(
             }
             return result;
         };
-
-        // Step 1: Collect stores, grouped by GEP base key.
         // Also handle pointer-phi stores (e.g. store to %ptr_phi),
         // which represent offset 0 but have no GEP-typed pointer.
         struct StoreInfo {
@@ -1910,7 +1908,6 @@ void LoopVectorize::emitVectorizedLoop(
             }
             if (!hasAll) continue;
 
-            // Step 2a: Check if stored values are all constants → direct ConstantVector store
             {
                 bool allConst = true;
                 for (int j = 0; j < vecWidth; j++) {
@@ -1951,7 +1948,6 @@ void LoopVectorize::emitVectorizedLoop(
                 }
             }
 
-            // Step 2b: Check if stored values come from a vectorizable binop
             auto *rootBinop = dynamic_cast<BinaryInst*>(vec[0]->storedVal);
             if (!rootBinop) continue;
             // Only integer NEON-supported opcodes; skip float
@@ -1968,7 +1964,6 @@ void LoopVectorize::emitVectorizedLoop(
             if (!sameBinop) continue;
 
 
-            // Step 3: For each operand of the root binop, pack into vector
             Type *vecTy  = getVecTy(rootBinop->type_);
             Type *vecPtrTy = getVecPtrTy(rootBinop->type_);
             Value *vecOp[2] = {nullptr, nullptr};
@@ -2055,11 +2050,9 @@ void LoopVectorize::emitVectorizedLoop(
                 }
             }
 
-            // Step 4: Create vector binop
             auto *vecBinop = new BinaryInst(vecTy, rootBinop->op_id_,
                                              vecOp[0], vecOp[1], vecBody);
 
-            // Step 5: GEP + bitcast + vector store
             auto *firstGep = vec[0]->gep;
             if (!firstGep) {
                 for (int jj = 1; jj < vecWidth; jj++)
@@ -2074,7 +2067,6 @@ void LoopVectorize::emitVectorizedLoop(
             auto *bc = new Bitcast(Instruction::BitCast, newGep, vecPtrTy, vecBody);
             new StoreInst(vecBinop, bc, vecBody);
 
-            // Step 6: Remove old scalar stores and binops.
             // Do NOT remove the GEPs — they may still be used by loads
             // (e.g. C[i][j] += A[i][k]*B[k][j] where C pointer is
             // shared between load and store). DCE will clean them up.
