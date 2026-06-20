@@ -43,6 +43,7 @@
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
+#include "include/backend/riscv/codegen.hpp"
 #include "include/mid/opt/parallelizeLoops.hpp"
 
 #include <algorithm>
@@ -55,6 +56,10 @@
 #include <vector>
 
 namespace {
+
+// 目标后端架构：直接在源码中以变量指明（不经命令行参数）。切换后端只需改这里。
+enum class TargetArch { Arm64, Riscv };
+constexpr TargetArch kTargetArch = TargetArch::Riscv;
 
 struct DriverOptions {
     char *input = nullptr;
@@ -270,7 +275,8 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     }
 }
 
-static void configureBackend(Arm64CodeGen &codegen, const DriverOptions &options) {
+template <class CodeGen>
+static void configureBackend(CodeGen &codegen, const DriverOptions &options) {
     bool enableOptimizations = options.optLevel >= 1;
     codegen.setEnableRegAlloc(enableOptimizations);
     codegen.setNoPeephole(!enableOptimizations || options.disablePeephole);
@@ -366,10 +372,14 @@ int main(int argc, char **argv) {
         return -1;
 
     if (options.printAsm || options.dumpMachineInstr) {
-        Arm64CodeGen codegen(m.get(), *out);
-        configureBackend(codegen, options);
-        codegen.generate();
-        {
+        if (kTargetArch == TargetArch::Riscv) {
+            RiscvCodeGen codegen(m.get(), *out);
+            configureBackend(codegen, options);
+            codegen.generate();
+        } else {
+            Arm64CodeGen codegen(m.get(), *out);
+            configureBackend(codegen, options);
+            codegen.generate();
             // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
             bool hasParallel = hasParallelForCall(m.get());
             std::vector<int> bodyIds = parallelBodyIds(m.get());
