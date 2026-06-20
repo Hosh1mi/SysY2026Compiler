@@ -244,47 +244,47 @@ inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {
     return false;
 }
 
-// Can we prove the lower `k` bits of v are all zero?
-// (i.e. v is a multiple of 2^k).
-// When `ctx` is provided we also inspect dominating branch conditions.
-inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx = nullptr) {
-    if (k <= 0) return true;
-    int mask = (1 << k) - 1;
+// // Can we prove the lower `k` bits of v are all zero?
+// // (i.e. v is a multiple of 2^k).
+// // When `ctx` is provided we also inspect dominating branch conditions.
+// inline bool isKnownMultipleOf(Value *v, int k, BasicBlock *ctx = nullptr) {
+//     if (k <= 0) return true;
+//     int mask = (1 << k) - 1;
 
-    // Constant case.
-    if (auto *ci = dynamic_cast<ConstantInt*>(v))
-        return (ci->value_ & mask) == 0;
+//     // Constant case.
+//     if (auto *ci = dynamic_cast<ConstantInt*>(v))
+//         return (ci->value_ & mask) == 0;
 
-    auto *inst = dynamic_cast<Instruction*>(v);
-    if (!inst)
-        return ctx ? isKnownMultipleOfFromBranch(v, k, ctx) : false;
+//     auto *inst = dynamic_cast<Instruction*>(v);
+//     if (!inst)
+//         return ctx ? isKnownMultipleOfFromBranch(v, k, ctx) : false;
 
-    // shl y, n  →  lower n bits are zero.
-    if (inst->op_id_ == Instruction::Shl) {
-        auto *amt = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-        if (amt && amt->value_ >= k) return true;
-    }
+//     // shl y, n  →  lower n bits are zero.
+//     if (inst->op_id_ == Instruction::Shl) {
+//         auto *amt = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+//         if (amt && amt->value_ >= k) return true;
+//     }
 
-    // mul y, C  →  if C is a multiple of 2^k, result is too.
-    if (inst->op_id_ == Instruction::Mul) {
-        auto *c1 = dynamic_cast<ConstantInt*>(inst->get_operand(0));
-        auto *c2 = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-        if ((c1 && (c1->value_ & mask) == 0) ||
-            (c2 && (c2->value_ & mask) == 0))
-            return true;
-    }
+//     // mul y, C  →  if C is a multiple of 2^k, result is too.
+//     if (inst->op_id_ == Instruction::Mul) {
+//         auto *c1 = dynamic_cast<ConstantInt*>(inst->get_operand(0));
+//         auto *c2 = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+//         if ((c1 && (c1->value_ & mask) == 0) ||
+//             (c2 && (c2->value_ & mask) == 0))
+//             return true;
+//     }
 
-    // and y, M  →  if M has lower k bits zero, result does too.
-    if (inst->op_id_ == Instruction::And) {
-        auto *amask = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-        if (!amask) amask = dynamic_cast<ConstantInt*>(inst->get_operand(0));
-        if (amask && (amask->value_ & mask) == 0) return true;
-    }
+//     // and y, M  →  if M has lower k bits zero, result does too.
+//     if (inst->op_id_ == Instruction::And) {
+//         auto *amask = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+//         if (!amask) amask = dynamic_cast<ConstantInt*>(inst->get_operand(0));
+//         if (amask && (amask->value_ & mask) == 0) return true;
+//     }
 
-// Also try branch-condition analysis.
-    if (ctx) return isKnownMultipleOfFromBranch(v, k, ctx);
-    return false;
-}
+// // Also try branch-condition analysis.
+//     if (ctx) return isKnownMultipleOfFromBranch(v, k, ctx);
+//     return false;
+// }
 
 extern thread_local RangeAnalysis *gInstCombineRangeAnalysis;
 
