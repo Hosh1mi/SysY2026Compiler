@@ -221,7 +221,11 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-static void addLoopPipeline(PassManager &pm) {
+// enableSimdParallel：是否启用与目标平台 SIMD/并行运行时强相关的循环变换。
+// ARM(A53, NEON + 并行 runtime)开启；RISC-V(BOOM, 无 SIMD、暂无并行 runtime)
+// 关闭——LoopVectorize 会产出向量 IR(InsertElement)、ParallelizeLoops 依赖
+// ARM 专属 dispatch/runtime,二者都不适用于当前 RISC-V 后端。
+static void addLoopPipeline(PassManager &pm, bool enableSimdParallel) {
     // pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.beginRepeatGroup(/*maxRounds=*/8);
@@ -236,8 +240,10 @@ static void addLoopPipeline(PassManager &pm) {
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
     pm.addPass(std::make_unique<LoopInterchange>());
-    pm.addPass(std::make_unique<ParallelizeLoops>());
-    pm.addPass(std::make_unique<LoopVectorize>());
+    if (enableSimdParallel) {
+        pm.addPass(std::make_unique<ParallelizeLoops>());
+        pm.addPass(std::make_unique<LoopVectorize>());
+    }
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
@@ -249,10 +255,8 @@ static void addLoopPipeline(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
-static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
-    if (optLevel < 1)
-        return;
-
+// 中端优化管线的公共主体。enableSimdParallel 控制目标相关的 SIMD/并行变换。
+static void buildPipelineCommon(PassManager &pm, bool enableSimdParallel) {
     addSsaPreparation(pm);
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
@@ -260,7 +264,7 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     // Second stamp: refresh attributes and immutable-load facts after the
     // global promotion / Mem2Reg / cleanup sequence, then feed loop+GVN.
     pm.addPass(std::make_unique<SemanticMarkerStamp>());
-    addLoopPipeline(pm);
+    addLoopPipeline(pm, enableSimdParallel);
     pm.addPass(std::make_unique<GVN>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CodeSink>());
@@ -269,10 +273,28 @@ static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
+}
 
-    if (optLevel >= 2) {
-        
-    }
+// ARM64 后端中端管线：启用 NEON 向量化与并行 runtime 相关变换。
+static void buildArm64Pipeline(PassManager &pm, int optLevel) {
+    if (optLevel < 1)
+        return;
+    buildPipelineCommon(pm, /*enableSimdParallel=*/true);
+}
+
+// RISC-V 后端中端管线：目标无 SIMD、暂无并行 runtime，关闭向量化与并行化，
+// 其余标量/循环/全局优化与 ARM 共用。
+static void buildRiscvPipeline(PassManager &pm, int optLevel) {
+    if (optLevel < 1)
+        return;
+    buildPipelineCommon(pm, /*enableSimdParallel=*/false);
+}
+
+static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
+    if (kTargetArch == TargetArch::Riscv)
+        buildRiscvPipeline(pm, optLevel);
+    else
+        buildArm64Pipeline(pm, optLevel);
 }
 
 template <class CodeGen>

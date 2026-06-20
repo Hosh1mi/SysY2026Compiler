@@ -1,7 +1,9 @@
 #include "../../include/backend/riscv/context.hpp"
+#include "../../include/backend/riscv/regalloc.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,44 +56,50 @@ int RiscvFuncContext::slotOf(Value *v) {
     return it != slots_.end() ? it->second : 0;
 }
 
-// 预扫描：为形参、所有产生结果的指令、alloca 区域分配栈槽，并计算帧大小。
+// 预扫描：确定 callee-saved 保存区，为溢出值/alloca 区域分配栈槽，计算帧大小。
 void RiscvFuncContext::planFrame() {
-    localCursor_ = 0;
+    // 收集实际占用的 callee-saved（来自图着色结果），有序去重，确定保存区大小。
+    {
+        std::set<std::string> cs;
+        for (auto &kv : assignedRegs_) cs.insert(kv.second);
+        usedCalleeSaved_.assign(cs.begin(), cs.end());
+    }
+    saveAreaBytes_ = 16 + static_cast<int>(usedCalleeSaved_.size()) * 8;
 
-    // 形参槽（统一 8 字节，前奏中由实参寄存器/入参栈搬入）。
+    localCursor_ = 0;
+    auto slotBase = [&]() { return -(saveAreaBytes_ + localCursor_); };
+
+    // 形参槽：仅未分配寄存器（溢出）的形参需要。
     for (auto *arg : func_->arguments_) {
+        if (hasReg(arg)) continue;
         localCursor_ += 8;
-        slots_[arg] = -(16 + localCursor_);
+        slots_[arg] = slotBase();
     }
 
     int maxPhi = 0;
     for (auto *bb : func_->basic_blocks_) {
         int phiCnt = 0;
         for (auto *inst : bb->instr_list_) {
-            if (inst->is_phi()) {
-                phiCnt++;
-                localCursor_ += 8;
-                slots_[inst] = -(16 + localCursor_);
-                continue;
-            }
+            if (inst->is_phi()) phiCnt++;
             if (inst->is_alloca()) {
                 auto *al = static_cast<AllocaInst *>(inst);
                 int region = alignUp(sizeOfType(al->alloca_ty_), 8);
                 localCursor_ += region;
-                slots_[inst] = -(16 + localCursor_);  // 区域基址（最低地址）
+                slots_[inst] = slotBase();  // 区域基址（最低地址）
                 continue;
             }
             if (inst->is_void()) continue;  // store/br/ret/void-call 无结果
+            if (hasReg(inst)) continue;     // 已分配寄存器，无需栈槽
             localCursor_ += 8;
-            slots_[inst] = -(16 + localCursor_);
+            slots_[inst] = slotBase();
         }
         if (phiCnt > maxPhi) maxPhi = phiCnt;
     }
 
-    // phi 并行拷贝临时区（maxPhi 个 8 字节槽）。
+    // phi 并行拷贝临时区（maxPhi 个 8 字节槽，供边上两遍拷贝使用）。
     phiTempBytes_ = maxPhi * 8;
     localCursor_ += phiTempBytes_;
-    phiTempBase_ = -(16 + localCursor_);
+    phiTempBase_ = -(saveAreaBytes_ + localCursor_);
 
     // 出参溢出区：取所有 call 的栈传参字节上界。
     outArgBytes_ = 0;
@@ -113,7 +121,7 @@ void RiscvFuncContext::planFrame() {
     }
     outArgBytes_ = alignUp(outArgBytes_, 16);
 
-    frameSize_ = alignUp(16 + localCursor_ + outArgBytes_, 16);
+    frameSize_ = alignUp(saveAreaBytes_ + localCursor_ + outArgBytes_, 16);
 }
 
 // ── 发射辅助 ────────────────────────────────────────────────────────────────
@@ -179,6 +187,10 @@ const char *RiscvFuncContext::memMnemonic(SlotKind kind, bool load) {
 // ── 取值 / 写回 ──────────────────────────────────────────────────────────────
 
 void RiscvFuncContext::loadInt(Value *v, const std::string &reg) {
+    if (hasReg(v)) {
+        if (reg != regOf(v)) emit("mv " + reg + ", " + regOf(v));
+        return;
+    }
     if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
         emit("li " + reg + ", " + std::to_string(ci->value_));
         return;
@@ -187,6 +199,10 @@ void RiscvFuncContext::loadInt(Value *v, const std::string &reg) {
 }
 
 void RiscvFuncContext::loadAddr(Value *v, const std::string &reg) {
+    if (hasReg(v)) {
+        if (reg != regOf(v)) emit("mv " + reg + ", " + regOf(v));
+        return;
+    }
     if (auto *gv = dynamic_cast<GlobalVariable *>(v)) {
         emit("la " + reg + ", " + gv->name_);
         return;
@@ -205,6 +221,10 @@ void RiscvFuncContext::loadAddr(Value *v, const std::string &reg) {
 }
 
 void RiscvFuncContext::loadFloat(Value *v, const std::string &freg) {
+    if (hasReg(v)) {
+        if (freg != regOf(v)) emit("fmv.s " + freg + ", " + regOf(v));
+        return;
+    }
     if (auto *cf = dynamic_cast<ConstantFloat *>(v)) {
         int bits;
         float f = cf->value_;
@@ -217,6 +237,15 @@ void RiscvFuncContext::loadFloat(Value *v, const std::string &freg) {
 }
 
 void RiscvFuncContext::storeResult(Value *v, const std::string &reg) {
+    if (hasReg(v)) {
+        const std::string &dst = regOf(v);
+        if (dst == reg) return;
+        if (slotKindOf(v) == SlotKind::Float)
+            emit("fmv.s " + dst + ", " + reg);
+        else
+            emit("mv " + dst + ", " + reg);
+        return;
+    }
     emitStoreSlot(reg, slotOf(v), slotKindOf(v));
 }
 
@@ -227,6 +256,11 @@ std::string RiscvFuncContext::blockLabel(BasicBlock *bb) const {
 // ── 顶层生成 ────────────────────────────────────────────────────────────────
 
 void RiscvFuncContext::generate() {
+    if (enableRegAlloc_) {
+        RiscvRegAlloc ra(func_);
+        ra.allocate();
+        assignedRegs_ = ra.assignedRegs();
+    }
     planFrame();
     emitPrologue();
     for (auto *bb : func_->basic_blocks_)
@@ -264,34 +298,59 @@ void RiscvFuncContext::emitPrologue() {
         emit("add s0, sp, t0");  // t0 仍持有 fs
     }
 
-    // 入参搬入各形参槽。
+    // 保存被占用的 callee-saved（在搬入实参覆盖它们之前）。整型 sd、浮点 fsd。
+    for (size_t k = 0; k < usedCalleeSaved_.size(); ++k) {
+        const std::string &r = usedCalleeSaved_[k];
+        int off = -(24 + 8 * static_cast<int>(k));
+        bool isF = !r.empty() && r[0] == 'f';
+        emitMem((isF ? "fsd " : "sd ") + r + ", " + std::to_string(off) + "(s0)", false);
+    }
+
+    // 入参搬入：已分配寄存器的形参搬到其物理寄存器，溢出的写入栈槽。
+    // 实参源寄存器(a*/fa*)与被分配寄存器(s*/fs*)不相交，顺序搬移即安全。
     int gp = 0, fp = 0, stackIn = 0;
     for (auto *arg : func_->arguments_) {
-        if (arg->type_ && arg->type_->tid_ == Type::FloatTyID) {
-            if (fp < kNumFpArgRegs) {
-                emitStoreSlot(fpArgRegs()[fp], slotOf(arg), SlotKind::Float);
-                fp++;
+        bool isFloat = arg->type_ && arg->type_->tid_ == Type::FloatTyID;
+        if (isFloat) {
+            bool inReg = fp < kNumFpArgRegs;
+            std::string src = inReg ? fpArgRegs()[fp] : std::string();
+            if (hasReg(arg)) {
+                if (inReg) emit("fmv.s " + regOf(arg) + ", " + src);
+                else emitLoadSlot(regOf(arg), stackIn, SlotKind::Float);
+            } else if (inReg) {
+                emitStoreSlot(src, slotOf(arg), SlotKind::Float);
             } else {
                 emitLoadSlot(scratch::fp0(), stackIn, SlotKind::Float);
                 emitStoreSlot(scratch::fp0(), slotOf(arg), SlotKind::Float);
-                stackIn += 8;
             }
+            if (inReg) fp++; else stackIn += 8;
         } else {
             SlotKind kind = slotKindOf(arg);
-            if (gp < kNumIntArgRegs) {
-                emitStoreSlot(intArgRegs()[gp], slotOf(arg), kind);
-                gp++;
+            bool inReg = gp < kNumIntArgRegs;
+            std::string src = inReg ? intArgRegs()[gp] : std::string();
+            if (hasReg(arg)) {
+                if (inReg) emit("mv " + regOf(arg) + ", " + src);
+                else emitLoadSlot(regOf(arg), stackIn, kind);
+            } else if (inReg) {
+                emitStoreSlot(src, slotOf(arg), kind);
             } else {
                 emitLoadSlot(scratch::int0(), stackIn, kind);
                 emitStoreSlot(scratch::int0(), slotOf(arg), kind);
-                stackIn += 8;
             }
+            if (inReg) gp++; else stackIn += 8;
         }
     }
 }
 
 void RiscvFuncContext::emitEpilogue() {
     int fs = frameSize_;
+    // 恢复 callee-saved（s0 仍有效，用 s0 相对寻址）。
+    for (size_t k = 0; k < usedCalleeSaved_.size(); ++k) {
+        const std::string &r = usedCalleeSaved_[k];
+        int off = -(24 + 8 * static_cast<int>(k));
+        bool isF = !r.empty() && r[0] == 'f';
+        emitMem((isF ? "fld " : "ld ") + r + ", " + std::to_string(off) + "(s0)", true);
+    }
     auto loadSpRel = [&](const std::string &reg, int off) {
         if (fitsImm12(off)) {
             emitMem("ld " + reg + ", " + std::to_string(off) + "(sp)", true);
@@ -394,7 +453,7 @@ void RiscvFuncContext::emitInstruction(Instruction *inst) {
         break;
     case Instruction::BitCast:
         loadAddr(inst->get_operand(0), scratch::addr0());
-        emitStoreSlot(scratch::addr0(), slotOf(inst), SlotKind::Pointer);
+        storeResult(inst, scratch::addr0());
         break;
     case Instruction::Select:
         emitSelect(static_cast<SelectInst *>(inst));
@@ -639,7 +698,7 @@ void RiscvFuncContext::emitGep(GetElementPtrInst *inst) {
             emit("add " + std::string(scratch::addr0()) + ", " + scratch::addr0() + ", " + scratch::int0());
         }
     }
-    emitStoreSlot(scratch::addr0(), slotOf(inst), SlotKind::Pointer);
+    storeResult(inst, scratch::addr0());
 }
 
 void RiscvFuncContext::emitLoad(LoadInst *inst) {

@@ -54,15 +54,22 @@ private:
                        const std::string &base = "s0");
     static const char *memMnemonic(SlotKind kind, bool load);
 
-    // ── 取值到寄存器 / 写回栈槽 ────────────────────────────────────────
-    // 把整型/指针值 v 加载到 reg（常量 li、全局 la、alloca addi、否则读槽）。
+    // ── 取值到寄存器 / 写回结果 ────────────────────────────────────────
+    // 这些辅助统一处理"已分配寄存器"与"溢出栈槽"两种情形：值若被分配到物理
+    // 寄存器，则取值=从该寄存器搬移、写回=搬移到该寄存器（不访存、不占栈槽）；
+    // 否则走常量物化 / 全局 la / alloca addi / 栈槽 lw/sw 的溢出路径。
+    // 寄存器分配关闭(-O0)时 assignedRegs_ 为空，全部走栈槽，等价于朴素路径。
     void loadInt(Value *v, const std::string &reg);
-    // 把地址类值 v（指针）加载到 reg。
     void loadAddr(Value *v, const std::string &reg);
-    // 把浮点值 v 加载到浮点寄存器 freg。
     void loadFloat(Value *v, const std::string &freg);
-    // 把寄存器写回 v 的结果槽。
     void storeResult(Value *v, const std::string &reg);
+
+    // 寄存器分配结果查询。
+    bool hasReg(Value *v) const { return assignedRegs_.count(v) > 0; }
+    std::string regOf(Value *v) const {
+        auto it = assignedRegs_.find(v);
+        return it == assignedRegs_.end() ? std::string() : it->second;
+    }
 
     std::string blockLabel(BasicBlock *bb) const;
     int slotOf(Value *v);  // 返回 v 的 s0 相对偏移（必要时即时分配）
@@ -94,9 +101,15 @@ private:
     riscv::MFunction &mfunc_;
     bool enableRegAlloc_;
 
+    // 图着色结果：Value* → 物理寄存器 ABI 名（仅 callee-saved，见 RiscvRegAlloc）。
+    std::map<Value *, std::string> assignedRegs_;
+    // 实际被占用、需在前奏/收场保存恢复的 callee-saved 寄存器（s*/fs*），有序去重。
+    std::vector<std::string> usedCalleeSaved_;
+
     std::map<Value *, int> slots_;  // Value* → s0 相对偏移（负）
     int frameSize_ = 0;
-    int localCursor_ = 0;   // 已分配的局部字节数（自 s0-16 向下）
+    int localCursor_ = 0;   // 已分配的局部字节数（自保存区下方向下）
+    int saveAreaBytes_ = 16;  // ra+s0(16) + callee-saved 保存区字节数
     int outArgBytes_ = 0;   // 出参溢出区字节数
     int phiTempBase_ = 0;   // phi 临时槽区起始（s0 相对偏移）
     int phiTempBytes_ = 0;  // phi 临时槽区字节数
