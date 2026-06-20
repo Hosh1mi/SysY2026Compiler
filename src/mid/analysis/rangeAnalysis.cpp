@@ -40,16 +40,24 @@ RangeAnalysis::RangeAnalysis(Function *func, AnalysisManager *AM, const LoopInfo
 
 void RangeAnalysis::clear() {
     cache_.clear();
+    // memoryInFacts_.clear();
+    // memoryOutFacts_.clear();
     blockFacts_.clear();
     postDomSets_.clear();
     ipdom_.clear();
     visiting_.clear();
+    // memoryFactsComputed_ = false;
+    // memoryFactsComputing_ = false;
     returnSummary_ = ReturnSummary{};
 }
 
 void RangeAnalysis::clearCache() {
     cache_.clear();
+    memoryInFacts_.clear();
+    memoryOutFacts_.clear();
     visiting_.clear();
+    memoryFactsComputed_ = false;
+    memoryFactsComputing_ = false;
     returnSummary_ = ReturnSummary{};
 }
 
@@ -358,6 +366,7 @@ RangeAnalysis::IntRange RangeAnalysis::getRangeImpl(Value *v, BasicBlock *ctx) {
     if (auto *zext = dynamic_cast<ZextInst *>(v)) return getZExtRange(zext, ctx);
     if (auto *icmp = dynamic_cast<ICmpInst *>(v)) return getICmpRange(icmp, ctx);
     if (auto *sel = dynamic_cast<SelectInst *>(v)) return getSelectRange(sel, ctx);
+    // if (auto *load = dynamic_cast<LoadInst *>(v)) return getLoadRange(load, ctx);
     if (auto *gep = dynamic_cast<GetElementPtrInst *>(v)) return getGEPOffsetRange(gep, ctx);
     if (auto *inst = dynamic_cast<Instruction *>(v)) {
         (void)inst;
@@ -779,6 +788,146 @@ RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBloc
     auto f = getRange(sel->get_operand(2), ctx);
     return t.join(f);
 }
+
+// RangeAnalysis::MemoryFactSet
+// RangeAnalysis::meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts) {
+//     MemoryFactSet result;
+//     if (predFacts.empty()) return result;
+
+//     result = predFacts.front();
+//     for (size_t i = 1; i < predFacts.size(); ++i) {
+//         for (auto it = result.pointerUpper.begin(); it != result.pointerUpper.end();) {
+//             auto jt = predFacts[i].pointerUpper.find(it->first);
+//             if (jt == predFacts[i].pointerUpper.end() || jt->second != it->second) {
+//                 it = result.pointerUpper.erase(it);
+//             } else {
+//                 ++it;
+//             }
+//         }
+//     }
+//     return result;
+// }
+
+// long long RangeAnalysis::getNormalizedValueMod(Value *v, BasicBlock *ctx) {
+//     auto range = getRange(v, ctx);
+//     if (!range.valid || range.isTop || range.isBottom) return 0;
+//     if (range.lower < 0 || range.upper < 0) return 0;
+//     if (range.upper == std::numeric_limits<long long>::max()) return 0;
+//     return range.upper + 1;
+// }
+
+// void RangeAnalysis::killMemoryFactsFor(Value *ptr, MemoryFactSet &facts,
+//                                        BasicAliasAnalysis &AA) {
+//     if (!ptr) {
+//         facts.pointerUpper.clear();
+//         return;
+//     }
+
+//     for (auto it = facts.pointerUpper.begin(); it != facts.pointerUpper.end();) {
+//         if (AA.alias(it->first, ptr) != AliasResult::NoAlias) {
+//             it = facts.pointerUpper.erase(it);
+//         } else {
+//             ++it;
+//         }
+//     }
+// }
+
+// void RangeAnalysis::transferMemoryFact(Instruction *inst, MemoryFactSet &facts) {
+//     if (!inst || !AM_ || !func_ || !func_->parent_) return;
+
+//     auto &AA = AM_->getBasicAA(func_->parent_);
+
+//     if (inst->is_store()) {
+//         auto *ptr = inst->get_operand(1);
+//         killMemoryFactsFor(ptr, facts, AA);
+
+//         long long upperPlusOne = getNormalizedValueMod(inst->get_operand(0), inst->parent_);
+//         if (upperPlusOne > 0)
+//             facts.pointerUpper[ptr] = upperPlusOne - 1;
+//         return;
+//     }
+
+//     if (inst->is_call()) {
+//         auto *call = static_cast<CallInst *>(inst);
+//         for (auto it = facts.pointerUpper.begin(); it != facts.pointerUpper.end();) {
+//             if (isModSet(AA.getCallModRef(call, it->first))) {
+//                 it = facts.pointerUpper.erase(it);
+//             } else {
+//                 ++it;
+//             }
+//         }
+//     }
+// }
+
+// void RangeAnalysis::computeMemoryFacts() {
+//     if (memoryFactsComputed_ || memoryFactsComputing_ || !func_ || !AM_) return;
+//     memoryFactsComputing_ = true;
+//     memoryInFacts_.clear();
+//     memoryOutFacts_.clear();
+
+//     for (auto *bb : func_->basic_blocks_) {
+//         memoryInFacts_[bb] = MemoryFactSet{};
+//         memoryOutFacts_[bb] = MemoryFactSet{};
+//     }
+
+//     bool changed = true;
+//     while (changed) {
+//         changed = false;
+//         for (auto *bb : func_->basic_blocks_) {
+//             std::vector<MemoryFactSet> predFacts;
+//             for (auto *pred : bb->pre_bbs_) {
+//                 auto it = memoryOutFacts_.find(pred);
+//                 predFacts.push_back(it == memoryOutFacts_.end() ? MemoryFactSet{} : it->second);
+//             }
+
+//             MemoryFactSet in = meetMemoryFacts(predFacts);
+//             MemoryFactSet out = in;
+//             for (auto *inst : bb->instr_list_) {
+//                 transferMemoryFact(inst, out);
+//             }
+
+//             if (memoryInFacts_[bb] != in || memoryOutFacts_[bb] != out) {
+//                 memoryInFacts_[bb] = std::move(in);
+//                 memoryOutFacts_[bb] = std::move(out);
+//                 changed = true;
+//             }
+//         }
+//     }
+
+//     memoryFactsComputing_ = false;
+//     memoryFactsComputed_ = true;
+//     cache_.clear();
+// }
+
+// const RangeAnalysis::MemoryFactSet &RangeAnalysis::entryMemoryFacts(BasicBlock *bb) {
+//     static const MemoryFactSet empty;
+//     if (!bb) return empty;
+//     computeMemoryFacts();
+//     auto it = memoryInFacts_.find(bb);
+//     return it == memoryInFacts_.end() ? empty : it->second;
+// }
+
+// RangeAnalysis::MemoryFactSet RangeAnalysis::memoryFactsBefore(Instruction *target) {
+//     MemoryFactSet facts;
+//     if (!target || !target->parent_) return facts;
+//     facts = entryMemoryFacts(target->parent_);
+//     for (auto *inst : target->parent_->instr_list_) {
+//         if (inst == target) break;
+//         transferMemoryFact(inst, facts);
+//     }
+//     return facts;
+// }
+
+// RangeAnalysis::IntRange RangeAnalysis::getLoadRange(LoadInst *load, BasicBlock *ctx) {
+//     (void)ctx;
+//     if (!load || !isIntegerValue(load)) return IntRange::top();
+//     if (memoryFactsComputing_) return IntRange::top();
+
+//     auto facts = memoryFactsBefore(load);
+//     auto it = facts.pointerUpper.find(load->get_operand(0));
+//     if (it == facts.pointerUpper.end()) return IntRange::top();
+//     return IntRange::bounded(0, it->second);
+// }
 
 long long RangeAnalysis::inferDirectReturnModulus(Value *v) const {
     auto *inst = dynamic_cast<Instruction *>(v);

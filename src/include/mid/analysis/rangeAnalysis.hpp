@@ -11,6 +11,7 @@
 #include <vector>
 
 class AnalysisManager;
+class BasicAliasAnalysis;
 
 class RangeAnalysis {
 public:
@@ -124,6 +125,7 @@ private:
     IntRange getPhiRange(PhiInst *phi, BasicBlock *ctx);
     IntRange getCallRange(CallInst *call, BasicBlock *ctx);
     IntRange getArgumentRange(Argument *arg, BasicBlock *ctx);
+    IntRange getLoadRange(LoadInst *load, BasicBlock *ctx);
     IntRange getICmpRange(ICmpInst *icmp, BasicBlock *ctx);
     IntRange getSelectRange(SelectInst *sel, BasicBlock *ctx);
     IntRange getSCEVRange(Value *v, BasicBlock *ctx);
@@ -132,6 +134,26 @@ private:
     bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting) const;
     long long getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx);
     long long inferDirectReturnModulus(Value *v) const;
+    long long getNormalizedValueMod(Value *v, BasicBlock *ctx);
+
+    struct MemoryFactSet {
+        std::map<Value *, long long> pointerUpper;
+
+        bool operator==(const MemoryFactSet &o) const {
+            return pointerUpper == o.pointerUpper;
+        }
+
+        bool operator!=(const MemoryFactSet &o) const {
+            return !(*this == o);
+        }
+    };
+
+    const MemoryFactSet &entryMemoryFacts(BasicBlock *bb);
+    MemoryFactSet memoryFactsBefore(Instruction *target);
+    void computeMemoryFacts();
+    void transferMemoryFact(Instruction *inst, MemoryFactSet &facts);
+    void killMemoryFactsFor(Value *ptr, MemoryFactSet &facts, BasicAliasAnalysis &AA);
+    static MemoryFactSet meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts);
 
     TruthValue compareRanges(ICmpInst::ICmpOp pred, const IntRange &lhs,
                              const IntRange &rhs) const;
@@ -162,10 +184,14 @@ private:
 
     std::map<CacheKey, IntRange> cache_;
     std::map<BasicBlock *, std::vector<PredicateFact>> blockFacts_;
+    std::map<BasicBlock *, MemoryFactSet> memoryInFacts_;
+    std::map<BasicBlock *, MemoryFactSet> memoryOutFacts_;
     std::map<BasicBlock *, std::set<BasicBlock *>> postDomSets_;
     std::map<BasicBlock *, BasicBlock *> ipdom_;
     std::set<std::pair<Value *, BasicBlock *>> visiting_;
     unsigned queryDepth_ = 0;
+    bool memoryFactsComputed_ = false;
+    bool memoryFactsComputing_ = false;
 
     struct ReturnSummary {
         bool computed = false;
