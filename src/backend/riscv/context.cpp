@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -461,13 +462,130 @@ void RiscvFuncContext::emitInstruction(Instruction *inst) {
     case Instruction::PHI:
         break;  // 由 emitPhiCopies 处理
     default:
-        // 向量等目标平台不支持/当前路径未覆盖的指令：留待后续接入。
-        emit("# unhandled inst op_id=" + std::to_string(inst->op_id_));
-        break;
+        throw std::runtime_error("RISC-V backend: unsupported IR opcode " +
+                                 std::to_string(inst->op_id_));
     }
 }
 
 void RiscvFuncContext::emitBinary(Instruction *inst) {
+    auto *lhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(0));
+    auto *rhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+
+    // Exact algebraic identities whose RV32 word semantics match the IR for
+    // every input, including INT_MIN. These reduce instruction count without
+    // relying on a target latency guess.
+    if (inst->op_id_ == Instruction::Mul && (lhsConst || rhsConst)) {
+        ConstantInt *constant = rhsConst ? rhsConst : lhsConst;
+        Value *other = rhsConst ? inst->get_operand(0) : inst->get_operand(1);
+        int value = constant->value_;
+        if (value == 0) {
+            emit("li " + std::string(scratch::int0()) + ", 0");
+            storeResult(inst, scratch::int0());
+            return;
+        }
+        if (value == 1) {
+            loadInt(other, scratch::int0());
+            storeResult(inst, scratch::int0());
+            return;
+        }
+        if (value == -1) {
+            loadInt(other, scratch::int0());
+            emit("negw " + std::string(scratch::int0()) + ", " + scratch::int0());
+            storeResult(inst, scratch::int0());
+            return;
+        }
+        if (value > 0 && (value & (value - 1)) == 0) {
+            int shift = 0;
+            while ((1U << shift) != static_cast<unsigned>(value)) ++shift;
+            loadInt(other, scratch::int0());
+            emit("slliw " + std::string(scratch::int0()) + ", " + scratch::int0() +
+                 ", " + std::to_string(shift));
+            storeResult(inst, scratch::int0());
+            return;
+        }
+    }
+
+    if ((inst->op_id_ == Instruction::SDiv ||
+         inst->op_id_ == Instruction::UDiv) && rhsConst && rhsConst->value_ == 1) {
+        loadInt(inst->get_operand(0), scratch::int0());
+        storeResult(inst, scratch::int0());
+        return;
+    }
+    if (inst->op_id_ == Instruction::SDiv && rhsConst && rhsConst->value_ == -1) {
+        loadInt(inst->get_operand(0), scratch::int0());
+        emit("negw " + std::string(scratch::int0()) + ", " + scratch::int0());
+        storeResult(inst, scratch::int0());
+        return;
+    }
+    if (rhsConst &&
+        ((inst->op_id_ == Instruction::SRem &&
+          (rhsConst->value_ == 1 || rhsConst->value_ == -1)) ||
+         (inst->op_id_ == Instruction::URem && rhsConst->value_ == 1))) {
+        emit("li " + std::string(scratch::int0()) + ", 0");
+        storeResult(inst, scratch::int0());
+        return;
+    }
+
+    Value *registerOperand = nullptr;
+    long immediate = 0;
+    const char *immMnemonic = nullptr;
+
+    switch (inst->op_id_) {
+    case Instruction::Add:
+        if (rhsConst && fitsImm12(rhsConst->value_)) {
+            registerOperand = inst->get_operand(0);
+            immediate = rhsConst->value_;
+            immMnemonic = "addiw";
+        } else if (lhsConst && fitsImm12(lhsConst->value_)) {
+            registerOperand = inst->get_operand(1);
+            immediate = lhsConst->value_;
+            immMnemonic = "addiw";
+        }
+        break;
+    case Instruction::Sub:
+        if (rhsConst) {
+            long negated = -static_cast<long>(rhsConst->value_);
+            if (fitsImm12(negated)) {
+                registerOperand = inst->get_operand(0);
+                immediate = negated;
+                immMnemonic = "addiw";
+            }
+        }
+        break;
+    case Instruction::And:
+    case Instruction::Or:
+    case Instruction::Xor: {
+        ConstantInt *constant = rhsConst ? rhsConst : lhsConst;
+        if (constant && fitsImm12(constant->value_)) {
+            registerOperand = rhsConst ? inst->get_operand(0) : inst->get_operand(1);
+            immediate = constant->value_;
+            immMnemonic = inst->op_id_ == Instruction::And ? "andi" :
+                          inst->op_id_ == Instruction::Or ? "ori" : "xori";
+        }
+        break;
+    }
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
+        if (rhsConst && rhsConst->value_ >= 0 && rhsConst->value_ < 32) {
+            registerOperand = inst->get_operand(0);
+            immediate = rhsConst->value_;
+            immMnemonic = inst->op_id_ == Instruction::Shl ? "slliw" :
+                          inst->op_id_ == Instruction::LShr ? "srliw" : "sraiw";
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (immMnemonic) {
+        loadInt(registerOperand, scratch::int0());
+        emit(std::string(immMnemonic) + " " + scratch::int0() + ", " +
+             scratch::int0() + ", " + std::to_string(immediate));
+        storeResult(inst, scratch::int0());
+        return;
+    }
+
     const char *mn = "addw";
     switch (inst->op_id_) {
     case Instruction::Add:  mn = "addw"; break;
@@ -693,8 +811,18 @@ void RiscvFuncContext::emitGep(GetElementPtrInst *inst) {
             emit("add " + std::string(scratch::addr0()) + ", " + scratch::addr0() + ", " + scratch::int1());
         } else {
             loadInt(idx, scratch::int0());
-            emit("li " + std::string(scratch::int1()) + ", " + std::to_string(stride));
-            emit("mul " + std::string(scratch::int0()) + ", " + scratch::int0() + ", " + scratch::int1());
+            if (stride > 0 && (stride & (stride - 1)) == 0) {
+                int shift = 0;
+                while ((1U << shift) != static_cast<unsigned>(stride)) ++shift;
+                if (shift != 0)
+                    emit("slli " + std::string(scratch::int0()) + ", " +
+                         scratch::int0() + ", " + std::to_string(shift));
+            } else {
+                emit("li " + std::string(scratch::int1()) + ", " +
+                     std::to_string(stride));
+                emit("mul " + std::string(scratch::int0()) + ", " +
+                     scratch::int0() + ", " + scratch::int1());
+            }
             emit("add " + std::string(scratch::addr0()) + ", " + scratch::addr0() + ", " + scratch::int0());
         }
     }

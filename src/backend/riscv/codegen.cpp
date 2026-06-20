@@ -1,10 +1,13 @@
 #include "../../include/backend/riscv/codegen.hpp"
 #include "../../include/backend/riscv/context.hpp"
 #include "../../include/backend/riscv/machine.hpp"
+#include "../../include/backend/riscv/machineDCE.hpp"
+#include "../../include/backend/riscv/peephole.hpp"
 #include "../../include/mid/ir/ir.hpp"
 
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -82,6 +85,16 @@ void RiscvCodeGen::generate() {
             mfunc.name = f->name_;
             RiscvFuncContext ctx(f, mfunc, enable_regalloc_);
             ctx.generate();
+            if (dump_pre_machine_instr_)
+                std::cerr << riscv::dumpMFunction(mfunc);
+            if (!no_peephole_) {
+                riscv::forwardAdjacentStoreLoads(mfunc);
+                riscv::removeSelfMoves(mfunc);
+                riscv::eliminateDeadMachineInstructions(mfunc);
+                riscv::removeSelfMoves(mfunc);
+            }
+            if (dump_machine_instr_)
+                std::cerr << riscv::dumpMFunction(mfunc);
             body << riscv::printMFunction(mfunc);
         }
     }

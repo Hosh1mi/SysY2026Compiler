@@ -1,9 +1,9 @@
 #pragma once
 // RISC-V 后端驱动：遍历 Module，发射数据段与各函数代码到输出流。
 //
-// 对外接口与 ARM 后端（Arm64CodeGen）保持一致的方法名，使 main.cpp 能以同一套
-// 配置代码切换后端。框架阶段只走朴素（无寄存器分配）代码生成路径，setNo*/set
-// EnableRegAlloc 等开关被记录但暂不驱动后端优化（后续接入）。
+// 对外接口与 ARM 后端（Arm64CodeGen）保持一致的方法名。RISC-V 的寄存器分配、
+// 机器 DCE、低风险窥孔和 machine dump 均由这些开关显式控制；调度开关保留给
+// 后续基于 BOOM 资源模型的实现。
 
 #include "../../mid/ir/ir.hpp"
 #include "machine.hpp"
