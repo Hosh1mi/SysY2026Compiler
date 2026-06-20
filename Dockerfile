@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y \
     cmake \
     python3 \
     gdb-multiarch \
+    gcc-riscv64-linux-gnu \
+    qemu-user-static \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

@@ -140,24 +140,26 @@ void RiscvFuncContext::emitTerminator(const std::string &text) {
     mfunc_.push(m);
 }
 
-void RiscvFuncContext::emitLoadSlot(const std::string &reg, int off, SlotKind kind) {
+void RiscvFuncContext::emitLoadSlot(const std::string &reg, int off, SlotKind kind,
+                                    const std::string &base) {
     const char *mn = memMnemonic(kind, /*load=*/true);
     if (fitsImm12(off)) {
-        emitMem(std::string(mn) + " " + reg + ", " + std::to_string(off) + "(s0)", true);
+        emitMem(std::string(mn) + " " + reg + ", " + std::to_string(off) + "(" + base + ")", true);
     } else {
         emit("li " + std::string(scratch::frame0()) + ", " + std::to_string(off));
-        emit("add " + std::string(scratch::frame0()) + ", s0, " + scratch::frame0());
+        emit("add " + std::string(scratch::frame0()) + ", " + base + ", " + scratch::frame0());
         emitMem(std::string(mn) + " " + reg + ", 0(" + scratch::frame0() + ")", true);
     }
 }
 
-void RiscvFuncContext::emitStoreSlot(const std::string &reg, int off, SlotKind kind) {
+void RiscvFuncContext::emitStoreSlot(const std::string &reg, int off, SlotKind kind,
+                                     const std::string &base) {
     const char *mn = memMnemonic(kind, /*load=*/false);
     if (fitsImm12(off)) {
-        emitMem(std::string(mn) + " " + reg + ", " + std::to_string(off) + "(s0)", false);
+        emitMem(std::string(mn) + " " + reg + ", " + std::to_string(off) + "(" + base + ")", false);
     } else {
         emit("li " + std::string(scratch::frame0()) + ", " + std::to_string(off));
-        emit("add " + std::string(scratch::frame0()) + ", s0, " + scratch::frame0());
+        emit("add " + std::string(scratch::frame0()) + ", " + base + ", " + scratch::frame0());
         emitMem(std::string(mn) + " " + reg + ", 0(" + scratch::frame0() + ")", false);
     }
 }
@@ -581,7 +583,7 @@ void RiscvFuncContext::emitCall(CallInst *inst) {
                 fp++;
             } else {
                 loadFloat(a, scratch::fp0());
-                emitMem("fsw " + std::string(scratch::fp0()) + ", " + std::to_string(stackOff) + "(sp)", false);
+                emitStoreSlot(scratch::fp0(), stackOff, SlotKind::Float, "sp");
                 stackOff += 8;
             }
         } else {
@@ -593,7 +595,7 @@ void RiscvFuncContext::emitCall(CallInst *inst) {
             } else {
                 if (isPtr) loadAddr(a, scratch::int0());
                 else loadInt(a, scratch::int0());
-                emitMem("sd " + std::string(scratch::int0()) + ", " + std::to_string(stackOff) + "(sp)", false);
+                emitStoreSlot(scratch::int0(), stackOff, SlotKind::Pointer, "sp");
                 stackOff += 8;
             }
         }

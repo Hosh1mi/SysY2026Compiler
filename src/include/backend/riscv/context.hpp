@@ -46,9 +46,12 @@ private:
     void emitCall(const std::string &text);
     void emitTerminator(const std::string &text);
 
-    // s0 相对栈帧寻址的 load/store，自动处理超出 imm12 范围的偏移。
-    void emitLoadSlot(const std::string &reg, int off, SlotKind kind);
-    void emitStoreSlot(const std::string &reg, int off, SlotKind kind);
+    // base 相对栈帧寻址的 load/store（base 默认帧指针 s0，出参用 sp），
+    // 自动处理超出 imm12 范围的偏移。
+    void emitLoadSlot(const std::string &reg, int off, SlotKind kind,
+                      const std::string &base = "s0");
+    void emitStoreSlot(const std::string &reg, int off, SlotKind kind,
+                       const std::string &base = "s0");
     static const char *memMnemonic(SlotKind kind, bool load);
 
     // ── 取值到寄存器 / 写回栈槽 ────────────────────────────────────────
