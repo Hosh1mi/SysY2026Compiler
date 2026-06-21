@@ -26,7 +26,9 @@ bool RiscvRegAlloc::canAssignRegister(Value *v) const {
 }
 
 void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
-                              const std::vector<std::string> &colorToReg, bool isFloat,
+                              const std::vector<std::string> &colorToReg,
+                              int callerSavedColors,
+                              const std::set<Value *> &requiresCalleeSaved,
                               const std::map<Value *, double> &spillCost,
                               const std::map<Value *, std::set<Value *>> &phiAffinity,
                               const std::function<bool(Value *, Value *)> &trulyInterferes) {
@@ -75,7 +77,11 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
     }
 
     std::map<Value *, std::vector<Value *>> members;
-    for (auto &iv : sorted) members[iv.value] = {iv.value};
+    std::map<Value *, bool> calleeOnly;
+    for (auto &iv : sorted) {
+        members[iv.value] = {iv.value};
+        calleeOnly[iv.value] = requiresCalleeSaved.count(iv.value) != 0;
+    }
 
     bool mergedAny = true;
     while (mergedAny) {
@@ -97,13 +103,15 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
             nbrs.insert(adj[b].begin(), adj[b].end());
             nbrs.erase(a);
             nbrs.erase(b);
+            bool mergedCalleeOnly = calleeOnly[a] || calleeOnly[b];
+            int availableColors = mergedCalleeOnly ? K - callerSavedColors : K;
             int highDegree = 0;
             for (auto *n : nbrs) {
                 int d = (int)adj[n].size();
                 if (adj[n].count(a) && adj[n].count(b)) d--;
-                if (d >= K) highDegree++;
+                if (d >= availableColors) highDegree++;
             }
-            if (highDegree >= K) continue;
+            if (highDegree >= availableColors) continue;
 
             for (auto *n : adj[b]) {
                 adj[n].erase(b);
@@ -116,6 +124,7 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
             intervalForValue[a].crossesCall =
                 intervalForValue[a].crossesCall || intervalForValue[b].crossesCall;
             cost[a] = std::max(cost[a], cost[b]);
+            calleeOnly[a] = mergedCalleeOnly;
             auto &ma = members[a];
             auto &mb = members[b];
             ma.insert(ma.end(), mb.begin(), mb.end());
@@ -153,8 +162,10 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
     int remaining = N;
     while (remaining > 0) {
         int pick = -1;
-        for (int i = 0; i < N; i++)
-            if (inWL[i] && deg[i] < K) { pick = i; break; }
+        for (int i = 0; i < N; i++) {
+            int availableColors = calleeOnly[nodes[i]] ? K - callerSavedColors : K;
+            if (inWL[i] && deg[i] < availableColors) { pick = i; break; }
+        }
         if (pick < 0) {
             double bestCost = 1e100;
             for (int i = 0; i < N; i++) {
@@ -182,7 +193,10 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
             if (it != colors.end()) neighborColors.insert(it->second);
         }
 
-        auto colorAllowed = [&](int c) { return c >= 0 && c < K; };
+        auto colorAllowed = [&](int c) {
+            return c >= 0 && c < K &&
+                   (!calleeOnly[ufFind(v)] || c >= callerSavedColors);
+        };
 
         int color = -1;
         auto affIt = phiAffinity.find(v);
@@ -198,7 +212,10 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
         }
         if (color < 0) {
             for (int c = 0; c < K; c++)
-                if (!neighborColors.count(c)) { color = c; break; }
+                if (colorAllowed(c) && !neighborColors.count(c)) {
+                    color = c;
+                    break;
+                }
         }
         if (color >= 0) {
             colors[v] = color;
@@ -212,7 +229,6 @@ void RiscvRegAlloc::colorPool(const std::vector<Interval> &pool,
         if (it == colors.end()) continue;
         assignedRegs_[v] = colorToReg[it->second];
     }
-    (void)isFloat;
 }
 
 void RiscvRegAlloc::allocate() {
@@ -247,10 +263,13 @@ void RiscvRegAlloc::allocate() {
                 preds[succ].push_back(bb);
     }
 
-    // 着色色板：仅 callee-saved。整型 s1-s11，浮点 fs0-fs11。
+    // Caller-saved 颜色排在前面，使短生命周期值优先避免序言/尾声保存。
+    // t0-t6/ft0-ft2 是指令选择 scratch，不得分配。
     std::vector<std::string> intColorToReg = {
+        "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
         "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"};
     std::vector<std::string> floatColorToReg = {
+        "ft3", "ft4", "ft5", "ft6", "ft7", "ft8", "ft9", "ft10", "ft11",
         "fs0", "fs1", "fs2", "fs3", "fs4", "fs5",
         "fs6", "fs7", "fs8", "fs9", "fs10", "fs11"};
 
@@ -366,6 +385,7 @@ void RiscvRegAlloc::allocate() {
     // ---- 4. 活跃区间 ----
     for (auto &entry : defPos) {
         Value *v = entry.first;
+        if (v->use_list_.empty()) continue;
         int start = entry.second;
         int end = lastUse[v];
         for (auto bb : blocksOrder)
@@ -462,6 +482,22 @@ void RiscvRegAlloc::allocate() {
             if (spillCost.count(partner)) spillCost[partner] = maxCost;
     }
 
+    // Values involved in ABI entry/call parallel moves stay in callee-saved
+    // colors. This avoids assigning an incoming argument or call operand to
+    // a*/fa* and then overwriting another source while moves are emitted.
+    std::set<Value *> requiresCalleeSaved = crossesCallValues;
+    for (auto *arg : func_->arguments_)
+        if (canAssignRegister(arg)) requiresCalleeSaved.insert(arg);
+    for (auto *bb : blocksOrder) {
+        for (auto *inst : bb->instr_list_) {
+            if (!inst->is_call()) continue;
+            for (unsigned i = 0; i + 1 < inst->num_ops_; ++i) {
+                Value *arg = inst->get_operand(i);
+                if (canAssignRegister(arg)) requiresCalleeSaved.insert(arg);
+            }
+        }
+    }
+
     // ---- 8. 分类 ----
     std::vector<Interval> intPool, floatPool;
     for (auto &iv : intervals) {
@@ -520,6 +556,8 @@ void RiscvRegAlloc::allocate() {
         };
 
     // ---- 10. 着色 ----
-    colorPool(intPool, intColorToReg, false, spillCost, phiAffinity, trulyInterferes);
-    colorPool(floatPool, floatColorToReg, true, spillCost, phiAffinity, trulyInterferes);
+    colorPool(intPool, intColorToReg, /*callerSavedColors=*/8,
+              requiresCalleeSaved, spillCost, phiAffinity, trulyInterferes);
+    colorPool(floatPool, floatColorToReg, /*callerSavedColors=*/9,
+              requiresCalleeSaved, spillCost, phiAffinity, trulyInterferes);
 }

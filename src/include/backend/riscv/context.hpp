@@ -101,7 +101,7 @@ private:
     riscv::MFunction &mfunc_;
     bool enableRegAlloc_;
 
-    // 图着色结果：Value* → 物理寄存器 ABI 名（仅 callee-saved，见 RiscvRegAlloc）。
+    // 图着色结果：Value* → 物理寄存器 ABI 名（caller/callee-saved 选择见 RiscvRegAlloc）。
     std::map<Value *, std::string> assignedRegs_;
     // 实际被占用、需在前奏/收场保存恢复的 callee-saved 寄存器（s*/fs*），有序去重。
     std::vector<std::string> usedCalleeSaved_;

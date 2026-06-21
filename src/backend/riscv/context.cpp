@@ -62,7 +62,12 @@ void RiscvFuncContext::planFrame() {
     // 收集实际占用的 callee-saved（来自图着色结果），有序去重，确定保存区大小。
     {
         std::set<std::string> cs;
-        for (auto &kv : assignedRegs_) cs.insert(kv.second);
+        for (auto &kv : assignedRegs_) {
+            const std::string &reg = kv.second;
+            bool calleeSavedGpr = !reg.empty() && reg[0] == 's';
+            bool calleeSavedFpr = reg.rfind("fs", 0) == 0;
+            if (calleeSavedGpr || calleeSavedFpr) cs.insert(reg);
+        }
         usedCalleeSaved_.assign(cs.begin(), cs.end());
     }
     saveAreaBytes_ = 16 + static_cast<int>(usedCalleeSaved_.size()) * 8;
@@ -72,6 +77,7 @@ void RiscvFuncContext::planFrame() {
 
     // 形参槽：仅未分配寄存器（溢出）的形参需要。
     for (auto *arg : func_->arguments_) {
+        if (arg->use_list_.empty()) continue;
         if (hasReg(arg)) continue;
         localCursor_ += 8;
         slots_[arg] = slotBase();
@@ -83,6 +89,7 @@ void RiscvFuncContext::planFrame() {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi()) phiCnt++;
             if (inst->is_alloca()) {
+                if (inst->use_list_.empty()) continue;
                 auto *al = static_cast<AllocaInst *>(inst);
                 int region = alignUp(sizeOfType(al->alloca_ty_), 8);
                 localCursor_ += region;
@@ -90,6 +97,7 @@ void RiscvFuncContext::planFrame() {
                 continue;
             }
             if (inst->is_void()) continue;  // store/br/ret/void-call 无结果
+            if (inst->use_list_.empty()) continue;
             if (hasReg(inst)) continue;     // 已分配寄存器，无需栈槽
             localCursor_ += 8;
             slots_[inst] = slotBase();
@@ -238,6 +246,7 @@ void RiscvFuncContext::loadFloat(Value *v, const std::string &freg) {
 }
 
 void RiscvFuncContext::storeResult(Value *v, const std::string &reg) {
+    if (v->use_list_.empty()) return;
     if (hasReg(v)) {
         const std::string &dst = regOf(v);
         if (dst == reg) return;
@@ -312,10 +321,13 @@ void RiscvFuncContext::emitPrologue() {
     int gp = 0, fp = 0, stackIn = 0;
     for (auto *arg : func_->arguments_) {
         bool isFloat = arg->type_ && arg->type_->tid_ == Type::FloatTyID;
+        bool isUsed = !arg->use_list_.empty();
         if (isFloat) {
             bool inReg = fp < kNumFpArgRegs;
             std::string src = inReg ? fpArgRegs()[fp] : std::string();
-            if (hasReg(arg)) {
+            if (!isUsed) {
+                // Keep ABI position accounting even when no move is needed.
+            } else if (hasReg(arg)) {
                 if (inReg) emit("fmv.s " + regOf(arg) + ", " + src);
                 else emitLoadSlot(regOf(arg), stackIn, SlotKind::Float);
             } else if (inReg) {
@@ -329,7 +341,9 @@ void RiscvFuncContext::emitPrologue() {
             SlotKind kind = slotKindOf(arg);
             bool inReg = gp < kNumIntArgRegs;
             std::string src = inReg ? intArgRegs()[gp] : std::string();
-            if (hasReg(arg)) {
+            if (!isUsed) {
+                // Keep ABI position accounting even when no move is needed.
+            } else if (hasReg(arg)) {
                 if (inReg) emit("mv " + regOf(arg) + ", " + src);
                 else emitLoadSlot(regOf(arg), stackIn, kind);
             } else if (inReg) {
