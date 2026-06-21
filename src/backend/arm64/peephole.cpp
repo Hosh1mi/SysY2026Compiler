@@ -592,8 +592,11 @@ static bool machineRegDeadAfter(const MachineBasicBlock &block,
 		ParsedLine line = parseLine(block.instrs[i].text);
 		if (line.kind != LineKind::Instruction) continue;
 		if (isCallBarrier(line.mnemonic)) return isCallerSavedReg(reg);
-		if (lineWritesReg(line, reg)) return true;
+		// Check reads before writes: an instruction that both reads and writes
+		// reg (e.g. `csel Wd, Wt, Wd`) keeps reg live at this point, so reg is
+		// not dead. Only a write without a read kills it.
 		if (lineReadsReg(line, reg)) return false;
+		if (lineWritesReg(line, reg)) return true;
 		if (line.mnemonic == "b" || line.mnemonic == "ret" ||
 		    line.mnemonic == "cbnz" || line.mnemonic == "cbz" ||
 		    line.mnemonic == "tbnz" || line.mnemonic == "tbz" ||
