@@ -27,14 +27,14 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
         dynamic_cast<Argument*>(val))
         return true;
 
-    auto inst = dynamic_cast<Instruction*>(val);
+    auto *inst = dynamic_cast<Instruction*>(val);
     if (!inst) return true;
     if (toHoist.count(inst)) return true;
     return !loopBlocks.count(inst->parent_);
 }
 
 bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
-                          const BasicAliasAnalysis &BAA) {
+                         const BasicAliasAnalysis &BAA) {
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
         inst->is_store() || inst->is_alloca())
         return false;
@@ -87,7 +87,6 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA) {
     if (!BAA) return false;
 
     bool changed = false;
-
     bool progress = true;
     while (progress) {
         progress = false;
@@ -128,7 +127,7 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA) {
 
                 it = bb->instr_list_.begin();
                 progress = true;
-                changed  = true;
+                changed = true;
             }
         }
     }
@@ -145,7 +144,7 @@ bool LICM::eliminateSinglePredPhis(Function *func) {
             if (bb->pre_bbs_.size() != 1) continue;
             auto it = bb->instr_list_.begin();
             while (it != bb->instr_list_.end()) {
-                auto phi = dynamic_cast<PhiInst*>(*it);
+                auto *phi = dynamic_cast<PhiInst*>(*it);
                 if (!phi) break;
                 Value *incoming = phi->get_operand(0);
                 phi->replace_all_use_with(incoming);
@@ -170,31 +169,31 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
         changed = false;
         auto it = loop.header->instr_list_.begin();
         while (it != loop.header->instr_list_.end()) {
-            auto phi = dynamic_cast<PhiInst*>(*it);
+            auto *phi = dynamic_cast<PhiInst*>(*it);
             if (!phi) break;
 
-            Value *non_latch_val = nullptr;
-            bool self_loop = true;
+            Value *nonLatchVal = nullptr;
+            bool selfLoop = true;
             bool valid = true;
 
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                Value *inc_bb  = phi->get_operand(i + 1);
-                Value *inc_val = phi->get_operand(i);
-                if (inc_bb == latch) {
-                    if (inc_val != phi) self_loop = false;
+                Value *incVal = phi->get_operand(i);
+                Value *incBB  = phi->get_operand(i + 1);
+                if (incBB == latch) {
+                    if (incVal != phi) selfLoop = false;
                 } else {
-                    if (!non_latch_val) non_latch_val = inc_val;
-                    else if (non_latch_val != inc_val) valid = false;
+                    if (!nonLatchVal) nonLatchVal = incVal;
+                    else if (nonLatchVal != incVal) valid = false;
                 }
             }
 
-            if (valid && self_loop && non_latch_val) {
-                auto nv_inst = dynamic_cast<Instruction*>(non_latch_val);
-                if (nv_inst && loop.blocks.count(nv_inst->parent_)) {
+            if (valid && selfLoop && nonLatchVal) {
+                auto *nvInst = dynamic_cast<Instruction*>(nonLatchVal);
+                if (nvInst && loop.blocks.count(nvInst->parent_)) {
                     ++it;
                     continue;
                 }
-                phi->replace_all_use_with(non_latch_val);
+                phi->replace_all_use_with(nonLatchVal);
                 loop.header->delete_instr(phi);
                 changed = true;
                 anyChanged = true;
