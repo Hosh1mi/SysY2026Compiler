@@ -237,6 +237,12 @@ void RiscvFuncContext::loadInt(Value *v, const std::string &reg) {
     emitLoadSlot(reg, slotOf(v), SlotKind::Int32);
 }
 
+std::string RiscvFuncContext::intOperand(Value *v, const std::string &scratch) {
+    if (auto *ci = dynamic_cast<ConstantInt *>(v); ci && ci->value_ == 0) return "zero";
+    loadInt(v, scratch);
+    return scratch;
+}
+
 void RiscvFuncContext::loadAddr(Value *v, const std::string &reg) {
     if (hasReg(v)) {
         if (reg != regOf(v)) emit("mv " + reg + ", " + regOf(v));
@@ -676,48 +682,49 @@ void RiscvFuncContext::emitFloatBinary(Instruction *inst) {
 }
 
 void RiscvFuncContext::emitICmp(ICmpInst *inst) {
-    loadInt(inst->get_operand(0), scratch::int0());
-    loadInt(inst->get_operand(1), scratch::int1());
-    const std::string a = scratch::int0(), b = scratch::int1();
+    // 输入按需用 zero 顶替常量 0；结果固定写入 int0（不会是 zero）。
+    const std::string a = intOperand(inst->get_operand(0), scratch::int0());
+    const std::string b = intOperand(inst->get_operand(1), scratch::int1());
+    const std::string d = scratch::int0();
     switch (inst->icmp_op_) {
     case ICmpInst::ICMP_EQ:
-        emit("subw " + a + ", " + a + ", " + b);
-        emit("seqz " + a + ", " + a);
+        emit("subw " + d + ", " + a + ", " + b);
+        emit("seqz " + d + ", " + d);
         break;
     case ICmpInst::ICMP_NE:
-        emit("subw " + a + ", " + a + ", " + b);
-        emit("snez " + a + ", " + a);
+        emit("subw " + d + ", " + a + ", " + b);
+        emit("snez " + d + ", " + d);
         break;
     case ICmpInst::ICMP_SLT:
-        emit("slt " + a + ", " + a + ", " + b);
+        emit("slt " + d + ", " + a + ", " + b);
         break;
     case ICmpInst::ICMP_SGT:
-        emit("slt " + a + ", " + b + ", " + a);
+        emit("slt " + d + ", " + b + ", " + a);
         break;
     case ICmpInst::ICMP_SLE:
-        emit("slt " + a + ", " + b + ", " + a);
-        emit("xori " + a + ", " + a + ", 1");
+        emit("slt " + d + ", " + b + ", " + a);
+        emit("xori " + d + ", " + d + ", 1");
         break;
     case ICmpInst::ICMP_SGE:
-        emit("slt " + a + ", " + a + ", " + b);
-        emit("xori " + a + ", " + a + ", 1");
+        emit("slt " + d + ", " + a + ", " + b);
+        emit("xori " + d + ", " + d + ", 1");
         break;
     case ICmpInst::ICMP_ULT:
-        emit("sltu " + a + ", " + a + ", " + b);
+        emit("sltu " + d + ", " + a + ", " + b);
         break;
     case ICmpInst::ICMP_UGT:
-        emit("sltu " + a + ", " + b + ", " + a);
+        emit("sltu " + d + ", " + b + ", " + a);
         break;
     case ICmpInst::ICMP_ULE:
-        emit("sltu " + a + ", " + b + ", " + a);
-        emit("xori " + a + ", " + a + ", 1");
+        emit("sltu " + d + ", " + b + ", " + a);
+        emit("xori " + d + ", " + d + ", 1");
         break;
     case ICmpInst::ICMP_UGE:
-        emit("sltu " + a + ", " + a + ", " + b);
-        emit("xori " + a + ", " + a + ", 1");
+        emit("sltu " + d + ", " + a + ", " + b);
+        emit("xori " + d + ", " + d + ", 1");
         break;
     }
-    storeResult(inst, a);
+    storeResult(inst, d);
 }
 
 void RiscvFuncContext::emitFCmp(FCmpInst *inst) {
@@ -786,10 +793,10 @@ void RiscvFuncContext::emitBranch(BranchInst *inst) {
     if (auto *cmp = dynamic_cast<ICmpInst *>(cond);
         cmp && fuseCmpBranch(cmp, inst) &&
         icmpToBranch(cmp->icmp_op_, cmpMn, cmpSwap)) {
-        loadInt(cmp->get_operand(0), scratch::int0());
-        loadInt(cmp->get_operand(1), scratch::int1());
-        std::string r1 = cmpSwap ? scratch::int1() : scratch::int0();
-        std::string r2 = cmpSwap ? scratch::int0() : scratch::int1();
+        std::string a = intOperand(cmp->get_operand(0), scratch::int0());
+        std::string b = intOperand(cmp->get_operand(1), scratch::int1());
+        std::string r1 = cmpSwap ? b : a;
+        std::string r2 = cmpSwap ? a : b;
 
         bool tphi = succHasPhi(trueBB), fphi = succHasPhi(falseBB);
         if (!tphi && !fphi) {

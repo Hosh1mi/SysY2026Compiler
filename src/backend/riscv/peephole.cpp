@@ -162,6 +162,12 @@ bool propagateCopies(MFunction &func) {
             auto it = canon.find(src);
             if (it != canon.end()) src = it->second;
             if (dst != src) canon[dst] = src;
+        } else if (mi.mnemonic == "li" && mi.operands.size() == 2 &&
+                   mi.operands[1] == "0") {
+            // 持 0 的寄存器可统一规范到 zero(x0)：对其使用改写为 zero 后，原 li 0
+            // 成为死代码被 DCE 删除。用 zero 顶替任意源操作数恒等价。
+            const std::string &dst = mi.operands[0];
+            if (dst != "zero") canon[dst] = "zero";
         }
     }
     return changed;

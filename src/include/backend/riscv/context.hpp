@@ -64,6 +64,10 @@ private:
     void loadFloat(Value *v, const std::string &freg);
     void storeResult(Value *v, const std::string &reg);
 
+    // 返回应直接引用的整型操作数寄存器：常量 0 用硬件 zero(x0)，免去 `li reg, 0`；
+    // 否则载入 scratch 并返回 scratch。仅用于纯读取操作数的消费者（不可写入返回值）。
+    std::string intOperand(Value *v, const std::string &scratch);
+
     // 寄存器分配结果查询。
     bool hasReg(Value *v) const { return assignedRegs_.count(v) > 0; }
     std::string regOf(Value *v) const {
