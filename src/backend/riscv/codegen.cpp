@@ -88,10 +88,14 @@ void RiscvCodeGen::generate() {
             if (dump_pre_machine_instr_)
                 std::cerr << riscv::dumpMFunction(mfunc);
             if (!no_peephole_) {
-                riscv::forwardAdjacentStoreLoads(mfunc);
-                riscv::removeSelfMoves(mfunc);
-                riscv::eliminateDeadMachineInstructions(mfunc);
-                riscv::removeSelfMoves(mfunc);
+                bool changed = true;
+                for (int round = 0; changed && round < 8; ++round) {
+                    changed = false;
+                    changed |= riscv::forwardAdjacentStoreLoads(mfunc);
+                    changed |= riscv::propagateCopies(mfunc);
+                    changed |= riscv::removeSelfMoves(mfunc);
+                    changed |= riscv::eliminateDeadMachineInstructions(mfunc);
+                }
             }
             if (dump_machine_instr_)
                 std::cerr << riscv::dumpMFunction(mfunc);
