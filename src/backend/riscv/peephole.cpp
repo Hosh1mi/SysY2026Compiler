@@ -207,6 +207,9 @@ bool redirectProducers(MFunction &func) {
             // mv 之间对 dst 的线性使用。生产者可读 dst（同条指令读旧值先于写新值）。
             auto plo = liveness.liveOut.find(&prod);
             if (plo != liveness.liveOut.end() && plo->second.count(dst)) continue;
+            // 生产者读取 dst 时不重定向：把输出改写为 dst 会就地覆盖 dst 旧值，在
+            // 并行拷贝/链式拷贝里若其它拷贝仍需 dst 旧值（迭代折叠后才显现）即出错。
+            if (prod.uses.count(dst)) continue;
 
             // 生产者与 mv 之间，src/dst 均不得被使用或重定义（call 钳制计入定义）。
             bool ok = true;

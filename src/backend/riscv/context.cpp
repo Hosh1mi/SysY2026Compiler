@@ -1078,6 +1078,49 @@ void RiscvFuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
     }
     if (pairs.empty()) return;
 
+    auto materializeInto = [&](Value *src, SlotKind kind, const std::string &reg) {
+        if (kind == SlotKind::Float) loadFloat(src, reg);
+        else if (kind == SlotKind::Pointer) loadAddr(src, reg);
+        else loadInt(src, reg);
+    };
+
+    // 快速路径：当没有“某个源寄存器同时又是另一对的目标寄存器”的覆盖冲突时，
+    // 直接发射寄存器/栈槽搬移即可（任意顺序安全），免去临时槽的 store/reload 往返。
+    // 存在冲突（含寄存器循环、目标寄存器重复）时回退到经内存的两遍并行拷贝。
+    bool hazard = false;
+    std::set<std::string> dstRegs;
+    std::set<Value *> dstVals;
+    for (auto &pr : pairs) {
+        dstVals.insert(pr.first);
+        if (hasReg(pr.first) && !dstRegs.insert(regOf(pr.first)).second) hazard = true;
+    }
+    for (auto &pr : pairs) {
+        // 源本身是本组的某个 phi 目标（含溢出到栈槽的 phi-读-phi 循环/交换）。
+        if (pr.second != pr.first && dstVals.count(pr.second)) hazard = true;
+        // 源寄存器是某目标寄存器：仅当它正是本对自身目标(自拷贝)时无害。
+        if (hasReg(pr.second)) {
+            const std::string sr = regOf(pr.second);
+            if (dstRegs.count(sr) && !(hasReg(pr.first) && regOf(pr.first) == sr))
+                hazard = true;
+        }
+    }
+
+    if (!hazard) {
+        for (auto &pr : pairs) {
+            Instruction *phi = pr.first;
+            SlotKind kind = slotKindOf(phi);
+            if (hasReg(phi)) {
+                materializeInto(pr.second, kind, regOf(phi));  // 自拷贝由 loadX 内部跳过
+            } else {
+                const std::string scratchReg =
+                    kind == SlotKind::Float ? scratch::fp0() : scratch::int0();
+                materializeInto(pr.second, kind, scratchReg);
+                storeResult(phi, scratchReg);
+            }
+        }
+        return;
+    }
+
     // 第一遍：把所有源读入 phi 临时槽。
     for (size_t i = 0; i < pairs.size(); ++i) {
         Instruction *phi = pairs[i].first;
