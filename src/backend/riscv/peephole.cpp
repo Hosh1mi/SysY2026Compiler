@@ -1,12 +1,29 @@
 #include "../../include/backend/riscv/peephole.hpp"
+#include "../../include/backend/riscv/liveness.hpp"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace riscv {
 
 namespace {
+
+// 可被重定向输出寄存器的生产者（首操作数为唯一定义）。store/call/branch 排除。
+bool isRedirectableProducer(MOpcode op) {
+    switch (op) {
+    case MOpcode::Move:
+    case MOpcode::Load:
+    case MOpcode::Alu:
+    case MOpcode::Mul:
+    case MOpcode::Div:
+    case MOpcode::Address:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // operand[0] 是否为定义位置（其余为使用）。与 MInst 解析一致：算术/搬运/加载/
 // 地址类把首操作数计入 defs；store/branch/ret/call 的全部操作数都是使用。
@@ -148,6 +165,70 @@ bool propagateCopies(MFunction &func) {
         }
     }
     return changed;
+}
+
+bool redirectProducers(MFunction &func) {
+    bool changedAny = false;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        LivenessResult liveness = analyzeLiveness(func);
+        const int n = static_cast<int>(func.insts.size());
+        for (int i = 0; i < n; ++i) {
+            MInst &move = func.insts[i];
+            if (!isPlainRegMove(move)) continue;
+            const std::string dst = move.operands[0];
+            const std::string src = move.operands[1];
+            if (dst == src || dst == "zero" || src == "zero") continue;
+
+            // src 必须在该 mv 处死亡（之后不再活跃），否则重定向会丢失它的值。
+            auto lo = liveness.liveOut.find(&move);
+            if (lo != liveness.liveOut.end() && lo->second.count(src)) continue;
+
+            // 向上在同一标签段内找 src 的生产者（最近一次定义）。
+            int p = -1;
+            for (int j = i - 1; j >= 0; --j) {
+                if (func.insts[j].isLabel) break;  // 段边界：生产者不支配该 mv
+                if (func.insts[j].defs.count(src)) { p = j; break; }
+            }
+            if (p < 0) continue;
+            MInst &prod = func.insts[p];
+            if (!isRedirectableProducer(prod.opcode) || prod.defs.size() != 1 ||
+                prod.operands.empty() || prod.operands[0] != src)
+                continue;
+            // dst 在生产者处不得活跃：重定向会在此新建一处 dst 定义，若 dst 的旧值
+            // 仍被下游（含 mv 之外的分支路径）需要就会被覆盖。该条件也覆盖生产者与
+            // mv 之间对 dst 的线性使用。生产者可读 dst（同条指令读旧值先于写新值）。
+            auto plo = liveness.liveOut.find(&prod);
+            if (plo != liveness.liveOut.end() && plo->second.count(dst)) continue;
+
+            // 生产者与 mv 之间，src/dst 均不得被使用或重定义（call 钳制计入定义）。
+            bool ok = true;
+            for (int k = p + 1; k < i && ok; ++k) {
+                const MInst &mid = func.insts[k];
+                if (mid.uses.count(dst) || mid.defs.count(dst)) ok = false;
+                if (mid.uses.count(src) || mid.defs.count(src)) ok = false;
+            }
+            if (!ok) continue;
+
+            // 重写生产者输出寄存器 src→dst，删除该 mv。
+            std::vector<std::string> newOps = prod.operands;
+            newOps[0] = dst;
+            std::string text = prod.mnemonic;
+            for (size_t t = 0; t < newOps.size(); ++t)
+                text += (t ? ", " : " ") + newOps[t];
+            MInst rebuilt = MInst::inst(text);
+            rebuilt.mayLoad = prod.mayLoad;
+            rebuilt.mayStore = prod.mayStore;
+            rebuilt.isCall = prod.isCall;
+            rebuilt.isTerminator = prod.isTerminator;
+            prod = std::move(rebuilt);
+            func.insts.erase(func.insts.begin() + i);
+            changed = changedAny = true;
+            break;
+        }
+    }
+    return changedAny;
 }
 
 }  // namespace riscv

@@ -93,6 +93,7 @@ void RiscvCodeGen::generate() {
                     changed = false;
                     changed |= riscv::forwardAdjacentStoreLoads(mfunc);
                     changed |= riscv::propagateCopies(mfunc);
+                    changed |= riscv::redirectProducers(mfunc);
                     changed |= riscv::removeSelfMoves(mfunc);
                     changed |= riscv::eliminateDeadMachineInstructions(mfunc);
                 }
