@@ -84,6 +84,10 @@ private:
     void emitBlock(BasicBlock *bb);
     void emitInstruction(Instruction *inst);
     void emitBinary(Instruction *inst);
+    // 常量除/余强度削减：除数为编译期常量时，用 RV64GC 的移位或 magic-number
+    // 乘高序列替换多周期的硬件 div/rem。覆盖 2 的幂、正负除数与符号舍入；除数为
+    // 0 或 INT_MIN 时保留硬件指令。命中返回 true。
+    bool tryEmitConstDivRem(Instruction *inst);
     void emitFloatBinary(Instruction *inst);
     void emitICmp(ICmpInst *inst);
     void emitFCmp(FCmpInst *inst);

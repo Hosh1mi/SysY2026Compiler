@@ -1,5 +1,6 @@
 #include "../../include/backend/riscv/context.hpp"
 #include "../../include/backend/riscv/regalloc.hpp"
+#include "../../include/backend/arm64/magicNumber.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -524,6 +525,69 @@ void RiscvFuncContext::emitInstruction(Instruction *inst) {
     }
 }
 
+bool RiscvFuncContext::tryEmitConstDivRem(Instruction *inst) {
+    const auto op = inst->op_id_;
+    const bool isSDiv = op == Instruction::SDiv;
+    const bool isSRem = op == Instruction::SRem;
+    if (!isSDiv && !isSRem) return false;  // unsigned 留给硬件（SysY 无 unsigned）
+
+    auto *rc = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+    if (!rc) return false;
+    const int divisor = rc->value_;
+
+    Magic::SignedDivisorInfo info = Magic::analyzeDivisor(divisor);
+    if (!info.reducible) return false;  // 0 / INT_MIN：保留 divw/remw 语义
+
+    const std::string n = scratch::int0();    // 被除数（始终保留）
+    const std::string tmp = scratch::int1();
+    const std::string q = scratch::int2();    // 商
+    loadInt(inst->get_operand(0), n);
+
+    if (info.powerOfTwo) {
+        // 有符号 n / 2^k：向零舍入需对负数加偏置 (2^k - 1)。
+        const int k = info.shift;
+        if (k == 0) {
+            // |divisor| == 1：商即 ±n。
+            if (divisor < 0) emit("negw " + q + ", " + n);
+            else emit("mv " + q + ", " + n);
+        } else {
+            emit("sraiw " + tmp + ", " + n + ", 31");
+            emit("srliw " + tmp + ", " + tmp + ", " + std::to_string(32 - k));
+            emit("addw " + tmp + ", " + n + ", " + tmp);
+            emit("sraiw " + q + ", " + tmp + ", " + std::to_string(k));
+            if (divisor < 0) emit("negw " + q + ", " + q);
+        }
+    } else {
+        // Magic-number 乘高序列（Hacker's Delight）。n、M 均为符号扩展的 32 位，
+        // 64 位 mul 得到精确乘积，srai 32 取高字，再按策略加/减并移位。
+        Magic::MagicNumber mag = Magic::getMagic(divisor);
+        emit("li " + tmp + ", " + std::to_string(mag.multiplier));
+        emit("mul " + q + ", " + n + ", " + tmp);
+        emit("srai " + q + ", " + q + ", 32");
+        if (mag.strat == Magic::MagicStrat::MULTIPLY_ADD_SHIFT)
+            emit("addw " + q + ", " + q + ", " + n);
+        else if (mag.strat == Magic::MagicStrat::MULTIPLY_SUB_SHIFT)
+            emit("subw " + q + ", " + q + ", " + n);
+        if (mag.shift > 0)
+            emit("sraiw " + q + ", " + q + ", " + std::to_string(mag.shift));
+        // 末尾修正加的是“移位结果”的符号位（非被除数 n）：负除数时商与 n 异号，
+        // 用 n 的符号会差 1。正除数下两者同号，此式同样正确。
+        emit("srliw " + tmp + ", " + q + ", 31");
+        emit("addw " + q + ", " + q + ", " + tmp);
+    }
+
+    if (isSDiv) {
+        storeResult(inst, q);
+        return true;
+    }
+    // 余数：r = n - q * divisor（对任意符号、2 的幂均正确）。
+    emit("li " + tmp + ", " + std::to_string(divisor));
+    emit("mulw " + tmp + ", " + q + ", " + tmp);
+    emit("subw " + n + ", " + n + ", " + tmp);
+    storeResult(inst, n);
+    return true;
+}
+
 void RiscvFuncContext::emitBinary(Instruction *inst) {
     auto *lhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(0));
     auto *rhsConst = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -582,6 +646,8 @@ void RiscvFuncContext::emitBinary(Instruction *inst) {
         storeResult(inst, scratch::int0());
         return;
     }
+
+    if (tryEmitConstDivRem(inst)) return;
 
     Value *registerOperand = nullptr;
     long immediate = 0;
