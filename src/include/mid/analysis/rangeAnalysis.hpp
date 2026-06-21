@@ -138,9 +138,11 @@ private:
 
     struct MemoryFactSet {
         std::map<Value *, long long> pointerUpper;
+        std::map<Value *, long long> pointerAbsUpper;
 
         bool operator==(const MemoryFactSet &o) const {
-            return pointerUpper == o.pointerUpper;
+            return pointerUpper == o.pointerUpper &&
+                   pointerAbsUpper == o.pointerAbsUpper;
         }
 
         bool operator!=(const MemoryFactSet &o) const {

@@ -22,6 +22,148 @@ ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
     }
 }
 
+namespace {
+
+struct ScaledValue {
+    Value *base = nullptr;
+    long long scale = 1;
+};
+
+bool parsePositiveScale(Value *v, ScaledValue &out) {
+    if (!v) return false;
+
+    if (auto *bin = dynamic_cast<BinaryInst *>(v)) {
+        if (bin->op_id_ == Instruction::Mul) {
+            if (auto *c = as_const_int(bin->get_operand(1)); c && c->value_ > 0) {
+                out = {bin->get_operand(0), c->value_};
+                return true;
+            }
+            if (auto *c = as_const_int(bin->get_operand(0)); c && c->value_ > 0) {
+                out = {bin->get_operand(1), c->value_};
+                return true;
+            }
+        }
+        if (bin->op_id_ == Instruction::Shl) {
+            auto *c = as_const_int(bin->get_operand(1));
+            if (c && c->value_ >= 0 && c->value_ < 31) {
+                out = {bin->get_operand(0), 1LL << c->value_};
+                return true;
+            }
+        }
+    }
+
+    out = {v, 1};
+    return true;
+}
+
+bool isSourceNonNegative(Value *v, BasicBlock *ctx,
+                         std::vector<Value *> &assuming, int depth) {
+    if (!v || depth > 12) return false;
+    if (std::find(assuming.begin(), assuming.end(), v) != assuming.end())
+        return true;
+
+    if (ValueFacts::isKnownNonNegative(v, ctx))
+        return true;
+    if (gInstCombineRangeAnalysis && gInstCombineRangeAnalysis->isKnownNonNegative(v, ctx))
+        return true;
+
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst) return false;
+
+    switch (inst->op_id_) {
+    case Instruction::AShr:
+        return isSourceNonNegative(inst->get_operand(0), ctx, assuming, depth + 1);
+    case Instruction::Mul: {
+        auto *rhs = as_const_int(inst->get_operand(1));
+        auto *lhs = as_const_int(inst->get_operand(0));
+        if (rhs && rhs->value_ >= 0)
+            return isSourceNonNegative(inst->get_operand(0), ctx, assuming, depth + 1);
+        if (lhs && lhs->value_ >= 0)
+            return isSourceNonNegative(inst->get_operand(1), ctx, assuming, depth + 1);
+        return false;
+    }
+    case Instruction::Shl: {
+        auto *shift = as_const_int(inst->get_operand(1));
+        return shift && shift->value_ >= 0 && shift->value_ < 31 &&
+               isSourceNonNegative(inst->get_operand(0), ctx, assuming, depth + 1);
+    }
+    case Instruction::Add:
+        return isSourceNonNegative(inst->get_operand(0), ctx, assuming, depth + 1) &&
+               isSourceNonNegative(inst->get_operand(1), ctx, assuming, depth + 1);
+    case Instruction::Or: {
+        auto *rhs = as_const_int(inst->get_operand(1));
+        auto *lhs = as_const_int(inst->get_operand(0));
+        if (rhs && rhs->value_ >= 0)
+            return isSourceNonNegative(inst->get_operand(0), ctx, assuming, depth + 1);
+        if (lhs && lhs->value_ >= 0)
+            return isSourceNonNegative(inst->get_operand(1), ctx, assuming, depth + 1);
+        return false;
+    }
+    default:
+        break;
+    }
+
+    auto *phi = dynamic_cast<PhiInst *>(inst);
+    if (!phi) return false;
+
+    assuming.push_back(v);
+    bool ok = true;
+    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+        if (!isSourceNonNegative(phi->get_operand(i), predBB, assuming, depth + 1)) {
+            ok = false;
+            break;
+        }
+    }
+    assuming.pop_back();
+    return ok;
+}
+
+bool isSourceNonNegative(Value *v, BasicBlock *ctx) {
+    std::vector<Value *> assuming;
+    return isSourceNonNegative(v, ctx, assuming, 0);
+}
+
+Value *foldScaledCompareFromPred(ICmpInst *inst) {
+    if (!inst || inst->icmp_op_ != ICmpInst::ICMP_SLT || !inst->parent_)
+        return nullptr;
+
+    ScaledValue cur;
+    if (!parsePositiveScale(inst->get_operand(0), cur))
+        return nullptr;
+    if (!isSourceNonNegative(cur.base, inst->parent_))
+        return nullptr;
+
+    BasicBlock *bb = inst->parent_;
+    for (auto *predBB : bb->pre_bbs_) {
+        auto *br = dynamic_cast<BranchInst *>(predBB->get_terminator());
+        if (!br || br->num_ops_ != 3) continue;
+
+        auto *prevCmp = dynamic_cast<ICmpInst *>(br->get_operand(0));
+        if (!prevCmp || prevCmp->icmp_op_ != ICmpInst::ICMP_SLT) continue;
+        if (prevCmp->get_operand(1) != inst->get_operand(1)) continue;
+
+        ScaledValue prev;
+        if (!parsePositiveScale(prevCmp->get_operand(0), prev)) continue;
+        if (prev.base != cur.base) continue;
+
+        auto *trueSucc = dynamic_cast<BasicBlock *>(br->get_operand(1));
+        auto *falseSucc = dynamic_cast<BasicBlock *>(br->get_operand(2));
+
+        // Source-level signed arithmetic has undefined overflow. Under that
+        // precondition, if k1*x >= bound and x >= 0, then k2*x >= bound for
+        // any k2 >= k1.  Keep only the false-edge direction needed by h-1;
+        // the true-edge form is too easy to misapply in loop exit tests.
+        (void)trueSucc;
+        if (falseSucc == bb && cur.scale >= prev.scale)
+            return make_const_int(inst->type_, 0);
+    }
+
+    return nullptr;
+}
+
+} // namespace
+
 // ═══════════════════════════════════════════════════════════════════════
 // visitICmp  —  integer comparison simplifications
 // ═══════════════════════════════════════════════════════════════════════
@@ -82,6 +224,9 @@ Value* visitICmp(ICmpInst *inst) {
                 return nullptr;
         }
     }
+
+    if (auto *folded = foldScaledCompareFromPred(inst))
+        return folded;
 
     // // 4. icmp eq/ne (srem x, 2), 1  ->  (x > 0) && ((x & 1) == 1)
     // if (cy && cy->value_ == 1 &&
