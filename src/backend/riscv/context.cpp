@@ -13,6 +13,36 @@ using namespace riscv;
 
 namespace {
 int alignUp(int x, int a) { return ((x + a - 1) / a) * a; }
+
+bool icmpToBranch(int op, const char *&mn, bool &swap) {
+    swap = false;
+    switch (op) {
+    case ICmpInst::ICMP_EQ:  mn = "beq";  break;
+    case ICmpInst::ICMP_NE:  mn = "bne";  break;
+    case ICmpInst::ICMP_SLT: mn = "blt";  break;
+    case ICmpInst::ICMP_SGT: mn = "blt";  swap = true; break;  // a>b ⇔ b<a
+    case ICmpInst::ICMP_SLE: mn = "bge";  swap = true; break;  // a<=b ⇔ b>=a
+    case ICmpInst::ICMP_SGE: mn = "bge";  break;
+    case ICmpInst::ICMP_ULT: mn = "bltu"; break;
+    case ICmpInst::ICMP_UGT: mn = "bltu"; swap = true; break;
+    case ICmpInst::ICMP_ULE: mn = "bgeu"; swap = true; break;
+    case ICmpInst::ICMP_UGE: mn = "bgeu"; break;
+    default: return false;
+    }
+    return true;
+}
+
+// 取条件分支的反向助记符（操作数顺序不变即为逻辑取反）。
+const char *invertBranch(const char *mn) {
+    std::string s(mn);
+    if (s == "beq")  return "bne";
+    if (s == "bne")  return "beq";
+    if (s == "blt")  return "bge";
+    if (s == "bge")  return "blt";
+    if (s == "bltu") return "bgeu";
+    if (s == "bgeu") return "bltu";
+    return mn;
+}
 }  // namespace
 
 RiscvFuncContext::RiscvFuncContext(Function *f, MFunction &mfunc, bool enableRegAlloc)
@@ -433,9 +463,16 @@ void RiscvFuncContext::emitInstruction(Instruction *inst) {
         emit("fneg.s " + std::string(scratch::fp0()) + ", " + scratch::fp0());
         storeResult(inst, scratch::fp0());
         break;
-    case Instruction::ICmp:
-        emitICmp(static_cast<ICmpInst *>(inst));
+    case Instruction::ICmp: {
+        auto *cmp = static_cast<ICmpInst *>(inst);
+        // 融合进紧邻的条件分支时不物化布尔结果，留给 emitBranch 直接发射。
+        if (cmp->use_list_.size() == 1) {
+            auto *br = dynamic_cast<BranchInst *>(cmp->use_list_.front().val_);
+            if (br && br->num_ops_ == 3 && fuseCmpBranch(cmp, br)) break;
+        }
+        emitICmp(cmp);
         break;
+    }
     case Instruction::FCmp:
         emitFCmp(static_cast<FCmpInst *>(inst));
         break;
@@ -720,6 +757,17 @@ void RiscvFuncContext::emitFCmp(FCmpInst *inst) {
     storeResult(inst, d);
 }
 
+bool RiscvFuncContext::fuseCmpBranch(ICmpInst *cmp, BranchInst *br) const {
+    if (!cmp || cmp->use_list_.size() != 1) return false;
+    if (cmp->parent_ != br->parent_) return false;
+    // cmp 必须是 br 的前一条指令：中间没有其它指令会重定义 cmp 操作数所在的
+    // 寄存器，因此把对操作数的读取下沉到分支点仍能读到正确的值。
+    auto &list = br->parent_->instr_list_;
+    auto it = std::find(list.begin(), list.end(), static_cast<Instruction *>(br));
+    if (it == list.begin() || it == list.end()) return false;
+    return *std::prev(it) == static_cast<Instruction *>(cmp);
+}
+
 void RiscvFuncContext::emitBranch(BranchInst *inst) {
     if (inst->num_ops_ == 1) {
         auto *succ = static_cast<BasicBlock *>(inst->get_operand(0));
@@ -730,6 +778,37 @@ void RiscvFuncContext::emitBranch(BranchInst *inst) {
     Value *cond = inst->get_operand(0);
     auto *trueBB = static_cast<BasicBlock *>(inst->get_operand(1));
     auto *falseBB = static_cast<BasicBlock *>(inst->get_operand(2));
+
+    // 比较与分支融合：条件是仅被本分支使用、且紧邻其前的整型比较时，直接对其
+    // 两个操作数发射 RISC-V 条件分支，省去 slt/seqz + 布尔回存/重载。
+    const char *cmpMn = nullptr;
+    bool cmpSwap = false;
+    if (auto *cmp = dynamic_cast<ICmpInst *>(cond);
+        cmp && fuseCmpBranch(cmp, inst) &&
+        icmpToBranch(cmp->icmp_op_, cmpMn, cmpSwap)) {
+        loadInt(cmp->get_operand(0), scratch::int0());
+        loadInt(cmp->get_operand(1), scratch::int1());
+        std::string r1 = cmpSwap ? scratch::int1() : scratch::int0();
+        std::string r2 = cmpSwap ? scratch::int0() : scratch::int1();
+
+        bool tphi = succHasPhi(trueBB), fphi = succHasPhi(falseBB);
+        if (!tphi && !fphi) {
+            emit(std::string(cmpMn) + " " + r1 + ", " + r2 + ", " + blockLabel(trueBB));
+            emitTerminator("j " + blockLabel(falseBB));
+            return;
+        }
+        // 关键边：比较为假时跳到 false 拷贝块，否则贯穿到 true 拷贝。
+        int id = edgeCounter_++;
+        std::string fedge = ".Ledge_" + func_->name_ + "_" + std::to_string(id);
+        emit(std::string(invertBranch(cmpMn)) + " " + r1 + ", " + r2 + ", " + fedge);
+        emitPhiCopies(curBlock_, trueBB);
+        emit("j " + blockLabel(trueBB));
+        emitLabel(fedge);
+        emitPhiCopies(curBlock_, falseBB);
+        emitTerminator("j " + blockLabel(falseBB));
+        return;
+    }
+
     loadInt(cond, scratch::int0());
 
     bool tphi = succHasPhi(trueBB), fphi = succHasPhi(falseBB);

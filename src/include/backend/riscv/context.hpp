@@ -84,6 +84,11 @@ private:
     void emitICmp(ICmpInst *inst);
     void emitFCmp(FCmpInst *inst);
     void emitBranch(BranchInst *inst);
+
+    // 比较与分支融合：当整型比较仅被紧邻其后的条件分支使用时，可省去 0/1 布尔
+    // 物化，直接对操作数发射 RISC-V 条件分支（beq/bne/blt/bge/bltu/bgeu）。
+    // 要求 cmp 单一使用、与 br 同块且为 br 的前驱指令（中间无指令重定义寄存器）。
+    bool fuseCmpBranch(ICmpInst *cmp, BranchInst *br) const;
     void emitReturn(ReturnInst *inst);
     void emitCall(CallInst *inst);
     void emitGep(GetElementPtrInst *inst);
