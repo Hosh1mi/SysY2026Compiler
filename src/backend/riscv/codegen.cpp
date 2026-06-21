@@ -96,6 +96,9 @@ void RiscvCodeGen::generate() {
                     changed |= riscv::redirectProducers(mfunc);
                     changed |= riscv::removeSelfMoves(mfunc);
                     changed |= riscv::eliminateDeadMachineInstructions(mfunc);
+                    changed |= riscv::forwardBranches(mfunc);
+                    changed |= riscv::removeDeadBlocks(mfunc);
+                    changed |= riscv::removeFallthroughJumps(mfunc);
                 }
             }
             if (dump_machine_instr_)

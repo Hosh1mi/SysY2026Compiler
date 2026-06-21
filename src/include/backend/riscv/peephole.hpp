@@ -17,4 +17,14 @@ bool propagateCopies(MFunction &func);
 // （call 对 caller-saved 的钳制计入重定义），保证不缩短任何活跃区间。
 bool redirectProducers(MFunction &func);
 
+// 分支转发：把跳向“仅含一条无条件 j”的蹦床块的分支直接改向其最终目标（解析链、
+// 防环）。蹦床块随后无人引用，由死块消除清理。
+bool forwardBranches(MFunction &func);
+
+// 死块消除：从入口块按 CFG（分支目标 + 条件分支贯穿）做可达性分析，删除不可达块。
+bool removeDeadBlocks(MFunction &func);
+
+// 贯穿跳转消除：`j L` 的下一条恰为标签 L 时删除该跳转（直接贯穿）。
+bool removeFallthroughJumps(MFunction &func);
+
 }  // namespace riscv

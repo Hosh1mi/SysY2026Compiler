@@ -61,6 +61,20 @@ bool isPlainRegMove(const MInst &m) {
            m.operands.size() == 2;
 }
 
+std::string blockLabelName(const std::string &text) {
+    std::string s = text;
+    if (!s.empty() && s.back() == ':') s.pop_back();
+    return s;
+}
+
+// 用 mnemonic + operands 重建分支文本。
+std::string rebuildBranch(const std::string &mnemonic,
+                          const std::vector<std::string> &operands) {
+    std::string text = mnemonic;
+    for (size_t k = 0; k < operands.size(); ++k) text += (k ? ", " : " ") + operands[k];
+    return text;
+}
+
 }  // namespace
 
 bool removeSelfMoves(MFunction &func) {
@@ -238,6 +252,113 @@ bool redirectProducers(MFunction &func) {
         }
     }
     return changedAny;
+}
+
+bool forwardBranches(MFunction &func) {
+    auto &insts = func.insts;
+    // 蹦床块：标签后紧跟唯一一条无条件 j。记录 标签 → 该 j 的目标。
+    std::map<std::string, std::string> tramp;
+    for (size_t i = 0; i + 1 < insts.size(); ++i) {
+        if (!insts[i].isLabel) continue;
+        const MInst &j = insts[i + 1];
+        bool lone = j.opcode == MOpcode::Branch && j.mnemonic == "j" &&
+                    !j.operands.empty() &&
+                    (i + 2 >= insts.size() || insts[i + 2].isLabel);
+        if (lone) tramp[blockLabelName(insts[i].text)] = j.operands.back();
+    }
+    if (tramp.empty()) return false;
+
+    auto resolve = [&](std::string label) -> std::string {
+        std::set<std::string> seen;
+        while (tramp.count(label) && seen.insert(label).second) label = tramp[label];
+        return label;
+    };
+
+    bool changed = false;
+    for (auto &mi : insts) {
+        if (mi.opcode != MOpcode::Branch || mi.operands.empty()) continue;
+        const std::string tgt = mi.operands.back();
+        if (!tramp.count(tgt)) continue;
+        std::string fin = resolve(tgt);
+        if (fin == tgt) continue;  // 自环等无法前进
+        std::vector<std::string> ops = mi.operands;
+        ops.back() = fin;
+        mi = MInst::inst(rebuildBranch(mi.mnemonic, ops));
+        changed = true;
+    }
+    return changed;
+}
+
+bool removeDeadBlocks(MFunction &func) {
+    auto &insts = func.insts;
+    const int n = static_cast<int>(insts.size());
+    if (n == 0) return false;
+
+    // 块起点：索引 0 及每个标签。
+    std::vector<int> starts;
+    for (int i = 0; i < n; ++i)
+        if (i == 0 || insts[i].isLabel) starts.push_back(i);
+    const int nb = static_cast<int>(starts.size());
+    auto blockEnd = [&](int b) { return b + 1 < nb ? starts[b + 1] : n; };
+
+    std::map<std::string, int> labelBlock;
+    for (int b = 0; b < nb; ++b)
+        if (insts[starts[b]].isLabel)
+            labelBlock[blockLabelName(insts[starts[b]].text)] = b;
+
+    std::vector<char> reach(nb, 0);
+    std::vector<int> stack;
+    reach[0] = 1;
+    stack.push_back(0);
+    auto mark = [&](int blk) {
+        if (blk >= 0 && blk < nb && !reach[blk]) { reach[blk] = 1; stack.push_back(blk); }
+    };
+    while (!stack.empty()) {
+        int b = stack.back();
+        stack.pop_back();
+        const int s = starts[b], e = blockEnd(b);
+        // 标签段内可能含中途的条件分支：扫描全部分支目标，而非只看末条指令。
+        for (int i = s; i < e; ++i) {
+            const MInst &mi = insts[i];
+            if (mi.opcode == MOpcode::Branch && !mi.operands.empty()) {
+                auto it = labelBlock.find(mi.operands.back());
+                if (it != labelBlock.end()) mark(it->second);
+            }
+        }
+        const MInst &last = insts[e - 1];
+        bool noFallthrough = last.opcode == MOpcode::Ret ||
+                             (last.opcode == MOpcode::Branch && last.mnemonic == "j");
+        if (!noFallthrough) mark(b + 1);
+    }
+
+    bool anyDead = false;
+    for (int b = 0; b < nb; ++b)
+        if (!reach[b]) { anyDead = true; break; }
+    if (!anyDead) return false;  // 无死块时不得移动原指令（否则留下空指令）
+
+    std::vector<MInst> kept;
+    kept.reserve(insts.size());
+    for (int b = 0; b < nb; ++b)
+        if (reach[b])
+            for (int i = starts[b]; i < blockEnd(b); ++i) kept.push_back(std::move(insts[i]));
+    func.insts = std::move(kept);
+    return true;
+}
+
+bool removeFallthroughJumps(MFunction &func) {
+    auto &insts = func.insts;
+    bool changed = false;
+    for (size_t i = 0; i + 1 < insts.size(); ++i) {
+        const MInst &mi = insts[i];
+        if (mi.opcode == MOpcode::Branch && mi.mnemonic == "j" && !mi.operands.empty() &&
+            insts[i + 1].isLabel &&
+            blockLabelName(insts[i + 1].text) == mi.operands.back()) {
+            insts.erase(insts.begin() + i);
+            changed = true;
+            --i;
+        }
+    }
+    return changed;
 }
 
 }  // namespace riscv
