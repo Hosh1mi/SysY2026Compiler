@@ -57,6 +57,7 @@ private:
     bool isCandidate(Function *f, BasicAliasAnalysis &baa,
                      unsigned &selfCallCount, unsigned &externalCallCount);
     bool functionReadsMemory(Function *f);
+    bool readsMutatedGlobal(Function *f);
     unsigned deriveArgBound(Function *f, Argument *arg);
     void transform(Function *f, const std::vector<unsigned> &bounds);
 };

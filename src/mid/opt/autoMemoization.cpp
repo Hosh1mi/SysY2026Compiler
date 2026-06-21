@@ -153,6 +153,12 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
     bool readsMem = functionReadsMemory(f);
     if (readsMem && externalCallCount != 1) return false;
 
+    // 读全局的函数：仅当其读取的全局在模块任何位置都不被 store 改写时才可缓存。
+    // 缓存常驻 BSS 且永不失效，若某全局在两次调用之间被改（典型：调用 f 的
+    // 循环体里 `G[i]=..`），缓存会返回旧值 → WA。knapsack 的 weight/value 仅经
+    // getarray 通过指针写入（IR 中无 store），仍可安全缓存。
+    if (readsMem && readsMutatedGlobal(f)) return false;
+
     return true;
 }
 
@@ -167,6 +173,32 @@ bool AutoMemoization::functionReadsMemory(Function *f) {
     for (auto bb : f->basic_blocks_)
         for (auto inst : bb->instr_list_)
             if (inst->is_load()) return true;
+    return false;
+}
+
+// 把指针回溯到其基址全局变量（穿透 GEP 链）；非全局返回 nullptr。
+static GlobalVariable *baseGlobal(Value *ptr) {
+    while (auto gep = dynamic_cast<GetElementPtrInst *>(ptr))
+        ptr = gep->get_operand(0);
+    return dynamic_cast<GlobalVariable *>(ptr);
+}
+
+// f 读取的全局中，是否存在被模块内任意 store 改写的。是 → 不可安全缓存。
+bool AutoMemoization::readsMutatedGlobal(Function *f) {
+    std::set<GlobalVariable *> readGlobals;
+    for (auto bb : f->basic_blocks_)
+        for (auto inst : bb->instr_list_)
+            if (inst->is_load())
+                if (auto gv = baseGlobal(inst->get_operand(0)))
+                    readGlobals.insert(gv);
+    if (readGlobals.empty()) return false;
+
+    for (auto func : f->parent_->function_list_)
+        for (auto bb : func->basic_blocks_)
+            for (auto inst : bb->instr_list_)
+                if (inst->is_store())
+                    if (auto gv = baseGlobal(inst->get_operand(1)))
+                        if (readGlobals.count(gv)) return true;
     return false;
 }
 
