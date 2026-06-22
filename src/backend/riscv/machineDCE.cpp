@@ -33,14 +33,17 @@ bool eliminateDeadMachineInstructions(MFunction &func) {
     do {
         changed = false;
         LivenessResult liveness = analyzeLiveness(func);
-        for (auto it = func.insts.begin(); it != func.insts.end(); ++it) {
-            auto live = liveness.liveOut.find(&*it);
-            if (live == liveness.liveOut.end()) continue;
-            if (isDeletable(*it) && !hasLiveDefinition(*it, live->second)) {
-                func.insts.erase(it);
-                changed = changedAny = true;
-                break;
+        for (auto &bb : func.blocks) {
+            for (auto it = bb.insts.begin(); it != bb.insts.end(); ++it) {
+                auto live = liveness.liveOut.find(&*it);
+                if (live == liveness.liveOut.end()) continue;
+                if (isDeletable(*it) && !hasLiveDefinition(*it, live->second)) {
+                    bb.insts.erase(it);
+                    changed = changedAny = true;
+                    break;
+                }
             }
+            if (changed) break;
         }
     } while (changed);
     return changedAny;

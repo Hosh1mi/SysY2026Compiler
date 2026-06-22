@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <sstream>
 
 namespace riscv {
@@ -89,6 +90,10 @@ void addCallBoundary(MInst &m) {
     m.defs.insert("ra");
 }
 
+std::string labelTarget(const MInst &m) {
+    return m.hasLabelTarget() ? m.operands.back() : std::string();
+}
+
 }  // namespace
 
 MInst MInst::inst(std::string text) {
@@ -151,15 +156,6 @@ MInst MInst::inst(std::string text) {
     return m;
 }
 
-MInst MInst::label(std::string label) {
-    MInst m;
-    m.text = std::move(label) + ":";
-    m.mnemonic = m.text;
-    m.opcode = MOpcode::Label;
-    m.isLabel = m.isBarrier = true;
-    return m;
-}
-
 MInst MInst::directive(std::string directive) {
     MInst m;
     m.text = std::move(directive);
@@ -168,13 +164,104 @@ MInst MInst::directive(std::string directive) {
     return m;
 }
 
+// ── 发射 API ────────────────────────────────────────────────────────────────
+
+void MFunction::addDirective(std::string text) {
+    directives.push_back(MInst::directive(std::move(text)));
+}
+
+void MFunction::startBlock(std::string label) {
+    MBasicBlock bb;
+    bb.label = std::move(label);
+    blocks.push_back(std::move(bb));
+}
+
+MBasicBlock &MFunction::cur() {
+    if (blocks.empty()) blocks.push_back(MBasicBlock{});
+    return blocks.back();
+}
+
+void MFunction::push(MInst m) { cur().insts.push_back(std::move(m)); }
+
+// ── CFG ──────────────────────────────────────────────────────────────────────
+
+void buildCFG(MFunction &func) {
+    std::map<std::string, int> labelToBlock;
+    for (int i = 0; i < static_cast<int>(func.blocks.size()); ++i)
+        if (func.blocks[i].hasLabel()) labelToBlock[func.blocks[i].label] = i;
+
+    for (auto &bb : func.blocks) {
+        bb.succ.clear();
+        bb.pred.clear();
+    }
+
+    const int n = static_cast<int>(func.blocks.size());
+    for (int i = 0; i < n; ++i) {
+        MBasicBlock &bb = func.blocks[i];
+        auto addSucc = [&](int t) {
+            if (t < 0 || t >= n) return;
+            if (std::find(bb.succ.begin(), bb.succ.end(), t) == bb.succ.end())
+                bb.succ.push_back(t);
+        };
+        for (const MInst &mi : bb.insts) {
+            std::string tgt = labelTarget(mi);
+            if (!tgt.empty()) {
+                auto it = labelToBlock.find(tgt);
+                if (it != labelToBlock.end()) addSucc(it->second);
+            }
+        }
+        bool noFallthrough = !bb.insts.empty() && bb.insts.back().isTerminator;
+        if (!noFallthrough) addSucc(i + 1);
+    }
+
+    for (int i = 0; i < n; ++i)
+        for (int s : func.blocks[i].succ)
+            func.blocks[s].pred.push_back(i);
+}
+
+// ── 验证 ──────────────────────────────────────────────────────────────────────
+
+bool verifyMFunction(const MFunction &func, std::string &error) {
+    std::map<std::string, int> labelToBlock;
+    for (int i = 0; i < static_cast<int>(func.blocks.size()); ++i)
+        if (func.blocks[i].hasLabel()) labelToBlock[func.blocks[i].label] = i;
+
+    const int n = static_cast<int>(func.blocks.size());
+    for (int i = 0; i < n; ++i) {
+        const MBasicBlock &bb = func.blocks[i];
+        for (const MInst &mi : bb.insts) {
+            if (mi.opcode == MOpcode::Unknown && !mi.isBarrier && !mi.isDirective) {
+                error = func.name + ": 不完整的指令副作用描述: '" + mi.text + "'";
+                return false;
+            }
+            std::string tgt = labelTarget(mi);
+            if (!tgt.empty() && !labelToBlock.count(tgt)) {
+                error = func.name + ": 未解析的分支目标 '" + tgt + "'";
+                return false;
+            }
+        }
+        bool noFallthrough = !bb.insts.empty() && bb.insts.back().isTerminator;
+        if (!noFallthrough && i + 1 >= n) {
+            error = func.name + ": 末块未以 terminator 结束，将贯穿出函数";
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── 打印 ──────────────────────────────────────────────────────────────────────
+
 std::string printMFunction(const MFunction &func) {
     std::ostringstream os;
-    for (const auto &mi : func.insts) {
-        if (mi.isLabel || mi.isDirective)
-            os << mi.text << "\n";
-        else
-            os << "\t" << mi.text << "\n";
+    for (const auto &d : func.directives) os << d.text << "\n";
+    for (const auto &bb : func.blocks) {
+        if (bb.hasLabel()) os << bb.label << ":\n";
+        for (const auto &mi : bb.insts) {
+            if (mi.isDirective)
+                os << mi.text << "\n";
+            else
+                os << "\t" << mi.text << "\n";
+        }
     }
     return os.str();
 }
@@ -182,22 +269,31 @@ std::string printMFunction(const MFunction &func) {
 std::string dumpMFunction(const MFunction &func) {
     std::ostringstream os;
     os << "machine-function " << func.name << "\n";
-    for (const auto &mi : func.insts) {
-        os << "  " << mi.text << " ; defs={";
-        bool first = true;
-        for (const auto &reg : mi.defs) {
-            if (!first) os << ',';
-            os << reg;
-            first = false;
-        }
-        os << "} uses={";
-        first = true;
-        for (const auto &reg : mi.uses) {
-            if (!first) os << ',';
-            os << reg;
-            first = false;
-        }
+    for (const auto &d : func.directives) os << "  " << d.text << "\n";
+    for (int i = 0; i < static_cast<int>(func.blocks.size()); ++i) {
+        const MBasicBlock &bb = func.blocks[i];
+        os << "block#" << i;
+        if (bb.hasLabel()) os << " " << bb.label;
+        os << "  succ={";
+        for (size_t k = 0; k < bb.succ.size(); ++k) os << (k ? "," : "") << bb.succ[k];
+        os << "} pred={";
+        for (size_t k = 0; k < bb.pred.size(); ++k) os << (k ? "," : "") << bb.pred[k];
         os << "}\n";
+        for (const auto &mi : bb.insts) {
+            os << "    " << mi.text;
+            os << "  ; defs={";
+            bool first = true;
+            for (const auto &reg : mi.defs) { os << (first ? "" : ",") << reg; first = false; }
+            os << "} uses={";
+            first = true;
+            for (const auto &reg : mi.uses) { os << (first ? "" : ",") << reg; first = false; }
+            os << "}";
+            if (mi.mayLoad) os << " load";
+            if (mi.mayStore) os << " store";
+            if (mi.isCall) os << " call";
+            if (mi.isTerminator) os << " term";
+            os << "\n";
+        }
     }
     return os.str();
 }

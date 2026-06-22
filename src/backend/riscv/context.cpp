@@ -167,7 +167,7 @@ void RiscvFuncContext::planFrame() {
 // ── 发射辅助 ────────────────────────────────────────────────────────────────
 
 void RiscvFuncContext::emit(const std::string &text) { mfunc_.push(MInst::inst(text)); }
-void RiscvFuncContext::emitLabel(const std::string &label) { mfunc_.push(MInst::label(label)); }
+void RiscvFuncContext::emitLabel(const std::string &label) { mfunc_.startBlock(label); }
 
 void RiscvFuncContext::emitMem(const std::string &text, bool load) {
     MInst m = MInst::inst(text);
@@ -315,7 +315,7 @@ void RiscvFuncContext::generate() {
 }
 
 void RiscvFuncContext::emitPrologue() {
-    mfunc_.push(MInst::directive("\t.globl " + func_->name_));
+    mfunc_.addDirective("\t.globl " + func_->name_);
     emitLabel(func_->name_);
 
     int fs = frameSize_;

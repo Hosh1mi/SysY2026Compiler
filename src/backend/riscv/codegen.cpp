@@ -1,8 +1,7 @@
 #include "../../include/backend/riscv/codegen.hpp"
 #include "../../include/backend/riscv/context.hpp"
 #include "../../include/backend/riscv/machine.hpp"
-#include "../../include/backend/riscv/machineDCE.hpp"
-#include "../../include/backend/riscv/peephole.hpp"
+#include "../../include/backend/riscv/passManager.hpp"
 #include "../../include/mid/ir/ir.hpp"
 
 #include <cstring>
@@ -85,24 +84,13 @@ void RiscvCodeGen::generate() {
             mfunc.name = f->name_;
             RiscvFuncContext ctx(f, mfunc, enable_regalloc_);
             ctx.generate();
-            if (dump_pre_machine_instr_)
-                std::cerr << riscv::dumpMFunction(mfunc);
-            if (!no_peephole_) {
-                bool changed = true;
-                for (int round = 0; changed && round < 8; ++round) {
-                    changed = false;
-                    changed |= riscv::forwardAdjacentStoreLoads(mfunc);
-                    changed |= riscv::propagateCopies(mfunc);
-                    changed |= riscv::redirectProducers(mfunc);
-                    changed |= riscv::removeSelfMoves(mfunc);
-                    changed |= riscv::eliminateDeadMachineInstructions(mfunc);
-                    changed |= riscv::forwardBranches(mfunc);
-                    changed |= riscv::removeDeadBlocks(mfunc);
-                    changed |= riscv::removeFallthroughJumps(mfunc);
-                }
-            }
-            if (dump_machine_instr_)
-                std::cerr << riscv::dumpMFunction(mfunc);
+
+            riscv::MachinePassOptions opt;
+            opt.runPeephole = !no_peephole_;
+            opt.dumpPre = dump_pre_machine_instr_;
+            opt.dumpPost = dump_machine_instr_;
+            riscv::runMachinePasses(mfunc, opt);
+
             body << riscv::printMFunction(mfunc);
         }
     }
