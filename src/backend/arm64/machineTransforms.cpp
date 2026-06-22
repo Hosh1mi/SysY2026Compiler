@@ -1,4 +1,4 @@
-#include "../../include/backend/arm64/peephole.hpp"
+#include "../../include/backend/arm64/machineTransforms.hpp"
 #include "../../include/backend/arm64/liveness.hpp"
 #include <cctype>
 #include <cstdlib>
@@ -1952,122 +1952,76 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	return true;
 }
 
-void peepholeOptimize(MachineFunction &func) {
-	bool changed = true;
-	while (changed) {
-		changed = false;
-		MachineLivenessResult liveness = MachineLiveness().analyze(func);
-		for (size_t b = 0; b < func.blocks.size() && !changed; ++b) {
-			for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
-				if (tryMachineFoldCopyIntoReturn(func, b, i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineSelfMove(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineSwapMov(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineForwardMov(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineRetargetCopyDest(func.blocks[b], i, liveness)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineRetargetVectorCopyDest(func.blocks[b], i, liveness)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineAndTBZ(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineCopyPropagate(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineImmediateFold(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineFoldAddSubMov(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineFoldMovIntoAddSub(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineShiftedAddSubFusion(func.blocks[b], i, liveness)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineMulAddFusion(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineStoreLoadForward(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineRedundantAdrp(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineRedundantSubFrame(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineZeroStore(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineDeadStore(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachinePostIndexScalar(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachinePostIndexNeon(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineVectorLdStAlias(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineMergeStores(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineMergeLoads(func.blocks[b], i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineFallthroughBranch(func, b, i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineBranchThreading(func, b, i)) {
-					changed = true;
-					break;
-				}
-				if (tryMachineRemoveDeadForwarder(func, b, i)) {
-					changed = true;
-					break;
-				}
-			}
+bool runMachineCopyPropagation(MachineFunction &func) {
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
+			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
+			    tryMachineSwapMov(func.blocks[b], i) ||
+			    tryMachineForwardMov(func.blocks[b], i) ||
+			    tryMachineRetargetCopyDest(func.blocks[b], i, liveness) ||
+			    tryMachineRetargetVectorCopyDest(func.blocks[b], i, liveness) ||
+			    tryMachineCopyPropagate(func.blocks[b], i) ||
+			    tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness))
+				return true;
 		}
 	}
+	return false;
+}
+
+bool runMachineInstructionCombine(MachineFunction &func) {
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+	for (auto &block : func.blocks) {
+		for (size_t i = 0; i < block.instrs.size(); ++i) {
+			if (tryMachineAndTBZ(block, i) ||
+			    tryMachineImmediateFold(block, i) ||
+			    tryMachineFoldAddSubMov(block, i) ||
+			    tryMachineFoldMovIntoAddSub(block, i) ||
+			    tryMachineShiftedAddSubFusion(block, i, liveness) ||
+			    tryMachineMulAddFusion(block, i) ||
+			    tryMachineZeroStore(block, i))
+				return true;
+		}
+	}
+	return false;
+}
+
+bool runMachineMemoryOptimization(MachineFunction &func) {
+	for (auto &block : func.blocks) {
+		for (size_t i = 0; i < block.instrs.size(); ++i) {
+			if (tryMachineStoreLoadForward(block, i) ||
+			    tryMachineDeadStore(block, i) ||
+			    tryMachinePostIndexScalar(block, i) ||
+			    tryMachinePostIndexNeon(block, i) ||
+			    tryMachineVectorLdStAlias(block, i) ||
+			    tryMachineMergeStores(block, i) ||
+			    tryMachineMergeLoads(block, i))
+				return true;
+		}
+	}
+	return false;
+}
+
+bool runMachineBranchOptimization(MachineFunction &func) {
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
+			if (tryMachineFallthroughBranch(func, b, i) ||
+			    tryMachineBranchThreading(func, b, i) ||
+			    tryMachineRemoveDeadForwarder(func, b, i))
+				return true;
+		}
+	}
+	return false;
+}
+
+bool runMachinePeephole(MachineFunction &func) {
+	for (auto &block : func.blocks) {
+		for (size_t i = 0; i < block.instrs.size(); ++i) {
+			if (tryMachineSelfMove(block, i) ||
+			    tryMachineRedundantAdrp(block, i) ||
+			    tryMachineRedundantSubFrame(block, i))
+				return true;
+		}
+	}
+	return false;
 }

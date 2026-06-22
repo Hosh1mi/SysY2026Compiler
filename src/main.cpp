@@ -57,9 +57,9 @@
 
 namespace {
 
-// 目标后端架构：直接在源码中以变量指明（不经命令行参数）。切换后端只需改这里。
+// Don't use parameter
 enum class TargetArch { Arm64, Riscv };
-constexpr TargetArch kTargetArch = TargetArch::Riscv;
+constexpr TargetArch kTargetArch = TargetArch::Arm64;
 
 struct DriverOptions {
     char *input = nullptr;
