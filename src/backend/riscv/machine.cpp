@@ -80,6 +80,70 @@ std::string labelTarget(const MInst &m) {
     return m.hasLabelTarget() ? m.operands.back() : std::string();
 }
 
+// 该 opcode 的首操作数是否为定义位置（其余为使用）。算术/搬运/加载/地址类把首
+// 操作数计入 defs；store/branch/ret/call 的全部操作数都是使用。
+bool firstOperandIsDef(MOpcode op) {
+    switch (op) {
+    case MOpcode::Move:
+    case MOpcode::Alu:
+    case MOpcode::Mul:
+    case MOpcode::Div:
+    case MOpcode::Load:
+    case MOpcode::Address:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// 把单个操作数文本解析为结构化 MOperand。
+MOperand parseOperand(const std::string &raw, bool isDef) {
+    MOperand o;
+    o.text = raw;
+    o.isDef = isDef;
+    std::string op = trim(raw);
+
+    size_t l = op.find('(');
+    if (l != std::string::npos) {
+        size_t r = op.find(')', l);
+        o.kind = MOperand::Kind::Mem;
+        std::string base = r != std::string::npos ? trim(op.substr(l + 1, r - l - 1)) : "";
+        o.reg = canonicalReg(base);
+        o.regClass = regClassOf(o.reg).value_or(RegClass::GPR);
+        return o;
+    }
+    if (isReg(op)) {
+        o.kind = MOperand::Kind::Reg;
+        o.reg = canonicalReg(op);
+        o.regClass = regClassOf(o.reg).value_or(RegClass::GPR);
+        return o;
+    }
+    bool numeric = !op.empty() &&
+                   (std::isdigit(static_cast<unsigned char>(op[0])) ||
+                    (op[0] == '-' && op.size() > 1));
+    o.kind = numeric ? MOperand::Kind::Imm : MOperand::Kind::Label;
+    return o;
+}
+
+// 寄存器操作数在该指令中应有的寄存器类；返回 nullopt 表示跳过检查（类混合的
+// 转换/搬运/比较指令操作数横跨两类，逐位语义不规则，不做静态裁定）。
+std::optional<RegClass> expectedRegClass(const std::string &mnemonic, const MOperand &op) {
+    // 访存基址寄存器在 RV 上恒为 GPR。
+    if (op.kind == MOperand::Kind::Mem) return RegClass::GPR;
+    // 整型（非 'f' 前缀）指令的寄存器操作数一律 GPR。
+    if (mnemonic.empty() || mnemonic[0] != 'f') return RegClass::GPR;
+    // 跨类的 fmv/fcvt/比较：dest 与 src 分属不同类，跳过。
+    static const std::set<std::string> mixed = {
+        "fmv.x.w", "fmv.w.x", "fmv.x.d", "fmv.d.x",
+        "fcvt.w.s", "fcvt.s.w", "fcvt.wu.s", "fcvt.s.wu",
+        "fcvt.l.s", "fcvt.s.l", "fcvt.lu.s", "fcvt.s.lu",
+        "fcvt.w.d", "fcvt.d.w", "fcvt.s.d", "fcvt.d.s",
+        "feq.s", "flt.s", "fle.s", "feq.d", "flt.d", "fle.d"};
+    if (mixed.count(mnemonic)) return std::nullopt;
+    // 其余浮点指令（fadd.s/fmul.s/fmv.s/flw 的数据寄存器/fsw 的数据寄存器…）为 FPR。
+    return RegClass::FPR;
+}
+
 }  // namespace
 
 MInst MInst::inst(std::string text) {
@@ -139,6 +203,11 @@ MInst MInst::inst(std::string text) {
         }
     }
     m.defs.erase("zero");
+
+    // 结构化操作数：首操作数按 opcode 决定是否为定义位。
+    bool firstDef = firstOperandIsDef(m.opcode);
+    for (size_t i = 0; i < m.operands.size(); ++i)
+        m.ops.push_back(parseOperand(m.operands[i], i == 0 && firstDef));
     return m;
 }
 
@@ -227,6 +296,15 @@ bool verifyMFunction(const MFunction &func, std::string &error) {
                         error = func.name + ": 未知寄存器类 '" + reg + "' 于 '" + mi.text + "'";
                         return false;
                     }
+            // 寄存器类混用：每个寄存器操作数的类须与该指令期望的类一致。
+            for (const MOperand &op : mi.ops) {
+                if (!op.isRegLike()) continue;
+                auto want = expectedRegClass(mi.mnemonic, op);
+                if (want && *want != op.regClass) {
+                    error = func.name + ": 寄存器类混用 '" + op.reg + "' 于 '" + mi.text + "'";
+                    return false;
+                }
+            }
             std::string tgt = labelTarget(mi);
             if (!tgt.empty() && !labelToBlock.count(tgt)) {
                 error = func.name + ": 未解析的分支目标 '" + tgt + "'";
@@ -285,6 +363,23 @@ std::string dumpMFunction(const MFunction &func) {
             if (mi.mayStore) os << " store";
             if (mi.isCall) os << " call";
             if (mi.isTerminator) os << " term";
+            if (!mi.ops.empty()) {
+                os << " ops=[";
+                for (size_t k = 0; k < mi.ops.size(); ++k) {
+                    const MOperand &op = mi.ops[k];
+                    if (k) os << ", ";
+                    switch (op.kind) {
+                    case MOperand::Kind::Reg:
+                        os << (op.regClass == RegClass::FPR ? "fpr:" : "gpr:") << op.reg
+                           << (op.isDef ? "(def)" : "");
+                        break;
+                    case MOperand::Kind::Mem: os << "mem:" << op.reg; break;
+                    case MOperand::Kind::Imm: os << "imm"; break;
+                    case MOperand::Kind::Label: os << "label"; break;
+                    }
+                }
+                os << "]";
+            }
             os << "\n";
         }
     }

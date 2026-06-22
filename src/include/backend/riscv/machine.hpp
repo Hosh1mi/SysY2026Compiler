@@ -6,11 +6,28 @@
 // 只在最终打印时生成。优化与分析使用结构化 opcode、defs/uses 与副作用标志，
 // 块边界由 CFG 给出，而不再依赖对汇编文本反向解析标签段。
 
+#include "target.hpp"
+
 #include <set>
 #include <string>
 #include <vector>
 
 namespace riscv {
+
+// 一个机器操作数的结构化视图（与原始文本并存，由 MInst::inst 解析时构造）。
+//   Reg   寄存器：reg 为规范 ABI 名，regClass 为其寄存器类，isDef 标识定义位。
+//   Mem   imm(base) 访存：reg 为 base 的规范 ABI 名（恒 GPR），regClass=GPR。
+//   Imm   立即数；Label 符号/块标签/调用目标。
+struct MOperand {
+    enum class Kind { Reg, Imm, Mem, Label };
+    Kind kind = Kind::Imm;
+    std::string text;                   // 原始文本（渲染/兼容用）
+    std::string reg;                    // Reg 或 Mem-base 的规范 ABI 名
+    RegClass regClass = RegClass::GPR;  // 仅 Reg/Mem 有意义
+    bool isDef = false;                 // 该操作数是否为定义位置
+
+    bool isRegLike() const { return kind == Kind::Reg || kind == Kind::Mem; }
+};
 
 enum class MOpcode {
     Unknown,
@@ -32,7 +49,8 @@ enum class MOpcode {
 struct MInst {
     std::string text;
     std::string mnemonic;
-    std::vector<std::string> operands;
+    std::vector<std::string> operands;   // 原始文本操作数（窥孔改写仍用）
+    std::vector<MOperand> ops;           // 结构化操作数（typed + reg class）
     MOpcode opcode = MOpcode::Unknown;
     std::set<std::string> defs;
     std::set<std::string> uses;
