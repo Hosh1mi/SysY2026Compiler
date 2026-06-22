@@ -494,7 +494,7 @@ void Arm64RegAlloc::allocate() {
             if (!phi) continue;
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 auto val = phi->get_operand(i);
-                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
                 if (canAssignRegister(val)) {
                     phiOut[pred].insert(val);
                 }

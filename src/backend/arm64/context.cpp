@@ -284,7 +284,7 @@ void Arm64FuncContext::reorderBlocks() {
             preferred[bb] = static_cast<BasicBlock*>(term->get_operand(0));
         } else if (term->num_ops_ == 3) {
             auto trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
-            auto falseBB = static_cast<BasicBlock*>(term->get_operand(2));
+            auto *falseBB = static_cast<BasicBlock*>(term->get_operand(2));
 
             // Check which edges carry phi copies. The codegen (emitFusedCmpBranch /
             // emitInstruction::Br) emits the unconditional 'b' to:

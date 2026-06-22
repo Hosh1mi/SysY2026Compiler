@@ -172,7 +172,7 @@ static int p2AlignForBytes(int align) {
 }
 
 void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
-    auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
+    auto *pointee = static_cast<PointerType*>(gv->type_)->contained_;
 
     appendMachineLine(module, "\t.global " + gv->name_);
     appendMachineLine(module, "\t.p2align " +

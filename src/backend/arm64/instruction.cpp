@@ -484,7 +484,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
 
         // ICmp + Br fusion: csel / ccmp+csel / cmp + b.cond
         if (inst->op_id_ == Instruction::ICmp) {
-            auto icmp = static_cast<ICmpInst*>(inst);
+            auto *icmp = static_cast<ICmpInst*>(inst);
             auto next = std::next(it);
             if (next != instrs.end()) {
                 auto *br = dynamic_cast<BranchInst*>(*next);
@@ -995,7 +995,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- ICmp ----
     case Instruction::ICmp: {
-        auto icmp = static_cast<ICmpInst*>(inst);
+        auto *icmp = static_cast<ICmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
@@ -1094,7 +1094,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- FCmp ----
     case Instruction::FCmp: {
-        auto fcmp = static_cast<FCmpInst*>(inst);
+        auto *fcmp = static_cast<FCmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         std::string r1 = loadFloat(v1);
@@ -1110,7 +1110,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- GEP ----
     case Instruction::GetElementPtr: {
-        auto gep = static_cast<GetElementPtrInst*>(inst);
+        auto *gep = static_cast<GetElementPtrInst*>(inst);
         auto ptr = gep->get_operand(0);
 
         std::string addr;
@@ -1181,7 +1181,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
 
         unsigned numIdx = gep->num_ops_ - 1;
-        auto srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
+        auto *srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
         Type *curTy = srcTy;
 
         for (unsigned i = 1; i < gep->num_ops_; i++) {
@@ -1192,10 +1192,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
             // 2. 更新 curTy 到下一层（为下一次迭代准备）
             if (curTy->tid_ == Type::ArrayTyID) {
-                auto at = static_cast<ArrayType*>(curTy);
+                auto *at = static_cast<ArrayType*>(curTy);
                 curTy = at->contained_;
             } else if (curTy->tid_ == Type::PointerTyID) {
-                auto pt = static_cast<PointerType*>(curTy);
+                auto *pt = static_cast<PointerType*>(curTy);
                 curTy = pt->contained_;
             }
             // 否则是基本类型，不再更新（后续索引非法，但一般不会出现）
@@ -1275,14 +1275,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         if (inst->num_ops_ == 1) {
             // Unconditional branch: emit copies for the single edge
-            auto target = static_cast<BasicBlock*>(inst->get_operand(0));
+            auto *target = static_cast<BasicBlock*>(inst->get_operand(0));
             emitPhiCopies(parentBB, target);
             emitBranchMachine("\tb " + bbLabel(func_, target));
         } else {
             // Conditional branch: evaluate condition FIRST, then edge-specific copies
             auto cond = inst->get_operand(0);
-            auto trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
-            auto falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
+            auto *trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
+            auto *falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
 
             // Check if either edge has phi copies
             bool hasTrue = false, hasFalse = false;
@@ -1354,9 +1354,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- Call ----
     case Instruction::Call: {
-        auto call = static_cast<CallInst*>(inst);
+        auto *call = static_cast<CallInst*>(inst);
         unsigned numArgs = call->num_ops_ - 1;
-        auto callee = static_cast<Function*>(call->get_operand(numArgs));
+        auto *callee = static_cast<Function*>(call->get_operand(numArgs));
 
         struct RegArg {
             unsigned index;

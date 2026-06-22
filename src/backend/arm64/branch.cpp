@@ -12,11 +12,11 @@ void Arm64FuncContext::preparePhi() {
     for (auto bb : func_->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
             if (!inst->is_phi()) continue;
-            auto phi = static_cast<PhiInst*>(inst);
+            auto *phi = static_cast<PhiInst*>(inst);
             int phiSlot = hasAssignedReg(phi) ? 0 : getSlot(phi);
             for (int i = 0; i < phi->num_ops_ / 2; i++) {
                 auto val = phi->get_operand(2 * i);
-                auto predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
+                auto *predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
                 phiCopies_.push_back({predBB, bb, val, phiSlot, phi});
             }
         }
@@ -677,7 +677,7 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     auto v2 = icmp->get_operand(1);
 
     auto trueBB  = static_cast<BasicBlock*>(br->get_operand(1));
-    auto falseBB = static_cast<BasicBlock*>(br->get_operand(2));
+    auto *falseBB = static_cast<BasicBlock*>(br->get_operand(2));
     BasicBlock *parentBB = br->parent_;
 
     const char *cond = icmpCond(icmp->icmp_op_);
