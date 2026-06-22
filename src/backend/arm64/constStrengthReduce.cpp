@@ -24,7 +24,7 @@
 
 // ── SDiv：常量除数强度削减（2 的幂偏置移位 / 非 2 幂魔数乘）──────────────────
 bool Arm64FuncContext::tryEmitSDivConst(Instruction *inst, Value *v1, Value *v2) {
-    auto ci = dynamic_cast<ConstantInt *>(v2);
+    auto *ci = dynamic_cast<ConstantInt *>(v2);
     if (!ci) return false;
 
     int32_t d = ci->value_;
@@ -224,11 +224,11 @@ bool Arm64FuncContext::tryEmitAddSubImm(Instruction *inst, Value *v1, Value *v2,
     };
 
     if (inst->op_id_ == Instruction::Add) {
-        if (auto ci = dynamic_cast<ConstantInt *>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt *>(v2)) {
             if (emitImmediate("add", "sub", v1, ci->value_))
                 return true;
         }
-        if (auto ci = dynamic_cast<ConstantInt *>(v1)) {
+        if (auto *ci = dynamic_cast<ConstantInt *>(v1)) {
             if (emitImmediate("add", "sub", v2, ci->value_))
                 return true;
         }
@@ -236,7 +236,7 @@ bool Arm64FuncContext::tryEmitAddSubImm(Instruction *inst, Value *v1, Value *v2,
         // Skip immediate form when v1 is zero: sub rd, wzr, #imm is illegal
         // (ARM64 sub(immediate) uses the WSP encoding slot, WZR not allowed).
         if (!(dynamic_cast<ConstantInt *>(v1) && static_cast<ConstantInt *>(v1)->value_ == 0)) {
-            if (auto ci = dynamic_cast<ConstantInt *>(v2)) {
+            if (auto *ci = dynamic_cast<ConstantInt *>(v2)) {
                 if (emitImmediate("sub", "add", v1, ci->value_))
                     return true;
             }
@@ -247,7 +247,7 @@ bool Arm64FuncContext::tryEmitAddSubImm(Instruction *inst, Value *v1, Value *v2,
 
 // ── SRem：常量除数取余（mag-1 → 0、mag-2 特例、2 的幂掩码、非 2 幂魔数 msub）────
 bool Arm64FuncContext::tryEmitSRemConst(Instruction *inst, Value *v1, Value *v2) {
-    auto ci = dynamic_cast<ConstantInt *>(v2);
+    auto *ci = dynamic_cast<ConstantInt *>(v2);
     if (!ci) return false;
 
     int32_t divisor = ci->value_;
@@ -377,7 +377,7 @@ bool Arm64FuncContext::tryEmitLogicalConst(Instruction *inst, Value *v1, Value *
 //                             非 2 幂 → 物化 elemSize 后 mul 缩放再 add
 void Arm64FuncContext::emitGepIndexStep(std::string &addr, Value *idx, int elemSize,
                                         Instruction *inst) {
-    if (auto ci = dynamic_cast<ConstantInt *>(idx)) {
+    if (auto *ci = dynamic_cast<ConstantInt *>(idx)) {
         int offset = ci->value_ * elemSize;
         if (offset != 0) {
             if (offset > 0 && offset <= 4095) {

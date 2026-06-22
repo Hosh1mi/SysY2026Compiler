@@ -33,7 +33,7 @@ std::string Arm64RegAlloc::assignedReg(Value *v, bool asAddress) const {
 
 bool Arm64RegAlloc::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
-    if (auto inst = dynamic_cast<Instruction*>(v)) {
+    if (auto *inst = dynamic_cast<Instruction*>(v)) {
         if (inst->is_void() || inst->is_alloca()) {
             return false;
         }
@@ -285,7 +285,7 @@ void Arm64RegAlloc::allocate() {
             auto term = bb->get_terminator();
             if (term) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         if (!visited.count(succ))
                             dfs(succ);
                     }
@@ -309,7 +309,7 @@ void Arm64RegAlloc::allocate() {
         auto term = bb->get_terminator();
         if (!term) continue;
         for (unsigned i = 0; i < term->num_ops_; ++i) {
-            if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+            if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                 preds[succ].push_back(bb);
             }
         }
@@ -490,7 +490,7 @@ void Arm64RegAlloc::allocate() {
     std::map<BasicBlock*, std::set<Value*>> phiOut;
     for (auto bb : blocksOrder) {
         for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
+            auto *phi = dynamic_cast<PhiInst*>(inst);
             if (!phi) continue;
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 auto val = phi->get_operand(i);
@@ -508,7 +508,7 @@ void Arm64RegAlloc::allocate() {
     for (auto bb : blocksOrder) {
         BBInfo info;
         for (auto inst : bb->instr_list_) {
-            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
                 if (canAssignRegister(phi)) info.def.insert(phi);
                 continue;
             }
@@ -537,7 +537,7 @@ void Arm64RegAlloc::allocate() {
             auto term = bb->get_terminator();
             if (term) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         for (auto v : liveIn[succ]) newOut.insert(v);
                     }
                 }
@@ -574,7 +574,7 @@ void Arm64RegAlloc::allocate() {
             if (canAssignRegister(inst))
                 live.erase(inst);
 
-            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
                 for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                     auto val = phi->get_operand(i);
                     if (canAssignRegister(val))
@@ -663,7 +663,7 @@ void Arm64RegAlloc::allocate() {
         auto term = bb->get_terminator();
         if (!term) continue;
         for (unsigned i = 0; i < term->num_ops_; ++i) {
-            auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
+            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
             if (!succ) continue;
             if (doms[bb].count(succ)) {
                 std::set<BasicBlock*> loopBlocks;
@@ -684,7 +684,7 @@ void Arm64RegAlloc::allocate() {
     std::map<Value*, std::set<Value*>> phiAffinity;
     for (auto bb : blocksOrder) {
         for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
+            auto *phi = dynamic_cast<PhiInst*>(inst);
             if (!phi || !canAssignRegister(phi)) continue;
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 auto val = phi->get_operand(i);
@@ -701,7 +701,7 @@ void Arm64RegAlloc::allocate() {
     for (auto &iv : intervals) {
         double cost = 0;
         for (auto &use : iv.value->use_list_) {
-            auto inst = dynamic_cast<Instruction*>(use.val_);
+            auto *inst = dynamic_cast<Instruction*>(use.val_);
             if (!inst) continue;
             int depth = loopDepth[inst->parent_];
             cost += std::pow(20.0, depth);
@@ -823,7 +823,7 @@ void Arm64RegAlloc::allocate() {
             double w = std::pow(20.0, depth);
             for (auto inst : bb->instr_list_) {
                 if (inst->op_id_ == Instruction::SRem) {
-                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                    auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
                     Magic::SignedDivisorInfo info = ci
                         ? Magic::analyzeDivisor(ci->value_)
                         : Magic::SignedDivisorInfo{};
@@ -832,7 +832,7 @@ void Arm64RegAlloc::allocate() {
                         addCandidate(static_cast<int>(info.magnitude), w);
                     }
                 } else if (inst->op_id_ == Instruction::SDiv) {
-                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                    auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
                     Magic::SignedDivisorInfo info = ci
                         ? Magic::analyzeDivisor(ci->value_)
                         : Magic::SignedDivisorInfo{};
@@ -843,7 +843,7 @@ void Arm64RegAlloc::allocate() {
                            inst->op_id_ == Instruction::ICmp) {
                     // 这些指令的多指令大常量操作数必然走 loadInt 物化
                     for (unsigned i = 0; i < inst->num_ops_; ++i)
-                        if (auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
+                        if (auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
                             addCandidate(ci->value_, w);
                 }
             }

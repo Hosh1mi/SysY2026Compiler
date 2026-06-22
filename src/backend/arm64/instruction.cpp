@@ -303,7 +303,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             auto term = b->get_terminator();
             if (!term || !term->is_br()) continue;
             for (unsigned i = 0; i < term->num_ops_; ++i) {
-                if (auto tgt = dynamic_cast<BasicBlock*>(term->get_operand(i)))
+                if (auto *tgt = dynamic_cast<BasicBlock*>(term->get_operand(i)))
                     branchTargets_.insert(tgt);
             }
         }
@@ -487,7 +487,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             auto icmp = static_cast<ICmpInst*>(inst);
             auto next = std::next(it);
             if (next != instrs.end()) {
-                auto br = dynamic_cast<BranchInst*>(*next);
+                auto *br = dynamic_cast<BranchInst*>(*next);
                 if (br && br->num_ops_ == 3 && br->get_operand(0) == icmp && icmp->use_list_.size() == 1) {
                     if (tryEmitCSel(icmp, br)) { ++it; continue; }
                     // if (tryEmitCCmpCSel(icmp, br)) { ++it; continue; }
@@ -519,7 +519,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     if (sInst->get_operand(i) == inst) { usesMul = true; break; }
                 if (usesMul && !dynamic_cast<BinaryInst*>(sInst)) break;
 
-                auto addSub = dynamic_cast<BinaryInst*>(sInst);
+                auto *addSub = dynamic_cast<BinaryInst*>(sInst);
                 if (addSub) {
                     Value *op0 = addSub->get_operand(0);
                     Value *op1 = addSub->get_operand(1);
@@ -647,7 +647,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             emitMachineInstr(std::move(st));
             break;
         }
-        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+        if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
                                  MOpcode::Adr, {base});
@@ -690,7 +690,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (!hasAssignedReg(inst)) storeVector(inst, vd);
             break;
         }
-        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+        if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
                                  MOpcode::Adr, {base});
@@ -876,7 +876,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         else if (inst->op_id_ == Instruction::LShr) opcode = "lsr";
         else                                        opcode = "asr";
 
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
             emitMachineInstrLine(
                 "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
                 MOpcode::Alu, {rd}, {r1});
@@ -1020,7 +1020,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             auto *cv2 = icmp->get_operand(1);
             std::string r1 = isPtr(cv1->type_) ? loadAddr(cv1) : loadInt(cv1);
             cond = icmpCond(icmp->icmp_op_);
-            if (auto ci = dynamic_cast<ConstantInt*>(cv2)) {
+            if (auto *ci = dynamic_cast<ConstantInt*>(cv2)) {
                 int val = ci->value_;
                 if (val >= 0 && val <= 4095)
                     emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
@@ -1139,9 +1139,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         if (useAssignedAddr) {
             addr = assignedAddr;
-            if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+            if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
                 emitGlobalAddr(gv, addr);
-            } else if (auto ci = dynamic_cast<ConstantInt*>(ptr)) {
+            } else if (auto *ci = dynamic_cast<ConstantInt*>(ptr)) {
                 emitIntConst(ci->value_, addr);
             } else if (hasAssignedReg(ptr)) {
                 std::string base = assignedReg(ptr, true);
@@ -1498,7 +1498,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             } else {
                 if (intArg < 8) {
                     std::string dst = "w" + std::to_string(intArg++);
-                    if (auto ci = dynamic_cast<ConstantInt*>(arg)) {
+                    if (auto *ci = dynamic_cast<ConstantInt*>(arg)) {
                         if (ci->value_ == 0)
                             emitMoveMachine(dst, "wzr");
                         else

@@ -322,7 +322,7 @@ void Arm64FuncContext::reorderBlocks() {
             if (term && term->is_br()) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
                     // operand 0 of cond br is i1 (not a BB), skipped by dynamic_cast
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         if (!placed.count(succ)) { next = succ; break; }
                     }
                 }
@@ -730,7 +730,7 @@ int Arm64FuncContext::getSlot(Value *v) {
     if (it != slots_.end()) return it->second;
 
     int size;
-    if (auto alloca = dynamic_cast<AllocaInst*>(v)) {
+    if (auto *alloca = dynamic_cast<AllocaInst*>(v)) {
         size = typeSize(alloca->alloca_ty_);
     } else if (isVector(v->type_)) {
         size = 16; // 128-bit vector value
