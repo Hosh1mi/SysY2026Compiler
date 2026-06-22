@@ -59,7 +59,7 @@ namespace {
 
 // Don't use parameter
 enum class TargetArch { Arm64, Riscv };
-constexpr TargetArch kTargetArch = TargetArch::Riscv;
+constexpr TargetArch kTargetArch = TargetArch::Arm64;
 
 struct DriverOptions {
     char *input = nullptr;
