@@ -22,6 +22,7 @@ private:
     bool tryUnroll(Loop &loop, Function *func, Module *module,
                    BasicAliasAnalysis &BAA);
     bool tryUnrollStructured(Loop &loop, Function *func, Module *module);
+    bool tryUnrollCFGRegion(Loop &loop, Function *func, Module *module);
     bool tryUnrollDoWhile(Loop &loop, Function *func, Module *module);
     Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
                            const std::unordered_map<Value *, Value *> &vmap);
