@@ -1179,17 +1179,17 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 addr = base;
             }
         }
-    
+
         unsigned numIdx = gep->num_ops_ - 1;
         auto srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
         Type *curTy = srcTy;
-    
+
         for (unsigned i = 1; i < gep->num_ops_; i++) {
             auto idx = gep->get_operand(i);
-            
+
             // 1. 当前层级元素的大小（一定是 typeSize(curTy)）
             int elemSize = typeSize(curTy);
-            
+
             // 2. 更新 curTy 到下一层（为下一次迭代准备）
             if (curTy->tid_ == Type::ArrayTyID) {
                 auto at = static_cast<ArrayType*>(curTy);
@@ -1199,7 +1199,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 curTy = pt->contained_;
             }
             // 否则是基本类型，不再更新（后续索引非法，但一般不会出现）
-            
+
             // 单层下标的常量驱动地址削减集中在 constStrengthReduce.cpp
             emitGepIndexStep(addr, idx, elemSize, inst);
         }
@@ -1473,7 +1473,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitStackAdjustMachine("sub", "x17");
             }
         }
-    
+
         // 传递参数 (寄存器 + 栈)
         intArg = 0; floatArg = 0;
         int stackIdx = 0;   // 栈参数写入偏移 (相对于 sp)
@@ -1517,10 +1517,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
         }
-    
+
         // 执行调用
         emitCallMachine(callee->name_, call);
-    
+
         // 回收栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
@@ -1530,8 +1530,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitStackAdjustMachine("add", "x17");
             }
         }
-    
-        // 处理返回值 
+
+        // 处理返回值
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
                 storeFloat(inst, "s0");
