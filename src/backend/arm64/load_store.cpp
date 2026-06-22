@@ -51,7 +51,7 @@ void Arm64FuncContext::freeIntReg(const std::string &reg) {
     }
 }
 
-void Arm64FuncContext::freeAddrReg(const std::string& reg) {
+void Arm64FuncContext::freeAddrReg(const std::string &reg) {
     if (reg.size() >= 2 && reg[0] == 'x') {
         int num = std::stoi(reg.substr(1));
         if (reservedIntRegs_.count(num)) return;

@@ -114,7 +114,7 @@ void Arm64CodeGen::generate() {
     }
 
     // 6. 输出数据段：.data -> .bss -> .section .rodata
-    auto emitGroup = [&](const char* sec, const std::vector<GlobalVariable*>& gvs) {
+    auto emitGroup = [&](const char *sec, const std::vector<GlobalVariable*> &gvs) {
         if (gvs.empty()) return;
         appendMachineLine(module, sec);
         for (auto gv : gvs) {
