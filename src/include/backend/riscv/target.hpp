@@ -10,6 +10,9 @@
 // 这里只描述与代码生成框架相关的寄存器约定，具体指令选择见 context.cpp。
 
 #include <array>
+#include <optional>
+#include <set>
+#include <string>
 
 namespace riscv {
 
@@ -18,6 +21,27 @@ enum class RegClass {
     GPR,  // x0-x31
     FPR,  // f0-f31
 };
+
+// ── 物理寄存器描述（ABI 名 ↔ xN/fN 别名、寄存器类、调用钳制）──────────────────
+// 单一事实来源，供 lowering 副作用标注、活跃性、寄存器分配与机器层验证共用。
+
+// 名字是否为一个物理寄存器（ABI 名、x0-x31、f0-f31，或别名 fp）。
+bool isReg(const std::string &name);
+
+// 寄存器类别；非寄存器返回 nullopt。
+std::optional<RegClass> regClassOf(const std::string &name);
+
+// 规范化为 ABI 名：xN/fN 数字名映射到 ABI 名，fp→s0；已是 ABI 名或非寄存器原样返回。
+std::string canonicalReg(const std::string &name);
+
+// 调用钳制：一次 call 覆盖的 caller-saved 物理寄存器集合（GPR: ra/t0-t6/a0-a7，
+// FPR: ft0-ft11/fa0-fa7），均为规范 ABI 名。
+const std::set<std::string> &callClobbers();
+
+// caller-saved / callee-saved 判定（输入会先规范化）。sp/gp/tp/zero 等专用寄存器
+// 两者均为 false。
+bool isCallerSaved(const std::string &name);
+bool isCalleeSaved(const std::string &name);
 
 // ── 调用约定（LP64D）相关寄存器 ──────────────────────────────────────────
 // 整型/指针实参依次放入 a0-a7，溢出走栈；浮点实参依次放入 fa0-fa7，溢出走栈。

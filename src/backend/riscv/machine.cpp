@@ -1,4 +1,5 @@
 #include "../../include/backend/riscv/machine.hpp"
+#include "../../include/backend/riscv/target.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -44,24 +45,12 @@ std::vector<std::string> splitOperands(const std::string &s) {
     return result;
 }
 
-bool isRegister(const std::string &s) {
-    static const std::set<std::string> named = {
-        "zero", "ra", "sp", "gp", "tp", "fp",
-        "t0", "t1", "t2", "t3", "t4", "t5", "t6",
-        "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11",
-        "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
-        "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "ft8", "ft9", "ft10", "ft11",
-        "fs0", "fs1", "fs2", "fs3", "fs4", "fs5", "fs6", "fs7", "fs8", "fs9", "fs10", "fs11",
-        "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"};
-    if (named.count(s)) return true;
-    if (s.size() < 2 || (s[0] != 'x' && s[0] != 'f')) return false;
-    return std::all_of(s.begin() + 1, s.end(), [](unsigned char c) { return std::isdigit(c); });
-}
-
+// 把操作数（"reg" 或 "imm(reg)"）中的物理寄存器规范化为 ABI 名后加入集合。
+// 寄存器类别、xN/fN 别名、fp→s0 等统一由目标描述（target.hpp）裁决。
 void addRegister(std::set<std::string> &set, const std::string &operand) {
     std::string op = trim(operand);
-    if (isRegister(op)) {
-        set.insert(op == "fp" ? "s0" : op);
+    if (isReg(op)) {
+        set.insert(canonicalReg(op));
         return;
     }
     size_t l = op.find('('), r = op.find(')', l == std::string::npos ? 0 : l + 1);
@@ -77,17 +66,14 @@ bool isOneOf(const std::string &op, std::initializer_list<const char *> names) {
 
 void addCallBoundary(MInst &m) {
     // Calls observe the current stack pointer (including stack-passed
-    // arguments) and overwrite ra plus all caller-saved registers.
+    // arguments) and conservatively read every argument register; they
+    // overwrite the full caller-saved set (target description).
     m.uses.insert("sp");
     for (int i = 0; i < 8; ++i) {
         m.uses.insert("a" + std::to_string(i));
         m.uses.insert("fa" + std::to_string(i));
-        m.defs.insert("a" + std::to_string(i));
-        m.defs.insert("fa" + std::to_string(i));
     }
-    for (int i = 0; i <= 6; ++i) m.defs.insert("t" + std::to_string(i));
-    for (int i = 0; i <= 11; ++i) m.defs.insert("ft" + std::to_string(i));
-    m.defs.insert("ra");
+    for (const auto &reg : callClobbers()) m.defs.insert(reg);
 }
 
 std::string labelTarget(const MInst &m) {
@@ -234,6 +220,13 @@ bool verifyMFunction(const MFunction &func, std::string &error) {
                 error = func.name + ": 不完整的指令副作用描述: '" + mi.text + "'";
                 return false;
             }
+            // defs/uses 必须均为已知寄存器类的物理寄存器（规范 ABI 名）。
+            for (const auto *side : {&mi.defs, &mi.uses})
+                for (const auto &reg : *side)
+                    if (!regClassOf(reg)) {
+                        error = func.name + ": 未知寄存器类 '" + reg + "' 于 '" + mi.text + "'";
+                        return false;
+                    }
             std::string tgt = labelTarget(mi);
             if (!tgt.empty() && !labelToBlock.count(tgt)) {
                 error = func.name + ": 未解析的分支目标 '" + tgt + "'";
