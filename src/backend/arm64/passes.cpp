@@ -16,12 +16,24 @@ bool Arm64InstructionCombinePass::run(MachineFunction &function) {
     return runMachineInstructionCombine(function);
 }
 
+bool Arm64CodeMotionPass::run(MachineFunction &function) {
+    return runMachineCodeMotion(function);
+}
+
 bool Arm64MemoryOptimizationPass::run(MachineFunction &function) {
     return runMachineMemoryOptimization(function);
 }
 
 bool Arm64BranchOptimizationPass::run(MachineFunction &function) {
     return runMachineBranchOptimization(function);
+}
+
+bool Arm64CanonicalizationPass::run(MachineFunction &function) {
+    return runMachineCanonicalization(function);
+}
+
+bool Arm64LocalCSEPass::run(MachineFunction &function) {
+    return runMachineLocalCSE(function);
 }
 
 bool Arm64PeepholePass::run(MachineFunction &function) {

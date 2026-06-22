@@ -284,16 +284,6 @@ static bool isScratchReg(const std::string &r) {
 	return num >= kScratchRegMin && num <= kScratchRegMax;
 }
 
-static bool isCallerSavedReg(const std::string &r) {
-	if (r.size() < 2 || !std::isdigit(r[1])) return false;
-	int num = std::atoi(r.c_str() + 1);
-	if (r[0] == 'w' || r[0] == 'x')
-		return num >= 0 && num <= 18;
-	if (r[0] == 's' || r[0] == 'd')
-		return (num >= 0 && num <= 7) || (num >= 16 && num <= 31);
-	return false;
-}
-
 // ── Main optimization loop ──────────────────────────────────────────
 
 static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
@@ -331,11 +321,13 @@ static bool tryMachineSwapMov(MachineBasicBlock &block, size_t idx) {
 
 static bool machineRegDeadAfter(const MachineBasicBlock &block,
                                 size_t idx,
-                                const std::string &reg);
+                                const std::string &reg,
+                                const MachineLivenessResult &liveness);
 static bool isControlFlowBarrier(const std::string &mnemonic);
 static bool setsFlags(const std::string &mnemonic);
 
-static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
+                                 const MachineLivenessResult &liveness) {
 	if (idx + 1 >= block.instrs.size()) return false;
 
 	ParsedLine first = parseLine(block.instrs[idx].text);
@@ -355,7 +347,7 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx) {
 	const std::string &dstReg = second.operands[0];
 	if (regClass(dstReg) != regClass(tempReg)) return false;
 
-	if (!machineRegDeadAfter(block, idx + 1, tempReg)) return false;
+	if (!machineRegDeadAfter(block, idx + 1, tempReg, liveness)) return false;
 
 	replaceMachineInstr(block.instrs[idx + 1],
 	                    makeMachineInsn("mov", {dstReg, srcReg}));
@@ -534,7 +526,8 @@ static bool canPropagateCopy(const ParsedLine &line,
 	return false;
 }
 
-static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
+                                    const MachineLivenessResult &liveness) {
 	ParsedLine copy = parseLine(block.instrs[idx].text);
 	if (copy.kind != LineKind::Instruction) return false;
 	if (copy.mnemonic != "mov" && copy.mnemonic != "fmov") return false;
@@ -573,7 +566,7 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx) {
 		ParsedLine rewritten;
 		if (!canPropagateCopy(line, tempReg, srcReg, rewritten))
 			return false;
-		if (!machineRegDeadAfter(block, i, tempReg))
+		if (!machineRegDeadAfter(block, i, tempReg, liveness))
 			return false;
 
 		replaceMachineInstr(block.instrs[i],
@@ -587,23 +580,26 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx) {
 
 static bool machineRegDeadAfter(const MachineBasicBlock &block,
                                 size_t idx,
-                                const std::string &reg) {
-	for (size_t i = idx + 1; i < block.instrs.size(); ++i) {
-		ParsedLine line = parseLine(block.instrs[i].text);
-		if (line.kind != LineKind::Instruction) continue;
-		if (isCallBarrier(line.mnemonic)) return isCallerSavedReg(reg);
-		if (lineWritesReg(line, reg)) return true;
-		if (lineReadsReg(line, reg)) return false;
-		if (line.mnemonic == "b" || line.mnemonic == "ret" ||
-		    line.mnemonic == "cbnz" || line.mnemonic == "cbz" ||
-		    line.mnemonic == "tbnz" || line.mnemonic == "tbz" ||
-		    (line.mnemonic.size() >= 2 && line.mnemonic[0] == 'b' && line.mnemonic[1] == '.'))
-			return false;
+                                const std::string &reg,
+                                const MachineLivenessResult &liveness) {
+	if (idx >= block.instrs.size()) return false;
+	auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx]);
+	if (liveIt == liveness.instrLiveOut.end()) return false;
+
+	char cls = 0;
+	std::string number;
+	std::string normalized = reg;
+	if (parsePhysicalReg(reg, cls, number)) {
+		if (cls == 'w' || cls == 'x')
+			normalized = "r" + number;
+		else
+			normalized = "v" + number;
 	}
-	return false;
+	return liveIt->second.count(normalized) == 0;
 }
 
-static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
+                                const MachineLivenessResult &liveness) {
 	auto &inst = block.instrs[idx];
 	ParsedLine zero = parseLine(inst.text);
 	if (zero.kind != LineKind::Instruction) return false;
@@ -649,7 +645,7 @@ static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx) {
 	}
 
 	if (!foundStore) return false;
-	if (!machineRegDeadAfter(block, lastTouched, zeroedReg)) return false;
+	if (!machineRegDeadAfter(block, lastTouched, zeroedReg, liveness)) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
@@ -676,7 +672,8 @@ static bool validAddSubSourceForClass(const std::string &reg, char cls) {
 	return cls == 'x' && reg == "sp";
 }
 
-static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
+                                    const MachineLivenessResult &liveness) {
 	ParsedLine movz = parseLine(block.instrs[idx].text);
 	if (movz.kind != LineKind::Instruction) return false;
 	if (movz.mnemonic != "movz") return false;
@@ -723,8 +720,8 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx) {
 	std::string dstReg = outMov.operands[0];
 	if (regClass(dstReg) != cls) return false;
 
-	if (!machineRegDeadAfter(block, movIdx, middleReg)) return false;
-	if (!machineRegDeadAfter(block, movIdx, tempReg)) return false;
+	if (!machineRegDeadAfter(block, movIdx, middleReg, liveness)) return false;
+	if (!machineRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
 
 	std::string newImm = "#" + std::to_string(value);
 	replaceMachineInstr(block.instrs[movIdx],
@@ -735,7 +732,8 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx) {
 	return true;
 }
 
-static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
+                                    const MachineLivenessResult &liveness) {
 	ParsedLine alu = parseLine(block.instrs[idx].text);
 	if (alu.kind != LineKind::Instruction) return false;
 	if (alu.mnemonic != "add" && alu.mnemonic != "sub") return false;
@@ -777,7 +775,7 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx) {
 				return false;
 		}
 
-		if (!machineRegDeadAfter(block, movIdx, tempReg)) return false;
+		if (!machineRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
 
 		std::vector<std::string> newOperands = alu.operands;
 		newOperands[0] = dstReg;
@@ -948,9 +946,10 @@ static bool tryMachineDelayAddSubToCopy(
 static bool deadAfterConsumer(const MachineBasicBlock &block,
                               size_t consumerIdx,
                               const std::string &removedReg,
-                              const std::string &consumerDst) {
+                              const std::string &consumerDst,
+                              const MachineLivenessResult &liveness) {
 	if (samePhysicalReg(removedReg, consumerDst)) return true;
-	return machineRegDeadAfter(block, consumerIdx, removedReg);
+	return machineRegDeadAfter(block, consumerIdx, removedReg, liveness);
 }
 
 static bool tryMachineShiftedAddSubFusion(
@@ -1019,7 +1018,8 @@ static bool tryMachineShiftedAddSubFusion(
 	return true;
 }
 
-static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
+                                   const MachineLivenessResult &liveness) {
 	if (idx + 1 >= block.instrs.size()) return false;
 
 	ParsedLine mul = parseLine(block.instrs[idx].text);
@@ -1089,8 +1089,9 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx) {
 		}
 	}
 
-	if (!deadAfterConsumer(block, consumerIdx, mulDst, dst)) return false;
-	if (!forwardedReg.empty() && !deadAfterConsumer(block, consumerIdx, forwardedReg, dst))
+	if (!deadAfterConsumer(block, consumerIdx, mulDst, dst, liveness)) return false;
+	if (!forwardedReg.empty() &&
+	    !deadAfterConsumer(block, consumerIdx, forwardedReg, dst, liveness))
 		return false;
 
 	replaceMachineInstr(block.instrs[consumerIdx],
@@ -1203,7 +1204,8 @@ static bool setsFlags(const std::string &mnemonic) {
 	return false;
 }
 
-static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx) {
+static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
+                             const MachineLivenessResult &liveness) {
 	ParsedLine andLine = parseLine(block.instrs[idx].text);
 	if (andLine.kind != LineKind::Instruction) return false;
 	if (andLine.mnemonic != "and") return false;
@@ -1299,6 +1301,16 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx) {
 				if (setsFlags(between.mnemonic)) return false;
 				if (between.mnemonic == "b" || between.mnemonic == "bl" ||
 				    between.mnemonic == "blr" || between.mnemonic == "ret")
+					return false;
+			}
+
+			bool isSupportedBranch =
+				(brLine.mnemonic == "b.eq" || brLine.mnemonic == "b.ne") &&
+				brLine.operands.size() >= 1;
+			if (isSupportedBranch) {
+				auto liveIt = liveness.instrLiveOut.find(&block.instrs[branchIdx]);
+				if (liveIt == liveness.instrLiveOut.end() ||
+				    liveIt->second.count(kMachineFlagsReg))
 					return false;
 			}
 
@@ -1646,6 +1658,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			for (size_t j = copyIdx + 1; j < idx; ++j) {
 				ParsedLine between = parseLine(block.instrs[j].text);
 				if (between.kind != LineKind::Instruction ||
+				    block.instrs[j].isCall || block.instrs[j].isBarrier ||
 				    lineWritesReg(between, addr.base) ||
 				    lineWritesReg(between, copy.operands[1])) {
 					clobbered = true;
@@ -1673,7 +1686,9 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			foundAdd = true;
 			break;
 		}
-		if (lineUsesReg(line, postBase))
+		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
+		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		    lineUsesReg(line, postBase))
 			return false;
 	}
 	if (!foundAdd)
@@ -1789,10 +1804,8 @@ static bool tryMachineBranchThreading(MachineFunction &func,
 	std::string finalTarget = resolveForwardTarget(func, target);
 	if (finalTarget.empty() || finalTarget == target) return false;
 
-	size_t pos = inst.text.rfind(target);
-	if (pos == std::string::npos) return false;
-	inst.text = inst.text.substr(0, pos) + finalTarget +
-	            inst.text.substr(pos + target.size());
+	line.operands[ti] = finalTarget;
+	replaceMachineInstr(inst, makeMachineInsn(line.mnemonic, line.operands));
 	return true;
 }
 
@@ -1956,13 +1969,11 @@ bool runMachineCopyPropagation(MachineFunction &func) {
 	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
-			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
-			    tryMachineSwapMov(func.blocks[b], i) ||
-			    tryMachineForwardMov(func.blocks[b], i) ||
+			if (tryMachineSwapMov(func.blocks[b], i) ||
+			    tryMachineForwardMov(func.blocks[b], i, liveness) ||
 			    tryMachineRetargetCopyDest(func.blocks[b], i, liveness) ||
 			    tryMachineRetargetVectorCopyDest(func.blocks[b], i, liveness) ||
-			    tryMachineCopyPropagate(func.blocks[b], i) ||
-			    tryMachineDelayAddSubToCopy(func.blocks[b], i, liveness))
+			    tryMachineCopyPropagate(func.blocks[b], i, liveness))
 				return true;
 		}
 	}
@@ -1973,27 +1984,35 @@ bool runMachineInstructionCombine(MachineFunction &func) {
 	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
-			if (tryMachineAndTBZ(block, i) ||
-			    tryMachineImmediateFold(block, i) ||
-			    tryMachineFoldAddSubMov(block, i) ||
+			if (tryMachineImmediateFold(block, i, liveness) ||
+			    tryMachineFoldAddSubMov(block, i, liveness) ||
 			    tryMachineFoldMovIntoAddSub(block, i) ||
 			    tryMachineShiftedAddSubFusion(block, i, liveness) ||
-			    tryMachineMulAddFusion(block, i) ||
-			    tryMachineZeroStore(block, i))
+			    tryMachineMulAddFusion(block, i, liveness))
 				return true;
 		}
 	}
 	return false;
 }
 
+bool runMachineCodeMotion(MachineFunction &func) {
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+	for (auto &block : func.blocks)
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+			if (tryMachineDelayAddSubToCopy(block, i, liveness))
+				return true;
+	return false;
+}
+
 bool runMachineMemoryOptimization(MachineFunction &func) {
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
 			if (tryMachineStoreLoadForward(block, i) ||
+			    tryMachineZeroStore(block, i, liveness) ||
 			    tryMachineDeadStore(block, i) ||
 			    tryMachinePostIndexScalar(block, i) ||
 			    tryMachinePostIndexNeon(block, i) ||
-			    tryMachineVectorLdStAlias(block, i) ||
 			    tryMachineMergeStores(block, i) ||
 			    tryMachineMergeLoads(block, i))
 				return true;
@@ -2003,9 +2022,12 @@ bool runMachineMemoryOptimization(MachineFunction &func) {
 }
 
 bool runMachineBranchOptimization(MachineFunction &func) {
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
-			if (tryMachineFallthroughBranch(func, b, i) ||
+			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
+			    tryMachineAndTBZ(func.blocks[b], i, liveness) ||
+			    tryMachineFallthroughBranch(func, b, i) ||
 			    tryMachineBranchThreading(func, b, i) ||
 			    tryMachineRemoveDeadForwarder(func, b, i))
 				return true;
@@ -2014,12 +2036,27 @@ bool runMachineBranchOptimization(MachineFunction &func) {
 	return false;
 }
 
+bool runMachineCanonicalization(MachineFunction &func) {
+	for (auto &block : func.blocks)
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+			if (tryMachineVectorLdStAlias(block, i))
+				return true;
+	return false;
+}
+
+bool runMachineLocalCSE(MachineFunction &func) {
+	for (auto &block : func.blocks)
+		for (size_t i = 0; i < block.instrs.size(); ++i)
+			if (tryMachineRedundantAdrp(block, i) ||
+			    tryMachineRedundantSubFrame(block, i))
+				return true;
+	return false;
+}
+
 bool runMachinePeephole(MachineFunction &func) {
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
-			if (tryMachineSelfMove(block, i) ||
-			    tryMachineRedundantAdrp(block, i) ||
-			    tryMachineRedundantSubFrame(block, i))
+			if (tryMachineSelfMove(block, i))
 				return true;
 		}
 	}

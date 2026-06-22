@@ -88,13 +88,16 @@ ARM64 后端接收中端已经完成优化的 `Module`，目标为 ARMv8-A/AArch
    - 选择有利于 fallthrough 的基本块布局。
    - 生成 prologue、参数搬运、标量/浮点/NEON 指令、地址计算、分支、调用、PHI copy 和 epilogue。常数强度削减只使用对全部输入成立的等价 ARM64 序列，并检查立即数编码范围。
 6. **Machine IR 优化（仅 `-O1`）**：`Arm64MachineOptimizationPipeline` 调度命名 pass，并重复到所有 pass 均无改动。每次可能产生死定义的迭代后运行 Machine DCE。
-   - `arm64-copy-propagation`：copy forwarding、copy destination retarget、返回值 copy 折叠；依赖物理寄存器别名和活跃性。
-   - `arm64-instruction-combine`：立即数、shifted add/sub、multiply-add、位测试分支等 ARM64 合并；检查寄存器宽度、NZCV 使用及编码合法性。
-   - `arm64-memory-optimization`：store-load forwarding、死 store、pair load/store、post-index 和 NEON load/store alias；无法证明地址、宽度和屏障安全时不变换。
-   - `arm64-branch-optimization`：fallthrough branch 删除、跳转穿透和无用 forwarder 清理。
-   - `arm64-peephole`：只保留自搬移、相邻冗余地址/栈帧序列等固定小窗口规则。
+   - `arm64-copy-propagation`：copy forwarding、copy destination retarget 和受限 copy propagation；依赖物理寄存器别名和活跃性。
+   - `arm64-instruction-combine`：立即数、shifted add/sub 和 multiply-add 等 ARM64 合并；检查寄存器宽度及编码合法性。
+   - `arm64-code-motion`：在完整 CFG 活跃性证明下，把纯 add/sub 延迟到条件分支的 fallthrough 路径。
+   - `arm64-memory-optimization`：零值 store、store-load forwarding、死 store、pair load/store 和 post-index；无法证明地址、宽度和屏障安全时不变换。
+   - `arm64-branch-optimization`：位测试分支合并、返回块折叠、fallthrough branch 删除、跳转穿透和无用 forwarder 清理；删除 NZCV 定义前必须证明 flags 在后继不活跃。
+   - `arm64-canonicalization`：把等价的单寄存器 NEON load/store 规范化为统一形式。
+   - `arm64-local-cse`：消除局部重复的 ADRP 和 frame-address 计算。
+   - `arm64-peephole`：只保留无需数据流或 CFG 分析的自搬移删除。
    - `arm64-machine-dce`：依据 Machine liveness 删除结果不活跃且无内存、调用或控制流副作用的指令。
-7. **post-RA 调度（仅 `-O1`）**：在物理 MachineInstr 上按 RAW/WAR/WAW、NZCV、barrier 和保守内存依赖构图，以 Cortex-A53 延迟隐藏为目标重排基本块内指令。未知地址一律视为可能别名。
+7. **post-RA 调度（仅 `-O1`）**：在物理 MachineInstr 上按 RAW/WAR/WAW、NZCV、barrier 和保守内存依赖构图，以 Cortex-A53 延迟隐藏为目标重排基本块内指令。未知地址一律视为可能别名。调度是最后一个变换阶段；其后不再运行会改变依赖关系或指令延迟的完整 peephole pipeline。
 8. **汇编输出**：把结构化 MachineInstr 打印为 `.text`，再按 `.data`、`.bss`、`.rodata` 输出全局数据。
 
 `-O0` 不运行寄存器分配、pre/post-RA 调度或 Machine IR 优化，使用栈槽和保守 lowering。`--fno-pre-schedule`、`--fno-peephole`、`--fno-schedule` 可分别关闭上述阶段；两个 dump 选项可观察 pre-RA 和最终 Machine IR。

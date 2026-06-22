@@ -23,8 +23,11 @@ Arm64MachineOptimizationPipeline::Arm64MachineOptimizationPipeline(
 
     optimizations_.addPass(std::make_unique<Arm64CopyPropagationPass>());
     optimizations_.addPass(std::make_unique<Arm64InstructionCombinePass>());
+    optimizations_.addPass(std::make_unique<Arm64CodeMotionPass>());
     optimizations_.addPass(std::make_unique<Arm64MemoryOptimizationPass>());
     optimizations_.addPass(std::make_unique<Arm64BranchOptimizationPass>());
+    optimizations_.addPass(std::make_unique<Arm64CanonicalizationPass>());
+    optimizations_.addPass(std::make_unique<Arm64LocalCSEPass>());
     optimizations_.addPass(std::make_unique<Arm64PeepholePass>());
 
     if (enableScheduling)
@@ -38,5 +41,9 @@ void Arm64MachineOptimizationPipeline::run(MachineFunction &function) {
             cleanup_.run(function);
         cleanup_.run(function);
     }
+    // Scheduling is terminal: running code motion, instruction combining or
+    // address-mode formation afterwards would invalidate its dependency and
+    // latency decisions. The scheduler only reorders instructions, so it does
+    // not require a deletion-only cleanup pass after it.
     scheduler_.run(function);
 }
