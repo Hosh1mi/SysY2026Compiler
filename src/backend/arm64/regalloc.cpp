@@ -383,6 +383,41 @@ std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
     return loopDepth;
 }
 
+std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
+    const std::vector<Interval> &intervals,
+    std::map<BasicBlock*, int> &loopDepth,
+    const std::map<Value*, std::set<Value*>> &phiAffinity) const {
+    std::map<Value*, double> spillCost;
+    for (auto &iv : intervals) {
+        double cost = 0;
+        for (auto &use : iv.value->use_list_) {
+            auto *inst = dynamic_cast<Instruction*>(use.val_);
+            if (!inst) continue;
+            int depth = loopDepth[inst->parent_];
+            cost += std::pow(20.0, depth);
+        }
+        if (dynamic_cast<Argument*>(iv.value))
+            cost /= 2.0;
+        if (cost < 1.0) cost = 1.0;
+        spillCost[iv.value] = cost;
+    }
+
+    // Propagate phi affinity costs: ensure phi partners have similar spill cost
+    // so the whole group gets registers or spills together.
+    for (auto &[v, partners] : phiAffinity) {
+        double maxCost = spillCost[v];
+        for (auto *partner : partners)
+            if (spillCost.count(partner))
+                maxCost = std::max(maxCost, spillCost[partner]);
+        spillCost[v] = maxCost;
+        for (auto *partner : partners)
+            if (spillCost.count(partner))
+                spillCost[partner] = maxCost;
+    }
+
+    return spillCost;
+}
+
 void Arm64RegAlloc::allocate() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
@@ -712,34 +747,9 @@ void Arm64RegAlloc::allocate() {
         }
     }
 
-    // ---- 8. Spill cost: sum of (10 ^ loopDepth) per use ----
-    std::map<Value*, double> spillCost;
-    for (auto &iv : intervals) {
-        double cost = 0;
-        for (auto &use : iv.value->use_list_) {
-            auto *inst = dynamic_cast<Instruction*>(use.val_);
-            if (!inst) continue;
-            int depth = loopDepth[inst->parent_];
-            cost += std::pow(20.0, depth);
-        }
-        if (dynamic_cast<Argument*>(iv.value))
-            cost /= 2.0;
-        if (cost < 1.0) cost = 1.0;
-        spillCost[iv.value] = cost;
-    }
-
-    // Propagate phi affinity costs: ensure phi partners have similar spill cost
-    // so the whole group gets registers or spills together.
-    for (auto &[v, partners] : phiAffinity) {
-        double maxCost = spillCost[v];
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                maxCost = std::max(maxCost, spillCost[partner]);
-        spillCost[v] = maxCost;
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                spillCost[partner] = maxCost;
-    }
+    // ---- 8. Spill cost ----
+    std::map<Value*, double> spillCost =
+        computeSpillCost(intervals, loopDepth, phiAffinity);
 
     // ---- 9. Separate into register-class pools ----
     std::vector<Interval> intPool, floatPool, neonPool;

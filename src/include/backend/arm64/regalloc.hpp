@@ -49,6 +49,12 @@ private:
         bool crossesCall;
     };
 
+    /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
+    std::map<Value*, double> computeSpillCost(
+        const std::vector<Interval> &intervals,
+        std::map<BasicBlock*, int> &loopDepth,
+        const std::map<Value*, std::set<Value*>> &phiAffinity) const;
+
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::set<int> &callerSavedRegs,
