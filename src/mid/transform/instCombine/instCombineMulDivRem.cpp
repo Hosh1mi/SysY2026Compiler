@@ -250,6 +250,10 @@ Value* visitSRem(BinaryInst *inst) {
         auto range = gInstCombineRangeAnalysis->getRange(x, bb);
         if (range.valid && !range.isTop && !range.isBottom) {
             long long mod = cy->value_;
+            if (range.lower > -mod && range.upper < mod) {
+                return x;
+            }
+
             if (range.lower >= 0 && range.upper < mod) {
                 return x;
             }
