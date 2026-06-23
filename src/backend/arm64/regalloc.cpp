@@ -651,6 +651,79 @@ std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
     return phiAffinity;
 }
 
+void Arm64RegAlloc::promoteLoopConstants(
+    const std::vector<BasicBlock*> &blocksOrder,
+    const std::map<BasicBlock*, int> &loopDepth,
+    bool isLeaf) {
+    auto needsMovk = [](int v) {
+        return (((uint32_t)v >> 16) & 0xFFFF) != 0;
+    };
+    std::map<int, double> weight;
+    auto addCandidate = [&](int v, double w) {
+        if (needsMovk(v)) weight[v] += w;
+    };
+    for (auto bb : blocksOrder) {
+        auto dit = loopDepth.find(bb);
+        int depth = (dit != loopDepth.end()) ? dit->second : 0;
+        if (depth <= 0) continue;
+        double w = std::pow(20.0, depth);
+        for (auto inst : bb->instr_list_) {
+            if (inst->op_id_ == Instruction::SRem) {
+                auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                Magic::SignedDivisorInfo info = ci
+                    ? Magic::analyzeDivisor(ci->value_)
+                    : Magic::SignedDivisorInfo{};
+                if (info.usesMagic()) {
+                    addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
+                    addCandidate(static_cast<int>(info.magnitude), w);
+                }
+            } else if (inst->op_id_ == Instruction::SDiv) {
+                auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                Magic::SignedDivisorInfo info = ci
+                    ? Magic::analyzeDivisor(ci->value_)
+                    : Magic::SignedDivisorInfo{};
+                if (info.usesMagic())
+                    addCandidate(Magic::getMagic(ci->value_).multiplier, w);
+            } else if (inst->op_id_ == Instruction::Add ||
+                       inst->op_id_ == Instruction::Sub ||
+                       inst->op_id_ == Instruction::ICmp) {
+                for (unsigned i = 0; i < inst->num_ops_; ++i)
+                    if (auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
+                        addCandidate(ci->value_, w);
+            }
+        }
+    }
+    if (weight.empty()) return;
+
+    std::set<int> usedRegs;
+    for (auto &kv : assignedRegs_) {
+        const std::string &r = kv.second;
+        if (!r.empty() && (r[0] == 'w' || r[0] == 'x'))
+            usedRegs.insert(std::stoi(r.substr(1)));
+    }
+    std::vector<int> freeRegs;
+    if (isLeaf) {
+        for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+    } else {
+        // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
+        // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
+        // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
+        // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
+        // 保存/恢复由 mergePromotedConstRegs 统一接管。
+        for (int r = 10; r <= 15; ++r)
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+        for (int r = 28; r >= 19; --r)
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+    }
+    std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
+    for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
+    std::sort(ranked.begin(), ranked.end());
+    size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
+    for (size_t i = 0; i < n; ++i)
+        promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
+}
+
 void Arm64RegAlloc::allocate() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
@@ -867,73 +940,5 @@ void Arm64RegAlloc::allocate() {
     // 叶函数使用 callee-saved，非叶函数优先使用 caller-saved；后端会在 call
     // 后重新物化 caller-saved promoted constants，避免额外保存/恢复 x19-x28。
     // 按常量值而非 Value* 记录，魔数这类 ISel 派生常量也能命中。
-    {
-        auto needsMovk = [](int v) {
-            return (((uint32_t)v >> 16) & 0xFFFF) != 0;
-        };
-        std::map<int, double> weight;
-        auto addCandidate = [&](int v, double w) {
-            if (needsMovk(v)) weight[v] += w;
-        };
-        for (auto bb : blocksOrder) {
-            int depth = loopDepth[bb];
-            if (depth <= 0) continue;
-            double w = std::pow(20.0, depth);
-            for (auto inst : bb->instr_list_) {
-                if (inst->op_id_ == Instruction::SRem) {
-                    auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    Magic::SignedDivisorInfo info = ci
-                        ? Magic::analyzeDivisor(ci->value_)
-                        : Magic::SignedDivisorInfo{};
-                    if (info.usesMagic()) {
-                        addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
-                        addCandidate(static_cast<int>(info.magnitude), w);
-                    }
-                } else if (inst->op_id_ == Instruction::SDiv) {
-                    auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    Magic::SignedDivisorInfo info = ci
-                        ? Magic::analyzeDivisor(ci->value_)
-                        : Magic::SignedDivisorInfo{};
-                    if (info.usesMagic())
-                        addCandidate(Magic::getMagic(ci->value_).multiplier, w);
-                } else if (inst->op_id_ == Instruction::Add ||
-                           inst->op_id_ == Instruction::Sub ||
-                           inst->op_id_ == Instruction::ICmp) {
-                    // 这些指令的多指令大常量操作数必然走 loadInt 物化
-                    for (unsigned i = 0; i < inst->num_ops_; ++i)
-                        if (auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
-                            addCandidate(ci->value_, w);
-                }
-            }
-        }
-        if (!weight.empty()) {
-            std::set<int> usedRegs;
-            for (auto &kv : assignedRegs_) {
-                const std::string &r = kv.second;
-                if (!r.empty() && (r[0] == 'w' || r[0] == 'x'))
-                    usedRegs.insert(std::stoi(r.substr(1)));
-            }
-            std::vector<int> freeRegs;
-            if (isLeaf) {
-                for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-            } else {
-                // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
-                // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
-                // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
-                // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
-                // 保存/恢复由 mergePromotedConstRegs 统一接管。
-                for (int r = 10; r <= 15; ++r)
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-                for (int r = 28; r >= 19; --r)
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-            }
-            std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
-            for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
-            std::sort(ranked.begin(), ranked.end());
-            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
-            for (size_t i = 0; i < n; ++i)
-                promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
-        }
-    }
+    promoteLoopConstants(blocksOrder, loopDepth, isLeaf);
 }

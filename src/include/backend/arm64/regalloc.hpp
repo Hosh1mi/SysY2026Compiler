@@ -83,6 +83,12 @@ private:
         std::map<BasicBlock*, int> &loopDepth,
         const std::map<Value*, std::set<Value*>> &phiAffinity) const;
 
+    /// 循环内多指令大常量提升：将高权重 32 位常量预物化到空闲寄存器。
+    void promoteLoopConstants(
+        const std::vector<BasicBlock*> &blocksOrder,
+        const std::map<BasicBlock*, int> &loopDepth,
+        bool isLeaf);
+
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::set<int> &callerSavedRegs,
