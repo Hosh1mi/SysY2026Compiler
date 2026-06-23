@@ -49,6 +49,13 @@ private:
         bool crossesCall;
     };
 
+    /// 数据流分析：计算每个块的 LiveIn/LiveOut，并标记跨越 call 的值。
+    void computeLiveness(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<BasicBlock*, std::set<Value*>> &liveIn,
+        std::map<BasicBlock*, std::set<Value*>> &liveOut,
+        std::set<Value*> &crossesCallValues) const;
+
     /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
     std::map<Value*, double> computeSpillCost(
         const std::vector<Interval> &intervals,

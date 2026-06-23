@@ -419,6 +419,111 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     return spillCost;
 }
 
+void Arm64RegAlloc::computeLiveness(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<BasicBlock*, std::set<Value*>> &liveIn,
+    std::map<BasicBlock*, std::set<Value*>> &liveOut,
+    std::set<Value*> &crossesCallValues) const {
+    struct BBInfo { std::set<Value*> def, use; };
+
+    std::map<BasicBlock*, std::set<Value*>> phiOut;
+    for (auto bb : blocksOrder) {
+        for (auto inst : bb->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                auto val = phi->get_operand(i);
+                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                if (canAssignRegister(val))
+                    phiOut[pred].insert(val);
+            }
+        }
+    }
+
+    std::map<BasicBlock*, BBInfo> bbInfo;
+    for (auto bb : blocksOrder) {
+        BBInfo info;
+        for (auto inst : bb->instr_list_) {
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
+                if (canAssignRegister(phi)) info.def.insert(phi);
+                continue;
+            }
+            if (canAssignRegister(inst)) info.def.insert(inst);
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val) && !info.def.count(val))
+                    info.use.insert(val);
+            }
+        }
+        auto it = bbInfo.find(bb);
+        if (it != bbInfo.end()) {
+            for (auto v : it->second.use) info.use.insert(v);
+        }
+        bbInfo[bb] = info;
+    }
+
+    bool changed;
+    do {
+        changed = false;
+        for (auto bb : blocksOrder) {
+            std::set<Value*> newIn, newOut;
+            auto term = bb->get_terminator();
+            if (term) {
+                for (unsigned i = 0; i < term->num_ops_; ++i) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                        for (auto v : liveIn[succ]) newOut.insert(v);
+                    }
+                }
+            }
+            for (auto v : phiOut[bb]) newOut.insert(v);
+
+            auto &info = bbInfo[bb];
+            for (auto v : info.use) newIn.insert(v);
+            for (auto v : newOut) {
+                if (!info.def.count(v)) newIn.insert(v);
+            }
+
+            if (newIn != liveIn[bb] || newOut != liveOut[bb]) changed = true;
+            liveIn[bb] = std::move(newIn);
+            liveOut[bb] = std::move(newOut);
+        }
+    } while (changed);
+
+    for (auto bb : blocksOrder) {
+        std::set<Value*> live = liveOut[bb];
+        for (auto it = bb->instr_list_.rbegin(); it != bb->instr_list_.rend(); ++it) {
+            Instruction *inst = *it;
+
+            if (inst->is_call()) {
+                std::set<Value*> liveAfterCall = live;
+                if (canAssignRegister(inst))
+                    liveAfterCall.erase(inst);
+                for (auto v : liveAfterCall)
+                    if (canAssignRegister(v))
+                        crossesCallValues.insert(v);
+            }
+
+            if (canAssignRegister(inst))
+                live.erase(inst);
+
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
+                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    auto val = phi->get_operand(i);
+                    if (canAssignRegister(val))
+                        live.insert(val);
+                }
+                continue;
+            }
+
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val))
+                    live.insert(val);
+            }
+        }
+    }
+}
+
 void Arm64RegAlloc::allocate() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
@@ -600,109 +705,9 @@ void Arm64RegAlloc::allocate() {
     }
 
     // ---- 3. Data-flow analysis: LiveIn / LiveOut ----
-    std::map<BasicBlock*, std::set<Value*>> phiOut;
-    for (auto bb : blocksOrder) {
-        for (auto inst : bb->instr_list_) {
-            auto *phi = dynamic_cast<PhiInst*>(inst);
-            if (!phi) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto val = phi->get_operand(i);
-                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (canAssignRegister(val)) {
-                    phiOut[pred].insert(val);
-                }
-            }
-        }
-    }
-
-    struct BBInfo { std::set<Value*> def, use; };
-    std::map<BasicBlock*, BBInfo> bbInfo;
-
-    for (auto bb : blocksOrder) {
-        BBInfo info;
-        for (auto inst : bb->instr_list_) {
-            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
-                if (canAssignRegister(phi)) info.def.insert(phi);
-                continue;
-            }
-
-            if (canAssignRegister(inst)) info.def.insert(inst);
-            for (unsigned i = 0; i < inst->num_ops_; ++i) {
-                auto val = inst->get_operand(i);
-                if (canAssignRegister(val) && !info.def.count(val)) {
-                    info.use.insert(val);
-                }
-            }
-        }
-        auto it = bbInfo.find(bb);
-        if (it != bbInfo.end()) {
-            for (auto v : it->second.use) info.use.insert(v);
-        }
-        bbInfo[bb] = info;
-    }
-
-    bool changed;
     std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
-    do {
-        changed = false;
-        for (auto bb : blocksOrder) {
-            std::set<Value*> newIn, newOut;
-            auto term = bb->get_terminator();
-            if (term) {
-                for (unsigned i = 0; i < term->num_ops_; ++i) {
-                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
-                        for (auto v : liveIn[succ]) newOut.insert(v);
-                    }
-                }
-            }
-            for (auto v : phiOut[bb]) newOut.insert(v);
-
-            auto &info = bbInfo[bb];
-            for (auto v : info.use) newIn.insert(v);
-            for (auto v : newOut) {
-                if (!info.def.count(v)) newIn.insert(v);
-            }
-
-            if (newIn != liveIn[bb] || newOut != liveOut[bb]) changed = true;
-            liveIn[bb] = std::move(newIn);
-            liveOut[bb] = std::move(newOut);
-        }
-    } while (changed);
-
     std::set<Value*> crossesCallValues;
-    for (auto bb : blocksOrder) {
-        std::set<Value*> live = liveOut[bb];
-        for (auto it = bb->instr_list_.rbegin(); it != bb->instr_list_.rend(); ++it) {
-            Instruction *inst = *it;
-
-            if (inst->is_call()) {
-                std::set<Value*> liveAfterCall = live;
-                if (canAssignRegister(inst))
-                    liveAfterCall.erase(inst);
-                for (auto v : liveAfterCall)
-                    if (canAssignRegister(v))
-                        crossesCallValues.insert(v);
-            }
-
-            if (canAssignRegister(inst))
-                live.erase(inst);
-
-            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
-                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                    auto val = phi->get_operand(i);
-                    if (canAssignRegister(val))
-                        live.insert(val);
-                }
-                continue;
-            }
-
-            for (unsigned i = 0; i < inst->num_ops_; ++i) {
-                auto val = inst->get_operand(i);
-                if (canAssignRegister(val))
-                    live.insert(val);
-            }
-        }
-    }
+    computeLiveness(blocksOrder, liveIn, liveOut, crossesCallValues);
 
     // ---- 4. Build live intervals ----
     for (auto &entry : defPos) {
