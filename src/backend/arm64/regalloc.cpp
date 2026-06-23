@@ -335,67 +335,90 @@ std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
 std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
     const std::vector<BasicBlock*> &blocksOrder,
     std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
-    // ---- Compute dominators (iterative algorithm) ----
-    BasicBlock *entry = func_->basic_blocks_[0];
-    std::map<BasicBlock*, std::set<BasicBlock*>> doms;
-    for (auto bb : blocksOrder) {
-        if (bb == entry)
-            doms[bb] = {entry};
-        else {
-            for (auto b : blocksOrder)
-                doms[bb].insert(b);
+    // ---- Cooper-Harvey-Kennedy immediate dominator algorithm ----
+    // RPO 编号：blocksOrder[0] 是入口，编号最小。
+    int N = (int)blocksOrder.size();
+    std::map<BasicBlock*, int> rpoNum;
+    for (int i = 0; i < N; ++i) rpoNum[blocksOrder[i]] = i;
+
+    // idom[i] = 直接支配者在 blocksOrder 中的下标，入口 idom[0] = 0。
+    std::vector<int> idom(N, -1);
+    idom[0] = 0;
+
+    // "intersect" 沿两条 idom 链向上爬到公共祖先（用 RPO 编号比较）。
+    auto intersect = [&](int a, int b) {
+        while (a != b) {
+            while (a > b) a = idom[a];
+            while (b > a) b = idom[b];
+        }
+        return a;
+    };
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 1; i < N; ++i) {
+            BasicBlock *bb = blocksOrder[i];
+            int newIdom = -1;
+            for (auto pred : preds[bb]) {
+                auto it = rpoNum.find(pred);
+                if (it == rpoNum.end()) continue;
+                int pi = it->second;
+                if (idom[pi] == -1) continue;  // 前驱还未处理
+                newIdom = (newIdom == -1) ? pi : intersect(pi, newIdom);
+            }
+            if (newIdom != -1 && newIdom != idom[i]) {
+                idom[i] = newIdom;
+                changed = true;
+            }
         }
     }
 
-    bool domChanged;
-    do {
-        domChanged = false;
-        for (auto bb : blocksOrder) {
-            if (bb == entry) continue;
-            std::set<BasicBlock*> inter;
-            bool firstPred = true;
-            for (auto pred : preds[bb]) {
-                if (firstPred) {
-                    inter = doms[pred];
-                    firstPred = false;
-                } else {
-                    std::set<BasicBlock*> temp;
-                    for (auto b : inter)
-                        if (doms[pred].count(b))
-                            temp.insert(b);
-                    inter = std::move(temp);
-                }
-            }
-            inter.insert(bb);
-            if (inter != doms[bb]) {
-                doms[bb] = std::move(inter);
-                domChanged = true;
-            }
+    // 检查 succ 是否支配 bb（沿 idom 链向上找）
+    auto dominates = [&](int succIdx, int bbIdx) {
+        int cur = bbIdx;
+        while (cur != succIdx) {
+            if (idom[cur] < 0) return false;   // 未初始化（不可达块）
+            if (idom[cur] == cur) return false; // 到达入口仍未找到
+            cur = idom[cur];
         }
-    } while (domChanged);
+        return true;
+    };
 
-    // ---- Loop depth based on dominators ----
+    // ---- Loop depth based on back edges ----
     std::map<BasicBlock*, int> loopDepth;
     for (auto bb : blocksOrder) loopDepth[bb] = 0;
 
-    for (auto bb : blocksOrder) {
+    for (int i = 0; i < N; ++i) {
+        BasicBlock *bb = blocksOrder[i];
         auto term = bb->get_terminator();
         if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
-            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
+        for (unsigned k = 0; k < term->num_ops_; ++k) {
+            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(k));
             if (!succ) continue;
-            if (doms[bb].count(succ)) {
-                std::set<BasicBlock*> loopBlocks;
-                std::function<void(BasicBlock*)> collect = [&](BasicBlock *b) {
-                    if (!loopBlocks.insert(b).second) return;
-                    if (b == succ) return;
-                    for (auto pred : preds[b])
-                        collect(pred);
-                };
-                collect(bb);
-                loopBlocks.insert(succ);
-                for (auto b : loopBlocks) loopDepth[b]++;
+            auto sit = rpoNum.find(succ);
+            if (sit == rpoNum.end()) continue;
+            int si = sit->second;
+            if (!dominates(si, i)) continue;  // 不是回边
+
+            // 收集自然循环：从回边尾(i)出发，沿前驱反向到达 succ(si)
+            std::set<int> loopSet;
+            std::vector<int> worklist = {i};
+            loopSet.insert(i);
+            loopSet.insert(si);
+            while (!worklist.empty()) {
+                int cur = worklist.back(); worklist.pop_back();
+                for (auto pred : preds[blocksOrder[cur]]) {
+                    auto pit = rpoNum.find(pred);
+                    if (pit == rpoNum.end()) continue;
+                    int pi = pit->second;
+                    if (!loopSet.count(pi)) {
+                        loopSet.insert(pi);
+                        worklist.push_back(pi);
+                    }
+                }
             }
+            for (int idx : loopSet) loopDepth[blocksOrder[idx]]++;
         }
     }
 
