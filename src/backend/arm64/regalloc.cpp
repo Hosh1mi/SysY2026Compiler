@@ -387,6 +387,7 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     const std::vector<Interval> &intervals,
     std::map<BasicBlock*, int> &loopDepth,
     const std::map<Value*, std::set<Value*>> &phiAffinity) const {
+    // 每次使用按 20^(循环深度) 加权;参数代价减半;下限 1.0。
     std::map<Value*, double> spillCost;
     for (auto &iv : intervals) {
         double cost = 0;
@@ -427,7 +428,7 @@ void Arm64RegAlloc::allocate() {
     std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
     std::vector<BasicBlock*> blocksOrder = computeBlockOrder(preds);
 
-    // ---- 2. Instruction numbering ----
+    // ---- 2. Per-block instruction index ranges (filled during dataflow below) ----
     std::map<BasicBlock*, int> blockStart, blockEnd;
 
     // ---- 0. Leaf-function argument pre-coloring ----
