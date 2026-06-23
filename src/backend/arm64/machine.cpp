@@ -515,9 +515,9 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
                         rest.find(".2d") != std::string::npos;
         mi.latency = (op == "fmul") ? (isVector ? 4 : 5) : 3;
         defFirstUseRest();
-    } else if (op == "mla" || op == "mls") {
+    } else if (op == "mla" || op == "mls" || op == "fmla" || op == "fmls") {
         mi.opcode = MOpcode::Neon;
-        mi.latency = 3;
+        mi.latency = (op == "fmla" || op == "fmls") ? 4 : 3;
         if (!operands.empty()) {
             addDef(mi, operands[0]);
             addUses(mi, operands[0]);

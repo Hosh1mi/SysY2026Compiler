@@ -6,6 +6,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -47,6 +48,21 @@ static bool isI32Vector4(Type *ty) {
     auto *vecTy = static_cast<VectorType *>(ty);
     return vecTy->num_elements_ == 4 &&
            vecTy->contained_->tid_ == Type::IntegerTyID;
+}
+
+static bool isF32Vector4(Type *ty) {
+    if (!ty || ty->tid_ != Type::VectorTyID) return false;
+    auto *vecTy = static_cast<VectorType *>(ty);
+    return vecTy->num_elements_ == 4 &&
+           vecTy->contained_->tid_ == Type::FloatTyID;
+}
+
+static bool isMlaMlsVector4(Type *ty) {
+    return isI32Vector4(ty) || isF32Vector4(ty);
+}
+
+static bool enableFusedFloatVectorMlaMls() {
+    return std::getenv("SYSY_ENABLE_FP_CONTRACT") != nullptr; //默认禁用，需要fast-math或FP contraction以避免浮点精度差异
 }
 
 static ConstantInt *getConstIntOperand(Value *v) {
@@ -173,10 +189,14 @@ static bool matchReductionExitAddv(StoreInst *store,
 
 static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
     auto *root = dynamic_cast<BinaryInst *>(inst);
-    if (!root || !isI32Vector4(root->type_)) return false;
+    if (!root || !isMlaMlsVector4(root->type_)) return false;
 
-    const bool isAdd = root->is_add();
-    const bool isSub = root->is_sub();
+    const bool isFloat = isF32Vector4(root->type_);
+    if (isFloat && !enableFusedFloatVectorMlaMls())
+        return false;
+
+    const bool isAdd = isFloat ? root->is_fadd() : root->is_add();
+    const bool isSub = isFloat ? root->is_fsub() : root->is_sub();
     if (!isAdd && !isSub) return false;
 
     auto *bb = root->parent_;
@@ -184,22 +204,28 @@ static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
 
     auto tryMatch = [&](Value *acc, Value *mulVal, const char *opcode) {
         auto *mul = dynamic_cast<BinaryInst *>(mulVal);
-        if (!mul || !mul->is_mul() || mul->parent_ != bb || !isI32Vector4(mul->type_))
+        if (!mul || mul->parent_ != bb || mul->type_ != root->type_)
             return false;
+        if (isFloat) {
+            if (!mul->is_fmul()) return false;
+        } else {
+            if (!mul->is_mul()) return false;
+        }
         if (mul->use_list_.size() != 1) return false;
         if (acc->type_ != root->type_) return false;
 
         LoadInst *accLoad = nullptr;
         LoadInst *lhsLoad = nullptr;
         LoadInst *rhsLoad = nullptr;
-        if (std::string(opcode) == "mla") {
+        if (isFloat || std::string(opcode) == "mla") {
             auto captureLoad = [&](Value *val, LoadInst *&load) {
                 load = dynamic_cast<LoadInst *>(val);
                 if (!load) return true;
-                if (load->parent_ != bb || !isI32Vector4(load->type_)) return false;
+                if (load->parent_ != bb || load->type_ != root->type_) return false;
                 return load->use_list_.size() == 1;
             };
-            if (!captureLoad(acc, accLoad) || !captureLoad(mul->get_operand(0), lhsLoad) ||
+            if (!captureLoad(acc, accLoad) ||
+                !captureLoad(mul->get_operand(0), lhsLoad) ||
                 !captureLoad(mul->get_operand(1), rhsLoad))
                 return false;
         }
@@ -217,10 +243,13 @@ static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
     };
 
     if (isSub)
-        return tryMatch(root->get_operand(0), root->get_operand(1), "mls");
+        return tryMatch(root->get_operand(0), root->get_operand(1),
+                        isFloat ? "fmls" : "mls");
 
-    return tryMatch(root->get_operand(0), root->get_operand(1), "mla") ||
-           tryMatch(root->get_operand(1), root->get_operand(0), "mla");
+    return tryMatch(root->get_operand(0), root->get_operand(1),
+                    isFloat ? "fmla" : "mla") ||
+           tryMatch(root->get_operand(1), root->get_operand(0),
+                    isFloat ? "fmla" : "mla");
 }
 
 } // namespace

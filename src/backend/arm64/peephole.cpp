@@ -460,8 +460,9 @@ static bool splitVectorOperand(const std::string &op, std::string &num,
 // splice the copy's destination spelling (always `.16b`) onto the producer,
 // corrupting a lane arrangement such as `.4s`.  Here we keep the producer's
 // arrangement and swap only the register number.  Accumulating forms
-// (mla / mls) and lane inserts read their destination, so they are excluded —
-// renaming the destination there would change which prior value is folded in.
+// (mla / mls / fmla / fmls) and lane inserts read their destination, so they
+// are excluded — renaming the destination there would change which prior value
+// is folded in.
 static bool tryMachineRetargetVectorCopyDest(
     MachineBasicBlock &block, size_t idx,
     const MachineLivenessResult &liveness) {
