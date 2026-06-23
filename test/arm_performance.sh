@@ -9,7 +9,7 @@ RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 RESULT_FILE="$PROJ_DIR/test/results/result_performance_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
-TEST_DIR="$PROJ_DIR/test/performance_final"
+TEST_DIR="$PROJ_DIR/test/performance"
 
 mkdir -p "$RESULT_DIR"
 

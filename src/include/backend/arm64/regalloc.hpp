@@ -89,6 +89,15 @@ private:
         const std::map<BasicBlock*, int> &loopDepth,
         bool isLeaf);
 
+    /// 每个寄存器类的着色调色板：color 下标 → 物理寄存器号，以及 caller-saved 集合。
+    struct RegPalette {
+        std::vector<int> intColorToReg, floatColorToReg, neonColorToReg;
+        std::set<int> callerSavedInt, callerSavedFloat, callerSavedNEON;
+    };
+
+    /// 按叶/非叶函数规则构建三个寄存器类的调色板，排除已预着色的寄存器。
+    RegPalette buildRegPalette(bool isLeaf) const;
+
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::set<int> &callerSavedRegs,

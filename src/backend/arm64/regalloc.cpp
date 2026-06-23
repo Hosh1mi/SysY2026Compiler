@@ -66,16 +66,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // ---- Phi coalescing（Briggs 保守准则）----
-    // 把 phi 相连且不冲突的活跃区间在着色前合并成一个节点，使 phi 拷贝
-    // 退化为自搬移（由 peephole 删除）。Briggs 准则保证合并后的节点
-    // 高度数邻居 < K，不会让图变得更难着色，因此不会引入新的 spill。
-    // 冲突判定：凸包不重叠（adj 无边）⇒ 必然安全；凸包重叠时再用
-    // trulyInterferes 做基于真实活跃性的精确判定——循环 phi 的凸包
-    // 横跨整个循环，与 backedge incoming 必然凸包重叠，但真实活跃
-    // 区间通常不冲突（incoming 死于并行拷贝处），精确判定能合并它们。
-    // 着色阶段仍使用凸包邻接（合并节点取成员邻接之并），保守安全。
-    // phi 拷贝发射端（emitPhiCopies）具备并行拷贝语义，撞号/成环均能处理。
+    // ---- Phi 合并（Briggs 保守准则 + George 准则）----
+    // 把 phi 相连且不真正冲突的活跃区间合并成一个节点，消除 phi 拷贝。
+    // 冲突判定先用凸包重叠（adj 有边）做快速过滤，凸包重叠时再调用
+    // trulyInterferes 做精确的活跃性判定（循环 phi 与 backedge incoming
+    // 虽凸包重叠但真实区间通常不冲突，精确判定能合并它们）。
+    // 合并守则：Briggs 准则（合并节点高度数邻居 < K）；Briggs 不满足时
+    // 尝试 George 准则（一方的高度数邻居均已是另一方的邻居，约束不恶化）。
     std::map<Value*, Value*> ufParent;
     std::function<Value*(Value*)> ufFind = [&](Value *v) -> Value* {
         auto it = ufParent.find(v);
@@ -123,7 +120,7 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                 if (conflict) continue;
             }
 
-            // Briggs：合并节点的"高度数（>=K）邻居"个数必须 < K
+            // Briggs 准则：合并后节点的高度数（≥K）邻居个数 < K
             std::set<Value*> nbrs = adj[a];
             nbrs.insert(adj[b].begin(), adj[b].end());
             nbrs.erase(a);
@@ -136,8 +133,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             }
             if (highDegree >= K) {
                 // George 准则（Briggs 不满足时的 fallback）：
-                // 若 a 的所有高度数邻居已在 adj[b] 中（或反方向），合并后
-                // b 的高度数邻居集合不扩大，着色约束不变严。
+                // a 的所有高度数邻居均已是 b 的邻居（或反之），则合并后
+                // 高度数邻居集合不扩大，着色约束不恶化，可以安全合并。
                 bool georgeAB = true;
                 for (auto *n : adj[a]) {
                     if (n == b) continue;
@@ -269,8 +266,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // Record assignments：每个原始值取其合并代表元的颜色，
-    // 寄存器名按值自身的类型决定（w/x 同号同寄存器）
+    // ---- 写回分配结果 ----
+    // 每个原始值取其 UF 代表元的颜色，寄存器名按值自身类型（w/x/s/v）决定。
     for (auto &iv : sorted) {
         Value *v = iv.value;
         auto it = colors.find(ufFind(v));
@@ -335,17 +332,18 @@ std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
 std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
     const std::vector<BasicBlock*> &blocksOrder,
     std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
-    // ---- Cooper-Harvey-Kennedy immediate dominator algorithm ----
+    // ---- Cooper-Harvey-Kennedy（CHK）即时支配者算法 ----
+    // 用 RPO 编号 + idom 链 intersect 迭代，O(n) 复杂度，替代 O(n²) 全集算法。
     // RPO 编号：blocksOrder[0] 是入口，编号最小。
     int N = (int)blocksOrder.size();
     std::map<BasicBlock*, int> rpoNum;
     for (int i = 0; i < N; ++i) rpoNum[blocksOrder[i]] = i;
 
-    // idom[i] = 直接支配者在 blocksOrder 中的下标，入口 idom[0] = 0。
+    // idom[i]：blocksOrder[i] 的直接支配者下标；入口自支配（idom[0] = 0）。
     std::vector<int> idom(N, -1);
     idom[0] = 0;
 
-    // "intersect" 沿两条 idom 链向上爬到公共祖先（用 RPO 编号比较）。
+    // intersect：沿两条 idom 链向上爬，利用 RPO 大小关系收敛到公共祖先。
     auto intersect = [&](int a, int b) {
         while (a != b) {
             while (a > b) a = idom[a];
@@ -364,7 +362,7 @@ std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
                 auto it = rpoNum.find(pred);
                 if (it == rpoNum.end()) continue;
                 int pi = it->second;
-                if (idom[pi] == -1) continue;  // 前驱还未处理
+                if (idom[pi] == -1) continue;  // 前驱尚未处理，跳过
                 newIdom = (newIdom == -1) ? pi : intersect(pi, newIdom);
             }
             if (newIdom != -1 && newIdom != idom[i]) {
@@ -374,18 +372,18 @@ std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
         }
     }
 
-    // 检查 succ 是否支配 bb（沿 idom 链向上找）
+    // dominates(succIdx, bbIdx)：沿 idom 链上爬，判断 succ 是否支配 bb。
     auto dominates = [&](int succIdx, int bbIdx) {
         int cur = bbIdx;
         while (cur != succIdx) {
-            if (idom[cur] < 0) return false;   // 未初始化（不可达块）
-            if (idom[cur] == cur) return false; // 到达入口仍未找到
+            if (idom[cur] < 0) return false;   // 不可达块，idom 未初始化
+            if (idom[cur] == cur) return false; // 已到达入口，未找到 succ
             cur = idom[cur];
         }
         return true;
     };
 
-    // ---- Loop depth based on back edges ----
+    // ---- 回边驱动的自然循环深度计算 ----
     std::map<BasicBlock*, int> loopDepth;
     for (auto bb : blocksOrder) loopDepth[bb] = 0;
 
@@ -430,17 +428,18 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     std::map<BasicBlock*, int> &loopDepth,
     const std::map<Value*, std::set<Value*>> &phiAffinity) const {
     // spill 代价 = def 处 store + 每次 use 处 load，均按 20^(循环深度) 加权。
-    // 参数已在调用方栈上，无 store 代价，整体减半；下限 1.0。
+    // 参数已在调用方栈上无 store 代价，整体减半；下限 1.0。
     std::map<Value*, double> spillCost;
     for (auto &iv : intervals) {
         double cost = 0;
-        // def-site store cost
+        // 定义点 store 代价：对称地将写回操作纳入 spill 估算（Chaitin 原始
+        // 公式仅统计 use-site；加入 def-site 后高频写变量更倾向留在寄存器）
         if (auto *defInst = dynamic_cast<Instruction*>(iv.value)) {
             auto dit = loopDepth.find(defInst->parent_);
             int depth = (dit != loopDepth.end()) ? dit->second : 0;
             cost += std::pow(20.0, depth);
         }
-        // use-site load costs
+        // 使用点 load 代价
         for (auto &use : iv.value->use_list_) {
             auto *inst = dynamic_cast<Instruction*>(use.val_);
             if (!inst) continue;
@@ -702,6 +701,52 @@ std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
     return phiAffinity;
 }
 
+Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
+    RegPalette pal;
+    // 扫描已预着色（叶函数参数）的寄存器，着色时排除它们。
+    std::set<int> precoloredInt, precoloredFloat;
+    for (auto &kv : assignedRegs_) {
+        const std::string &r = kv.second;
+        if (r.empty()) continue;
+        if (r[0] == 'w' || r[0] == 'x') precoloredInt.insert(std::stoi(r.substr(1)));
+        else if (r[0] == 's')            precoloredFloat.insert(std::stoi(r.substr(1)));
+    }
+    if (isLeaf) {
+        const int callerInt[] = {0,1,2,3,4,5,6,7,9};
+        for (int r : callerInt) {
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.callerSavedInt.insert(r);
+        }
+        for (int r = 19; r <= 28; ++r)
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+        const int callerFloat[] = {0,1,2,3,4,5,6,7,16};
+        for (int r : callerFloat) {
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.callerSavedFloat.insert(r);
+        }
+        for (int r = 8; r <= 15; ++r)
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+    } else {
+        const int callerInt[] = {9,0,1,2,3,4,5,6,7};
+        for (int r : callerInt) {
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.callerSavedInt.insert(r);
+        }
+        for (int r = 19; r <= 28; ++r)
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+        for (int r = 0; r <= 7; ++r) {
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.callerSavedFloat.insert(r);
+        }
+        if (!precoloredFloat.count(16)) pal.floatColorToReg.push_back(16);
+        pal.callerSavedFloat.insert(16);
+        for (int r = 8; r <= 15; ++r)
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+    }
+    for (int r = 8; r <= 15; ++r) pal.neonColorToReg.push_back(r);
+    return pal;
+}
+
 void Arm64RegAlloc::promoteLoopConstants(
     const std::vector<BasicBlock*> &blocksOrder,
     const std::map<BasicBlock*, int> &loopDepth,
@@ -776,18 +821,7 @@ void Arm64RegAlloc::promoteLoopConstants(
 }
 
 void Arm64RegAlloc::allocate() {
-    std::map<Value*, int> defPos;
-    std::map<Value*, int> lastUse;
-    std::vector<Interval> intervals;
-
-    // ---- 1. RPO block order & predecessor map ----
-    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
-    std::vector<BasicBlock*> blocksOrder = computeBlockOrder(preds);
-
-    // ---- 2. Per-block instruction index ranges (filled during dataflow below) ----
-    std::map<BasicBlock*, int> blockStart, blockEnd;
-
-    // ---- 0. Leaf-function argument pre-coloring ----
+    // ---- 1. Leaf detection + argument pre-coloring ----
     bool isLeaf = true;
     for (auto bb : func_->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
@@ -811,96 +845,31 @@ void Arm64RegAlloc::allocate() {
         }
     }
 
-    // Build color→physical-register mapping.
-    // Values that live through calls must stay in callee-saved registers.
-    // Short-lived values should prefer caller-saved registers so they do not
-    // force save/restore slots in leaf functions or for call-local temporaries.
-    std::vector<int> intColorToReg;
-    std::vector<int> floatColorToReg;
-    std::vector<int> neonColorToReg;
-    std::set<int> callerSavedIntRegs;
-    std::set<int> callerSavedFloatRegs;
-    std::set<int> callerSavedNEONRegs;
-    {
-        std::set<int> precoloredIntRegs;
-        for (auto &kv : assignedRegs_) {
-            const std::string &reg = kv.second;
-            if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
-                precoloredIntRegs.insert(std::stoi(reg.substr(1)));
-        }
-        if (isLeaf) {
-            const int callerIntRegs[] = {0,1,2,3,4,5,6,7, 9};
-            for (int r : callerIntRegs) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-                callerSavedIntRegs.insert(r);
-            }
-            for (int r = 19; r <= 28; ++r) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-            }
-        } else {
-            const int callerIntRegs[] = {9,0,1,2,3,4,5,6,7};
-            for (int r : callerIntRegs) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-                callerSavedIntRegs.insert(r);
-            }
-            callerSavedIntRegs.insert(9);
-            for (int r = 19; r <= 28; ++r) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-            }
-        }
-        std::set<int> precoloredFloatRegs;
-        for (auto &kv : assignedRegs_) {
-            const std::string &reg = kv.second;
-            if (!reg.empty() && reg[0] == 's')
-                precoloredFloatRegs.insert(std::stoi(reg.substr(1)));
-        }
-        if (isLeaf) {
-            const int callerFloatRegs[] = {0,1,2,3,4,5,6,7, 16};
-            for (int r : callerFloatRegs) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-                callerSavedFloatRegs.insert(r);
-            }
-            for (int r = 8; r <= 15; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-            }
-        } else {
-            for (int r = 0; r <= 7; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-                callerSavedFloatRegs.insert(r);
-            }
-            if (!precoloredFloatRegs.count(16))
-                floatColorToReg.push_back(16);
-            callerSavedFloatRegs.insert(16);
-            for (int r = 8; r <= 15; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-            }
-        }
-        for (int r = 8; r <= 15; ++r)
-            neonColorToReg.push_back(r);
-    }
+    // ---- 2. RPO block order & predecessor map ----
+    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+    std::vector<BasicBlock*> blocksOrder = computeBlockOrder(preds);
 
+    // ---- 3. Register palette (color→physical-reg + caller-saved sets) ----
+    RegPalette pal = buildRegPalette(isLeaf);
+
+    // Instruction numbers (defPos / lastUse / block ranges)
+    std::map<Value*, int> defPos, lastUse;
+    std::map<BasicBlock*, int> blockStart, blockEnd;
     computeInstructionNumbers(blocksOrder, defPos, lastUse, blockStart, blockEnd);
 
-    // ---- 3. Data-flow analysis: LiveIn / LiveOut ----
+    // ---- 4. Liveness analysis: LiveIn / LiveOut ----
     std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
     std::set<Value*> crossesCallValues;
     computeLiveness(blocksOrder, liveIn, liveOut, crossesCallValues);
 
-    // ---- 4. Build live intervals ----
-    intervals = buildIntervals(blocksOrder, defPos, lastUse, blockEnd, liveOut, crossesCallValues);
+    // ---- 5. Build live intervals ----
+    std::vector<Interval> intervals =
+        buildIntervals(blocksOrder, defPos, lastUse, blockEnd, liveOut, crossesCallValues);
 
-    // ---- 5/6. Dominators & loop depth ----
+    // ---- 6. Loop depth ----
     std::map<BasicBlock*, int> loopDepth = computeLoopDepth(blocksOrder, preds);
 
-    // ---- 7. Phi coalesce affinity ----
+    // ---- 7. Phi affinity ----
     std::map<Value*, std::set<Value*>> phiAffinity = buildPhiAffinity(blocksOrder);
 
     // ---- 8. Spill cost ----
@@ -910,15 +879,12 @@ void Arm64RegAlloc::allocate() {
     // ---- 9. Separate into register-class pools ----
     std::vector<Interval> intPool, floatPool, neonPool;
     for (auto &iv : intervals) {
-        if (iv.isNEON)
-            neonPool.push_back(iv);
-        else if (iv.isFloat)
-            floatPool.push_back(iv);
-        else
-            intPool.push_back(iv);
+        if (iv.isNEON) neonPool.push_back(iv);
+        else if (iv.isFloat) floatPool.push_back(iv);
+        else intPool.push_back(iv);
     }
 
-    // ---- 10. Precise SSA interference oracle（仅用于 affinity 合并判定）----
+    // ---- 10. SSA interference oracle (used only by affinity coalescing) ----
     // liveAtDefs(v)：v 定义写入后仍活跃的值集合。两值真干涉 ⇔ 一方在另一
     // 方定义点处活跃（SSA 性质）。phi 的物理定义点是各前驱末尾的并行拷贝：
     // 任何在某前驱出口活跃的值都与 phi 冲突，唯一豁免是 phi 自己来自该
@@ -954,7 +920,7 @@ void Arm64RegAlloc::allocate() {
             live = liveOut[bb];
             for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
                 Instruction *cur = *rit;
-                if (cur == inst) break;  // live == inst 定义后的活跃集合
+                if (cur == inst) break;
                 if (canAssignRegister(cur)) live.erase(cur);
                 if (dynamic_cast<PhiInst*>(cur)) continue;  // phi 的读发生在前驱
                 for (unsigned i = 0; i < cur->num_ops_; ++i) {
@@ -963,7 +929,7 @@ void Arm64RegAlloc::allocate() {
                 }
             }
         } else {
-            // Argument：在入口块起点定义，与其余参数及入口 liveIn 同时活跃
+            // Argument：与其余参数及入口 liveIn 同时活跃
             BasicBlock *entryBB = func_->basic_blocks_[0];
             live = liveIn[entryBB];
             for (auto *arg : func_->arguments_)
@@ -980,16 +946,12 @@ void Arm64RegAlloc::allocate() {
         };
 
     // ---- 11. Graph coloring (Chaitin-Briggs) ----
-    colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity, trulyInterferes);
-    colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity, trulyInterferes);
-    colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity, trulyInterferes);
+    colorPool(intPool,   pal.intColorToReg,   false, pal.callerSavedInt,   spillCost, phiAffinity, trulyInterferes);
+    colorPool(floatPool, pal.floatColorToReg, true,  pal.callerSavedFloat, spillCost, phiAffinity, trulyInterferes);
+    colorPool(neonPool,  pal.neonColorToReg,  false, pal.callerSavedNEON,  spillCost, phiAffinity, trulyInterferes);
 
-    // ---- 12. 循环内多指令常量提升 ----
-    // srem/sdiv 常数除法的魔数乘数/除数、以及 Add/Sub/ICmp 的大常量操作数
-    // 在循环里每次迭代都要 movz+movk 重物化。把权重最高的几个 32 位常量
-    // 提升到整个函数都未被占用的寄存器（与已有着色零干涉），入口物化一次。
-    // 叶函数使用 callee-saved，非叶函数优先使用 caller-saved；后端会在 call
-    // 后重新物化 caller-saved promoted constants，避免额外保存/恢复 x19-x28。
-    // 按常量值而非 Value* 记录，魔数这类 ISel 派生常量也能命中。
+    // ---- 12. Loop constant promotion ----
+    // srem/sdiv 魔数乘数、Add/Sub/ICmp 大常量在循环里每次迭代重物化。
+    // 把高权重常量提升到空闲寄存器，入口物化一次。
     promoteLoopConstants(blocksOrder, loopDepth, isLeaf);
 }
