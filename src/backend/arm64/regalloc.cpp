@@ -134,7 +134,26 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                 if (adj[n].count(a) && adj[n].count(b)) d--;  // 合并后只算一个邻居
                 if (d >= K) highDegree++;
             }
-            if (highDegree >= K) continue;
+            if (highDegree >= K) {
+                // George 准则（Briggs 不满足时的 fallback）：
+                // 若 a 的所有高度数邻居已在 adj[b] 中（或反方向），合并后
+                // b 的高度数邻居集合不扩大，着色约束不变严。
+                bool georgeAB = true;
+                for (auto *n : adj[a]) {
+                    if (n == b) continue;
+                    if ((int)adj[n].size() >= K && !adj[b].count(n))
+                        { georgeAB = false; break; }
+                }
+                if (!georgeAB) {
+                    bool georgeBA = true;
+                    for (auto *n : adj[b]) {
+                        if (n == a) continue;
+                        if ((int)adj[n].size() >= K && !adj[a].count(n))
+                            { georgeBA = false; break; }
+                    }
+                    if (!georgeBA) continue;
+                }
+            }
 
             // 把 b 并入 a
             for (auto *n : adj[b]) {
