@@ -595,6 +595,62 @@ void Arm64RegAlloc::computeLiveness(
     }
 }
 
+std::vector<Arm64RegAlloc::Interval> Arm64RegAlloc::buildIntervals(
+    const std::vector<BasicBlock*> &blocksOrder,
+    const std::map<Value*, int> &defPos,
+    const std::map<Value*, int> &lastUse,
+    const std::map<BasicBlock*, int> &blockEnd,
+    const std::map<BasicBlock*, std::set<Value*>> &liveOut,
+    const std::set<Value*> &crossesCallValues) const {
+    std::vector<Interval> intervals;
+    for (auto &entry : defPos) {
+        Value *v = entry.first;
+        int start = entry.second;
+        int end = lastUse.at(v);
+
+        for (auto bb : blocksOrder) {
+            auto it = liveOut.find(bb);
+            if (it != liveOut.end() && it->second.count(v)) {
+                auto eit = blockEnd.find(bb);
+                if (eit != blockEnd.end())
+                    end = std::max(end, eit->second);
+            }
+        }
+
+        if (start == 0 && end == 0 && dynamic_cast<Argument*>(v))
+            continue;
+
+        if (end >= start) {
+            bool crossesCall = crossesCallValues.count(v) > 0;
+            intervals.push_back({v, start, end,
+                                 isAllocatableFloatValue(v->type_),
+                                 isAllocatablePtrValue(v->type_),
+                                 isAllocatableNEONValue(v->type_),
+                                 crossesCall});
+        }
+    }
+    return intervals;
+}
+
+std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
+    const std::vector<BasicBlock*> &blocksOrder) const {
+    std::map<Value*, std::set<Value*>> phiAffinity;
+    for (auto bb : blocksOrder) {
+        for (auto inst : bb->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst*>(inst);
+            if (!phi || !canAssignRegister(phi)) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                auto val = phi->get_operand(i);
+                if (canAssignRegister(val)) {
+                    phiAffinity[phi].insert(val);
+                    phiAffinity[val].insert(phi);
+                }
+            }
+        }
+    }
+    return phiAffinity;
+}
+
 void Arm64RegAlloc::allocate() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
@@ -715,48 +771,13 @@ void Arm64RegAlloc::allocate() {
     computeLiveness(blocksOrder, liveIn, liveOut, crossesCallValues);
 
     // ---- 4. Build live intervals ----
-    for (auto &entry : defPos) {
-        Value *v = entry.first;
-        int start = entry.second;
-        int end = lastUse[v];
-
-        for (auto bb : blocksOrder) {
-            if (liveOut[bb].count(v)) {
-                end = std::max(end, blockEnd[bb]);
-            }
-        }
-
-        if (start == 0 && end == 0 && dynamic_cast<Argument*>(v))
-            continue;
-
-        if (end >= start) {
-            bool crossesCall = crossesCallValues.count(v) > 0;
-            intervals.push_back({v, start, end,
-                                 isAllocatableFloatValue(v->type_),
-                                 isAllocatablePtrValue(v->type_),
-                                 isAllocatableNEONValue(v->type_),
-                                 crossesCall});
-        }
-    }
+    intervals = buildIntervals(blocksOrder, defPos, lastUse, blockEnd, liveOut, crossesCallValues);
 
     // ---- 5/6. Dominators & loop depth ----
     std::map<BasicBlock*, int> loopDepth = computeLoopDepth(blocksOrder, preds);
 
     // ---- 7. Phi coalesce affinity ----
-    std::map<Value*, std::set<Value*>> phiAffinity;
-    for (auto bb : blocksOrder) {
-        for (auto inst : bb->instr_list_) {
-            auto *phi = dynamic_cast<PhiInst*>(inst);
-            if (!phi || !canAssignRegister(phi)) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto val = phi->get_operand(i);
-                if (canAssignRegister(val)) {
-                    phiAffinity[phi].insert(val);
-                    phiAffinity[val].insert(phi);
-                }
-            }
-        }
-    }
+    std::map<Value*, std::set<Value*>> phiAffinity = buildPhiAffinity(blocksOrder);
 
     // ---- 8. Spill cost ----
     std::map<Value*, double> spillCost =

@@ -64,6 +64,19 @@ private:
         std::map<BasicBlock*, std::set<Value*>> &liveOut,
         std::set<Value*> &crossesCallValues) const;
 
+    /// 由 defPos/lastUse/liveOut 构建所有值的活跃区间。
+    std::vector<Interval> buildIntervals(
+        const std::vector<BasicBlock*> &blocksOrder,
+        const std::map<Value*, int> &defPos,
+        const std::map<Value*, int> &lastUse,
+        const std::map<BasicBlock*, int> &blockEnd,
+        const std::map<BasicBlock*, std::set<Value*>> &liveOut,
+        const std::set<Value*> &crossesCallValues) const;
+
+    /// 构建 phi 亲和组：phi 与其所有 incoming 值双向关联。
+    std::map<Value*, std::set<Value*>> buildPhiAffinity(
+        const std::vector<BasicBlock*> &blocksOrder) const;
+
     /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
     std::map<Value*, double> computeSpillCost(
         const std::vector<Interval> &intervals,
