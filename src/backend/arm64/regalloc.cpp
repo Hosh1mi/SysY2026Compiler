@@ -387,14 +387,23 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     const std::vector<Interval> &intervals,
     std::map<BasicBlock*, int> &loopDepth,
     const std::map<Value*, std::set<Value*>> &phiAffinity) const {
-    // 每次使用按 20^(循环深度) 加权;参数代价减半;下限 1.0。
+    // spill 代价 = def 处 store + 每次 use 处 load，均按 20^(循环深度) 加权。
+    // 参数已在调用方栈上，无 store 代价，整体减半；下限 1.0。
     std::map<Value*, double> spillCost;
     for (auto &iv : intervals) {
         double cost = 0;
+        // def-site store cost
+        if (auto *defInst = dynamic_cast<Instruction*>(iv.value)) {
+            auto dit = loopDepth.find(defInst->parent_);
+            int depth = (dit != loopDepth.end()) ? dit->second : 0;
+            cost += std::pow(20.0, depth);
+        }
+        // use-site load costs
         for (auto &use : iv.value->use_list_) {
             auto *inst = dynamic_cast<Instruction*>(use.val_);
             if (!inst) continue;
-            int depth = loopDepth[inst->parent_];
+            auto dit = loopDepth.find(inst->parent_);
+            int depth = (dit != loopDepth.end()) ? dit->second : 0;
             cost += std::pow(20.0, depth);
         }
         if (dynamic_cast<Argument*>(iv.value))
