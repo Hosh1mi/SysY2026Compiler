@@ -8,6 +8,7 @@
 #include "include/mid/opt/linearBlockMerge.hpp"
 #include "include/mid/opt/deadStoreEliminate.hpp"
 #include "include/mid/opt/correlatedValuePropagation.hpp"
+#include "include/mid/opt/jumpThreadingLite.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
@@ -172,6 +173,7 @@ static void addCfgCleanup(PassManager &pm) {
 
 static void addCorrelatedCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<CorrelatedValuePropagation>());
+    pm.addPass(std::make_unique<JumpThreadingLite>());
     pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<DeadCodeEliminate>());

@@ -11,5 +11,5 @@ public:
 
 private:
     bool runOnModule(Module *module);
-    bool runOnFunction(Function *func);
+    bool runOnFunction(Function *func, AnalysisManager *AM);
 };
