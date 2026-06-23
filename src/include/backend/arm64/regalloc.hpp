@@ -34,6 +34,11 @@ private:
     std::vector<BasicBlock*> computeBlockOrder(
         std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const;
 
+    /// 基于支配关系计算每个块的循环嵌套深度。
+    std::map<BasicBlock*, int> computeLoopDepth(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const;
+
     struct Interval {
         Value *value;
         int start;

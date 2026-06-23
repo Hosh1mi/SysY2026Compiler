@@ -313,6 +313,76 @@ std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
     return blocksOrder;
 }
 
+std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
+    // ---- Compute dominators (iterative algorithm) ----
+    BasicBlock *entry = func_->basic_blocks_[0];
+    std::map<BasicBlock*, std::set<BasicBlock*>> doms;
+    for (auto bb : blocksOrder) {
+        if (bb == entry)
+            doms[bb] = {entry};
+        else {
+            for (auto b : blocksOrder)
+                doms[bb].insert(b);
+        }
+    }
+
+    bool domChanged;
+    do {
+        domChanged = false;
+        for (auto bb : blocksOrder) {
+            if (bb == entry) continue;
+            std::set<BasicBlock*> inter;
+            bool firstPred = true;
+            for (auto pred : preds[bb]) {
+                if (firstPred) {
+                    inter = doms[pred];
+                    firstPred = false;
+                } else {
+                    std::set<BasicBlock*> temp;
+                    for (auto b : inter)
+                        if (doms[pred].count(b))
+                            temp.insert(b);
+                    inter = std::move(temp);
+                }
+            }
+            inter.insert(bb);
+            if (inter != doms[bb]) {
+                doms[bb] = std::move(inter);
+                domChanged = true;
+            }
+        }
+    } while (domChanged);
+
+    // ---- Loop depth based on dominators ----
+    std::map<BasicBlock*, int> loopDepth;
+    for (auto bb : blocksOrder) loopDepth[bb] = 0;
+
+    for (auto bb : blocksOrder) {
+        auto term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned i = 0; i < term->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
+            if (!succ) continue;
+            if (doms[bb].count(succ)) {
+                std::set<BasicBlock*> loopBlocks;
+                std::function<void(BasicBlock*)> collect = [&](BasicBlock *b) {
+                    if (!loopBlocks.insert(b).second) return;
+                    if (b == succ) return;
+                    for (auto pred : preds[b])
+                        collect(pred);
+                };
+                collect(bb);
+                loopBlocks.insert(succ);
+                for (auto b : loopBlocks) loopDepth[b]++;
+            }
+        }
+    }
+
+    return loopDepth;
+}
+
 void Arm64RegAlloc::allocate() {
     std::map<Value*, int> defPos;
     std::map<Value*, int> lastUse;
@@ -623,69 +693,8 @@ void Arm64RegAlloc::allocate() {
         }
     }
 
-    // ---- 5. Compute dominators (iterative algorithm) ----
-    BasicBlock *entry = func_->basic_blocks_[0];
-    std::map<BasicBlock*, std::set<BasicBlock*>> doms;
-    for (auto bb : blocksOrder) {
-        if (bb == entry)
-            doms[bb] = {entry};
-        else {
-            for (auto b : blocksOrder)
-                doms[bb].insert(b);
-        }
-    }
-
-    bool domChanged;
-    do {
-        domChanged = false;
-        for (auto bb : blocksOrder) {
-            if (bb == entry) continue;
-            std::set<BasicBlock*> inter;
-            bool firstPred = true;
-            for (auto pred : preds[bb]) {
-                if (firstPred) {
-                    inter = doms[pred];
-                    firstPred = false;
-                } else {
-                    std::set<BasicBlock*> temp;
-                    for (auto b : inter)
-                        if (doms[pred].count(b))
-                            temp.insert(b);
-                    inter = std::move(temp);
-                }
-            }
-            inter.insert(bb);
-            if (inter != doms[bb]) {
-                doms[bb] = std::move(inter);
-                domChanged = true;
-            }
-        }
-    } while (domChanged);
-
-    // ---- 6. Loop depth based on dominators ----
-    std::map<BasicBlock*, int> loopDepth;
-    for (auto bb : blocksOrder) loopDepth[bb] = 0;
-
-    for (auto bb : blocksOrder) {
-        auto term = bb->get_terminator();
-        if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
-            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
-            if (!succ) continue;
-            if (doms[bb].count(succ)) {
-                std::set<BasicBlock*> loopBlocks;
-                std::function<void(BasicBlock*)> collect = [&](BasicBlock *b) {
-                    if (!loopBlocks.insert(b).second) return;
-                    if (b == succ) return;
-                    for (auto pred : preds[b])
-                        collect(pred);
-                };
-                collect(bb);
-                loopBlocks.insert(succ);
-                for (auto b : loopBlocks) loopDepth[b]++;
-            }
-        }
-    }
+    // ---- 5/6. Dominators & loop depth ----
+    std::map<BasicBlock*, int> loopDepth = computeLoopDepth(blocksOrder, preds);
 
     // ---- 7. Phi coalesce affinity ----
     std::map<Value*, std::set<Value*>> phiAffinity;
