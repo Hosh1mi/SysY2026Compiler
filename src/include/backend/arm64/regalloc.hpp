@@ -30,6 +30,10 @@ public:
 private:
     bool canAssignRegister(Value *v) const;
 
+    /// 计算逆后序(RPO)块序,并填充每个块的前驱表。
+    std::vector<BasicBlock*> computeBlockOrder(
+        std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const;
+
     struct Interval {
         Value *value;
         int start;

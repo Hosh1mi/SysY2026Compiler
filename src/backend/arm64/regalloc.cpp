@@ -269,13 +269,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     }
 }
 
-void Arm64RegAlloc::allocate() {
-    std::map<Value*, int> defPos;
-    std::map<Value*, int> lastUse;
-    std::vector<Interval> intervals;
-
-    // ---- 1. RPO block order & predecessor map ----
-    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
+    std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
     std::vector<BasicBlock*> blocksOrder;
 
     {
@@ -314,6 +309,18 @@ void Arm64RegAlloc::allocate() {
             }
         }
     }
+
+    return blocksOrder;
+}
+
+void Arm64RegAlloc::allocate() {
+    std::map<Value*, int> defPos;
+    std::map<Value*, int> lastUse;
+    std::vector<Interval> intervals;
+
+    // ---- 1. RPO block order & predecessor map ----
+    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+    std::vector<BasicBlock*> blocksOrder = computeBlockOrder(preds);
 
     // ---- 2. Instruction numbering ----
     std::map<BasicBlock*, int> blockStart, blockEnd;
