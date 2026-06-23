@@ -49,6 +49,14 @@ private:
         bool crossesCall;
     };
 
+    /// 指令编号：为每个可分配值填充定义点/最后使用点，并记录每个块的编号范围。
+    void computeInstructionNumbers(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<Value*, int> &defPos,
+        std::map<Value*, int> &lastUse,
+        std::map<BasicBlock*, int> &blockStart,
+        std::map<BasicBlock*, int> &blockEnd) const;
+
     /// 数据流分析：计算每个块的 LiveIn/LiveOut，并标记跨越 call 的值。
     void computeLiveness(
         const std::vector<BasicBlock*> &blocksOrder,

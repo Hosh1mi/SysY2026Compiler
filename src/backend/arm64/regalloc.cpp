@@ -419,6 +419,77 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     return spillCost;
 }
 
+void Arm64RegAlloc::computeInstructionNumbers(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<Value*, int> &defPos,
+    std::map<Value*, int> &lastUse,
+    std::map<BasicBlock*, int> &blockStart,
+    std::map<BasicBlock*, int> &blockEnd) const {
+    int idx = 0;
+    for (auto arg : func_->arguments_) {
+        if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
+            defPos[arg] = 0;
+            lastUse[arg] = 0;
+        }
+    }
+
+    for (auto bb : blocksOrder) {
+        if (bb->instr_list_.empty()) {
+            blockStart[bb] = blockEnd[bb] = idx;
+            continue;
+        }
+
+        blockStart[bb] = idx + 1;
+        for (auto inst : bb->instr_list_) {
+            ++idx;
+
+            if (canAssignRegister(inst)) {
+                bool skipForSelect = false;
+                if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+                    inst->use_list_.size() == 1) {
+                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                if (!skipForSelect &&
+                    inst->op_id_ == Instruction::Select &&
+                    inst->use_list_.size() == 1 &&
+                    (isInt(inst->type_) || isPtr(inst->type_) || isFloat(inst->type_))) {
+                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
+                    if (user) skipForSelect = true;
+                }
+                if (!skipForSelect) {
+                    defPos[inst] = idx;
+                    lastUse[inst] = idx;
+                }
+            }
+
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                auto val = inst->get_operand(i);
+                if (canAssignRegister(val))
+                    lastUse[val] = std::max(lastUse[val], idx);
+                // Select emits its own cmp/fcmp using the compare operands, so
+                // extend those operands' live ranges to this Select's position.
+                if (inst->op_id_ == Instruction::Select) {
+                    if (auto *icmp = dynamic_cast<ICmpInst*>(val)) {
+                        for (unsigned j = 0; j < icmp->num_ops_; ++j) {
+                            auto icmpOp = icmp->get_operand(j);
+                            if (canAssignRegister(icmpOp))
+                                lastUse[icmpOp] = std::max(lastUse[icmpOp], idx);
+                        }
+                    } else if (auto *fcmp = dynamic_cast<FCmpInst*>(val)) {
+                        for (unsigned j = 0; j < fcmp->num_ops_; ++j) {
+                            auto fcmpOp = fcmp->get_operand(j);
+                            if (canAssignRegister(fcmpOp))
+                                lastUse[fcmpOp] = std::max(lastUse[fcmpOp], idx);
+                        }
+                    }
+                }
+            }
+        }
+        blockEnd[bb] = idx;
+    }
+}
+
 void Arm64RegAlloc::computeLiveness(
     const std::vector<BasicBlock*> &blocksOrder,
     std::map<BasicBlock*, std::set<Value*>> &liveIn,
@@ -636,73 +707,7 @@ void Arm64RegAlloc::allocate() {
             neonColorToReg.push_back(r);
     }
 
-    int idx = 0;
-    for (auto arg : func_->arguments_) {
-        if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
-            defPos[arg] = 0;
-            lastUse[arg] = 0;
-        }
-    }
-
-    for (auto bb : blocksOrder) {
-        if (bb->instr_list_.empty()) {
-            blockStart[bb] = blockEnd[bb] = idx;
-            continue;
-        }
-
-        blockStart[bb] = idx + 1;
-        for (auto inst : bb->instr_list_) {
-            ++idx;
-
-            if (canAssignRegister(inst)) {
-                bool skipForSelect = false;
-                if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
-                    inst->use_list_.size() == 1) {
-                    auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
-                    if (user) skipForSelect = true;
-                }
-                if (!skipForSelect &&
-                    inst->op_id_ == Instruction::Select &&
-                    inst->use_list_.size() == 1 &&
-                    (isInt(inst->type_) || isPtr(inst->type_) || isFloat(inst->type_))) {
-                    auto *user = dynamic_cast<ReturnInst*>((*inst->use_list_.begin()).val_);
-                    if (user) skipForSelect = true;
-                }
-                if (!skipForSelect) {
-                    defPos[inst] = idx;
-                    lastUse[inst] = idx;
-                }
-            }
-
-            for (unsigned i = 0; i < inst->num_ops_; ++i) {
-                auto val = inst->get_operand(i);
-                if (canAssignRegister(val)) {
-                    lastUse[val] = std::max(lastUse[val], idx);
-                }
-                // Select emits its own cmp/fcmp using the compare operands, so
-                // extend those operands' live ranges to this Select's position.
-                if (inst->op_id_ == Instruction::Select) {
-                    if (auto *icmp = dynamic_cast<ICmpInst*>(val)) {
-                        for (unsigned j = 0; j < icmp->num_ops_; ++j) {
-                            auto icmpOp = icmp->get_operand(j);
-                            if (canAssignRegister(icmpOp)) {
-                                lastUse[icmpOp] = std::max(lastUse[icmpOp], idx);
-                            }
-                        }
-                    } else if (auto *fcmp = dynamic_cast<FCmpInst*>(val)) {
-                        for (unsigned j = 0; j < fcmp->num_ops_; ++j) {
-                            auto fcmpOp = fcmp->get_operand(j);
-                            if (canAssignRegister(fcmpOp)) {
-                                lastUse[fcmpOp] = std::max(lastUse[fcmpOp], idx);
-                            }
-                        }
-                    }
-                }
-            }
-
-        }
-        blockEnd[bb] = idx;
-    }
+    computeInstructionNumbers(blocksOrder, defPos, lastUse, blockStart, blockEnd);
 
     // ---- 3. Data-flow analysis: LiveIn / LiveOut ----
     std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
