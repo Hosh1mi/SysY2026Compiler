@@ -54,7 +54,6 @@ private:
         const std::vector<BasicBlock*> &blocksOrder,
         std::map<Value*, int> &defPos,
         std::map<Value*, int> &lastUse,
-        std::map<BasicBlock*, int> &blockStart,
         std::map<BasicBlock*, int> &blockEnd) const;
 
     /// 数据流分析：计算每个块的 LiveIn/LiveOut，并标记跨越 call 的值。
@@ -80,7 +79,7 @@ private:
     /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
     std::map<Value*, double> computeSpillCost(
         const std::vector<Interval> &intervals,
-        std::map<BasicBlock*, int> &loopDepth,
+        const std::map<BasicBlock*, int> &loopDepth,
         const std::map<Value*, std::set<Value*>> &phiAffinity) const;
 
     /// 循环内多指令大常量提升：将高权重 32 位常量预物化到空闲寄存器。

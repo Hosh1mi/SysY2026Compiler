@@ -172,13 +172,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    std::set<Value*> worklist;
-    for (auto &kv : adj) worklist.insert(kv.first);
     std::vector<Value*> stack;
     std::set<Value*> potentialSpills;
 
     // Simplify phase
-    std::vector<Value*> nodes(worklist.begin(), worklist.end());
+    std::vector<Value*> nodes;
+    nodes.reserve(adj.size());
+    for (auto &kv : adj) nodes.push_back(kv.first);
     int N = (int)nodes.size();
     std::unordered_map<Value*, int> idOf;
     idOf.reserve(N * 2);
@@ -308,12 +308,14 @@ std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
         if (!func_->basic_blocks_.empty())
             dfs(func_->basic_blocks_[0]);
 
+        std::reverse(blocksOrder.begin(), blocksOrder.end());
+
+        // Append unreachable blocks after the RPO so blocksOrder[0] is always
+        // the entry; CHK idom seeds idom[0]=0 assuming this invariant.
         for (auto bb : func_->basic_blocks_) {
             if (!visited.count(bb))
-                dfs(bb);
+                blocksOrder.push_back(bb);
         }
-
-        std::reverse(blocksOrder.begin(), blocksOrder.end());
     }
 
     for (auto bb : blocksOrder) {
@@ -425,7 +427,7 @@ std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
 
 std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     const std::vector<Interval> &intervals,
-    std::map<BasicBlock*, int> &loopDepth,
+    const std::map<BasicBlock*, int> &loopDepth,
     const std::map<Value*, std::set<Value*>> &phiAffinity) const {
     // spill 代价 = def 处 store + 每次 use 处 load，均按 20^(循环深度) 加权。
     // 参数已在调用方栈上无 store 代价，整体减半；下限 1.0。
@@ -473,7 +475,6 @@ void Arm64RegAlloc::computeInstructionNumbers(
     const std::vector<BasicBlock*> &blocksOrder,
     std::map<Value*, int> &defPos,
     std::map<Value*, int> &lastUse,
-    std::map<BasicBlock*, int> &blockStart,
     std::map<BasicBlock*, int> &blockEnd) const {
     int idx = 0;
     for (auto arg : func_->arguments_) {
@@ -485,11 +486,10 @@ void Arm64RegAlloc::computeInstructionNumbers(
 
     for (auto bb : blocksOrder) {
         if (bb->instr_list_.empty()) {
-            blockStart[bb] = blockEnd[bb] = idx;
+            blockEnd[bb] = idx;
             continue;
         }
 
-        blockStart[bb] = idx + 1;
         for (auto inst : bb->instr_list_) {
             ++idx;
 
@@ -575,10 +575,6 @@ void Arm64RegAlloc::computeLiveness(
                 if (canAssignRegister(val) && !info.def.count(val))
                     info.use.insert(val);
             }
-        }
-        auto it = bbInfo.find(bb);
-        if (it != bbInfo.end()) {
-            for (auto v : it->second.use) info.use.insert(v);
         }
         bbInfo[bb] = info;
     }
@@ -743,6 +739,7 @@ Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
         for (int r = 8; r <= 15; ++r)
             if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
     }
+    // NEON palette: v8-v15 are all callee-saved on AArch64, so callerSavedNEON stays empty.
     for (int r = 8; r <= 15; ++r) pal.neonColorToReg.push_back(r);
     return pal;
 }
@@ -779,7 +776,7 @@ void Arm64RegAlloc::promoteLoopConstants(
                     ? Magic::analyzeDivisor(ci->value_)
                     : Magic::SignedDivisorInfo{};
                 if (info.usesMagic())
-                    addCandidate(Magic::getMagic(ci->value_).multiplier, w);
+                    addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
             } else if (inst->op_id_ == Instruction::Add ||
                        inst->op_id_ == Instruction::Sub ||
                        inst->op_id_ == Instruction::ICmp) {
@@ -854,8 +851,8 @@ void Arm64RegAlloc::allocate() {
 
     // Instruction numbers (defPos / lastUse / block ranges)
     std::map<Value*, int> defPos, lastUse;
-    std::map<BasicBlock*, int> blockStart, blockEnd;
-    computeInstructionNumbers(blocksOrder, defPos, lastUse, blockStart, blockEnd);
+    std::map<BasicBlock*, int> blockEnd;
+    computeInstructionNumbers(blocksOrder, defPos, lastUse, blockEnd);
 
     // ---- 4. Liveness analysis: LiveIn / LiveOut ----
     std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
