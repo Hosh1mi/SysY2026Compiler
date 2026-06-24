@@ -30,6 +30,7 @@
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
+#include "include/mid/opt/ifConversion.hpp"
 #include "include/mid/opt/loopInterchange.hpp"
 #include "include/mid/opt/splitGEP.hpp"
 #include "include/mid/opt/CFGSimplify.hpp"
@@ -247,6 +248,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel) {
     pm.endRepeatGroup();
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
+    pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
