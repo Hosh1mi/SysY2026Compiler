@@ -33,7 +33,7 @@ std::string Arm64RegAlloc::assignedReg(Value *v, bool asAddress) const {
 
 bool Arm64RegAlloc::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
-    if (auto inst = dynamic_cast<Instruction*>(v)) {
+    if (auto *inst = dynamic_cast<Instruction*>(v)) {
         if (inst->is_void() || inst->is_alloca()) {
             return false;
         }
@@ -66,16 +66,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // ---- Phi coalescing（Briggs 保守准则）----
-    // 把 phi 相连且不冲突的活跃区间在着色前合并成一个节点，使 phi 拷贝
-    // 退化为自搬移（由 peephole 删除）。Briggs 准则保证合并后的节点
-    // 高度数邻居 < K，不会让图变得更难着色，因此不会引入新的 spill。
-    // 冲突判定：凸包不重叠（adj 无边）⇒ 必然安全；凸包重叠时再用
-    // trulyInterferes 做基于真实活跃性的精确判定——循环 phi 的凸包
-    // 横跨整个循环，与 backedge incoming 必然凸包重叠，但真实活跃
-    // 区间通常不冲突（incoming 死于并行拷贝处），精确判定能合并它们。
-    // 着色阶段仍使用凸包邻接（合并节点取成员邻接之并），保守安全。
-    // phi 拷贝发射端（emitPhiCopies）具备并行拷贝语义，撞号/成环均能处理。
+    // ---- Phi 合并（Briggs 保守准则 + George 准则）----
+    // 把 phi 相连且不真正冲突的活跃区间合并成一个节点，消除 phi 拷贝。
+    // 冲突判定先用凸包重叠（adj 有边）做快速过滤，凸包重叠时再调用
+    // trulyInterferes 做精确的活跃性判定（循环 phi 与 backedge incoming
+    // 虽凸包重叠但真实区间通常不冲突，精确判定能合并它们）。
+    // 合并守则：Briggs 准则（合并节点高度数邻居 < K）；Briggs 不满足时
+    // 尝试 George 准则（一方的高度数邻居均已是另一方的邻居，约束不恶化）。
     std::map<Value*, Value*> ufParent;
     std::function<Value*(Value*)> ufFind = [&](Value *v) -> Value* {
         auto it = ufParent.find(v);
@@ -123,7 +120,7 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                 if (conflict) continue;
             }
 
-            // Briggs：合并节点的"高度数（>=K）邻居"个数必须 < K
+            // Briggs 准则：合并后节点的高度数（≥K）邻居个数 < K
             std::set<Value*> nbrs = adj[a];
             nbrs.insert(adj[b].begin(), adj[b].end());
             nbrs.erase(a);
@@ -134,7 +131,26 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                 if (adj[n].count(a) && adj[n].count(b)) d--;  // 合并后只算一个邻居
                 if (d >= K) highDegree++;
             }
-            if (highDegree >= K) continue;
+            if (highDegree >= K) {
+                // George 准则（Briggs 不满足时的 fallback）：
+                // a 的所有高度数邻居均已是 b 的邻居（或反之），则合并后
+                // 高度数邻居集合不扩大，着色约束不恶化，可以安全合并。
+                bool georgeAB = true;
+                for (auto *n : adj[a]) {
+                    if (n == b) continue;
+                    if ((int)adj[n].size() >= K && !adj[b].count(n))
+                        { georgeAB = false; break; }
+                }
+                if (!georgeAB) {
+                    bool georgeBA = true;
+                    for (auto *n : adj[b]) {
+                        if (n == a) continue;
+                        if ((int)adj[n].size() >= K && !adj[a].count(n))
+                            { georgeBA = false; break; }
+                    }
+                    if (!georgeBA) continue;
+                }
+            }
 
             // 把 b 并入 a
             for (auto *n : adj[b]) {
@@ -156,13 +172,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    std::set<Value*> worklist;
-    for (auto &kv : adj) worklist.insert(kv.first);
     std::vector<Value*> stack;
     std::set<Value*> potentialSpills;
 
     // Simplify phase
-    std::vector<Value*> nodes(worklist.begin(), worklist.end());
+    std::vector<Value*> nodes;
+    nodes.reserve(adj.size());
+    for (auto &kv : adj) nodes.push_back(kv.first);
     int N = (int)nodes.size();
     std::unordered_map<Value*, int> idOf;
     idOf.reserve(N * 2);
@@ -250,8 +266,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // Record assignments：每个原始值取其合并代表元的颜色，
-    // 寄存器名按值自身的类型决定（w/x 同号同寄存器）
+    // ---- 写回分配结果 ----
+    // 每个原始值取其 UF 代表元的颜色，寄存器名按值自身类型（w/x/s/v）决定。
     for (auto &iv : sorted) {
         Value *v = iv.value;
         auto it = colors.find(ufFind(v));
@@ -269,13 +285,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     }
 }
 
-void Arm64RegAlloc::allocate() {
-    std::map<Value*, int> defPos;
-    std::map<Value*, int> lastUse;
-    std::vector<Interval> intervals;
-
-    // ---- 1. RPO block order & predecessor map ----
-    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+std::vector<BasicBlock*> Arm64RegAlloc::computeBlockOrder(
+    std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
     std::vector<BasicBlock*> blocksOrder;
 
     {
@@ -285,7 +296,7 @@ void Arm64RegAlloc::allocate() {
             auto term = bb->get_terminator();
             if (term) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         if (!visited.count(succ))
                             dfs(succ);
                     }
@@ -297,127 +308,174 @@ void Arm64RegAlloc::allocate() {
         if (!func_->basic_blocks_.empty())
             dfs(func_->basic_blocks_[0]);
 
+        std::reverse(blocksOrder.begin(), blocksOrder.end());
+
+        // Append unreachable blocks after the RPO so blocksOrder[0] is always
+        // the entry; CHK idom seeds idom[0]=0 assuming this invariant.
         for (auto bb : func_->basic_blocks_) {
             if (!visited.count(bb))
-                dfs(bb);
+                blocksOrder.push_back(bb);
         }
-
-        std::reverse(blocksOrder.begin(), blocksOrder.end());
     }
 
     for (auto bb : blocksOrder) {
         auto term = bb->get_terminator();
         if (!term) continue;
         for (unsigned i = 0; i < term->num_ops_; ++i) {
-            if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+            if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                 preds[succ].push_back(bb);
             }
         }
     }
 
-    // ---- 2. Instruction numbering ----
-    std::map<BasicBlock*, int> blockStart, blockEnd;
+    return blocksOrder;
+}
 
-    // ---- 0. Leaf-function argument pre-coloring ----
-    bool isLeaf = true;
-    for (auto bb : func_->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
-            if (inst->is_call()) { isLeaf = false; break; }
+std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const {
+    // ---- Cooper-Harvey-Kennedy（CHK）即时支配者算法 ----
+    // 用 RPO 编号 + idom 链 intersect 迭代，O(n) 复杂度，替代 O(n²) 全集算法。
+    // RPO 编号：blocksOrder[0] 是入口，编号最小。
+    int N = (int)blocksOrder.size();
+    std::map<BasicBlock*, int> rpoNum;
+    for (int i = 0; i < N; ++i) rpoNum[blocksOrder[i]] = i;
+
+    // idom[i]：blocksOrder[i] 的直接支配者下标；入口自支配（idom[0] = 0）。
+    std::vector<int> idom(N, -1);
+    idom[0] = 0;
+
+    // intersect：沿两条 idom 链向上爬，利用 RPO 大小关系收敛到公共祖先。
+    auto intersect = [&](int a, int b) {
+        while (a != b) {
+            while (a > b) a = idom[a];
+            while (b > a) b = idom[b];
         }
-        if (!isLeaf) break;
+        return a;
+    };
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 1; i < N; ++i) {
+            BasicBlock *bb = blocksOrder[i];
+            int newIdom = -1;
+            for (auto pred : preds[bb]) {
+                auto it = rpoNum.find(pred);
+                if (it == rpoNum.end()) continue;
+                int pi = it->second;
+                if (idom[pi] == -1) continue;  // 前驱尚未处理，跳过
+                newIdom = (newIdom == -1) ? pi : intersect(pi, newIdom);
+            }
+            if (newIdom != -1 && newIdom != idom[i]) {
+                idom[i] = newIdom;
+                changed = true;
+            }
+        }
     }
-    if (isLeaf) {
-        int intArgIdx = 0, floatArgIdx = 0;
-        for (auto arg : func_->arguments_) {
-            if (!canAssignRegister(arg)) continue;
-            if (isAllocatableFloatValue(arg->type_)) {
-                if (floatArgIdx < 8)
-                    assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
-            } else {
-                if (intArgIdx < 8) {
-                    bool isPtr = isAllocatablePtrValue(arg->type_);
-                    assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+
+    // dominates(succIdx, bbIdx)：沿 idom 链上爬，判断 succ 是否支配 bb。
+    auto dominates = [&](int succIdx, int bbIdx) {
+        int cur = bbIdx;
+        while (cur != succIdx) {
+            if (idom[cur] < 0) return false;   // 不可达块，idom 未初始化
+            if (idom[cur] == cur) return false; // 已到达入口，未找到 succ
+            cur = idom[cur];
+        }
+        return true;
+    };
+
+    // ---- 回边驱动的自然循环深度计算 ----
+    std::map<BasicBlock*, int> loopDepth;
+    for (auto bb : blocksOrder) loopDepth[bb] = 0;
+
+    for (int i = 0; i < N; ++i) {
+        BasicBlock *bb = blocksOrder[i];
+        auto term = bb->get_terminator();
+        if (!term) continue;
+        for (unsigned k = 0; k < term->num_ops_; ++k) {
+            auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(k));
+            if (!succ) continue;
+            auto sit = rpoNum.find(succ);
+            if (sit == rpoNum.end()) continue;
+            int si = sit->second;
+            if (!dominates(si, i)) continue;  // 不是回边
+
+            // 收集自然循环：从回边尾(i)出发，沿前驱反向到达 succ(si)
+            std::set<int> loopSet;
+            std::vector<int> worklist = {i};
+            loopSet.insert(i);
+            loopSet.insert(si);
+            while (!worklist.empty()) {
+                int cur = worklist.back(); worklist.pop_back();
+                for (auto pred : preds[blocksOrder[cur]]) {
+                    auto pit = rpoNum.find(pred);
+                    if (pit == rpoNum.end()) continue;
+                    int pi = pit->second;
+                    if (!loopSet.count(pi)) {
+                        loopSet.insert(pi);
+                        worklist.push_back(pi);
+                    }
                 }
             }
+            for (int idx : loopSet) loopDepth[blocksOrder[idx]]++;
         }
     }
 
-    // Build color→physical-register mapping.
-    // Values that live through calls must stay in callee-saved registers.
-    // Short-lived values should prefer caller-saved registers so they do not
-    // force save/restore slots in leaf functions or for call-local temporaries.
-    std::vector<int> intColorToReg;
-    std::vector<int> floatColorToReg;
-    std::vector<int> neonColorToReg;
-    std::set<int> callerSavedIntRegs;
-    std::set<int> callerSavedFloatRegs;
-    std::set<int> callerSavedNEONRegs;
-    {
-        std::set<int> precoloredIntRegs;
-        for (auto &kv : assignedRegs_) {
-            const std::string &reg = kv.second;
-            if (!reg.empty() && (reg[0] == 'w' || reg[0] == 'x'))
-                precoloredIntRegs.insert(std::stoi(reg.substr(1)));
+    return loopDepth;
+}
+
+std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
+    const std::vector<Interval> &intervals,
+    const std::map<BasicBlock*, int> &loopDepth,
+    const std::map<Value*, std::set<Value*>> &phiAffinity) const {
+    // spill 代价 = def 处 store + 每次 use 处 load，均按 20^(循环深度) 加权。
+    // 参数已在调用方栈上无 store 代价，整体减半；下限 1.0。
+    std::map<Value*, double> spillCost;
+    for (auto &iv : intervals) {
+        double cost = 0;
+        // 定义点 store 代价：对称地将写回操作纳入 spill 估算（Chaitin 原始
+        // 公式仅统计 use-site；加入 def-site 后高频写变量更倾向留在寄存器）
+        if (auto *defInst = dynamic_cast<Instruction*>(iv.value)) {
+            auto dit = loopDepth.find(defInst->parent_);
+            int depth = (dit != loopDepth.end()) ? dit->second : 0;
+            cost += std::pow(20.0, depth);
         }
-        if (isLeaf) {
-            const int callerIntRegs[] = {0,1,2,3,4,5,6,7, 9};
-            for (int r : callerIntRegs) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-                callerSavedIntRegs.insert(r);
-            }
-            for (int r = 19; r <= 28; ++r) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-            }
-        } else {
-            const int callerIntRegs[] = {9,0,1,2,3,4,5,6,7};
-            for (int r : callerIntRegs) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-                callerSavedIntRegs.insert(r);
-            }
-            callerSavedIntRegs.insert(9);
-            for (int r = 19; r <= 28; ++r) {
-                if (!precoloredIntRegs.count(r))
-                    intColorToReg.push_back(r);
-            }
+        // 使用点 load 代价
+        for (auto &use : iv.value->use_list_) {
+            auto *inst = dynamic_cast<Instruction*>(use.val_);
+            if (!inst) continue;
+            auto dit = loopDepth.find(inst->parent_);
+            int depth = (dit != loopDepth.end()) ? dit->second : 0;
+            cost += std::pow(20.0, depth);
         }
-        std::set<int> precoloredFloatRegs;
-        for (auto &kv : assignedRegs_) {
-            const std::string &reg = kv.second;
-            if (!reg.empty() && reg[0] == 's')
-                precoloredFloatRegs.insert(std::stoi(reg.substr(1)));
-        }
-        if (isLeaf) {
-            const int callerFloatRegs[] = {0,1,2,3,4,5,6,7, 16};
-            for (int r : callerFloatRegs) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-                callerSavedFloatRegs.insert(r);
-            }
-            for (int r = 8; r <= 15; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-            }
-        } else {
-            for (int r = 0; r <= 7; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-                callerSavedFloatRegs.insert(r);
-            }
-            if (!precoloredFloatRegs.count(16))
-                floatColorToReg.push_back(16);
-            callerSavedFloatRegs.insert(16);
-            for (int r = 8; r <= 15; ++r) {
-                if (!precoloredFloatRegs.count(r))
-                    floatColorToReg.push_back(r);
-            }
-        }
-        for (int r = 8; r <= 15; ++r)
-            neonColorToReg.push_back(r);
+        if (dynamic_cast<Argument*>(iv.value))
+            cost /= 2.0;
+        if (cost < 1.0) cost = 1.0;
+        spillCost[iv.value] = cost;
     }
 
+    // Propagate phi affinity costs: ensure phi partners have similar spill cost
+    // so the whole group gets registers or spills together.
+    for (auto &[v, partners] : phiAffinity) {
+        double maxCost = spillCost[v];
+        for (auto *partner : partners)
+            if (spillCost.count(partner))
+                maxCost = std::max(maxCost, spillCost[partner]);
+        spillCost[v] = maxCost;
+        for (auto *partner : partners)
+            if (spillCost.count(partner))
+                spillCost[partner] = maxCost;
+    }
+
+    return spillCost;
+}
+
+void Arm64RegAlloc::computeInstructionNumbers(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<Value*, int> &defPos,
+    std::map<Value*, int> &lastUse,
+    std::map<BasicBlock*, int> &blockEnd) const {
     int idx = 0;
     for (auto arg : func_->arguments_) {
         if (canAssignRegister(arg) && !hasAssignedReg(arg)) {
@@ -428,11 +486,10 @@ void Arm64RegAlloc::allocate() {
 
     for (auto bb : blocksOrder) {
         if (bb->instr_list_.empty()) {
-            blockStart[bb] = blockEnd[bb] = idx;
+            blockEnd[bb] = idx;
             continue;
         }
 
-        blockStart[bb] = idx + 1;
         for (auto inst : bb->instr_list_) {
             ++idx;
 
@@ -458,78 +515,71 @@ void Arm64RegAlloc::allocate() {
 
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
                 auto val = inst->get_operand(i);
-                if (canAssignRegister(val)) {
+                if (canAssignRegister(val))
                     lastUse[val] = std::max(lastUse[val], idx);
-                }
                 // Select emits its own cmp/fcmp using the compare operands, so
                 // extend those operands' live ranges to this Select's position.
                 if (inst->op_id_ == Instruction::Select) {
                     if (auto *icmp = dynamic_cast<ICmpInst*>(val)) {
                         for (unsigned j = 0; j < icmp->num_ops_; ++j) {
                             auto icmpOp = icmp->get_operand(j);
-                            if (canAssignRegister(icmpOp)) {
+                            if (canAssignRegister(icmpOp))
                                 lastUse[icmpOp] = std::max(lastUse[icmpOp], idx);
-                            }
                         }
                     } else if (auto *fcmp = dynamic_cast<FCmpInst*>(val)) {
                         for (unsigned j = 0; j < fcmp->num_ops_; ++j) {
                             auto fcmpOp = fcmp->get_operand(j);
-                            if (canAssignRegister(fcmpOp)) {
+                            if (canAssignRegister(fcmpOp))
                                 lastUse[fcmpOp] = std::max(lastUse[fcmpOp], idx);
-                            }
                         }
                     }
                 }
             }
-
         }
         blockEnd[bb] = idx;
     }
+}
 
-    // ---- 3. Data-flow analysis: LiveIn / LiveOut ----
+void Arm64RegAlloc::computeLiveness(
+    const std::vector<BasicBlock*> &blocksOrder,
+    std::map<BasicBlock*, std::set<Value*>> &liveIn,
+    std::map<BasicBlock*, std::set<Value*>> &liveOut,
+    std::set<Value*> &crossesCallValues) const {
+    struct BBInfo { std::set<Value*> def, use; };
+
     std::map<BasicBlock*, std::set<Value*>> phiOut;
     for (auto bb : blocksOrder) {
         for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
+            auto *phi = dynamic_cast<PhiInst*>(inst);
             if (!phi) continue;
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 auto val = phi->get_operand(i);
-                auto pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
-                if (canAssignRegister(val)) {
+                auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
+                if (canAssignRegister(val))
                     phiOut[pred].insert(val);
-                }
             }
         }
     }
 
-    struct BBInfo { std::set<Value*> def, use; };
     std::map<BasicBlock*, BBInfo> bbInfo;
-
     for (auto bb : blocksOrder) {
         BBInfo info;
         for (auto inst : bb->instr_list_) {
-            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
                 if (canAssignRegister(phi)) info.def.insert(phi);
                 continue;
             }
-
             if (canAssignRegister(inst)) info.def.insert(inst);
             for (unsigned i = 0; i < inst->num_ops_; ++i) {
                 auto val = inst->get_operand(i);
-                if (canAssignRegister(val) && !info.def.count(val)) {
+                if (canAssignRegister(val) && !info.def.count(val))
                     info.use.insert(val);
-                }
             }
-        }
-        auto it = bbInfo.find(bb);
-        if (it != bbInfo.end()) {
-            for (auto v : it->second.use) info.use.insert(v);
         }
         bbInfo[bb] = info;
     }
 
     bool changed;
-    std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
     do {
         changed = false;
         for (auto bb : blocksOrder) {
@@ -537,7 +587,7 @@ void Arm64RegAlloc::allocate() {
             auto term = bb->get_terminator();
             if (term) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         for (auto v : liveIn[succ]) newOut.insert(v);
                     }
                 }
@@ -556,7 +606,6 @@ void Arm64RegAlloc::allocate() {
         }
     } while (changed);
 
-    std::set<Value*> crossesCallValues;
     for (auto bb : blocksOrder) {
         std::set<Value*> live = liveOut[bb];
         for (auto it = bb->instr_list_.rbegin(); it != bb->instr_list_.rend(); ++it) {
@@ -574,7 +623,7 @@ void Arm64RegAlloc::allocate() {
             if (canAssignRegister(inst))
                 live.erase(inst);
 
-            if (auto phi = dynamic_cast<PhiInst*>(inst)) {
+            if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
                 for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                     auto val = phi->get_operand(i);
                     if (canAssignRegister(val))
@@ -590,16 +639,27 @@ void Arm64RegAlloc::allocate() {
             }
         }
     }
+}
 
-    // ---- 4. Build live intervals ----
+std::vector<Arm64RegAlloc::Interval> Arm64RegAlloc::buildIntervals(
+    const std::vector<BasicBlock*> &blocksOrder,
+    const std::map<Value*, int> &defPos,
+    const std::map<Value*, int> &lastUse,
+    const std::map<BasicBlock*, int> &blockEnd,
+    const std::map<BasicBlock*, std::set<Value*>> &liveOut,
+    const std::set<Value*> &crossesCallValues) const {
+    std::vector<Interval> intervals;
     for (auto &entry : defPos) {
         Value *v = entry.first;
         int start = entry.second;
-        int end = lastUse[v];
+        int end = lastUse.at(v);
 
         for (auto bb : blocksOrder) {
-            if (liveOut[bb].count(v)) {
-                end = std::max(end, blockEnd[bb]);
+            auto it = liveOut.find(bb);
+            if (it != liveOut.end() && it->second.count(v)) {
+                auto eit = blockEnd.find(bb);
+                if (eit != blockEnd.end())
+                    end = std::max(end, eit->second);
             }
         }
 
@@ -615,76 +675,15 @@ void Arm64RegAlloc::allocate() {
                                  crossesCall});
         }
     }
+    return intervals;
+}
 
-    // ---- 5. Compute dominators (iterative algorithm) ----
-    BasicBlock *entry = func_->basic_blocks_[0];
-    std::map<BasicBlock*, std::set<BasicBlock*>> doms;
-    for (auto bb : blocksOrder) {
-        if (bb == entry)
-            doms[bb] = {entry};
-        else {
-            for (auto b : blocksOrder)
-                doms[bb].insert(b);
-        }
-    }
-
-    bool domChanged;
-    do {
-        domChanged = false;
-        for (auto bb : blocksOrder) {
-            if (bb == entry) continue;
-            std::set<BasicBlock*> inter;
-            bool firstPred = true;
-            for (auto pred : preds[bb]) {
-                if (firstPred) {
-                    inter = doms[pred];
-                    firstPred = false;
-                } else {
-                    std::set<BasicBlock*> temp;
-                    for (auto b : inter)
-                        if (doms[pred].count(b))
-                            temp.insert(b);
-                    inter = std::move(temp);
-                }
-            }
-            inter.insert(bb);
-            if (inter != doms[bb]) {
-                doms[bb] = std::move(inter);
-                domChanged = true;
-            }
-        }
-    } while (domChanged);
-
-    // ---- 6. Loop depth based on dominators ----
-    std::map<BasicBlock*, int> loopDepth;
-    for (auto bb : blocksOrder) loopDepth[bb] = 0;
-
-    for (auto bb : blocksOrder) {
-        auto term = bb->get_terminator();
-        if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
-            auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i));
-            if (!succ) continue;
-            if (doms[bb].count(succ)) {
-                std::set<BasicBlock*> loopBlocks;
-                std::function<void(BasicBlock*)> collect = [&](BasicBlock *b) {
-                    if (!loopBlocks.insert(b).second) return;
-                    if (b == succ) return;
-                    for (auto pred : preds[b])
-                        collect(pred);
-                };
-                collect(bb);
-                loopBlocks.insert(succ);
-                for (auto b : loopBlocks) loopDepth[b]++;
-            }
-        }
-    }
-
-    // ---- 7. Phi coalesce affinity ----
+std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
+    const std::vector<BasicBlock*> &blocksOrder) const {
     std::map<Value*, std::set<Value*>> phiAffinity;
     for (auto bb : blocksOrder) {
         for (auto inst : bb->instr_list_) {
-            auto phi = dynamic_cast<PhiInst*>(inst);
+            auto *phi = dynamic_cast<PhiInst*>(inst);
             if (!phi || !canAssignRegister(phi)) continue;
             for (unsigned i = 0; i < phi->num_ops_; i += 2) {
                 auto val = phi->get_operand(i);
@@ -695,48 +694,194 @@ void Arm64RegAlloc::allocate() {
             }
         }
     }
+    return phiAffinity;
+}
 
-    // ---- 8. Spill cost: sum of (10 ^ loopDepth) per use ----
-    std::map<Value*, double> spillCost;
-    for (auto &iv : intervals) {
-        double cost = 0;
-        for (auto &use : iv.value->use_list_) {
-            auto inst = dynamic_cast<Instruction*>(use.val_);
-            if (!inst) continue;
-            int depth = loopDepth[inst->parent_];
-            cost += std::pow(20.0, depth);
+Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
+    RegPalette pal;
+    // 扫描已预着色（叶函数参数）的寄存器，着色时排除它们。
+    std::set<int> precoloredInt, precoloredFloat;
+    for (auto &kv : assignedRegs_) {
+        const std::string &r = kv.second;
+        if (r.empty()) continue;
+        if (r[0] == 'w' || r[0] == 'x') precoloredInt.insert(std::stoi(r.substr(1)));
+        else if (r[0] == 's')            precoloredFloat.insert(std::stoi(r.substr(1)));
+    }
+    if (isLeaf) {
+        const int callerInt[] = {0,1,2,3,4,5,6,7,9};
+        for (int r : callerInt) {
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.callerSavedInt.insert(r);
         }
-        if (dynamic_cast<Argument*>(iv.value))
-            cost /= 2.0;
-        if (cost < 1.0) cost = 1.0;
-        spillCost[iv.value] = cost;
+        for (int r = 19; r <= 28; ++r)
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+        const int callerFloat[] = {0,1,2,3,4,5,6,7,16};
+        for (int r : callerFloat) {
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.callerSavedFloat.insert(r);
+        }
+        for (int r = 8; r <= 15; ++r)
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+    } else {
+        const int callerInt[] = {9,0,1,2,3,4,5,6,7};
+        for (int r : callerInt) {
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.callerSavedInt.insert(r);
+        }
+        for (int r = 19; r <= 28; ++r)
+            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+        for (int r = 0; r <= 7; ++r) {
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.callerSavedFloat.insert(r);
+        }
+        if (!precoloredFloat.count(16)) pal.floatColorToReg.push_back(16);
+        pal.callerSavedFloat.insert(16);
+        for (int r = 8; r <= 15; ++r)
+            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+    }
+    // NEON palette: v8-v15 are all callee-saved on AArch64, so callerSavedNEON stays empty.
+    for (int r = 8; r <= 15; ++r) pal.neonColorToReg.push_back(r);
+    return pal;
+}
+
+void Arm64RegAlloc::promoteLoopConstants(
+    const std::vector<BasicBlock*> &blocksOrder,
+    const std::map<BasicBlock*, int> &loopDepth,
+    bool isLeaf) {
+    auto needsMovk = [](int v) {
+        return (((uint32_t)v >> 16) & 0xFFFF) != 0;
+    };
+    std::map<int, double> weight;
+    auto addCandidate = [&](int v, double w) {
+        if (needsMovk(v)) weight[v] += w;
+    };
+    for (auto bb : blocksOrder) {
+        auto dit = loopDepth.find(bb);
+        int depth = (dit != loopDepth.end()) ? dit->second : 0;
+        if (depth <= 0) continue;
+        double w = std::pow(20.0, depth);
+        for (auto inst : bb->instr_list_) {
+            if (inst->op_id_ == Instruction::SRem) {
+                auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                Magic::SignedDivisorInfo info = ci
+                    ? Magic::analyzeDivisor(ci->value_)
+                    : Magic::SignedDivisorInfo{};
+                if (info.usesMagic()) {
+                    addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
+                    addCandidate(static_cast<int>(info.magnitude), w);
+                }
+            } else if (inst->op_id_ == Instruction::SDiv) {
+                auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
+                Magic::SignedDivisorInfo info = ci
+                    ? Magic::analyzeDivisor(ci->value_)
+                    : Magic::SignedDivisorInfo{};
+                if (info.usesMagic())
+                    addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
+            } else if (inst->op_id_ == Instruction::Add ||
+                       inst->op_id_ == Instruction::Sub ||
+                       inst->op_id_ == Instruction::ICmp) {
+                for (unsigned i = 0; i < inst->num_ops_; ++i)
+                    if (auto *ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
+                        addCandidate(ci->value_, w);
+            }
+        }
+    }
+    if (weight.empty()) return;
+
+    std::set<int> usedRegs;
+    for (auto &kv : assignedRegs_) {
+        const std::string &r = kv.second;
+        if (!r.empty() && (r[0] == 'w' || r[0] == 'x'))
+            usedRegs.insert(std::stoi(r.substr(1)));
+    }
+    std::vector<int> freeRegs;
+    if (isLeaf) {
+        for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+    } else {
+        // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
+        // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
+        // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
+        // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
+        // 保存/恢复由 mergePromotedConstRegs 统一接管。
+        for (int r = 10; r <= 15; ++r)
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+        for (int r = 28; r >= 19; --r)
+            if (!usedRegs.count(r)) freeRegs.push_back(r);
+    }
+    std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
+    for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
+    std::sort(ranked.begin(), ranked.end());
+    size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
+    for (size_t i = 0; i < n; ++i)
+        promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
+}
+
+void Arm64RegAlloc::allocate() {
+    // ---- 1. Leaf detection + argument pre-coloring ----
+    bool isLeaf = true;
+    for (auto bb : func_->basic_blocks_) {
+        for (auto inst : bb->instr_list_) {
+            if (inst->is_call()) { isLeaf = false; break; }
+        }
+        if (!isLeaf) break;
+    }
+    if (isLeaf) {
+        int intArgIdx = 0, floatArgIdx = 0;
+        for (auto arg : func_->arguments_) {
+            if (!canAssignRegister(arg)) continue;
+            if (isAllocatableFloatValue(arg->type_)) {
+                if (floatArgIdx < 8)
+                    assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
+            } else {
+                if (intArgIdx < 8) {
+                    bool isPtr = isAllocatablePtrValue(arg->type_);
+                    assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
+                }
+            }
+        }
     }
 
-    // Propagate phi affinity costs: ensure phi partners have similar spill cost
-    // so the whole group gets registers or spills together.
-    for (auto &[v, partners] : phiAffinity) {
-        double maxCost = spillCost[v];
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                maxCost = std::max(maxCost, spillCost[partner]);
-        spillCost[v] = maxCost;
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                spillCost[partner] = maxCost;
-    }
+    // ---- 2. RPO block order & predecessor map ----
+    std::map<BasicBlock*, std::vector<BasicBlock*>> preds;
+    std::vector<BasicBlock*> blocksOrder = computeBlockOrder(preds);
+
+    // ---- 3. Register palette (color→physical-reg + caller-saved sets) ----
+    RegPalette pal = buildRegPalette(isLeaf);
+
+    // Instruction numbers (defPos / lastUse / block ranges)
+    std::map<Value*, int> defPos, lastUse;
+    std::map<BasicBlock*, int> blockEnd;
+    computeInstructionNumbers(blocksOrder, defPos, lastUse, blockEnd);
+
+    // ---- 4. Liveness analysis: LiveIn / LiveOut ----
+    std::map<BasicBlock*, std::set<Value*>> liveIn, liveOut;
+    std::set<Value*> crossesCallValues;
+    computeLiveness(blocksOrder, liveIn, liveOut, crossesCallValues);
+
+    // ---- 5. Build live intervals ----
+    std::vector<Interval> intervals =
+        buildIntervals(blocksOrder, defPos, lastUse, blockEnd, liveOut, crossesCallValues);
+
+    // ---- 6. Loop depth ----
+    std::map<BasicBlock*, int> loopDepth = computeLoopDepth(blocksOrder, preds);
+
+    // ---- 7. Phi affinity ----
+    std::map<Value*, std::set<Value*>> phiAffinity = buildPhiAffinity(blocksOrder);
+
+    // ---- 8. Spill cost ----
+    std::map<Value*, double> spillCost =
+        computeSpillCost(intervals, loopDepth, phiAffinity);
 
     // ---- 9. Separate into register-class pools ----
     std::vector<Interval> intPool, floatPool, neonPool;
     for (auto &iv : intervals) {
-        if (iv.isNEON)
-            neonPool.push_back(iv);
-        else if (iv.isFloat)
-            floatPool.push_back(iv);
-        else
-            intPool.push_back(iv);
+        if (iv.isNEON) neonPool.push_back(iv);
+        else if (iv.isFloat) floatPool.push_back(iv);
+        else intPool.push_back(iv);
     }
 
-    // ---- 10. Precise SSA interference oracle（仅用于 affinity 合并判定）----
+    // ---- 10. SSA interference oracle (used only by affinity coalescing) ----
     // liveAtDefs(v)：v 定义写入后仍活跃的值集合。两值真干涉 ⇔ 一方在另一
     // 方定义点处活跃（SSA 性质）。phi 的物理定义点是各前驱末尾的并行拷贝：
     // 任何在某前驱出口活跃的值都与 phi 冲突，唯一豁免是 phi 自己来自该
@@ -772,7 +917,7 @@ void Arm64RegAlloc::allocate() {
             live = liveOut[bb];
             for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
                 Instruction *cur = *rit;
-                if (cur == inst) break;  // live == inst 定义后的活跃集合
+                if (cur == inst) break;
                 if (canAssignRegister(cur)) live.erase(cur);
                 if (dynamic_cast<PhiInst*>(cur)) continue;  // phi 的读发生在前驱
                 for (unsigned i = 0; i < cur->num_ops_; ++i) {
@@ -781,7 +926,7 @@ void Arm64RegAlloc::allocate() {
                 }
             }
         } else {
-            // Argument：在入口块起点定义，与其余参数及入口 liveIn 同时活跃
+            // Argument：与其余参数及入口 liveIn 同时活跃
             BasicBlock *entryBB = func_->basic_blocks_[0];
             live = liveIn[entryBB];
             for (auto *arg : func_->arguments_)
@@ -798,84 +943,12 @@ void Arm64RegAlloc::allocate() {
         };
 
     // ---- 11. Graph coloring (Chaitin-Briggs) ----
-    colorPool(intPool, intColorToReg, false, callerSavedIntRegs, spillCost, phiAffinity, trulyInterferes);
-    colorPool(floatPool, floatColorToReg, true, callerSavedFloatRegs, spillCost, phiAffinity, trulyInterferes);
-    colorPool(neonPool, neonColorToReg, false, callerSavedNEONRegs, spillCost, phiAffinity, trulyInterferes);
+    colorPool(intPool,   pal.intColorToReg,   false, pal.callerSavedInt,   spillCost, phiAffinity, trulyInterferes);
+    colorPool(floatPool, pal.floatColorToReg, true,  pal.callerSavedFloat, spillCost, phiAffinity, trulyInterferes);
+    colorPool(neonPool,  pal.neonColorToReg,  false, pal.callerSavedNEON,  spillCost, phiAffinity, trulyInterferes);
 
-    // ---- 12. 循环内多指令常量提升 ----
-    // srem/sdiv 常数除法的魔数乘数/除数、以及 Add/Sub/ICmp 的大常量操作数
-    // 在循环里每次迭代都要 movz+movk 重物化。把权重最高的几个 32 位常量
-    // 提升到整个函数都未被占用的寄存器（与已有着色零干涉），入口物化一次。
-    // 叶函数使用 callee-saved，非叶函数优先使用 caller-saved；后端会在 call
-    // 后重新物化 caller-saved promoted constants，避免额外保存/恢复 x19-x28。
-    // 按常量值而非 Value* 记录，魔数这类 ISel 派生常量也能命中。
-    {
-        auto needsMovk = [](int v) {
-            return (((uint32_t)v >> 16) & 0xFFFF) != 0;
-        };
-        std::map<int, double> weight;
-        auto addCandidate = [&](int v, double w) {
-            if (needsMovk(v)) weight[v] += w;
-        };
-        for (auto bb : blocksOrder) {
-            int depth = loopDepth[bb];
-            if (depth <= 0) continue;
-            double w = std::pow(20.0, depth);
-            for (auto inst : bb->instr_list_) {
-                if (inst->op_id_ == Instruction::SRem) {
-                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    Magic::SignedDivisorInfo info = ci
-                        ? Magic::analyzeDivisor(ci->value_)
-                        : Magic::SignedDivisorInfo{};
-                    if (info.usesMagic()) {
-                        addCandidate(Magic::getMagic(info.magnitude).multiplier, w);
-                        addCandidate(static_cast<int>(info.magnitude), w);
-                    }
-                } else if (inst->op_id_ == Instruction::SDiv) {
-                    auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(1));
-                    Magic::SignedDivisorInfo info = ci
-                        ? Magic::analyzeDivisor(ci->value_)
-                        : Magic::SignedDivisorInfo{};
-                    if (info.usesMagic())
-                        addCandidate(Magic::getMagic(ci->value_).multiplier, w);
-                } else if (inst->op_id_ == Instruction::Add ||
-                           inst->op_id_ == Instruction::Sub ||
-                           inst->op_id_ == Instruction::ICmp) {
-                    // 这些指令的多指令大常量操作数必然走 loadInt 物化
-                    for (unsigned i = 0; i < inst->num_ops_; ++i)
-                        if (auto ci = dynamic_cast<ConstantInt*>(inst->get_operand(i)))
-                            addCandidate(ci->value_, w);
-                }
-            }
-        }
-        if (!weight.empty()) {
-            std::set<int> usedRegs;
-            for (auto &kv : assignedRegs_) {
-                const std::string &r = kv.second;
-                if (!r.empty() && (r[0] == 'w' || r[0] == 'x'))
-                    usedRegs.insert(std::stoi(r.substr(1)));
-            }
-            std::vector<int> freeRegs;
-            if (isLeaf) {
-                for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-            } else {
-                // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
-                // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
-                // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
-                // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
-                // 保存/恢复由 mergePromotedConstRegs 统一接管。
-                for (int r = 10; r <= 15; ++r)
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-                for (int r = 28; r >= 19; --r)
-                    if (!usedRegs.count(r)) freeRegs.push_back(r);
-            }
-            std::vector<std::pair<double, int>> ranked;  // (-权重, 常量值)，排序确定
-            for (auto &kv : weight) ranked.push_back({-kv.second, kv.first});
-            std::sort(ranked.begin(), ranked.end());
-            size_t n = std::min({freeRegs.size(), ranked.size(), (size_t)8});
-            for (size_t i = 0; i < n; ++i)
-                promotedConsts_[ranked[i].second] = "w" + std::to_string(freeRegs[i]);
-        }
-    }
+    // ---- 12. Loop constant promotion ----
+    // srem/sdiv 魔数乘数、Add/Sub/ICmp 大常量在循环里每次迭代重物化。
+    // 把高权重常量提升到空闲寄存器，入口物化一次。
+    promoteLoopConstants(blocksOrder, loopDepth, isLeaf);
 }

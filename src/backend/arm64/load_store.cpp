@@ -51,7 +51,7 @@ void Arm64FuncContext::freeIntReg(const std::string &reg) {
     }
 }
 
-void Arm64FuncContext::freeAddrReg(const std::string& reg) {
+void Arm64FuncContext::freeAddrReg(const std::string &reg) {
     if (reg.size() >= 2 && reg[0] == 'x') {
         int num = std::stoi(reg.substr(1));
         if (reservedIntRegs_.count(num)) return;
@@ -282,7 +282,7 @@ std::string Arm64FuncContext::intConstReg(int val) {
 }
 
 std::string Arm64FuncContext::loadInt(Value *v) {
-    if (auto ci = dynamic_cast<ConstantInt*>(v)) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
         if (ci->value_ == 0) return "wzr";
         return intConstReg(ci->value_);
     }
@@ -299,7 +299,7 @@ std::string Arm64FuncContext::loadInt(Value *v) {
 }
 
 std::string Arm64FuncContext::loadFloat(Value *v) {
-    if (auto cf = dynamic_cast<ConstantFloat*>(v)) {
+    if (auto *cf = dynamic_cast<ConstantFloat*>(v)) {
         std::string r = allocFloatReg();
         emitFloatConst(cf->value_, r);
         return r;
@@ -317,12 +317,12 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
 }
 
 std::string Arm64FuncContext::loadAddr(Value *v) {
-    if (auto gv = dynamic_cast<GlobalVariable*>(v)) {
+    if (auto *gv = dynamic_cast<GlobalVariable*>(v)) {
         std::string r = allocAddrReg();
         emitGlobalAddr(gv, r);
         return r;
     }
-    if (auto ci = dynamic_cast<ConstantInt*>(v)) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
         if (ci->value_ == 0) return "xzr";
         std::string r = allocAddrReg();
         emitIntConst(ci->value_, r);

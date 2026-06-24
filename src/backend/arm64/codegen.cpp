@@ -114,7 +114,7 @@ void Arm64CodeGen::generate() {
     }
 
     // 6. 输出数据段：.data -> .bss -> .section .rodata
-    auto emitGroup = [&](const char* sec, const std::vector<GlobalVariable*>& gvs) {
+    auto emitGroup = [&](const char *sec, const std::vector<GlobalVariable*> &gvs) {
         if (gvs.empty()) return;
         appendMachineLine(module, sec);
         for (auto gv : gvs) {
@@ -172,7 +172,7 @@ static int p2AlignForBytes(int align) {
 }
 
 void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
-    auto pointee = static_cast<PointerType*>(gv->type_)->contained_;
+    auto *pointee = static_cast<PointerType*>(gv->type_)->contained_;
 
     appendMachineLine(module, "\t.global " + gv->name_);
     appendMachineLine(module, "\t.p2align " +
@@ -185,22 +185,22 @@ void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
         appendMachineLine(module, line.str());
     };
 
-    if (auto cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
+    if (auto *cz = dynamic_cast<ConstantZero*>(gv->init_val_)) {
         appendMachineLine(module, "\t.zero " + std::to_string(globalTypeSize(pointee)));
-    } else if (auto ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {
+    } else if (auto *ci = dynamic_cast<ConstantInt*>(gv->init_val_)) {
         appendMachineLine(module, "\t.word " + std::to_string(ci->value_));
-    } else if (auto cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {
+    } else if (auto *cf = dynamic_cast<ConstantFloat*>(gv->init_val_)) {
         float val = cf->value_;
         int bits;
         std::memcpy(&bits, &val, sizeof(bits));
         appendWordHex(bits);
-    } else if (auto ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
+    } else if (auto *ca = dynamic_cast<ConstantArray*>(gv->init_val_)) {
         std::function<bool(Constant*)> allZero = [&](Constant *elem) -> bool {
-            if (auto eci = dynamic_cast<ConstantInt*>(elem))
+            if (auto *eci = dynamic_cast<ConstantInt*>(elem))
                 return eci->value_ == 0;
-            if (auto ecf = dynamic_cast<ConstantFloat*>(elem))
+            if (auto *ecf = dynamic_cast<ConstantFloat*>(elem))
                 return ecf->value_ == 0.0f;
-            if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
+            if (auto *eca = dynamic_cast<ConstantArray*>(elem)) {
                 for (auto sub : eca->const_array)
                     if (!allZero(sub)) return false;
                 return true;
@@ -214,7 +214,7 @@ void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
         if (isAllZero) {
             int totalElements = 1;
             Type *cur = pointee;
-            while (auto arrTy = dynamic_cast<ArrayType*>(cur)) {
+            while (auto *arrTy = dynamic_cast<ArrayType*>(cur)) {
                 totalElements *= arrTy->num_elements_;
                 cur = arrTy->contained_;
             }
@@ -226,14 +226,14 @@ void Arm64CodeGen::emitGlobal(MachineModule &module, GlobalVariable *gv) {
             appendMachineLine(module, "\t.zero " + std::to_string(totalElements * elemSize));
         } else {
             std::function<void(Constant*)> emitElem = [&](Constant *elem) {
-                if (auto eci = dynamic_cast<ConstantInt*>(elem)) {
+                if (auto *eci = dynamic_cast<ConstantInt*>(elem)) {
                     appendMachineLine(module, "\t.word " + std::to_string(eci->value_));
-                } else if (auto ecf = dynamic_cast<ConstantFloat*>(elem)) {
+                } else if (auto *ecf = dynamic_cast<ConstantFloat*>(elem)) {
                     float val = ecf->value_;
                     int bits;
                     std::memcpy(&bits, &val, sizeof(bits));
                     appendWordHex(bits);
-                } else if (auto eca = dynamic_cast<ConstantArray*>(elem)) {
+                } else if (auto *eca = dynamic_cast<ConstantArray*>(elem)) {
                     for (auto sub : eca->const_array) emitElem(sub);
                 } else if (dynamic_cast<ConstantZero*>(elem)) {
                     appendMachineLine(module, "\t.word 0");
