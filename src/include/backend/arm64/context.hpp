@@ -171,6 +171,7 @@ private:
 
     BasicBlock *epilogueBB_ = nullptr;
     int edgeCounter_ = 0;
-    bool needsFrame_ = true;  // false when localSize==0 (no stack, no callee-saved regs)
+    bool needsFrame_ = true;     // false when localSize==0 && no calls (no epilogue needed)
+    bool needsFramePtr_ = true;  // false for leaf functions with no stack args (skip x29/x30)
     std::set<BasicBlock*> branchTargets_;  // blocks referenced by branch instructions
 };

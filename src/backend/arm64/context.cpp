@@ -455,10 +455,24 @@ void Arm64FuncContext::emitPrologue() {
     }
     needsFrame_ = (localSize > 0) || hasCalls;
 
-    if (needsFrame_) {
+    // Leaf functions with no stack-passed arguments don't need the x29/x30 frame
+    // pointer chain — only callee-saved register slots on the stack.
+    int intArgCount = 0, floatArgCount = 0;
+    for (auto arg : func_->arguments_) {
+        if (isFloat(arg->type_)) floatArgCount++;
+        else intArgCount++;
+    }
+    bool hasStackArgs = (intArgCount > 8) || (floatArgCount > 8);
+    // Skip x29/x30 only for true leaf functions with no spill slots and no stack args:
+    // spill slots are accessed via [x29, #-N] so any spill requires the frame pointer.
+    needsFramePtr_ = hasCalls || hasStackArgs || (prologueFrameSize_ > 0);
+
+    if (needsFramePtr_) {
         // stp supports only -512..504 range; use minimal stp + sub for large frames
         emitFramePushMachine();
         emitMoveMachine("x29", "sp");
+    }
+    if (localSize > 0) {
         if (localSize <= 4095) {
             emitStackAdjustMachine("sub", localSize);
         } else {
@@ -702,7 +716,9 @@ void Arm64FuncContext::emitEpilogue() {
             emitStackAdjustMachine("add", "x17");
         }
     }
-    emitFramePopMachine();
+    if (needsFramePtr_) {
+        emitFramePopMachine();
+    }
     emitRetMachine();
 }
 
