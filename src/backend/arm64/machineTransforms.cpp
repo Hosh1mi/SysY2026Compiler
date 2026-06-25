@@ -2,6 +2,8 @@
 #include "../../include/backend/arm64/liveness.hpp"
 #include <cctype>
 #include <cstdlib>
+#include <iterator>
+#include <map>
 #include <limits>
 #include <set>
 #include <string>
@@ -1584,6 +1586,413 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 	return false;
 }
 
+struct PointerExpr {
+	std::string base;
+	int offset = 0;
+	bool valid = false;
+};
+
+static bool parseRegisterNumber(const std::string &reg, char expectedClass, int &num) {
+	std::string text = trim(reg);
+	if (text.size() < 2 || text[0] != expectedClass)
+		return false;
+	for (size_t i = 1; i < text.size(); ++i)
+		if (!std::isdigit(static_cast<unsigned char>(text[i])))
+			return false;
+	num = std::atoi(text.c_str() + 1);
+	return true;
+}
+
+static std::string machineLiveRegName(char cls, int num) {
+	if (cls == 'w' || cls == 'x')
+		return "r" + std::to_string(num);
+	if (cls == 's' || cls == 'd' || cls == 'q' || cls == 'v')
+		return "v" + std::to_string(num);
+	return "";
+}
+
+static PointerExpr memoryExpr(const MemOperand &mem,
+                              const std::map<std::string, PointerExpr> &env) {
+	PointerExpr out;
+	auto it = env.find(mem.base);
+	if (it == env.end() || !it->second.valid)
+		return out;
+	out = it->second;
+	out.offset += mem.offset;
+	return out;
+}
+
+static bool isPlainGPRReg(const std::string &reg, char cls) {
+	int num = 0;
+	return parseRegisterNumber(reg, cls, num);
+}
+
+static bool chooseDeadQReg(const MachineFunction &func,
+                           const MachineLivenessResult &liveness,
+                           const MachineInstr *before,
+                           std::string &qReg) {
+	std::set<std::string> live;
+	auto liveIt = liveness.instrLiveOut.find(before);
+	if (liveIt != liveness.instrLiveOut.end())
+		live = liveIt->second;
+
+	std::set<std::string> mentioned;
+	for (const auto &block : func.blocks) {
+		for (const auto &inst : block.instrs) {
+			ParsedLine line = parseLine(inst.text);
+			if (line.kind != LineKind::Instruction)
+				continue;
+			for (const auto &op : line.operands) {
+				char cls = 0;
+				std::string num;
+				if (parsePhysicalReg(op, cls, num) &&
+				    (cls == 's' || cls == 'd' || cls == 'q' || cls == 'v'))
+					mentioned.insert("v" + num);
+				MemOperand mem = parseMemOp(op);
+				if (mem.valid) {
+					char baseCls = 0;
+					std::string baseNum;
+					if (parsePhysicalReg(mem.base, baseCls, baseNum) &&
+					    (baseCls == 's' || baseCls == 'd' ||
+					     baseCls == 'q' || baseCls == 'v'))
+						mentioned.insert("v" + baseNum);
+				}
+			}
+		}
+	}
+
+	for (int r = 16; r <= 31; ++r) {
+		std::string liveName = "v" + std::to_string(r);
+		if (live.count(liveName) || mentioned.count(liveName))
+			continue;
+		qReg = "q" + std::to_string(r);
+		return true;
+	}
+	for (int r = 0; r <= 7; ++r) {
+		std::string liveName = "v" + std::to_string(r);
+		if (live.count(liveName) || mentioned.count(liveName))
+			continue;
+		qReg = "q" + std::to_string(r);
+		return true;
+	}
+	return false;
+}
+
+static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
+                                         MachineBasicBlock &block,
+                                         size_t idx,
+                                         const MachineLivenessResult &liveness) {
+	if (idx >= block.instrs.size())
+		return false;
+
+	ParsedLine first = parseLine(block.instrs[idx].text);
+	if (first.kind != LineKind::Instruction || first.mnemonic != "ldr" ||
+	    first.operands.size() != 2 || !isPlainGPRReg(first.operands[0], 'w'))
+		return false;
+
+	MemOperand firstMem = parseMemOp(first.operands[1]);
+	if (!firstMem.valid || firstMem.base == "sp")
+		return false;
+
+	const size_t MaxScan = 32;
+	const size_t end = std::min(block.instrs.size(), idx + MaxScan);
+
+	std::map<std::string, PointerExpr> env;
+	for (size_t i = idx; i < end; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction)
+			break;
+		for (const auto &op : line.operands) {
+			MemOperand mem = parseMemOp(op);
+			if (mem.valid && regClass(mem.base) == 'x' && !env.count(mem.base))
+				env[mem.base] = {mem.base, 0, true};
+		}
+		if ((line.mnemonic == "mov" || line.mnemonic == "add") &&
+		    !line.operands.empty() && regClass(line.operands[0]) == 'x' &&
+		    !env.count(line.operands[0]))
+			env[line.operands[0]] = {line.operands[0], 0, true};
+	}
+	if (!env.count(firstMem.base))
+		env[firstMem.base] = {firstMem.base, 0, true};
+
+	struct CopyPair {
+		int offset;
+	};
+	std::map<std::string, PointerExpr> loadValue;
+	std::vector<CopyPair> copies;
+
+	std::string srcBase;
+	std::string dstBase;
+	size_t replaceEnd = idx;
+	bool complete = false;
+	std::string counterReg;
+	bool sawCounterInc = false;
+
+	auto gprAlias = [](const std::string &reg) -> std::string {
+		if (reg.size() < 2 || !std::isdigit(static_cast<unsigned char>(reg[1])))
+			return "";
+		if (reg[0] == 'w')
+			return "x" + reg.substr(1);
+		if (reg[0] == 'x')
+			return "w" + reg.substr(1);
+		return "";
+	};
+
+	auto invalidateReg = [&](const std::string &reg) {
+		env.erase(reg);
+		loadValue.erase(reg);
+		std::string alias = gprAlias(reg);
+		if (!alias.empty()) {
+			env.erase(alias);
+			loadValue.erase(alias);
+		}
+	};
+
+	auto findExprReg = [&](const std::string &base,
+	                       const std::set<std::string> *preferredLive,
+	                       std::string &regOut) {
+		std::string fallback;
+		for (const auto &entry : env) {
+			if (regClass(entry.first) != 'x' || !entry.second.valid ||
+			    entry.second.base != base || entry.second.offset != 16)
+				continue;
+			int regNo = 0;
+			if (!parseRegisterNumber(entry.first, 'x', regNo))
+				continue;
+			std::string liveName = "r" + std::to_string(regNo);
+			if (preferredLive && preferredLive->count(liveName)) {
+				regOut = entry.first;
+				return true;
+			}
+			if (entry.first == base)
+				fallback = entry.first;
+			else if (fallback.empty())
+				fallback = entry.first;
+		}
+		if (!fallback.empty()) {
+			regOut = fallback;
+			return true;
+		}
+		return false;
+	};
+
+	auto hasFinalPointerUpdates = [&]() {
+		if (copies.size() != 4 || srcBase.empty() || dstBase.empty())
+			return false;
+		std::string srcReg;
+		std::string dstReg;
+		return findExprReg(srcBase, nullptr, srcReg) &&
+		       findExprReg(dstBase, nullptr, dstReg);
+	};
+
+	for (size_t i = idx; i < end; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction)
+			break;
+		if (line.mnemonic == "b" || line.mnemonic == "bl" || line.mnemonic == "blr" ||
+		    line.mnemonic == "ret" || line.mnemonic == "cmp" || line.mnemonic == "tst" ||
+		    line.mnemonic == "cbz" || line.mnemonic == "cbnz" ||
+		    line.mnemonic == "tbz" || line.mnemonic == "tbnz")
+			break;
+
+		if (line.mnemonic == "mov" && line.operands.size() == 2 &&
+		    regClass(line.operands[0]) == 'x' && regClass(line.operands[1]) == 'x') {
+			auto srcIt = env.find(line.operands[1]);
+			if (srcIt == env.end() || !srcIt->second.valid)
+				return false;
+			invalidateReg(line.operands[0]);
+			env[line.operands[0]] = srcIt->second;
+			if (hasFinalPointerUpdates()) {
+				replaceEnd = i;
+				complete = true;
+				break;
+			}
+			continue;
+		}
+
+		if (line.mnemonic == "add" && line.operands.size() == 3 &&
+		    regClass(line.operands[0]) == 'x' && regClass(line.operands[1]) == 'x' &&
+		    !line.operands[2].empty() && line.operands[2][0] == '#') {
+			auto srcIt = env.find(line.operands[1]);
+			if (srcIt == env.end() || !srcIt->second.valid)
+				return false;
+			int amount = 0;
+			if (!parseHashImmediate(line.operands[2], amount))
+				return false;
+			invalidateReg(line.operands[0]);
+			env[line.operands[0]] = {srcIt->second.base,
+			                         srcIt->second.offset + amount,
+			                         true};
+			if (hasFinalPointerUpdates()) {
+				replaceEnd = i;
+				complete = true;
+				break;
+			}
+			continue;
+		}
+
+		if (line.mnemonic == "add" && line.operands.size() == 3 &&
+		    regClass(line.operands[0]) == 'w' && line.operands[0] == line.operands[1] &&
+		    line.operands[2] == "#4") {
+			if (sawCounterInc)
+				return false;
+			sawCounterInc = true;
+			counterReg = line.operands[0];
+			invalidateReg(counterReg);
+			if (hasFinalPointerUpdates()) {
+				replaceEnd = i;
+				complete = true;
+				break;
+			}
+			continue;
+		}
+
+		if (line.mnemonic == "ldr" &&
+		    (line.operands.size() == 2 || line.operands.size() == 3) &&
+		    isPlainGPRReg(line.operands[0], 'w')) {
+			MemOperand mem = parseMemOp(line.operands[1]);
+			if (!mem.valid)
+				return false;
+			int postInc = 0;
+			if (line.operands.size() == 3 &&
+			    !parseHashImmediate(line.operands[2], postInc))
+				return false;
+			PointerExpr expr = memoryExpr(mem, env);
+			if (!expr.valid)
+				return false;
+			if (srcBase.empty()) {
+				srcBase = expr.base;
+			} else if (srcBase != expr.base) {
+				return false;
+			}
+			invalidateReg(line.operands[0]);
+			loadValue[line.operands[0]] = expr;
+			if (line.operands.size() == 3)
+				env[mem.base] = {expr.base, expr.offset + postInc, true};
+			if (hasFinalPointerUpdates()) {
+				replaceEnd = i;
+				complete = true;
+				break;
+			}
+			continue;
+		}
+
+		if (line.mnemonic == "str" &&
+		    (line.operands.size() == 2 || line.operands.size() == 3) &&
+		    isPlainGPRReg(line.operands[0], 'w')) {
+			auto valIt = loadValue.find(line.operands[0]);
+			if (valIt == loadValue.end() || !valIt->second.valid)
+				return false;
+			MemOperand mem = parseMemOp(line.operands[1]);
+			if (!mem.valid)
+				return false;
+			int postInc = 0;
+			if (line.operands.size() == 3 &&
+			    !parseHashImmediate(line.operands[2], postInc))
+				return false;
+			PointerExpr dst = memoryExpr(mem, env);
+			if (!dst.valid)
+				return false;
+			if (dstBase.empty()) {
+				dstBase = dst.base;
+			} else if (dstBase != dst.base) {
+				return false;
+			}
+			if (dst.offset != valIt->second.offset)
+				return false;
+			copies.push_back({dst.offset});
+			if (line.operands.size() == 3)
+				env[mem.base] = {dst.base, dst.offset + postInc, true};
+			if (hasFinalPointerUpdates()) {
+				replaceEnd = i;
+				complete = true;
+				break;
+			}
+			continue;
+		}
+
+		if (block.instrs[i].mayLoad || block.instrs[i].mayStore ||
+		    block.instrs[i].isCall || block.instrs[i].isBarrier)
+			return false;
+
+		if (!line.operands.empty()) {
+			char cls = regClass(line.operands[0]);
+			if (cls == 'w' || cls == 'x')
+				invalidateReg(line.operands[0]);
+		}
+		if (hasFinalPointerUpdates()) {
+			replaceEnd = i;
+			complete = true;
+			break;
+		}
+	}
+
+	if (!complete || copies.size() != 4 ||
+	    srcBase.empty() || dstBase.empty() || srcBase == dstBase)
+		return false;
+	std::set<int> offsets;
+	for (const auto &copy : copies)
+		offsets.insert(copy.offset);
+	if (!offsets.count(0) || !offsets.count(4) ||
+	    !offsets.count(8) || !offsets.count(12))
+		return false;
+
+	auto liveAfterIt = liveness.instrLiveOut.find(&block.instrs[replaceEnd]);
+	if (liveAfterIt == liveness.instrLiveOut.end())
+		return false;
+	const auto &liveAfter = liveAfterIt->second;
+	std::string srcUpdateReg;
+	std::string dstUpdateReg;
+	if (!findExprReg(srcBase, &liveAfter, srcUpdateReg) ||
+	    !findExprReg(dstBase, &liveAfter, dstUpdateReg))
+		return false;
+
+	for (size_t i = idx; i <= replaceEnd; ++i) {
+		ParsedLine line = parseLine(block.instrs[i].text);
+		if (line.kind != LineKind::Instruction || line.operands.empty())
+			continue;
+		char cls = regClass(line.operands[0]);
+		if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd' &&
+		    cls != 'q' && cls != 'v')
+			continue;
+		std::string liveName;
+		int regNo = 0;
+		if (parseRegisterNumber(line.operands[0], cls, regNo))
+			liveName = machineLiveRegName(cls, regNo);
+		if (liveName.empty())
+			continue;
+		if (samePhysicalReg(line.operands[0], srcUpdateReg) ||
+		    samePhysicalReg(line.operands[0], dstUpdateReg) ||
+		    samePhysicalReg(line.operands[0], counterReg))
+			continue;
+		if (liveAfter.count(liveName))
+			return false;
+	}
+
+	std::string qReg;
+	if (!chooseDeadQReg(func, liveness, &block.instrs[idx], qReg))
+		return false;
+
+	std::vector<MachineInstr> repl;
+	auto append = [&](const std::string &text) {
+		MachineInstr inst = parseMachineInstr(text, block.instrs[idx].originalIndex);
+		repl.push_back(std::move(inst));
+	};
+	append("\tldr " + qReg + ", [" + srcBase + "]");
+	append("\tstr " + qReg + ", [" + dstBase + "]");
+	append("\tadd " + srcUpdateReg + ", " + srcBase + ", #16");
+	append("\tadd " + dstUpdateReg + ", " + dstBase + ", #16");
+	if (sawCounterInc)
+		append("\tadd " + counterReg + ", " + counterReg + ", #4");
+
+	block.instrs.erase(block.instrs.begin() + idx,
+	                   block.instrs.begin() + replaceEnd + 1);
+	block.instrs.insert(block.instrs.begin() + idx,
+	                    std::make_move_iterator(repl.begin()),
+	                    std::make_move_iterator(repl.end()));
+	return true;
+}
+
 static std::string parseFullVectorListReg(const std::string &operand) {
 	std::string text = trim(operand);
 	if (text.size() < 7 || text.front() != '{' || text.back() != '}')
@@ -2009,7 +2418,8 @@ bool runMachineMemoryOptimization(MachineFunction &func) {
 	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
-			if (tryMachineStoreLoadForward(block, i) ||
+			if (tryMachineWidenI32CopyWindow(func, block, i, liveness) ||
+			    tryMachineStoreLoadForward(block, i) ||
 			    tryMachineZeroStore(block, i, liveness) ||
 			    tryMachineDeadStore(block, i) ||
 			    tryMachinePostIndexScalar(block, i) ||
