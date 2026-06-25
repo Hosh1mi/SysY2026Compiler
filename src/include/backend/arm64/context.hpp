@@ -173,5 +173,6 @@ private:
     int edgeCounter_ = 0;
     bool needsFrame_ = true;     // false when localSize==0 && no calls (no epilogue needed)
     bool needsFramePtr_ = true;  // false for leaf functions with no stack args (skip x29/x30)
+    bool needsLinkSave_ = false; // true when x30 is saved in the local SP frame
     std::set<BasicBlock*> branchTargets_;  // blocks referenced by branch instructions
 };

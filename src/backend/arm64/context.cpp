@@ -443,7 +443,6 @@ void Arm64FuncContext::emitPrologue() {
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
-    int localSize = align16(prologueFrameSize_ + savedRegBytes);
 
     // Determine whether the function has any call instructions.
     bool hasCalls = false;
@@ -453,19 +452,21 @@ void Arm64FuncContext::emitPrologue() {
         }
         if (hasCalls) break;
     }
-    needsFrame_ = (localSize > 0) || hasCalls;
 
-    // Leaf functions with no stack-passed arguments don't need the x29/x30 frame
-    // pointer chain — only callee-saved register slots on the stack.
+    // Functions with no x29-relative slots and no stack-passed incoming args can
+    // save only LR in the local SP frame instead of building a full x29/x30
+    // frame record.  Keep x29 whenever existing slot addressing needs it.
     int intArgCount = 0, floatArgCount = 0;
     for (auto arg : func_->arguments_) {
         if (isFloat(arg->type_)) floatArgCount++;
         else intArgCount++;
     }
     bool hasStackArgs = (intArgCount > 8) || (floatArgCount > 8);
-    // Skip x29/x30 only for true leaf functions with no spill slots and no stack args:
-    // spill slots are accessed via [x29, #-N] so any spill requires the frame pointer.
-    needsFramePtr_ = hasCalls || hasStackArgs || (prologueFrameSize_ > 0);
+    needsFramePtr_ = hasStackArgs || (prologueFrameSize_ > 0);
+    needsLinkSave_ = hasCalls && !needsFramePtr_;
+    int linkSaveBytes = needsLinkSave_ ? 8 : 0;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes + linkSaveBytes);
+    needsFrame_ = needsFramePtr_ || (localSize > 0);
 
     if (needsFramePtr_) {
         // stp supports only -512..504 range; use minimal stp + sub for large frames
@@ -512,6 +513,10 @@ void Arm64FuncContext::emitPrologue() {
             emitStoreRegSPMachine("d" + std::to_string(savedNEONRegs[i]), saveOffset);
             saveOffset += 8;
         }
+    }
+    if (needsLinkSave_) {
+        emitStoreRegSPMachine("x30", saveOffset);
+        saveOffset += 8;
     }
 
    // ----- load arguments (including register arguments and stack arguments) -----
@@ -673,7 +678,8 @@ void Arm64FuncContext::emitEpilogue() {
     auto savedFloatRegs = collectAssignedFloatRegs(assignedRegs_);
     auto savedNEONRegs = collectAssignedNEONRegs(assignedRegs_);
     int savedRegBytes = static_cast<int>(savedIntRegs.size() + savedFloatRegs.size() + savedNEONRegs.size()) * 8;
-    int localSize = align16(prologueFrameSize_ + savedRegBytes);
+    int linkSaveBytes = needsLinkSave_ ? 8 : 0;
+    int localSize = align16(prologueFrameSize_ + savedRegBytes + linkSaveBytes);
 
     int restoreOffset = 0;
     for (size_t i = 0; i < savedIntRegs.size(); i += 2) {
@@ -706,6 +712,10 @@ void Arm64FuncContext::emitEpilogue() {
             emitLoadRegSPMachine("d" + std::to_string(savedNEONRegs[i]), restoreOffset);
             restoreOffset += 8;
         }
+    }
+    if (needsLinkSave_) {
+        emitLoadRegSPMachine("x30", restoreOffset);
+        restoreOffset += 8;
     }
 
     if (localSize > 0) {
