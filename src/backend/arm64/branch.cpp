@@ -12,11 +12,11 @@ void Arm64FuncContext::preparePhi() {
     for (auto bb : func_->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
             if (!inst->is_phi()) continue;
-            auto phi = static_cast<PhiInst*>(inst);
+            auto *phi = static_cast<PhiInst*>(inst);
             int phiSlot = hasAssignedReg(phi) ? 0 : getSlot(phi);
             for (int i = 0; i < phi->num_ops_ / 2; i++) {
                 auto val = phi->get_operand(2 * i);
-                auto predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
+                auto *predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
                 phiCopies_.push_back({predBB, bb, val, phiSlot, phi});
             }
         }
@@ -68,21 +68,21 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
         }
 
         if (cp.isFloat) {
-            if (auto cf = dynamic_cast<ConstantFloat*>(cp.src)) {
+            if (auto *cf = dynamic_cast<ConstantFloat*>(cp.src)) {
                 emitFloatConst(cf->value_, cp.dstReg);
             } else {
                 emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
             }
         } else if (cp.isPtr) {
-            if (auto gv = dynamic_cast<GlobalVariable*>(cp.src)) {
+            if (auto *gv = dynamic_cast<GlobalVariable*>(cp.src)) {
                 emitGlobalAddr(gv, cp.dstReg);
-            } else if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
+            } else if (auto *ci = dynamic_cast<ConstantInt*>(cp.src)) {
                 emitIntConst(ci->value_, cp.dstReg);
             } else {
                 emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
             }
         } else {
-            if (auto ci = dynamic_cast<ConstantInt*>(cp.src)) {
+            if (auto *ci = dynamic_cast<ConstantInt*>(cp.src)) {
                 emitIntConst(ci->value_, cp.dstReg);
             } else {
                 emitLoadRegMachine(cp.dstReg, getSlot(cp.src));
@@ -259,7 +259,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
 
             if (cp.phi && hasAssignedReg(cp.phi) && !isFloat(val->type_) &&
                 !isPtr(val->type_)) {
-                if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                if (auto *ci = dynamic_cast<ConstantInt*>(val)) {
                     std::string dstReg = assignedReg(cp.phi);
                     if (!batchSourceReadsReg(dstReg, idx)) {
                         if (ci->value_ == 0)
@@ -278,7 +278,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                     usedFloatRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocFloatReg();
                     if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg, "fmov");
-                } else if (auto cf = dynamic_cast<ConstantFloat*>(val)) {
+                } else if (auto *cf = dynamic_cast<ConstantFloat*>(val)) {
                     tmpReg = allocFloatReg();
                     emitFloatConst(cf->value_, tmpReg);
                 } else {
@@ -291,7 +291,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                     usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocAddrReg();
                     if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg);
-                } else if (auto gv = dynamic_cast<GlobalVariable*>(val)) {
+                } else if (auto *gv = dynamic_cast<GlobalVariable*>(val)) {
                     tmpReg = allocAddrReg();
                     emitGlobalAddr(gv, tmpReg);
                 } else {
@@ -304,7 +304,7 @@ void Arm64FuncContext::emitPhiCopies(BasicBlock *pred, BasicBlock *succ) {
                     usedIntRegs_.insert(std::stoi(srcReg.substr(1)));
                     tmpReg = allocIntReg();
                     if (tmpReg != srcReg) emitMoveMachine(tmpReg, srcReg);
-                } else if (auto ci = dynamic_cast<ConstantInt*>(val)) {
+                } else if (auto *ci = dynamic_cast<ConstantInt*>(val)) {
                     tmpReg = allocIntReg();
                     emitIntConst(ci->value_, tmpReg);
                 } else {
@@ -475,7 +475,7 @@ bool Arm64FuncContext::tryEmitCSel(ICmpInst *icmp, BranchInst *br) {
     const char *cond = icmpCond(icmp->icmp_op_);
 
     auto emitCmp = [&]() {
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
             if (val >= 0 && val <= 4095)
                 emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
@@ -593,7 +593,7 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
         auto *v1 = icmp->get_operand(0);
         auto *v2 = icmp->get_operand(1);
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
             if (val >= 0 && val <= 4095)
                 emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
@@ -615,7 +615,7 @@ bool Arm64FuncContext::tryEmitCCmpCSel(ICmpInst *icmp1, BranchInst *br1) {
         auto *v2 = icmp2->get_operand(1);
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
         const char *outerCond = icmpCond(icmp1->icmp_op_);
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
             int val = ci->value_;
             emitMachineInstrLine("\tccmp " + r1 + ", #" + std::to_string(val) + ", #0, " + outerCond,
                                  MOpcode::FlagUse, {}, {r1}, 1, true, true, true);
@@ -677,7 +677,7 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     auto v2 = icmp->get_operand(1);
 
     auto trueBB  = static_cast<BasicBlock*>(br->get_operand(1));
-    auto falseBB = static_cast<BasicBlock*>(br->get_operand(2));
+    auto *falseBB = static_cast<BasicBlock*>(br->get_operand(2));
     BasicBlock *parentBB = br->parent_;
 
     const char *cond = icmpCond(icmp->icmp_op_);
@@ -691,7 +691,7 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     }
 
     // cmp r, #0; b.eq/b.ne → cbz/cbnz (single instruction)
-    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
         if (ci->value_ == 0 && (strcmp(cond, "eq") == 0 || strcmp(cond, "ne") == 0)) {
             bool useCbz = (strcmp(cond, "eq") == 0);
             std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
@@ -745,7 +745,7 @@ void Arm64FuncContext::emitFusedCmpBranch(ICmpInst *icmp, BranchInst *br) {
     std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
 
     // Emit cmp with immediate if possible (ARM64 cmp imm is 12-bit: 0-4095)
-    if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
         int val = ci->value_;
         if (val >= 0 && val <= 4095) {
             emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),

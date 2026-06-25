@@ -284,7 +284,7 @@ void Arm64FuncContext::reorderBlocks() {
             preferred[bb] = static_cast<BasicBlock*>(term->get_operand(0));
         } else if (term->num_ops_ == 3) {
             auto trueBB  = static_cast<BasicBlock*>(term->get_operand(1));
-            auto falseBB = static_cast<BasicBlock*>(term->get_operand(2));
+            auto *falseBB = static_cast<BasicBlock*>(term->get_operand(2));
 
             // Check which edges carry phi copies. The codegen (emitFusedCmpBranch /
             // emitInstruction::Br) emits the unconditional 'b' to:
@@ -322,7 +322,7 @@ void Arm64FuncContext::reorderBlocks() {
             if (term && term->is_br()) {
                 for (unsigned i = 0; i < term->num_ops_; ++i) {
                     // operand 0 of cond br is i1 (not a BB), skipped by dynamic_cast
-                    if (auto succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
+                    if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(i))) {
                         if (!placed.count(succ)) { next = succ; break; }
                     }
                 }
@@ -455,10 +455,24 @@ void Arm64FuncContext::emitPrologue() {
     }
     needsFrame_ = (localSize > 0) || hasCalls;
 
-    if (needsFrame_) {
+    // Leaf functions with no stack-passed arguments don't need the x29/x30 frame
+    // pointer chain — only callee-saved register slots on the stack.
+    int intArgCount = 0, floatArgCount = 0;
+    for (auto arg : func_->arguments_) {
+        if (isFloat(arg->type_)) floatArgCount++;
+        else intArgCount++;
+    }
+    bool hasStackArgs = (intArgCount > 8) || (floatArgCount > 8);
+    // Skip x29/x30 only for true leaf functions with no spill slots and no stack args:
+    // spill slots are accessed via [x29, #-N] so any spill requires the frame pointer.
+    needsFramePtr_ = hasCalls || hasStackArgs || (prologueFrameSize_ > 0);
+
+    if (needsFramePtr_) {
         // stp supports only -512..504 range; use minimal stp + sub for large frames
         emitFramePushMachine();
         emitMoveMachine("x29", "sp");
+    }
+    if (localSize > 0) {
         if (localSize <= 4095) {
             emitStackAdjustMachine("sub", localSize);
         } else {
@@ -702,7 +716,9 @@ void Arm64FuncContext::emitEpilogue() {
             emitStackAdjustMachine("add", "x17");
         }
     }
-    emitFramePopMachine();
+    if (needsFramePtr_) {
+        emitFramePopMachine();
+    }
     emitRetMachine();
 }
 
@@ -730,7 +746,7 @@ int Arm64FuncContext::getSlot(Value *v) {
     if (it != slots_.end()) return it->second;
 
     int size;
-    if (auto alloca = dynamic_cast<AllocaInst*>(v)) {
+    if (auto *alloca = dynamic_cast<AllocaInst*>(v)) {
         size = typeSize(alloca->alloca_ty_);
     } else if (isVector(v->type_)) {
         size = 16; // 128-bit vector value

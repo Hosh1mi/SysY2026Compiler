@@ -68,6 +68,34 @@ Value* visitAnd(BinaryInst *inst) {
         }
     }
 
+    // 7. Parity extraction: and(mul(a, b), 1)  →  and(and(a, 1), and(b, 1))
+    //    Proof: (a*b) mod 2 = (a mod 2)*(b mod 2) = (a&1)&(b&1) for all i32.
+    //    The mask MUST be exactly 1; the identity does NOT hold for 2^k (k>0):
+    //    e.g. (3*3)&4 = 4 but (3&4)&(3&4) = 0.
+    //    Require the mul to have a single user so DCE can delete it afterward;
+    //    if the product is used elsewhere, adding 3 ands for no net gain is wrong.
+    if (cy && cy->value_ == 1) {
+        auto *mul_inst = dynamic_cast<BinaryInst*>(x);
+        if (mul_inst && mul_inst->op_id_ == Instruction::Mul &&
+            mul_inst->use_list_.size() == 1) {
+            Value *a = mul_inst->get_operand(0);
+            Value *b = mul_inst->get_operand(1);
+            auto *a1 = new BinaryInst(ty, Instruction::And, a,
+                                      make_const_int(ty, 1), bb, true);
+            stampIntegerFacts(a1);
+            bb->add_instruction_before_inst(a1, inst);
+            auto *b1 = new BinaryInst(ty, Instruction::And, b,
+                                      make_const_int(ty, 1), bb, true);
+            stampIntegerFacts(b1);
+            bb->add_instruction_before_inst(b1, inst);
+            auto *result = new BinaryInst(ty, Instruction::And, a1, b1,
+                                          bb, true);
+            stampIntegerFacts(result);
+            bb->add_instruction_before_inst(result, inst);
+            return result;
+        }
+    }
+
     return nullptr;
 }
 

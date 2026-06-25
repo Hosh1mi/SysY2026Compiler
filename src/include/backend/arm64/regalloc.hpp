@@ -30,6 +30,15 @@ public:
 private:
     bool canAssignRegister(Value *v) const;
 
+    /// 计算逆后序(RPO)块序,并填充每个块的前驱表。
+    std::vector<BasicBlock*> computeBlockOrder(
+        std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const;
+
+    /// 基于支配关系计算每个块的循环嵌套深度。
+    std::map<BasicBlock*, int> computeLoopDepth(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<BasicBlock*, std::vector<BasicBlock*>> &preds) const;
+
     struct Interval {
         Value *value;
         int start;
@@ -39,6 +48,54 @@ private:
         bool isNEON;
         bool crossesCall;
     };
+
+    /// 指令编号：为每个可分配值填充定义点/最后使用点，并记录每个块的编号范围。
+    void computeInstructionNumbers(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<Value*, int> &defPos,
+        std::map<Value*, int> &lastUse,
+        std::map<BasicBlock*, int> &blockEnd) const;
+
+    /// 数据流分析：计算每个块的 LiveIn/LiveOut，并标记跨越 call 的值。
+    void computeLiveness(
+        const std::vector<BasicBlock*> &blocksOrder,
+        std::map<BasicBlock*, std::set<Value*>> &liveIn,
+        std::map<BasicBlock*, std::set<Value*>> &liveOut,
+        std::set<Value*> &crossesCallValues) const;
+
+    /// 由 defPos/lastUse/liveOut 构建所有值的活跃区间。
+    std::vector<Interval> buildIntervals(
+        const std::vector<BasicBlock*> &blocksOrder,
+        const std::map<Value*, int> &defPos,
+        const std::map<Value*, int> &lastUse,
+        const std::map<BasicBlock*, int> &blockEnd,
+        const std::map<BasicBlock*, std::set<Value*>> &liveOut,
+        const std::set<Value*> &crossesCallValues) const;
+
+    /// 构建 phi 亲和组：phi 与其所有 incoming 值双向关联。
+    std::map<Value*, std::set<Value*>> buildPhiAffinity(
+        const std::vector<BasicBlock*> &blocksOrder) const;
+
+    /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
+    std::map<Value*, double> computeSpillCost(
+        const std::vector<Interval> &intervals,
+        const std::map<BasicBlock*, int> &loopDepth,
+        const std::map<Value*, std::set<Value*>> &phiAffinity) const;
+
+    /// 循环内多指令大常量提升：将高权重 32 位常量预物化到空闲寄存器。
+    void promoteLoopConstants(
+        const std::vector<BasicBlock*> &blocksOrder,
+        const std::map<BasicBlock*, int> &loopDepth,
+        bool isLeaf);
+
+    /// 每个寄存器类的着色调色板：color 下标 → 物理寄存器号，以及 caller-saved 集合。
+    struct RegPalette {
+        std::vector<int> intColorToReg, floatColorToReg, neonColorToReg;
+        std::set<int> callerSavedInt, callerSavedFloat, callerSavedNEON;
+    };
+
+    /// 按叶/非叶函数规则构建三个寄存器类的调色板，排除已预着色的寄存器。
+    RegPalette buildRegPalette(bool isLeaf) const;
 
     void colorPool(const std::vector<Interval> &pool,
                    const std::vector<int> &colorToReg, bool isFloat,

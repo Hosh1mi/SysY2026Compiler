@@ -332,7 +332,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             auto term = b->get_terminator();
             if (!term || !term->is_br()) continue;
             for (unsigned i = 0; i < term->num_ops_; ++i) {
-                if (auto tgt = dynamic_cast<BasicBlock*>(term->get_operand(i)))
+                if (auto *tgt = dynamic_cast<BasicBlock*>(term->get_operand(i)))
                     branchTargets_.insert(tgt);
             }
         }
@@ -513,10 +513,10 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
 
         // ICmp + Br fusion: csel / ccmp+csel / cmp + b.cond
         if (inst->op_id_ == Instruction::ICmp) {
-            auto icmp = static_cast<ICmpInst*>(inst);
+            auto *icmp = static_cast<ICmpInst*>(inst);
             auto next = std::next(it);
             if (next != instrs.end()) {
-                auto br = dynamic_cast<BranchInst*>(*next);
+                auto *br = dynamic_cast<BranchInst*>(*next);
                 if (br && br->num_ops_ == 3 && br->get_operand(0) == icmp && icmp->use_list_.size() == 1) {
                     if (tryEmitCSel(icmp, br)) { ++it; continue; }
                     // if (tryEmitCCmpCSel(icmp, br)) { ++it; continue; }
@@ -548,7 +548,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                     if (sInst->get_operand(i) == inst) { usesMul = true; break; }
                 if (usesMul && !dynamic_cast<BinaryInst*>(sInst)) break;
 
-                auto addSub = dynamic_cast<BinaryInst*>(sInst);
+                auto *addSub = dynamic_cast<BinaryInst*>(sInst);
                 if (addSub) {
                     Value *op0 = addSub->get_operand(0);
                     Value *op1 = addSub->get_operand(1);
@@ -676,7 +676,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             emitMachineInstr(std::move(st));
             break;
         }
-        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+        if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
                                  MOpcode::Adr, {base});
@@ -719,7 +719,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             if (!hasAssignedReg(inst)) storeVector(inst, vd);
             break;
         }
-        if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+        if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
             std::string base = allocAddrReg();
             emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
                                  MOpcode::Adr, {base});
@@ -905,7 +905,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         else if (inst->op_id_ == Instruction::LShr) opcode = "lsr";
         else                                        opcode = "asr";
 
-        if (auto ci = dynamic_cast<ConstantInt*>(v2)) {
+        if (auto *ci = dynamic_cast<ConstantInt*>(v2)) {
             emitMachineInstrLine(
                 "\t" + std::string(opcode) + " " + rd + ", " + r1 + ", #" + std::to_string(ci->value_),
                 MOpcode::Alu, {rd}, {r1});
@@ -1024,7 +1024,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- ICmp ----
     case Instruction::ICmp: {
-        auto icmp = static_cast<ICmpInst*>(inst);
+        auto *icmp = static_cast<ICmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
@@ -1049,7 +1049,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             auto *cv2 = icmp->get_operand(1);
             std::string r1 = isPtr(cv1->type_) ? loadAddr(cv1) : loadInt(cv1);
             cond = icmpCond(icmp->icmp_op_);
-            if (auto ci = dynamic_cast<ConstantInt*>(cv2)) {
+            if (auto *ci = dynamic_cast<ConstantInt*>(cv2)) {
                 int val = ci->value_;
                 if (val >= 0 && val <= 4095)
                     emitMachineInstrLine("\tcmp " + r1 + ", #" + std::to_string(val),
@@ -1123,7 +1123,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- FCmp ----
     case Instruction::FCmp: {
-        auto fcmp = static_cast<FCmpInst*>(inst);
+        auto *fcmp = static_cast<FCmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
         std::string r1 = loadFloat(v1);
@@ -1139,7 +1139,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- GEP ----
     case Instruction::GetElementPtr: {
-        auto gep = static_cast<GetElementPtrInst*>(inst);
+        auto *gep = static_cast<GetElementPtrInst*>(inst);
         auto ptr = gep->get_operand(0);
 
         std::string addr;
@@ -1168,9 +1168,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         if (useAssignedAddr) {
             addr = assignedAddr;
-            if (auto gv = dynamic_cast<GlobalVariable*>(ptr)) {
+            if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
                 emitGlobalAddr(gv, addr);
-            } else if (auto ci = dynamic_cast<ConstantInt*>(ptr)) {
+            } else if (auto *ci = dynamic_cast<ConstantInt*>(ptr)) {
                 emitIntConst(ci->value_, addr);
             } else if (hasAssignedReg(ptr)) {
                 std::string base = assignedReg(ptr, true);
@@ -1208,27 +1208,27 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 addr = base;
             }
         }
-    
+
         unsigned numIdx = gep->num_ops_ - 1;
-        auto srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
+        auto *srcTy = static_cast<PointerType*>(ptr->type_)->contained_;
         Type *curTy = srcTy;
-    
+
         for (unsigned i = 1; i < gep->num_ops_; i++) {
             auto idx = gep->get_operand(i);
-            
+
             // 1. 当前层级元素的大小（一定是 typeSize(curTy)）
             int elemSize = typeSize(curTy);
-            
+
             // 2. 更新 curTy 到下一层（为下一次迭代准备）
             if (curTy->tid_ == Type::ArrayTyID) {
-                auto at = static_cast<ArrayType*>(curTy);
+                auto *at = static_cast<ArrayType*>(curTy);
                 curTy = at->contained_;
             } else if (curTy->tid_ == Type::PointerTyID) {
-                auto pt = static_cast<PointerType*>(curTy);
+                auto *pt = static_cast<PointerType*>(curTy);
                 curTy = pt->contained_;
             }
             // 否则是基本类型，不再更新（后续索引非法，但一般不会出现）
-            
+
             // 单层下标的常量驱动地址削减集中在 constStrengthReduce.cpp
             emitGepIndexStep(addr, idx, elemSize, inst);
         }
@@ -1304,14 +1304,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
         if (inst->num_ops_ == 1) {
             // Unconditional branch: emit copies for the single edge
-            auto target = static_cast<BasicBlock*>(inst->get_operand(0));
+            auto *target = static_cast<BasicBlock*>(inst->get_operand(0));
             emitPhiCopies(parentBB, target);
             emitBranchMachine("\tb " + bbLabel(func_, target));
         } else {
             // Conditional branch: evaluate condition FIRST, then edge-specific copies
             auto cond = inst->get_operand(0);
-            auto trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
-            auto falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
+            auto *trueBB = static_cast<BasicBlock*>(inst->get_operand(1));
+            auto *falseBB = static_cast<BasicBlock*>(inst->get_operand(2));
 
             // Check if either edge has phi copies
             bool hasTrue = false, hasFalse = false;
@@ -1383,9 +1383,9 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
 
     // ---- Call ----
     case Instruction::Call: {
-        auto call = static_cast<CallInst*>(inst);
+        auto *call = static_cast<CallInst*>(inst);
         unsigned numArgs = call->num_ops_ - 1;
-        auto callee = static_cast<Function*>(call->get_operand(numArgs));
+        auto *callee = static_cast<Function*>(call->get_operand(numArgs));
 
         struct RegArg {
             unsigned index;
@@ -1502,7 +1502,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitStackAdjustMachine("sub", "x17");
             }
         }
-    
+
         // 传递参数 (寄存器 + 栈)
         intArg = 0; floatArg = 0;
         int stackIdx = 0;   // 栈参数写入偏移 (相对于 sp)
@@ -1527,7 +1527,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             } else {
                 if (intArg < 8) {
                     std::string dst = "w" + std::to_string(intArg++);
-                    if (auto ci = dynamic_cast<ConstantInt*>(arg)) {
+                    if (auto *ci = dynamic_cast<ConstantInt*>(arg)) {
                         if (ci->value_ == 0)
                             emitMoveMachine(dst, "wzr");
                         else
@@ -1546,10 +1546,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 }
             }
         }
-    
+
         // 执行调用
         emitCallMachine(callee->name_, call);
-    
+
         // 回收栈参数空间
         if (stackBytes > 0) {
             if (stackBytes <= 4095)
@@ -1559,8 +1559,8 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 emitStackAdjustMachine("add", "x17");
             }
         }
-    
-        // 处理返回值 
+
+        // 处理返回值
         if (!isVoid(inst->type_)) {
             if (isFloat(inst->type_)) {
                 storeFloat(inst, "s0");

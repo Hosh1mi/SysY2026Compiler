@@ -1,7 +1,6 @@
 #pragma once
 #include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
-#include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 #include <set>
@@ -25,10 +24,8 @@ private:
     bool eliminateTrivialHeaderPhis(const Loop &loop);
 
     bool isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
-                     const std::set<Instruction*>& toHoist, const Loop *loop = nullptr,
-                     ScalarEvolution *SE = nullptr);
+                     const std::set<Instruction*>& toHoist);
     bool isSafeToHoist(Instruction *inst, const Loop &loop,
                        const BasicAliasAnalysis &BAA);
-    bool runOnLoop(const Loop &loop, ScalarEvolution *SE,
-                   const BasicAliasAnalysis *BAA);
+    bool runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA);
 };
