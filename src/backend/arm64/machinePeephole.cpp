@@ -1,5 +1,5 @@
 #include "../../include/backend/arm64/machinePeephole.hpp"
-#include "../../include/backend/arm64/liveness.hpp"
+#include "../../include/backend/arm64/machinePeepholeUtils.hpp"
 #include <cctype>
 #include <cstdlib>
 #include <iterator>
@@ -9,204 +9,6 @@
 #include <string>
 #include <vector>
 
-
-struct MemOperand {
-	std::string base;
-	int offset = 0;
-	bool valid = false;
-};
-
-static std::string trim(const std::string &s) {
-	size_t b = 0;
-	while (b < s.size() && (s[b] == ' ' || s[b] == '\t')) ++b;
-	size_t e = s.size();
-	while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n')) --e;
-	return s.substr(b, e - b);
-}
-
-static char regClass(const std::string &r) {
-	if (r.empty()) return 0;
-	if (r == "wzr") return 'w';
-	if (r == "xzr") return 'x';
-	if (r == "sp") return 'x';
-	char c = r[0];
-	if ((c == 'w' || c == 'x' || c == 's' || c == 'd' || c == 'q' || c == 'v') &&
-	    r.size() >= 2 && std::isdigit(r[1]))
-		return c;
-	return 0;
-}
-
-static int regSize(char cls) {
-	if (cls == 'w' || cls == 's') return 4;
-	if (cls == 'x' || cls == 'd') return 8;
-	if (cls == 'q' || cls == 'v') return 16;
-	return 0;
-}
-
-static bool parsePhysicalReg(const std::string &reg, char &cls, std::string &num) {
-	std::string text = trim(reg);
-	if (text.size() >= 2 && text.front() == '{' && text.back() == '}')
-		text = trim(text.substr(1, text.size() - 2));
-	if (text == "wzr" || text == "xzr" || text == "sp")
-		return false;
-	if (text.size() < 2)
-		return false;
-
-	cls = text[0];
-	if (cls != 'w' && cls != 'x' && cls != 's' &&
-	    cls != 'd' && cls != 'q' && cls != 'v')
-		return false;
-
-	size_t pos = 1;
-	while (pos < text.size() && std::isdigit(text[pos]))
-		++pos;
-	if (pos == 1)
-		return false;
-	num = text.substr(1, pos - 1);
-	return true;
-}
-
-static bool samePhysicalReg(const std::string &a, const std::string &b) {
-	if (a == b) return true;
-	char aCls = 0;
-	char bCls = 0;
-	std::string aNum;
-	std::string bNum;
-	if (!parsePhysicalReg(a, aCls, aNum) || !parsePhysicalReg(b, bCls, bNum))
-		return false;
-	bool sameIntFile = (aCls == 'w' || aCls == 'x') && (bCls == 'w' || bCls == 'x');
-	bool sameFloatFile = (aCls == 's' || aCls == 'd' || aCls == 'q' || aCls == 'v') &&
-	                     (bCls == 's' || bCls == 'd' || bCls == 'q' || bCls == 'v');
-	if (!sameIntFile && !sameFloatFile) return false;
-
-	return aNum == bNum;
-}
-
-// Parse [base, #offset], [base], [base, #-offset]
-// Rejects post-index ([base], #imm) and pre-index ([base, #imm]!)
-static MemOperand parseMemOp(const std::string &s) {
-	MemOperand m;
-	std::string t = trim(s);
-	if (t.empty() || t[0] != '[') return m;
-	size_t close = t.find(']');
-	if (close == std::string::npos) return m;
-	// Reject post-index and pre-index
-	if (close + 1 < t.size()) {
-		char after = t[close + 1];
-		if (after == '!' || after == ',') return m;
-	}
-	std::string inner = t.substr(1, close - 1);
-	size_t comma = inner.find(',');
-	if (comma == std::string::npos) {
-		// [base]
-		m.base = trim(inner);
-		m.offset = 0;
-		m.valid = true;
-	} else {
-		m.base = trim(inner.substr(0, comma));
-		std::string offStr = trim(inner.substr(comma + 1));
-		if (!offStr.empty() && offStr[0] == '#') {
-			m.offset = std::atoi(offStr.c_str() + 1);
-			m.valid = true;
-		}
-	}
-	return m;
-}
-
-static std::string makeMachineInsn(const std::string &mnemonic,
-                                   const std::vector<std::string> &operands) {
-	std::string s = "\t" + mnemonic;
-	if (!operands.empty()) {
-		s += "\t";
-		for (size_t i = 0; i < operands.size(); ++i) {
-			if (i > 0) s += ", ";
-			s += operands[i];
-		}
-	}
-	return s;
-}
-
-static void replaceMachineInstr(MachineInstr &inst, const std::string &text) {
-	int originalIndex = inst.originalIndex;
-	MachineInstr parsed = parseMachineInstr(text, originalIndex);
-	parsed.originalIndex = originalIndex;
-	inst = std::move(parsed);
-}
-
-// ── helper: count occurrences of a register in a line's operands ────
-// True for lines the scanning loops skip over (empty and comment);
-// distinguishes them from lines that STOP scanning (label / directive).
-static bool isInertLine(const MachineInstr &inst) {
-	return inst.isLabelLike &&
-	       inst.opcode != MOpcode::Label &&
-	       inst.opcode != MOpcode::Directive;
-}
-
-
-// Check if r is read as a source operand (not just written as destination)
-static bool lineReadsReg(const MachineInstr &l, const std::string &r) {
-	if (l.rawOperands.empty()) return false;
-	for (size_t i = 1; i < l.rawOperands.size(); ++i)
-		if (l.rawOperands[i] == r || samePhysicalReg(l.rawOperands[i], r)) return true;
-	if (l.opcodeText == "str" || l.opcodeText == "stp" || l.opcodeText == "stur" ||
-	    l.opcodeText == "cbnz" || l.opcodeText == "cbz" ||
-	    l.opcodeText == "cmp" || l.opcodeText == "fcmp" || l.opcodeText == "tst")
-		if (l.rawOperands[0] == r || samePhysicalReg(l.rawOperands[0], r)) return true;
-	return false;
-}
-
-static bool lineUsesReg(const MachineInstr &l, const std::string &r) {
-	for (const auto &op : l.rawOperands) {
-		// Check as whole word match
-		if (op == r || samePhysicalReg(op, r)) return true;
-		MemOperand mem = parseMemOp(op);
-		if (mem.valid && samePhysicalReg(mem.base, r)) return true;
-		// Check if r appears inside a memory operand
-		size_t p = op.find(r);
-		if (p != std::string::npos) {
-			if (p > 0 && (std::isalnum(op[p - 1]) || op[p - 1] == '_')) continue;
-			size_t after = p + r.size();
-			if (after < op.size() && (std::isalnum(op[after]) || op[after] == '_')) continue;
-			return true;
-		}
-	}
-	return false;
-}
-
-// Does line write (not just read) a register?
-static bool lineWritesReg(const MachineInstr &l, const std::string &r) {
-	if ((l.opcodeText == "ldr" || l.opcodeText == "str" ||
-	     l.opcodeText == "ld1" || l.opcodeText == "st1") &&
-	    l.rawOperands.size() >= 3) {
-		MemOperand mem = parseMemOp(l.rawOperands[1]);
-		if (mem.valid && samePhysicalReg(mem.base, r))
-			return true;
-	}
-	// Stores, compares, branches do not write a register destination
-	if (l.opcodeText == "str" || l.opcodeText == "stp" ||
-		l.opcodeText == "cmp" || l.opcodeText == "fcmp" ||
-		l.opcodeText == "cbnz" || l.opcodeText == "cbz" ||
-		l.opcodeText == "b" || l.opcodeText == "bl" || l.opcodeText == "blr" ||
-		l.opcodeText == "ret" || l.opcodeText == "st1")
-		return false;
-	// ldp writes two registers: ldp r0, r1, [...]
-	if (l.opcodeText == "ldp") {
-		for (int i = 0; i < 2 && i < (int)l.rawOperands.size(); ++i) {
-			const std::string &op = l.rawOperands[i];
-			if (op == r) return true;
-			if (op.size() >= 2 && r.size() >= 2 &&
-			    ((op[0] == 'w' || op[0] == 'x') && (r[0] == 'w' || r[0] == 'x')) &&
-			    op.substr(1) == r.substr(1)) return true;
-		}
-		return false;
-	}
-	if (!l.rawOperands.empty()) {
-		const std::string &dst = l.rawOperands[0];
-		if (dst == r) return true;
-		if (samePhysicalReg(dst, r)) return true;
-	}
-	return false;
-}
 
 
 // ── RULE implementations ────────────────────────────────────────────
@@ -262,18 +64,13 @@ static bool tryMachineSwapMov(MachineBasicBlock &block, size_t idx) {
 	const std::string &rB = first.rawOperands[1];
 	if (rA == rB) return false;
 	if (rB.empty() || rB[0] == '#') return false;
-	if (!regClass(rA) || !regClass(rB)) return false;
+	if (!peephRegClass(rA) || !peephRegClass(rB)) return false;
 	if (second.rawOperands[0] != rB || second.rawOperands[1] != rA) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
 }
 
-static bool machineRegDeadAfter(const MachineBasicBlock &block,
-                                size_t idx,
-                                const std::string &reg,
-                                const MachineLivenessResult &liveness);
-static bool isControlFlowBarrier(const MachineInstr &inst);
 
 static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
                                  const MachineLivenessResult &liveness) {
@@ -286,7 +83,7 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
 	const std::string &tempReg = first.rawOperands[0];
 	const std::string &srcReg = first.rawOperands[1];
 	if (tempReg == srcReg) return false;
-	if (!regClass(tempReg)) return false;
+	if (!peephRegClass(tempReg)) return false;
 
 	const MachineInstr &second = block.instrs[idx + 1];
 	if (second.isLabelLike) return false;
@@ -294,12 +91,12 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
 	if (second.rawOperands[1] != tempReg) return false;
 
 	const std::string &dstReg = second.rawOperands[0];
-	if (regClass(dstReg) != regClass(tempReg)) return false;
+	if (peephRegClass(dstReg) != peephRegClass(tempReg)) return false;
 
-	if (!machineRegDeadAfter(block, idx + 1, tempReg, liveness)) return false;
+	if (!peephRegDeadAfter(block, idx + 1, tempReg, liveness)) return false;
 
-	replaceMachineInstr(block.instrs[idx + 1],
-	                    makeMachineInsn("mov", {dstReg, srcReg}));
+	peephReplaceInstr(block.instrs[idx + 1],
+	                    peephMakeInsn("mov", {dstReg, srcReg}));
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
 }
@@ -307,10 +104,10 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
 static bool isRetargetablePureDef(const MachineInstr &line) {
 	if (line.isLabelLike || line.rawOperands.empty())
 		return false;
-	if (!regClass(line.rawOperands[0]))
+	if (!peephRegClass(line.rawOperands[0]))
 		return false;
 	if (line.setsFlags || line.isCall ||
-	    isControlFlowBarrier(line))
+	    peephIsControlFlowBarrier(line))
 		return false;
 
 	static const std::set<std::string> mnemonics = {
@@ -339,16 +136,16 @@ static bool tryMachineRetargetCopyDest(
 	const std::string &tempReg = producer.rawOperands[0];
 	const std::string &dstReg = copy.rawOperands[0];
 	const std::string &copySrc = copy.rawOperands[1];
-	if (!samePhysicalReg(copySrc, tempReg)) return false;
-	if (samePhysicalReg(dstReg, tempReg)) {
+	if (!peephSamePhysicalReg(copySrc, tempReg)) return false;
+	if (peephSamePhysicalReg(dstReg, tempReg)) {
 		block.instrs.erase(block.instrs.begin() + idx + 1);
 		return true;
 	}
 
 	if (dstReg == "sp" || dstReg == "wzr" || dstReg == "xzr")
 		return false;
-	char tempCls = regClass(tempReg);
-	char dstCls = regClass(dstReg);
+	char tempCls = peephRegClass(tempReg);
+	char dstCls = peephRegClass(dstReg);
 	if (!tempCls || !dstCls || tempCls != dstCls)
 		return false;
 	if (tempCls != 'w' && tempCls != 'x' && tempCls != 's' && tempCls != 'd')
@@ -368,8 +165,8 @@ static bool tryMachineRetargetCopyDest(
 
 	std::vector<std::string> operands = producer.rawOperands;
 	operands[0] = dstReg;
-	replaceMachineInstr(block.instrs[idx],
-	                    makeMachineInsn(producer.opcodeText, operands));
+	peephReplaceInstr(block.instrs[idx],
+	                    peephMakeInsn(producer.opcodeText, operands));
 	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
 }
@@ -445,8 +242,8 @@ static bool tryMachineRetargetVectorCopyDest(
 
 	std::vector<std::string> operands = producer.rawOperands;
 	operands[0] = "v" + dstNum + prodArr;
-	replaceMachineInstr(block.instrs[idx],
-	                    makeMachineInsn(producer.opcodeText, operands));
+	peephReplaceInstr(block.instrs[idx],
+	                    peephMakeInsn(producer.opcodeText, operands));
 	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
 }
@@ -485,30 +282,30 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
 
 	const std::string &tempReg = copy.rawOperands[0];
 	const std::string &srcReg = copy.rawOperands[1];
-	if (tempReg == srcReg || samePhysicalReg(tempReg, srcReg)) return false;
+	if (tempReg == srcReg || peephSamePhysicalReg(tempReg, srcReg)) return false;
 	if (srcReg == "sp" || srcReg == "wzr" || srcReg == "xzr") return false;
 
-	char tempCls = regClass(tempReg);
-	char srcCls = regClass(srcReg);
+	char tempCls = peephRegClass(tempReg);
+	char srcCls = peephRegClass(srcReg);
 	if (!tempCls || !srcCls || tempCls != srcCls) return false;
 	if (copy.opcodeText == "mov" && (tempCls == 's' || tempCls == 'd')) return false;
 	if (copy.opcodeText == "fmov" && tempCls != 's' && tempCls != 'd') return false;
 
 	for (size_t i = idx + 1; i < block.instrs.size(); ++i) {
 		const MachineInstr &line = block.instrs[i];
-		if (isInertLine(line))
+		if (peephIsInertLine(line))
 			continue;
 		if (line.isLabelLike)
 			return false;
-		if (line.isCall || isControlFlowBarrier(line))
+		if (line.isCall || peephIsControlFlowBarrier(line))
 			return false;
 
-		if (lineWritesReg(line, srcReg))
+		if (peephLineWritesReg(line, srcReg))
 			return false;
-		if (lineUsesReg(line, tempReg) && !lineReadsReg(line, tempReg))
+		if (peephLineUsesReg(line, tempReg) && !peephLineReadsReg(line, tempReg))
 			return false;
-		if (!lineReadsReg(line, tempReg)) {
-			if (lineWritesReg(line, tempReg))
+		if (!peephLineReadsReg(line, tempReg)) {
+			if (peephLineWritesReg(line, tempReg))
 				return false;
 			continue;
 		}
@@ -516,11 +313,11 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
 		std::vector<std::string> rewrittenOps;
 		if (!canPropagateCopy(line, tempReg, srcReg, rewrittenOps))
 			return false;
-		if (!machineRegDeadAfter(block, i, tempReg, liveness))
+		if (!peephRegDeadAfter(block, i, tempReg, liveness))
 			return false;
 
-		replaceMachineInstr(block.instrs[i],
-		                    makeMachineInsn(line.opcodeText, rewrittenOps));
+		peephReplaceInstr(block.instrs[i],
+		                    peephMakeInsn(line.opcodeText, rewrittenOps));
 		block.instrs.erase(block.instrs.begin() + idx);
 		return true;
 	}
@@ -528,25 +325,6 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
 	return false;
 }
 
-static bool machineRegDeadAfter(const MachineBasicBlock &block,
-                                size_t idx,
-                                const std::string &reg,
-                                const MachineLivenessResult &liveness) {
-	if (idx >= block.instrs.size()) return false;
-	auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx]);
-	if (liveIt == liveness.instrLiveOut.end()) return false;
-
-	char cls = 0;
-	std::string number;
-	std::string normalized = reg;
-	if (parsePhysicalReg(reg, cls, number)) {
-		if (cls == 'w' || cls == 'x')
-			normalized = "r" + number;
-		else
-			normalized = "v" + number;
-	}
-	return liveIt->second.count(normalized) == 0;
-}
 
 static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
                                 const MachineLivenessResult &liveness) {
@@ -557,7 +335,7 @@ static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
 	if (zero.rawOperands.empty()) return false;
 
 	std::string zeroedReg = zero.rawOperands[0];
-	char cls = regClass(zeroedReg);
+	char cls = peephRegClass(zeroedReg);
 	if (cls != 'w' && cls != 'x') return false;
 
 	bool isZeroing = false;
@@ -580,45 +358,31 @@ static bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
 		++seen;
 
 		if (line.isCall) return false;
-		if (lineWritesReg(line, zeroedReg)) return false;
+		if (peephLineWritesReg(line, zeroedReg)) return false;
 
 		if (line.opcodeText == "str" && line.rawOperands.size() >= 2 &&
 		    line.rawOperands[0] == zeroedReg) {
 			auto newOps = line.rawOperands;
 			newOps[0] = architecturalZero;
-			replaceMachineInstr(block.instrs[i], makeMachineInsn("str", newOps));
+			peephReplaceInstr(block.instrs[i], peephMakeInsn("str", newOps));
 			foundStore = true;
 			lastTouched = i;
 			continue;
 		}
 
-		if (lineUsesReg(line, zeroedReg)) return false;
+		if (peephLineUsesReg(line, zeroedReg)) return false;
 	}
 
 	if (!foundStore) return false;
-	if (!machineRegDeadAfter(block, lastTouched, zeroedReg, liveness)) return false;
+	if (!peephRegDeadAfter(block, lastTouched, zeroedReg, liveness)) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
 }
 
-static std::vector<size_t> machineInstructionWindow(const MachineBasicBlock &block,
-                                                    size_t idx,
-                                                    int count) {
-	std::vector<size_t> window;
-	for (size_t i = idx; i < block.instrs.size() && (int)window.size() < count; ++i) {
-		const MachineInstr &line = block.instrs[i];
-		if (!line.isLabelLike) {
-			window.push_back(i);
-		} else if (!isInertLine(line)) {
-			break;
-		}
-	}
-	return window;
-}
 
 static bool validAddSubSourceForClass(const std::string &reg, char cls) {
-	char sourceCls = regClass(reg);
+	char sourceCls = peephRegClass(reg);
 	if (sourceCls == cls) return true;
 	return cls == 'x' && reg == "sp";
 }
@@ -632,7 +396,7 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
 
 	std::string tempReg = movz.rawOperands[0];
 	if (!isScratchReg(tempReg)) return false;
-	char cls = regClass(tempReg);
+	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
 
 	const std::string &imm = movz.rawOperands[1];
@@ -640,7 +404,7 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
 	int value = std::atoi(imm.c_str() + 1);
 	if (value < 0 || value > kAddSubImm12Max) return false;
 
-	auto window = machineInstructionWindow(block, idx + 1, 2);
+	auto window = peephInstrWindow(block, idx + 1, 2);
 	if (window.size() < 2) return false;
 
 	size_t aluIdx = window[0];
@@ -653,7 +417,7 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
 
 	std::string middleReg = alu.rawOperands[0];
 	if (!isScratchReg(middleReg)) return false;
-	if (regClass(middleReg) != cls) return false;
+	if (peephRegClass(middleReg) != cls) return false;
 
 	std::string sourceReg;
 	if (alu.rawOperands[2] == tempReg) {
@@ -669,14 +433,14 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
 	if (outMov.opcodeText != "mov" || outMov.rawOperands.size() != 2) return false;
 	if (outMov.rawOperands[1] != middleReg) return false;
 	std::string dstReg = outMov.rawOperands[0];
-	if (regClass(dstReg) != cls) return false;
+	if (peephRegClass(dstReg) != cls) return false;
 
-	if (!machineRegDeadAfter(block, movIdx, middleReg, liveness)) return false;
-	if (!machineRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
+	if (!peephRegDeadAfter(block, movIdx, middleReg, liveness)) return false;
+	if (!peephRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
 
 	std::string newImm = "#" + std::to_string(value);
-	replaceMachineInstr(block.instrs[movIdx],
-	                    makeMachineInsn(alu.opcodeText, {dstReg, sourceReg, newImm}));
+	peephReplaceInstr(block.instrs[movIdx],
+	                    peephMakeInsn(alu.opcodeText, {dstReg, sourceReg, newImm}));
 
 	block.instrs.erase(block.instrs.begin() + aluIdx);
 	block.instrs.erase(block.instrs.begin() + idx);
@@ -695,24 +459,24 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 
 	std::string tempReg = alu.rawOperands[0];
 	if (!isScratchReg(tempReg)) return false;
-	char cls = regClass(tempReg);
+	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
 	if (!validAddSubSourceForClass(alu.rawOperands[1], cls)) return false;
 
-	auto window = machineInstructionWindow(block, idx + 1, 6);
+	auto window = peephInstrWindow(block, idx + 1, 6);
 	for (size_t movIdx : window) {
 		const MachineInstr &line = block.instrs[movIdx];
 		if (line.isLabelLike) continue;
 		if (line.isCall) return false;
-		if (lineWritesReg(line, tempReg)) return false;
+		if (peephLineWritesReg(line, tempReg)) return false;
 
 		bool isMov = line.opcodeText == "mov" && line.rawOperands.size() == 2;
-		if (lineUsesReg(line, tempReg) && !isMov) return false;
+		if (peephLineUsesReg(line, tempReg) && !isMov) return false;
 		if (!isMov || line.rawOperands[1] != tempReg)
 			continue;
 
 		std::string dstReg = line.rawOperands[0];
-		if (regClass(dstReg) != cls) return false;
+		if (peephRegClass(dstReg) != cls) return false;
 
 		if (dstReg == tempReg) {
 			block.instrs.erase(block.instrs.begin() + movIdx);
@@ -722,15 +486,15 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 		for (size_t j = idx + 1; j < movIdx; ++j) {
 			const MachineInstr &between = block.instrs[j];
 			if (between.isLabelLike) continue;
-			if (lineUsesReg(between, dstReg) || lineWritesReg(between, dstReg))
+			if (peephLineUsesReg(between, dstReg) || peephLineWritesReg(between, dstReg))
 				return false;
 		}
 
-		if (!machineRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
+		if (!peephRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
 
 		std::vector<std::string> newOperands = alu.rawOperands;
 		newOperands[0] = dstReg;
-		replaceMachineInstr(block.instrs[idx], makeMachineInsn(alu.opcodeText, newOperands));
+		peephReplaceInstr(block.instrs[idx], peephMakeInsn(alu.opcodeText, newOperands));
 		block.instrs.erase(block.instrs.begin() + movIdx);
 		return true;
 	}
@@ -760,20 +524,20 @@ static bool tryMachineFoldMovIntoAddSub(MachineBasicBlock &block, size_t idx) {
 
 	const std::string dstReg = copy.rawOperands[0];
 	const std::string srcReg = copy.rawOperands[1];
-	if (dstReg == srcReg || samePhysicalReg(dstReg, srcReg)) return false;
-	char cls = regClass(dstReg);
+	if (dstReg == srcReg || peephSamePhysicalReg(dstReg, srcReg)) return false;
+	char cls = peephRegClass(dstReg);
 	if (cls != 'w' && cls != 'x') return false;
-	if (regClass(srcReg) != cls) return false;
+	if (peephRegClass(srcReg) != cls) return false;
 	if (srcReg == "sp" || srcReg == "wzr" || srcReg == "xzr") return false;
 
-	auto window = machineInstructionWindow(block, idx + 1, 6);
+	auto window = peephInstrWindow(block, idx + 1, 6);
 	for (size_t aluIdx : window) {
 		const MachineInstr &line = block.instrs[aluIdx];
 		if (line.isLabelLike) continue;
-		if (line.isCall || isControlFlowBarrier(line))
+		if (line.isCall || peephIsControlFlowBarrier(line))
 			return false;
 		// The source value must survive unchanged until it is read directly.
-		if (lineWritesReg(line, srcReg)) return false;
+		if (peephLineWritesReg(line, srcReg)) return false;
 
 		bool isSelfAddSub =
 		    (line.opcodeText == "add" || line.opcodeText == "sub") &&
@@ -783,15 +547,15 @@ static bool tryMachineFoldMovIntoAddSub(MachineBasicBlock &block, size_t idx) {
 		if (isSelfAddSub) {
 			std::vector<std::string> newOperands = line.rawOperands;
 			newOperands[1] = srcReg;
-			replaceMachineInstr(block.instrs[aluIdx],
-			                    makeMachineInsn(line.opcodeText, newOperands));
+			peephReplaceInstr(block.instrs[aluIdx],
+			                    peephMakeInsn(line.opcodeText, newOperands));
 			block.instrs.erase(block.instrs.begin() + idx);
 			return true;
 		}
 		// Any other read of the copied value, or a redefinition of Xd before
 		// the add/sub, means the move is still live (or already dead via a
 		// different path); leave it untouched.
-		if (lineUsesReg(line, dstReg) || lineWritesReg(line, dstReg))
+		if (peephLineUsesReg(line, dstReg) || peephLineWritesReg(line, dstReg))
 			return false;
 	}
 	return false;
@@ -822,9 +586,9 @@ static bool tryMachineDelayAddSubToCopy(
 	if (alu.rawOperands.size() != 3) return false;
 
 	const std::string tempReg = alu.rawOperands[0];
-	char cls = regClass(tempReg);
+	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
-	if (regClass(alu.rawOperands[1]) != cls && alu.rawOperands[1] != "sp")
+	if (peephRegClass(alu.rawOperands[1]) != cls && alu.rawOperands[1] != "sp")
 		return false;
 	if (alu.rawOperands[2].empty() || alu.rawOperands[2][0] != '#')
 		return false;
@@ -835,7 +599,7 @@ static bool tryMachineDelayAddSubToCopy(
 	int seen = 0;
 	for (size_t i = idx + 1; i < block.instrs.size() && seen < 10; ++i) {
 		const MachineInstr &line = block.instrs[i];
-		if (isInertLine(line))
+		if (peephIsInertLine(line))
 			continue;
 		if (line.isLabelLike)
 			return false;
@@ -846,7 +610,7 @@ static bool tryMachineDelayAddSubToCopy(
 		if (isCopy) {
 			if (!sawConditionalBranch) return false;
 			const std::string &dstReg = line.rawOperands[0];
-			if (regClass(dstReg) != cls || dstReg == tempReg) return false;
+			if (peephRegClass(dstReg) != cls || dstReg == tempReg) return false;
 
 			auto liveIt = liveness.instrLiveOut.find(&block.instrs[i]);
 			if (liveIt == liveness.instrLiveOut.end()) return false;
@@ -861,26 +625,26 @@ static bool tryMachineDelayAddSubToCopy(
 
 			std::vector<std::string> operands = alu.rawOperands;
 			operands[0] = dstReg;
-			replaceMachineInstr(block.instrs[i],
-			                    makeMachineInsn(alu.opcodeText, operands));
+			peephReplaceInstr(block.instrs[i],
+			                    peephMakeInsn(alu.opcodeText, operands));
 			block.instrs.erase(block.instrs.begin() + idx);
 			return true;
 		}
 
-		if (lineReadsReg(line, tempReg) || lineWritesReg(line, tempReg))
+		if (peephLineReadsReg(line, tempReg) || peephLineWritesReg(line, tempReg))
 			return false;
 		for (const auto &source : sourceRegs) {
 			std::string physical = source;
 			if (!physical.empty() && physical[0] == 'r')
 				physical = std::string(1, cls) + physical.substr(1);
-			if (lineWritesReg(line, physical))
+			if (peephLineWritesReg(line, physical))
 				return false;
 		}
 
 		if (line.isCall || line.opcodeText == "b" ||
 		    line.opcodeText == "ret")
 			return false;
-		if (isControlFlowBarrier(line)) {
+		if (peephIsControlFlowBarrier(line)) {
 			if (sawConditionalBranch)
 				return false;
 			if (line.opcodeText.size() < 3 ||
@@ -899,8 +663,8 @@ static bool deadAfterConsumer(const MachineBasicBlock &block,
                               const std::string &removedReg,
                               const std::string &consumerDst,
                               const MachineLivenessResult &liveness) {
-	if (samePhysicalReg(removedReg, consumerDst)) return true;
-	return machineRegDeadAfter(block, consumerIdx, removedReg, liveness);
+	if (peephSamePhysicalReg(removedReg, consumerDst)) return true;
+	return peephRegDeadAfter(block, consumerIdx, removedReg, liveness);
 }
 
 static bool tryMachineShiftedAddSubFusion(
@@ -915,8 +679,8 @@ static bool tryMachineShiftedAddSubFusion(
 
 	const std::string &shiftDst = shift.rawOperands[0];
 	const std::string &shiftSrc = shift.rawOperands[1];
-	char cls = regClass(shiftDst);
-	if ((cls != 'w' && cls != 'x') || regClass(shiftSrc) != cls)
+	char cls = peephRegClass(shiftDst);
+	if ((cls != 'w' && cls != 'x') || peephRegClass(shiftSrc) != cls)
 		return false;
 
 	const std::string &amountText = shift.rawOperands[2];
@@ -936,24 +700,24 @@ static bool tryMachineShiftedAddSubFusion(
 	const std::string &dst = consumer.rawOperands[0];
 	const std::string &lhs = consumer.rawOperands[1];
 	const std::string &rhs = consumer.rawOperands[2];
-	if (regClass(dst) != cls) return false;
+	if (peephRegClass(dst) != cls) return false;
 
 	std::string base;
 	if (consumer.opcodeText == "add") {
-		if (samePhysicalReg(lhs, shiftDst))
+		if (peephSamePhysicalReg(lhs, shiftDst))
 			base = rhs;
-		else if (samePhysicalReg(rhs, shiftDst))
+		else if (peephSamePhysicalReg(rhs, shiftDst))
 			base = lhs;
 		else
 			return false;
 	} else {
-		if (!samePhysicalReg(rhs, shiftDst)) return false;
+		if (!peephSamePhysicalReg(rhs, shiftDst)) return false;
 		base = lhs;
 	}
 
-	if (regClass(base) != cls || samePhysicalReg(base, shiftDst))
+	if (peephRegClass(base) != cls || peephSamePhysicalReg(base, shiftDst))
 		return false;
-	if (!samePhysicalReg(shiftDst, dst)) {
+	if (!peephSamePhysicalReg(shiftDst, dst)) {
 		auto liveIt = liveness.instrLiveOut.find(&block.instrs[idx + 1]);
 		if (liveIt == liveness.instrLiveOut.end() || block.instrs[idx].defs.empty())
 			return false;
@@ -961,8 +725,8 @@ static bool tryMachineShiftedAddSubFusion(
 			if (liveIt->second.count(def)) return false;
 	}
 
-	replaceMachineInstr(block.instrs[idx + 1],
-	                    makeMachineInsn(consumer.opcodeText,
+	peephReplaceInstr(block.instrs[idx + 1],
+	                    peephMakeInsn(consumer.opcodeText,
 	                                    {dst, base, shiftSrc,
 	                                     "lsl #" + std::to_string(amount)}));
 	block.instrs.erase(block.instrs.begin() + idx);
@@ -980,9 +744,9 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	const std::string &mulDst = mul.rawOperands[0];
 	const std::string &mulOp1 = mul.rawOperands[1];
 	const std::string &mulOp2 = mul.rawOperands[2];
-	char cls = regClass(mulDst);
+	char cls = peephRegClass(mulDst);
 	if (cls != 'w' && cls != 'x') return false;
-	if (regClass(mulOp1) != cls || regClass(mulOp2) != cls) return false;
+	if (peephRegClass(mulOp1) != cls || peephRegClass(mulOp2) != cls) return false;
 
 	size_t consumerIdx = idx + 1;
 	std::string effectiveSrc = mulDst;
@@ -991,10 +755,10 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	const MachineInstr *consumerPtr = &block.instrs[consumerIdx];
 	if (consumerPtr->isLabelLike) return false;
 	if (consumerPtr->opcodeText == "mov" && consumerPtr->rawOperands.size() == 2 &&
-	    consumerPtr->rawOperands[1] == mulDst && regClass(consumerPtr->rawOperands[0]) == cls) {
+	    consumerPtr->rawOperands[1] == mulDst && peephRegClass(consumerPtr->rawOperands[0]) == cls) {
 		forwardedReg = consumerPtr->rawOperands[0];
-		if (samePhysicalReg(forwardedReg, mulOp1) ||
-		    samePhysicalReg(forwardedReg, mulOp2))
+		if (peephSamePhysicalReg(forwardedReg, mulOp1) ||
+		    peephSamePhysicalReg(forwardedReg, mulOp2))
 			return false;
 		if (idx + 2 >= block.instrs.size()) return false;
 		consumerIdx = idx + 2;
@@ -1010,21 +774,21 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	const std::string &dst = consumer.rawOperands[0];
 	const std::string &lhs = consumer.rawOperands[1];
 	const std::string &rhs = consumer.rawOperands[2];
-	if (regClass(dst) != cls) return false;
+	if (peephRegClass(dst) != cls) return false;
 
 	std::string replacementMnemonic;
 	std::vector<std::string> replacementOperands;
 
 	if (consumer.opcodeText == "add") {
 		std::string acc;
-		if (lhs == effectiveSrc && regClass(rhs) == cls) {
+		if (lhs == effectiveSrc && peephRegClass(rhs) == cls) {
 			acc = rhs;
-		} else if (rhs == effectiveSrc && regClass(lhs) == cls) {
+		} else if (rhs == effectiveSrc && peephRegClass(lhs) == cls) {
 			acc = lhs;
 		} else {
 			return false;
 		}
-		if (samePhysicalReg(acc, effectiveSrc)) return false;
+		if (peephSamePhysicalReg(acc, effectiveSrc)) return false;
 		replacementMnemonic = "madd";
 		replacementOperands = {dst, mulOp1, mulOp2, acc};
 	} else {
@@ -1032,8 +796,8 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 		if (lhs == "wzr" || lhs == "xzr") {
 			replacementMnemonic = "mneg";
 			replacementOperands = {dst, mulOp1, mulOp2};
-		} else if (regClass(lhs) == cls) {
-			if (samePhysicalReg(lhs, effectiveSrc)) return false;
+		} else if (peephRegClass(lhs) == cls) {
+			if (peephSamePhysicalReg(lhs, effectiveSrc)) return false;
 			replacementMnemonic = "msub";
 			replacementOperands = {dst, mulOp1, mulOp2, lhs};
 		} else {
@@ -1046,8 +810,8 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	    !deadAfterConsumer(block, consumerIdx, forwardedReg, dst, liveness))
 		return false;
 
-	replaceMachineInstr(block.instrs[consumerIdx],
-	                    makeMachineInsn(replacementMnemonic, replacementOperands));
+	peephReplaceInstr(block.instrs[consumerIdx],
+	                    peephMakeInsn(replacementMnemonic, replacementOperands));
 	if (!forwardedReg.empty()) {
 		block.instrs.erase(block.instrs.begin() + idx + 1);
 		block.instrs.erase(block.instrs.begin() + idx);
@@ -1065,9 +829,9 @@ static bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 	    store.rawOperands.size() != 2)
 		return false;
 
-	MemOperand storeMem = parseMemOp(store.rawOperands[1]);
+	MemOperand storeMem = peephParseMemOp(store.rawOperands[1]);
 	const std::string &src = store.rawOperands[0];
-	char cls = regClass(src);
+	char cls = peephRegClass(src);
 	const MachineInstr &storeMI = block.instrs[idx];
 	if (!storeMem.valid || storeMem.base != "x29" ||
 	    !storeMI.memOffsetKnown || storeMI.memBase != "r29" ||
@@ -1098,22 +862,22 @@ static bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 		                     mi.memWidth == storeMI.memWidth;
 		if (exactSlotLoad) {
 			const std::string &dst = line.rawOperands[0];
-			if (regClass(dst) != cls) return false;
-			if (samePhysicalReg(src, dst)) {
+			if (peephRegClass(dst) != cls) return false;
+			if (peephSamePhysicalReg(src, dst)) {
 				block.instrs.erase(block.instrs.begin() + loadIdx);
 				return true;
 			}
 
 			std::string movMnemonic =
 			    (cls == 's' || cls == 'd') ? "fmov" : "mov";
-			replaceMachineInstr(mi, makeMachineInsn(movMnemonic, {dst, src}));
+			peephReplaceInstr(mi, peephMakeInsn(movMnemonic, {dst, src}));
 			return true;
 		}
 
 		// A write to the saved value makes the old register value unavailable.
 		// Check this after a matching load so `str w9; ...; ldr w9` can simply
 		// discard the reload.
-		if (lineWritesReg(line, src)) return false;
+		if (peephLineWritesReg(line, src)) return false;
 
 		// Spill slots are private to this frame, but an unclassified store may
 		// itself use a frame-derived scratch address.  Only step over stores whose
@@ -1124,13 +888,6 @@ static bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 	return false;
 }
 
-static bool isControlFlowBarrier(const MachineInstr &inst) {
-	const std::string &mnemonic = inst.opcodeText;
-	return mnemonic == "b" || mnemonic == "ret" ||
-	       mnemonic == "cbnz" || mnemonic == "cbz" ||
-	       mnemonic == "tbnz" || mnemonic == "tbz" ||
-	       (mnemonic.size() >= 2 && mnemonic[0] == 'b' && mnemonic[1] == '.');
-}
 
 // ── RULE: (and x, 1) == 0 → tbz / (and x, 1) != 0 → tbnz ───────
 //
@@ -1155,9 +912,9 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 
 	const std::string &tempReg = andLine.rawOperands[0];
 	const std::string &srcReg  = andLine.rawOperands[1];
-	char cls = regClass(tempReg);
+	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
-	if (regClass(srcReg) != cls) return false;
+	if (peephRegClass(srcReg) != cls) return false;
 
 	// Scan forward for a consumer of tempReg.
 	// We stop at barriers (calls, CF changes, writes to tempReg).
@@ -1171,7 +928,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		if (line.isCall) return false;
 
 		// tempReg must not be redefined before consumption
-		if (lineWritesReg(line, tempReg)) return false;
+		if (peephLineWritesReg(line, tempReg)) return false;
 
 		// ── Direct cbz / cbnz ──────────────────────────────────
 		bool isCbz  = (line.opcodeText == "cbz"  && line.rawOperands.size() >= 2 &&
@@ -1180,7 +937,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		               line.rawOperands[0] == tempReg);
 
 		// Bail on other control-flow barriers (unrelated cbz/cbnz, ret, b, etc.)
-		if (!isCbz && !isCbnz && isControlFlowBarrier(line))
+		if (!isCbz && !isCbnz && peephIsControlFlowBarrier(line))
 			return false;
 
 		if (isCbz || isCbnz) {
@@ -1190,14 +947,14 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 			for (size_t j = idx + 1; j < i; ++j) {
 				const MachineInstr &between = block.instrs[j];
 				if (between.isLabelLike) continue;
-				if (lineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
+				if (peephLineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
 			}
 			if (usedElsewhere) return false;
 
 			const std::string &label = line.rawOperands[1];
 			std::string newMnemonic = isCbz ? "tbz" : "tbnz";
-			replaceMachineInstr(block.instrs[i],
-			                    makeMachineInsn(newMnemonic,
+			peephReplaceInstr(block.instrs[i],
+			                    peephMakeInsn(newMnemonic,
 			                                    {srcReg, "#0", label}));
 			block.instrs.erase(block.instrs.begin() + idx);
 			return true;
@@ -1212,7 +969,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 
 		if (!isTst && !isCmpZero) {
 			// tempReg is used by some other instruction — bail out
-			if (lineUsesReg(line, tempReg)) return false;
+			if (peephLineUsesReg(line, tempReg)) return false;
 			continue;
 		}
 
@@ -1221,7 +978,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		for (size_t j = idx + 1; j < i; ++j) {
 			const MachineInstr &between = block.instrs[j];
 			if (between.isLabelLike) continue;
-			if (lineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
+			if (peephLineReadsReg(between, tempReg)) { usedElsewhere = true; break; }
 		}
 		if (usedElsewhere) return false;
 
@@ -1229,7 +986,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		size_t branchIdx = i + 1;
 		while (branchIdx < block.instrs.size()) {
 			const MachineInstr &brLine = block.instrs[branchIdx];
-			if (isInertLine(brLine)) {
+			if (peephIsInertLine(brLine)) {
 				++branchIdx;
 				continue;
 			}
@@ -1256,16 +1013,16 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 			}
 
 			if (brLine.opcodeText == "b.eq" && brLine.rawOperands.size() >= 1) {
-				replaceMachineInstr(block.instrs[branchIdx],
-				                    makeMachineInsn("tbz",
+				peephReplaceInstr(block.instrs[branchIdx],
+				                    peephMakeInsn("tbz",
 				                                    {srcReg, "#0", brLine.rawOperands[0]}));
 				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
 				block.instrs.erase(block.instrs.begin() + idx); // remove and
 				return true;
 			}
 			if (brLine.opcodeText == "b.ne" && brLine.rawOperands.size() >= 1) {
-				replaceMachineInstr(block.instrs[branchIdx],
-				                    makeMachineInsn("tbnz",
+				peephReplaceInstr(block.instrs[branchIdx],
+				                    peephMakeInsn("tbnz",
 				                                    {srcReg, "#0", brLine.rawOperands[0]}));
 				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
 				block.instrs.erase(block.instrs.begin() + idx); // remove and
@@ -1286,13 +1043,13 @@ static bool tryMachineRedundantAdrp(MachineBasicBlock &block, size_t idx) {
 	const std::string &reg = first.rawOperands[0];
 	const std::string &symbol = first.rawOperands[1];
 
-	auto window = machineInstructionWindow(block, idx + 1, 20);
+	auto window = peephInstrWindow(block, idx + 1, 20);
 	for (size_t wi : window) {
 		const MachineInstr &line = block.instrs[wi];
 		if (line.isLabelLike) continue;
-		if (line.isCall || isControlFlowBarrier(line))
+		if (line.isCall || peephIsControlFlowBarrier(line))
 			return false;
-		if (lineWritesReg(line, reg)) return false;
+		if (peephLineWritesReg(line, reg)) return false;
 
 		if (line.opcodeText == "adrp" && line.rawOperands.size() >= 2 &&
 		    line.rawOperands[0] == reg && line.rawOperands[1] == symbol) {
@@ -1312,11 +1069,11 @@ static bool tryMachineRedundantSubFrame(MachineBasicBlock &block, size_t idx) {
 	const std::string &imm = first.rawOperands[2];
 	if (imm.empty() || imm[0] != '#') return false;
 
-	auto window = machineInstructionWindow(block, idx + 1, 3);
+	auto window = peephInstrWindow(block, idx + 1, 3);
 	for (size_t wi : window) {
 		const MachineInstr &line = block.instrs[wi];
 		if (line.isLabelLike) continue;
-		if (line.isCall || isControlFlowBarrier(line))
+		if (line.isCall || peephIsControlFlowBarrier(line))
 			return false;
 
 		if (line.opcodeText == "sub" && line.rawOperands.size() == 3 &&
@@ -1326,7 +1083,7 @@ static bool tryMachineRedundantSubFrame(MachineBasicBlock &block, size_t idx) {
 			return true;
 		}
 
-		if (lineWritesReg(line, "x17")) return false;
+		if (peephLineWritesReg(line, "x17")) return false;
 	}
 
 	return false;
@@ -1349,16 +1106,16 @@ static bool tryMachineDeadStore(MachineBasicBlock &block, size_t idx) {
 	if (first.opcodeText != "str" || second.opcodeText != "str") return false;
 	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
 
-	MemOperand firstMem = parseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = parseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 	if (firstMem.offset != secondMem.offset) return false;
 
-	char firstClass = regClass(first.rawOperands[0]);
+	char firstClass = peephRegClass(first.rawOperands[0]);
 	if (firstClass != 'w' && firstClass != 'x' && firstClass != 's' && firstClass != 'd')
 		return false;
-	if (regClass(second.rawOperands[0]) != firstClass) return false;
+	if (peephRegClass(second.rawOperands[0]) != firstClass) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
@@ -1374,16 +1131,16 @@ static bool tryMachineMergeStores(MachineBasicBlock &block, size_t idx) {
 	if (first.opcodeText != "str" || second.opcodeText != "str") return false;
 	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
 
-	MemOperand firstMem = parseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = parseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 
-	char cls = regClass(first.rawOperands[0]);
+	char cls = peephRegClass(first.rawOperands[0]);
 	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
-	if (regClass(second.rawOperands[0]) != cls) return false;
+	if (peephRegClass(second.rawOperands[0]) != cls) return false;
 
-	int stride = regSize(cls);
+	int stride = peephRegSize(cls);
 	int diff = secondMem.offset - firstMem.offset;
 	if (std::abs(diff) != stride) return false;
 
@@ -1396,12 +1153,12 @@ static bool tryMachineMergeStores(MachineBasicBlock &block, size_t idx) {
 	std::string addr = "[x29, #" + std::to_string(lowerOffset) + "]";
 
 	if (firstIsLower) {
-		replaceMachineInstr(block.instrs[idx],
-		                    makeMachineInsn("stp", {lowerReg, higherReg, addr}));
+		peephReplaceInstr(block.instrs[idx],
+		                    peephMakeInsn("stp", {lowerReg, higherReg, addr}));
 		block.instrs.erase(block.instrs.begin() + idx + 1);
 	} else {
-		replaceMachineInstr(block.instrs[idx + 1],
-		                    makeMachineInsn("stp", {lowerReg, higherReg, addr}));
+		peephReplaceInstr(block.instrs[idx + 1],
+		                    peephMakeInsn("stp", {lowerReg, higherReg, addr}));
 		block.instrs.erase(block.instrs.begin() + idx);
 	}
 	return true;
@@ -1417,21 +1174,21 @@ static bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
 	if (first.opcodeText != "ldr" || second.opcodeText != "ldr") return false;
 	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
 
-	MemOperand firstMem = parseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = parseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 
 	const std::string &firstDst = first.rawOperands[0];
 	const std::string &secondDst = second.rawOperands[0];
-	char cls = regClass(firstDst);
+	char cls = peephRegClass(firstDst);
 	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
-	if (regClass(secondDst) != cls) return false;
-	if (samePhysicalReg(firstDst, secondDst)) return false;
-	if (samePhysicalReg(firstDst, firstMem.base) ||
-	    samePhysicalReg(secondDst, secondMem.base)) return false;
+	if (peephRegClass(secondDst) != cls) return false;
+	if (peephSamePhysicalReg(firstDst, secondDst)) return false;
+	if (peephSamePhysicalReg(firstDst, firstMem.base) ||
+	    peephSamePhysicalReg(secondDst, secondMem.base)) return false;
 
-	int stride = regSize(cls);
+	int stride = peephRegSize(cls);
 	int diff = secondMem.offset - firstMem.offset;
 	if (std::abs(diff) != stride) return false;
 
@@ -1444,12 +1201,12 @@ static bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
 	std::string addr = "[x29, #" + std::to_string(lowerOffset) + "]";
 
 	if (firstIsLower) {
-		replaceMachineInstr(block.instrs[idx],
-		                    makeMachineInsn("ldp", {lowerReg, higherReg, addr}));
+		peephReplaceInstr(block.instrs[idx],
+		                    peephMakeInsn("ldp", {lowerReg, higherReg, addr}));
 		block.instrs.erase(block.instrs.begin() + idx + 1);
 	} else {
-		replaceMachineInstr(block.instrs[idx + 1],
-		                    makeMachineInsn("ldp", {lowerReg, higherReg, addr}));
+		peephReplaceInstr(block.instrs[idx + 1],
+		                    peephMakeInsn("ldp", {lowerReg, higherReg, addr}));
 		block.instrs.erase(block.instrs.begin() + idx);
 	}
 	return true;
@@ -1462,7 +1219,7 @@ static bool isSimpleNeonMemOp(const MachineInstr &line) {
 }
 
 static bool parseHashImmediate(const std::string &operand, int &value) {
-	std::string text = trim(operand);
+	std::string text = peephTrim(operand);
 	if (text.size() < 2 || text[0] != '#') return false;
 	char *end = nullptr;
 	long parsed = std::strtol(text.c_str() + 1, &end, 0);
@@ -1480,17 +1237,17 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 	if (mem.opcodeText != "ldr" && mem.opcodeText != "str") return false;
 	if (mem.rawOperands.size() != 2) return false;
 
-	char valueClass = regClass(mem.rawOperands[0]);
+	char valueClass = peephRegClass(mem.rawOperands[0]);
 	if (valueClass != 'w' && valueClass != 'x' && valueClass != 's' &&
 	    valueClass != 'd' && valueClass != 'q')
 		return false;
 
-	MemOperand addr = parseMemOp(mem.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(mem.rawOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
-	if (regClass(addr.base) != 'x' || addr.base == "sp") return false;
+	if (peephRegClass(addr.base) != 'x' || addr.base == "sp") return false;
 	// Base/data overlap with writeback is constrained-unpredictable for some
 	// load/store encodings, so keep those cases in their original form.
-	if (samePhysicalReg(mem.rawOperands[0], addr.base)) return false;
+	if (peephSamePhysicalReg(mem.rawOperands[0], addr.base)) return false;
 
 	const size_t scanEnd = std::min(block.instrs.size(), idx + 6);
 	for (size_t addIdx = idx + 1; addIdx < scanEnd; ++addIdx) {
@@ -1508,8 +1265,8 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 
 			std::vector<std::string> operands = mem.rawOperands;
 			operands.push_back("#" + std::to_string(writeback));
-			replaceMachineInstr(block.instrs[idx],
-			                    makeMachineInsn(mem.opcodeText, operands));
+			peephReplaceInstr(block.instrs[idx],
+			                    peephMakeInsn(mem.opcodeText, operands));
 			block.instrs.erase(block.instrs.begin() + addIdx);
 			return true;
 		}
@@ -1518,7 +1275,7 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 		// Keep it local to non-trapping instructions independent of the base.
 		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
 		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
-		    lineUsesReg(line, addr.base))
+		    peephLineUsesReg(line, addr.base))
 			return false;
 	}
 	return false;
@@ -1531,7 +1288,7 @@ struct PointerExpr {
 };
 
 static bool parseRegisterNumber(const std::string &reg, char expectedClass, int &num) {
-	std::string text = trim(reg);
+	std::string text = peephTrim(reg);
 	if (text.size() < 2 || text[0] != expectedClass)
 		return false;
 	for (size_t i = 1; i < text.size(); ++i)
@@ -1583,14 +1340,14 @@ static bool chooseDeadQReg(const MachineFunction &func,
 			for (const auto &op : line.rawOperands) {
 				char cls = 0;
 				std::string num;
-				if (parsePhysicalReg(op, cls, num) &&
+				if (peephParsePhysicalReg(op, cls, num) &&
 				    (cls == 's' || cls == 'd' || cls == 'q' || cls == 'v'))
 					mentioned.insert("v" + num);
-				MemOperand mem = parseMemOp(op);
+				MemOperand mem = peephParseMemOp(op);
 				if (mem.valid) {
 					char baseCls = 0;
 					std::string baseNum;
-					if (parsePhysicalReg(mem.base, baseCls, baseNum) &&
+					if (peephParsePhysicalReg(mem.base, baseCls, baseNum) &&
 					    (baseCls == 's' || baseCls == 'd' ||
 					     baseCls == 'q' || baseCls == 'v'))
 						mentioned.insert("v" + baseNum);
@@ -1628,7 +1385,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 	    first.rawOperands.size() != 2 || !isPlainGPRReg(first.rawOperands[0], 'w'))
 		return false;
 
-	MemOperand firstMem = parseMemOp(first.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
 	if (!firstMem.valid || firstMem.base == "sp")
 		return false;
 
@@ -1641,12 +1398,12 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		if (line.isLabelLike)
 			break;
 		for (const auto &op : line.rawOperands) {
-			MemOperand mem = parseMemOp(op);
-			if (mem.valid && regClass(mem.base) == 'x' && !env.count(mem.base))
+			MemOperand mem = peephParseMemOp(op);
+			if (mem.valid && peephRegClass(mem.base) == 'x' && !env.count(mem.base))
 				env[mem.base] = {mem.base, 0, true};
 		}
 		if ((line.opcodeText == "mov" || line.opcodeText == "add") &&
-		    !line.rawOperands.empty() && regClass(line.rawOperands[0]) == 'x' &&
+		    !line.rawOperands.empty() && peephRegClass(line.rawOperands[0]) == 'x' &&
 		    !env.count(line.rawOperands[0]))
 			env[line.rawOperands[0]] = {line.rawOperands[0], 0, true};
 	}
@@ -1691,7 +1448,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 	                       std::string &regOut) {
 		std::string fallback;
 		for (const auto &entry : env) {
-			if (regClass(entry.first) != 'x' || !entry.second.valid ||
+			if (peephRegClass(entry.first) != 'x' || !entry.second.valid ||
 			    entry.second.base != base || entry.second.offset != 16)
 				continue;
 			int regNo = 0;
@@ -1734,7 +1491,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			break;
 
 		if (line.opcodeText == "mov" && line.rawOperands.size() == 2 &&
-		    regClass(line.rawOperands[0]) == 'x' && regClass(line.rawOperands[1]) == 'x') {
+		    peephRegClass(line.rawOperands[0]) == 'x' && peephRegClass(line.rawOperands[1]) == 'x') {
 			auto srcIt = env.find(line.rawOperands[1]);
 			if (srcIt == env.end() || !srcIt->second.valid)
 				return false;
@@ -1749,7 +1506,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		}
 
 		if (line.opcodeText == "add" && line.rawOperands.size() == 3 &&
-		    regClass(line.rawOperands[0]) == 'x' && regClass(line.rawOperands[1]) == 'x' &&
+		    peephRegClass(line.rawOperands[0]) == 'x' && peephRegClass(line.rawOperands[1]) == 'x' &&
 		    !line.rawOperands[2].empty() && line.rawOperands[2][0] == '#') {
 			auto srcIt = env.find(line.rawOperands[1]);
 			if (srcIt == env.end() || !srcIt->second.valid)
@@ -1770,7 +1527,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		}
 
 		if (line.opcodeText == "add" && line.rawOperands.size() == 3 &&
-		    regClass(line.rawOperands[0]) == 'w' && line.rawOperands[0] == line.rawOperands[1] &&
+		    peephRegClass(line.rawOperands[0]) == 'w' && line.rawOperands[0] == line.rawOperands[1] &&
 		    line.rawOperands[2] == "#4") {
 			if (sawCounterInc)
 				return false;
@@ -1788,7 +1545,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		if (line.opcodeText == "ldr" &&
 		    (line.rawOperands.size() == 2 || line.rawOperands.size() == 3) &&
 		    isPlainGPRReg(line.rawOperands[0], 'w')) {
-			MemOperand mem = parseMemOp(line.rawOperands[1]);
+			MemOperand mem = peephParseMemOp(line.rawOperands[1]);
 			if (!mem.valid)
 				return false;
 			int postInc = 0;
@@ -1821,7 +1578,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			auto valIt = loadValue.find(line.rawOperands[0]);
 			if (valIt == loadValue.end() || !valIt->second.valid)
 				return false;
-			MemOperand mem = parseMemOp(line.rawOperands[1]);
+			MemOperand mem = peephParseMemOp(line.rawOperands[1]);
 			if (!mem.valid)
 				return false;
 			int postInc = 0;
@@ -1854,7 +1611,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			return false;
 
 		if (!line.rawOperands.empty()) {
-			char cls = regClass(line.rawOperands[0]);
+			char cls = peephRegClass(line.rawOperands[0]);
 			if (cls == 'w' || cls == 'x')
 				invalidateReg(line.rawOperands[0]);
 		}
@@ -1889,7 +1646,7 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		const MachineInstr &line = block.instrs[i];
 		if (line.isLabelLike || line.rawOperands.empty())
 			continue;
-		char cls = regClass(line.rawOperands[0]);
+		char cls = peephRegClass(line.rawOperands[0]);
 		if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd' &&
 		    cls != 'q' && cls != 'v')
 			continue;
@@ -1899,9 +1656,9 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			liveName = machineLiveRegName(cls, regNo);
 		if (liveName.empty())
 			continue;
-		if (samePhysicalReg(line.rawOperands[0], srcUpdateReg) ||
-		    samePhysicalReg(line.rawOperands[0], dstUpdateReg) ||
-		    samePhysicalReg(line.rawOperands[0], counterReg))
+		if (peephSamePhysicalReg(line.rawOperands[0], srcUpdateReg) ||
+		    peephSamePhysicalReg(line.rawOperands[0], dstUpdateReg) ||
+		    peephSamePhysicalReg(line.rawOperands[0], counterReg))
 			continue;
 		if (liveAfter.count(liveName))
 			return false;
@@ -1932,10 +1689,10 @@ static bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 }
 
 static std::string parseFullVectorListReg(const std::string &operand) {
-	std::string text = trim(operand);
+	std::string text = peephTrim(operand);
 	if (text.size() < 7 || text.front() != '{' || text.back() != '}')
 		return "";
-	text = trim(text.substr(1, text.size() - 2));
+	text = peephTrim(text.substr(1, text.size() - 2));
 	if (text.empty() || text[0] != 'v')
 		return "";
 
@@ -1964,7 +1721,7 @@ static bool tryMachineVectorLdStAlias(MachineBasicBlock &block, size_t idx) {
 	if (qReg.empty())
 		return false;
 
-	MemOperand addr = parseMemOp(line.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(line.rawOperands[1]);
 	if (!addr.valid || addr.offset != 0)
 		return false;
 	if (line.rawOperands.size() == 3 && line.rawOperands[2] != "#16")
@@ -1973,8 +1730,8 @@ static bool tryMachineVectorLdStAlias(MachineBasicBlock &block, size_t idx) {
 	std::vector<std::string> operands = {qReg, line.rawOperands[1]};
 	if (line.rawOperands.size() == 3)
 		operands.push_back(line.rawOperands[2]);
-	replaceMachineInstr(block.instrs[idx],
-	                    makeMachineInsn(line.opcodeText == "ld1" ? "ldr" : "str",
+	peephReplaceInstr(block.instrs[idx],
+	                    peephMakeInsn(line.opcodeText == "ld1" ? "ldr" : "str",
 	                                    operands));
 	return true;
 }
@@ -1987,7 +1744,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 		return false;
 	if (!isSimpleNeonMemOp(mem)) return false;
 
-	MemOperand addr = parseMemOp(mem.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(mem.rawOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
 	if (addr.base.empty() || addr.base == "sp") return false;
 
@@ -1999,7 +1756,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			if (copy.isLabelLike)
 				break;
 			if (copy.opcodeText != "mov" || copy.rawOperands.size() != 2 ||
-			    copy.rawOperands[0] != addr.base || regClass(copy.rawOperands[1]) != 'x')
+			    copy.rawOperands[0] != addr.base || peephRegClass(copy.rawOperands[1]) != 'x')
 				continue;
 
 			bool clobbered = false;
@@ -2007,8 +1764,8 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 				const MachineInstr &between = block.instrs[j];
 				if (between.isLabelLike ||
 				    block.instrs[j].isCall || block.instrs[j].isBarrier ||
-				    lineWritesReg(between, addr.base) ||
-				    lineWritesReg(between, copy.rawOperands[1])) {
+				    peephLineWritesReg(between, addr.base) ||
+				    peephLineWritesReg(between, copy.rawOperands[1])) {
 					clobbered = true;
 					break;
 				}
@@ -2036,7 +1793,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 		}
 		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
 		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
-		    lineUsesReg(line, postBase))
+		    peephLineUsesReg(line, postBase))
 			return false;
 	}
 	if (!foundAdd)
@@ -2045,8 +1802,8 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 	std::vector<std::string> operands = mem.rawOperands;
 	operands[1] = "[" + postBase + "]";
 	operands.push_back("#16");
-	replaceMachineInstr(block.instrs[idx],
-	                    makeMachineInsn(mem.opcodeText, operands));
+	peephReplaceInstr(block.instrs[idx],
+	                    peephMakeInsn(mem.opcodeText, operands));
 	block.instrs.erase(block.instrs.begin() + addIdx);
 	return true;
 }
@@ -2054,7 +1811,7 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 static std::string labelName(const MachineInstr &inst) {
 	const MachineInstr &line = inst;
 	if (line.opcode != MOpcode::Label) return "";
-	std::string label = trim(line.text);
+	std::string label = peephTrim(line.text);
 	if (!label.empty() && label.back() == ':')
 		label.pop_back();
 	return label;
@@ -2069,7 +1826,7 @@ static bool nextVisibleIsLabel(const MachineFunction &func,
 		size_t begin = (b == blockIdx) ? instrIdx + 1 : 0;
 		for (size_t i = begin; i < instrs.size(); ++i) {
 			const MachineInstr &line = instrs[i];
-			if (isInertLine(line))
+			if (peephIsInertLine(line))
 				continue;
 			if (line.opcode == MOpcode::Label)
 				return labelName(instrs[i]) == target;
@@ -2107,7 +1864,7 @@ static bool findFirstInstrAfterLabel(const MachineFunction &func,
 					seen = true;
 				continue;
 			}
-			if (isInertLine(line) ||
+			if (peephIsInertLine(line) ||
 			    line.opcode == MOpcode::Label)
 				continue;
 			if (line.isLabelLike)
@@ -2154,7 +1911,7 @@ static bool tryMachineBranchThreading(MachineFunction &func,
 
 	auto newBranchOps = line.rawOperands;
 	newBranchOps[ti] = finalTarget;
-	replaceMachineInstr(inst, makeMachineInsn(line.opcodeText, newBranchOps));
+	peephReplaceInstr(inst, peephMakeInsn(line.opcodeText, newBranchOps));
 	return true;
 }
 
@@ -2194,7 +1951,7 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 			size_t start = (b == blockIdx) ? instrIdx : instrs.size();
 			for (size_t i = start; i-- > 0;) {
 				const MachineInstr &l = instrs[i];
-				if (isInertLine(l))
+				if (peephIsInertLine(l))
 					continue;
 				if (!l.isLabelLike &&
 				    ((l.opcodeText == "b" && l.rawOperands.size() == 1) ||
@@ -2213,7 +1970,7 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 		auto &instrs = func.blocks[bIdx].instrs;
 		for (; iIdx < instrs.size(); ++iIdx) {
 			const MachineInstr &l = instrs[iIdx];
-			if (isInertLine(l))
+			if (peephIsInertLine(l))
 				continue;
 			if (!l.isLabelLike && l.opcodeText == "b" &&
 			    l.rawOperands.size() == 1) {
@@ -2256,7 +2013,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	if (copy.rawOperands.size() != 2) return false;
 	const std::string tempReg = copy.rawOperands[0];
 	const std::string srcReg = copy.rawOperands[1];
-	if (!regClass(tempReg) || regClass(tempReg) != regClass(srcReg)) return false;
+	if (!peephRegClass(tempReg) || peephRegClass(tempReg) != peephRegClass(srcReg)) return false;
 
 	size_t returnMoveBlock = 0, returnMoveInstr = 0;
 	bool crossedLabel = false;
@@ -2266,7 +2023,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 		size_t begin = (b == blockIdx) ? instrIdx + 1 : 0;
 		for (size_t i = begin; i < instrs.size(); ++i) {
 			const MachineInstr &line = instrs[i];
-			if (isInertLine(line))
+			if (peephIsInertLine(line))
 				continue;
 			if (line.opcode == MOpcode::Label) {
 				crossedLabel = true;
@@ -2288,7 +2045,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	const MachineInstr &returnMove =
 		func.blocks[returnMoveBlock].instrs[returnMoveInstr];
 	if (returnMove.opcodeText != copy.opcodeText) return false;
-	if (regClass(returnMove.rawOperands[0]) != regClass(tempReg)) return false;
+	if (peephRegClass(returnMove.rawOperands[0]) != peephRegClass(tempReg)) return false;
 
 	bool foundRet = false;
 	for (size_t b = returnMoveBlock; b < func.blocks.size() && !foundRet; ++b) {
@@ -2296,7 +2053,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 		size_t begin = (b == returnMoveBlock) ? returnMoveInstr + 1 : 0;
 		for (size_t i = begin; i < instrs.size(); ++i) {
 			const MachineInstr &line = instrs[i];
-			if (isInertLine(line))
+			if (peephIsInertLine(line))
 				continue;
 			if (line.isLabelLike || line.opcodeText != "ret")
 				return false;
@@ -2306,8 +2063,8 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	}
 	if (!foundRet) return false;
 
-	replaceMachineInstr(block.instrs[instrIdx],
-	                    makeMachineInsn(copy.opcodeText,
+	peephReplaceInstr(block.instrs[instrIdx],
+	                    peephMakeInsn(copy.opcodeText,
 	                                    {returnMove.rawOperands[0], srcReg}));
 	MachineInstr ret = parseMachineInstr("\tret", block.instrs[instrIdx].originalIndex);
 	block.instrs.insert(block.instrs.begin() + instrIdx + 1, std::move(ret));
