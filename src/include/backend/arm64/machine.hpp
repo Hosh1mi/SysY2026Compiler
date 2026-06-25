@@ -65,6 +65,7 @@ struct MachineInstr {
     MOpcode opcode = MOpcode::Unknown;
     std::vector<MachineOperand> operands;
 
+    std::vector<std::string> rawOperands; // comma-split text operands from inst text
     std::set<std::string> defs;
     std::set<std::string> uses;
 

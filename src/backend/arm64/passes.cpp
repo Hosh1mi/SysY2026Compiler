@@ -1,7 +1,7 @@
 #include "../../include/backend/arm64/passes.hpp"
 
 #include "../../include/backend/arm64/machineDCE.hpp"
-#include "../../include/backend/arm64/machineTransforms.hpp"
+#include "../../include/backend/arm64/machinePeephole.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 
 bool Arm64MachineDCEPass::run(MachineFunction &function) {
