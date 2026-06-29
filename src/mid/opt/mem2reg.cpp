@@ -1,406 +1,467 @@
 #include "../../include/mid/opt/mem2reg.hpp"
+
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <queue>
 #include <stack>
-#include <functional>
 #include <unordered_set>
 
 void Mem2Reg::execute(Module *module) {
-    curModule = module;
-    for (auto func : module->function_list_) {
+    run(module);
+}
+
+PreservedAnalyses Mem2Reg::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    return run(module) ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+bool Mem2Reg::run(Module *module) {
+    bool changed = false;
+    for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
-        runOnFunction(func);
+        changed |= runOnFunction(func);
     }
+    return changed;
 }
 
-// -----------------------------------------------------------------------
-// 指令支配关系（同块比较顺序，跨块用支配树）
-// -----------------------------------------------------------------------
-bool Mem2Reg::iADomB(Instruction *ia, Instruction *ib) {
-    BasicBlock *bbA = ia->parent_;
-    BasicBlock *bbB = ib->parent_;
-    if (bbA == bbB) {
-        // 遍历指令列表，ia 在 ib 之前则支配
-        bool foundA = false;
-        for (auto inst : bbA->instr_list_) {
-            if (inst == ia) foundA = true;
-            if (inst == ib) return foundA;
+bool Mem2Reg::runOnFunction(Function *func) {
+    if (func->basic_blocks_.empty()) return false;
+    resetFunctionState(func);
+    if (!entryBlock_->pre_bbs_.empty()) return false;
+
+    bool changed = runScalarReplacement();
+
+    domInfo_ = &func->getDominatorInfo();
+    collectPromotableAllocas();
+
+    size_t kept = 0;
+    for (size_t i = 0; i < allocas_.size(); ++i) {
+        auto &info = allocas_[i];
+        if (tryPromoteTrivialAlloca(info)) {
+            changed = true;
+            continue;
         }
-        return false;
+
+        placePhiNodes(info);
+        if (kept != i)
+            allocas_[kept] = std::move(allocas_[i]);
+        ++kept;
     }
-    // 跨基本块：bbA 支配 bbB
-    return domInfo_->dominates(bbA, bbB);
+    allocas_.erase(allocas_.begin() + kept, allocas_.end());
+
+    if (!allocas_.empty()) {
+        renamePromotedAllocas();
+        changed = true;
+    }
+
+    if (!toDelete_.empty()) {
+        eraseMarkedInstructions();
+        changed = true;
+    }
+
+    return changed;
 }
 
-// -----------------------------------------------------------------------
-// 收集可提升的 alloca
-// -----------------------------------------------------------------------
-void Mem2Reg::analyseAlloca() {
-    allocas.clear();
-    for (auto bb : currentFunc->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
+void Mem2Reg::resetFunctionState(Function *func) {
+    currentFunc_ = func;
+    entryBlock_ = func->basic_blocks_.front();
+    domInfo_ = nullptr;
+    allocas_.clear();
+    phiOwners_.clear();
+    toDelete_.clear();
+}
+
+void Mem2Reg::collectPromotableAllocas() {
+    allocas_.clear();
+
+    for (auto *bb : currentFunc_->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
             if (inst->op_id_ != Instruction::Alloca) continue;
-            AllocaInst *alloca = static_cast<AllocaInst *>(inst);
+
+            auto *alloca = static_cast<AllocaInst *>(inst);
             AllocaInfo info;
             info.alloca = alloca;
             bool promotable = true;
 
             for (auto &use : alloca->use_list_) {
-                Instruction *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = dynamic_cast<Instruction *>(use.val_);
                 if (!user) {
                     promotable = false;
-                    break;        // 如果用户不是指令，不可提升
+                    break;
                 }
 
-                switch (user->op_id_) {
-                    case Instruction::Load: {
-                        LoadInst *load = static_cast<LoadInst *>(user);
-                        info.loads.push_back(load);
-                        info.userBlocks[load->parent_].loads.push_back(load);
-                        break;
-                    }
-                    case Instruction::Store: {
-                        StoreInst *store = static_cast<StoreInst *>(user);
-                        if (store->get_operand(1) != alloca) {
-                            promotable = false;
-                            break;
-                        }
-                        info.stores.push_back(store);
-                        info.userBlocks[store->parent_].stores.push_back(store);
-                        break;
-                    }
-                    default:
+                if (user->op_id_ == Instruction::Load) {
+                    auto *load = static_cast<LoadInst *>(user);
+                    info.loads.push_back(load);
+                    info.userBlocks[load->parent_].loads.push_back(load);
+                    continue;
+                }
+
+                if (user->op_id_ == Instruction::Store) {
+                    auto *store = static_cast<StoreInst *>(user);
+                    if (store->get_operand(1) != alloca) {
                         promotable = false;
                         break;
+                    }
+                    info.stores.push_back(store);
+                    info.userBlocks[store->parent_].stores.push_back(store);
+                    continue;
                 }
-                if (!promotable) break;
+
+                promotable = false;
+                break;
             }
-            if (promotable) allocas.push_back(info);
+
+            if (promotable)
+                allocas_.push_back(std::move(info));
         }
     }
 }
 
-// -----------------------------------------------------------------------
-// 三种简单场景处理
-// -----------------------------------------------------------------------
+bool Mem2Reg::tryPromoteTrivialAlloca(AllocaInfo &info) {
+    return removeUnusedAlloca(info) ||
+           rewriteSingleStoreAlloca(info) ||
+           promoteSingleBlockAlloca(info);
+}
+
 bool Mem2Reg::removeUnusedAlloca(AllocaInfo &info) {
-    if (info.loads.empty()) {
-        for (auto store : info.stores) toDelete.insert(store);
-        toDelete.insert(info.alloca);
-        return true;
-    }
-    return false;
+    if (!info.loads.empty()) return false;
+
+    for (auto *store : info.stores)
+        toDelete_.insert(store);
+    toDelete_.insert(info.alloca);
+    return true;
 }
 
 bool Mem2Reg::rewriteSingleStoreAlloca(AllocaInfo &info) {
-    if (info.stores.size() == 1) {
-        StoreInst *store = info.stores[0];
-        Value *rval = store->get_operand(0);
-        for (auto load : info.loads) {
-            if (!iADomB(store, load)) return false; // 无法保证 store 在 load 前
-            load->replace_all_use_with(rval);
-            toDelete.insert(load);
-        }
-        toDelete.insert(store);
-        toDelete.insert(info.alloca);
-        return true;
+    if (info.stores.size() != 1) return false;
+
+    auto *store = info.stores.front();
+    Value *storedValue = store->get_operand(0);
+    for (auto *load : info.loads) {
+        if (!instructionDominates(store, load))
+            return false;
+        load->replace_all_use_with(storedValue);
+        toDelete_.insert(load);
     }
-    return false;
+
+    toDelete_.insert(store);
+    toDelete_.insert(info.alloca);
+    return true;
 }
 
 bool Mem2Reg::promoteSingleBlockAlloca(AllocaInfo &info) {
     if (info.userBlocks.size() != 1) return false;
-    BasicBlock *bb = info.userBlocks.begin()->first;
-    auto &stores = info.userBlocks[bb].stores;
-    auto &loads  = info.userBlocks[bb].loads;
 
-    std::unordered_set<Instruction *> storeSet(stores.begin(), stores.end());
-    std::unordered_set<Instruction *> loadSet(loads.begin(), loads.end());
+    BasicBlock *bb = info.userBlocks.begin()->first;
+    auto &uses = info.userBlocks.begin()->second;
+    std::unordered_set<Instruction *> stores(uses.stores.begin(),
+                                             uses.stores.end());
+    std::unordered_set<Instruction *> loads(uses.loads.begin(),
+                                            uses.loads.end());
 
     StoreInst *lastStore = nullptr;
-    for (auto inst : bb->instr_list_) {
-        if (storeSet.count(inst)) {
+    for (auto *inst : bb->instr_list_) {
+        if (stores.count(inst)) {
             lastStore = static_cast<StoreInst *>(inst);
-        } else if (loadSet.count(inst)) {
-            if (!lastStore) return false; // load 前无 store（此时尚未改写任何指令）
-            auto *load = static_cast<LoadInst *>(inst);
-            load->replace_all_use_with(lastStore->get_operand(0));
-            toDelete.insert(load);
+            continue;
         }
+
+        if (!loads.count(inst)) continue;
+        if (!lastStore) return false;
+
+        auto *load = static_cast<LoadInst *>(inst);
+        load->replace_all_use_with(lastStore->get_operand(0));
+        toDelete_.insert(load);
     }
-    for (auto store : stores) toDelete.insert(store);
-    toDelete.insert(info.alloca);
+
+    for (auto *store : uses.stores)
+        toDelete_.insert(store);
+    toDelete_.insert(info.alloca);
     return true;
 }
 
-// -----------------------------------------------------------------------
-// 插入 phi 节点
-// -----------------------------------------------------------------------
-void Mem2Reg::insertPhiNodes(AllocaInfo &info) {
-    // 1. 找出 define 块和有需要 live-in 的块
+void Mem2Reg::placePhiNodes(AllocaInfo &info) {
     info.defBlocks.clear();
     info.liveInBlocks.clear();
-    for (auto &p : info.userBlocks) {
-        BasicBlock *b = p.first;
-        if (!p.second.stores.empty())
-            info.defBlocks.push_back(b);
-        if (!p.second.loads.empty()) {
-            // 如果第一个 load 前没有 store，则需要 live-in
-            bool needLiveIn = false;
-            if (p.second.stores.empty()) {
-                needLiveIn = true;
-            } else {
-                // 比较第一个 load 和第一个 store 的顺序
-                bool seenStore = false;
-                for (auto inst : b->instr_list_) {
-                    if (std::find(p.second.stores.begin(), p.second.stores.end(), inst) != p.second.stores.end())
-                        seenStore = true;
-                    if (std::find(p.second.loads.begin(), p.second.loads.end(), inst) != p.second.loads.end()) {
-                        if (!seenStore) needLiveIn = true;
-                        break;
-                    }
-                }
-            }
-            if (needLiveIn) info.liveInBlocks.insert(b);
-        }
+
+    for (auto &entry : info.userBlocks) {
+        BasicBlock *bb = entry.first;
+        const BlockInfo &uses = entry.second;
+
+        if (!uses.stores.empty())
+            info.defBlocks.push_back(bb);
+        if (!uses.loads.empty() && !hasStoreBeforeFirstLoad(uses, bb))
+            info.liveInBlocks.insert(bb);
     }
 
-    // 2. 传播 live-in：若某块需要 live-in，其某些前驱也可能需要，直到遇到 def 块
-    std::queue<BasicBlock *> q;
-    for (auto b : info.liveInBlocks) q.push(b);
-    while (!q.empty()) {
-        BasicBlock *b = q.front(); q.pop();
-        for (auto pred : b->pre_bbs_) {
+    std::queue<BasicBlock *> liveInWorklist;
+    for (auto *bb : info.liveInBlocks)
+        liveInWorklist.push(bb);
+
+    while (!liveInWorklist.empty()) {
+        BasicBlock *bb = liveInWorklist.front();
+        liveInWorklist.pop();
+
+        for (auto *pred : bb->pre_bbs_) {
             if (info.liveInBlocks.count(pred)) continue;
-            if (info.userBlocks.count(pred) && !info.userBlocks[pred].stores.empty())
-                continue; // pred 是 define 块，停止
+            auto it = info.userBlocks.find(pred);
+            if (it != info.userBlocks.end() && !it->second.stores.empty())
+                continue;
+
             info.liveInBlocks.insert(pred);
-            q.push(pred);
+            liveInWorklist.push(pred);
         }
     }
 
-    // 3. 计算 define 块的迭代支配边界，得到 phi 块
-    std::set<BasicBlock *> defSet(info.defBlocks.begin(), info.defBlocks.end());
-    std::set<BasicBlock *> phiSet;
-    std::queue<BasicBlock *> workQ;
-    std::set<BasicBlock *> visited;
-    for (auto b : info.defBlocks) workQ.push(b);
-    while (!workQ.empty()) {
-        BasicBlock *b = workQ.front(); workQ.pop();
-        // 迭代支配边界
-        auto it = domInfo_->domFront.find(b);
-        if (it != domInfo_->domFront.end()) {
-            for (auto f : it->second) {
-                if (visited.count(f)) continue;
-                visited.insert(f);
-                if (info.liveInBlocks.count(f))
-                    phiSet.insert(f);
-                if (!defSet.count(f))
-                    workQ.push(f);
-            }
+    std::set<BasicBlock *> defSet(info.defBlocks.begin(),
+                                  info.defBlocks.end());
+    std::set<BasicBlock *> visitedFrontiers;
+    std::queue<BasicBlock *> defWorklist;
+    for (auto *bb : info.defBlocks)
+        defWorklist.push(bb);
+
+    info.phiBlocks.clear();
+    while (!defWorklist.empty()) {
+        BasicBlock *bb = defWorklist.front();
+        defWorklist.pop();
+
+        auto frontierIt = domInfo_->domFront.find(bb);
+        if (frontierIt == domInfo_->domFront.end()) continue;
+
+        for (auto *frontier : frontierIt->second) {
+            if (visitedFrontiers.count(frontier)) continue;
+            visitedFrontiers.insert(frontier);
+
+            if (info.liveInBlocks.count(frontier))
+                info.phiBlocks.insert(frontier);
+            if (!defSet.count(frontier))
+                defWorklist.push(frontier);
         }
     }
-    info.phiBlocks = phiSet;
 
-    // 4. 在 phi 块开头插入 phi 指令
-    for (auto bb : info.phiBlocks) {
-        // 修正 2 : 使用 PhiInst::create_phi 创建空 phi，再加入基本块
-        auto phi = PhiInst::create_phi(info.alloca->alloca_ty_, bb);
-        bb->add_instruction_front(phi);   // 插入到基本块最前面
-        phiToAlloca[phi] = info.alloca;
+    for (auto *bb : info.phiBlocks) {
+        auto *phi = PhiInst::create_phi(info.alloca->alloca_ty_, bb);
+        bb->add_instruction_front(phi);
+        phiOwners_[phi] = info.alloca;
     }
 }
 
-// -----------------------------------------------------------------------
-// Rename（按支配树先序遍历）
-// -----------------------------------------------------------------------
-void Mem2Reg::rename() {
-    // 每个 alloca 的值栈，初始压入 undef 代表（我们以 0 常量代替）
-    std::map<AllocaInst *, std::stack<Value *>> stacks;
-    for (auto &info : allocas) {
-        Type *ty = info.alloca->alloca_ty_;
-        if (ty->tid_ == Type::IntegerTyID) {
-            stacks[info.alloca].push(new ConstantInt(ty, 0));
-        } else if (ty->tid_ == Type::FloatTyID) {
-            stacks[info.alloca].push(new ConstantFloat(ty, 0.0f));
-        } else {
-            continue;
+bool Mem2Reg::hasStoreBeforeFirstLoad(const BlockInfo &blockInfo,
+                                      BasicBlock *bb) const {
+    if (blockInfo.stores.empty()) return false;
+
+    bool seenStore = false;
+    for (auto *inst : bb->instr_list_) {
+        if (std::find(blockInfo.stores.begin(), blockInfo.stores.end(), inst) !=
+            blockInfo.stores.end()) {
+            seenStore = true;
+        }
+        if (std::find(blockInfo.loads.begin(), blockInfo.loads.end(), inst) !=
+            blockInfo.loads.end()) {
+            return seenStore;
         }
     }
 
-    // 支配树先序遍历
+    return true;
+}
+
+void Mem2Reg::renamePromotedAllocas() {
+    std::map<AllocaInst *, std::stack<Value *>> valueStacks;
+    for (auto &info : allocas_) {
+        if (Value *zero = zeroValueFor(info.alloca->alloca_ty_))
+            valueStacks[info.alloca].push(zero);
+    }
+
     std::function<void(BasicBlock *)> renameBlock = [&](BasicBlock *bb) {
-        // 记录栈深度，以便退出时恢复
-        std::map<AllocaInst *, size_t> savedSizes;
-        for (auto &info : allocas)
-            savedSizes[info.alloca] = stacks[info.alloca].size();
+        std::map<AllocaInst *, size_t> savedDepths;
+        for (auto &entry : valueStacks)
+            savedDepths[entry.first] = entry.second.size();
 
-        // 1. 处理块开头的 phi（它们是新定义）
-        for (auto inst : bb->instr_list_) {
+        for (auto *inst : bb->instr_list_) {
             if (inst->op_id_ != Instruction::PHI) break;
-            PhiInst *phi = static_cast<PhiInst *>(inst);
-            auto it = phiToAlloca.find(phi);
-            if (it != phiToAlloca.end())
-                stacks[it->second].push(phi);
+            auto *phi = static_cast<PhiInst *>(inst);
+            auto owner = phiOwners_.find(phi);
+            if (owner != phiOwners_.end())
+                valueStacks[owner->second].push(phi);
         }
 
-        // 2. 重写普通 load/store
-        for (auto inst : bb->instr_list_) {
-            if (toDelete.count(inst)) continue;
+        for (auto *inst : bb->instr_list_) {
+            if (toDelete_.count(inst)) continue;
+
             if (inst->op_id_ == Instruction::Load) {
-                LoadInst *load = static_cast<LoadInst *>(inst);
-                AllocaInst *alloca = dynamic_cast<AllocaInst *>(load->get_operand(0));
-                if (!alloca || !stacks.count(alloca)) continue;
-                Value *top = stacks[alloca].top();
-                load->replace_all_use_with(top);
-                toDelete.insert(load);
-            } else if (inst->op_id_ == Instruction::Store) {
-                StoreInst *store = static_cast<StoreInst *>(inst);
-                AllocaInst *alloca = dynamic_cast<AllocaInst *>(store->get_operand(1));
-                if (!alloca || !stacks.count(alloca)) continue;
-                stacks[alloca].push(store->get_operand(0));
-                toDelete.insert(store);
+                auto *load = static_cast<LoadInst *>(inst);
+                auto *alloca =
+                    dynamic_cast<AllocaInst *>(load->get_operand(0));
+                auto stackIt = valueStacks.find(alloca);
+                if (!alloca || stackIt == valueStacks.end()) continue;
+
+                load->replace_all_use_with(stackIt->second.top());
+                toDelete_.insert(load);
+                continue;
+            }
+
+            if (inst->op_id_ == Instruction::Store) {
+                auto *store = static_cast<StoreInst *>(inst);
+                auto *alloca =
+                    dynamic_cast<AllocaInst *>(store->get_operand(1));
+                auto stackIt = valueStacks.find(alloca);
+                if (!alloca || stackIt == valueStacks.end()) continue;
+
+                stackIt->second.push(store->get_operand(0));
+                toDelete_.insert(store);
             }
         }
 
-        // 3. 为后继块的 phi 填充参数
-        for (auto succ : bb->succ_bbs_) {
-            for (auto inst : succ->instr_list_) {
+        for (auto *succ : bb->succ_bbs_) {
+            for (auto *inst : succ->instr_list_) {
                 if (inst->op_id_ != Instruction::PHI) break;
-                PhiInst *phi = static_cast<PhiInst *>(inst);
-                auto it = phiToAlloca.find(phi);
-                if (it != phiToAlloca.end()) {
-                    Value *incomingVal = stacks[it->second].top();
-                    phi->addIncoming(incomingVal, bb);
-                }
+                auto *phi = static_cast<PhiInst *>(inst);
+                auto owner = phiOwners_.find(phi);
+                if (owner == phiOwners_.end()) continue;
+
+                auto stackIt = valueStacks.find(owner->second);
+                if (stackIt != valueStacks.end())
+                    phi->addIncoming(stackIt->second.top(), bb);
             }
         }
 
-        // 4. 递归支配树子节点
-        auto it = domInfo_->domChildren.find(bb);
-        if (it != domInfo_->domChildren.end()) {
-            for (auto child : it->second) {
+        auto children = domInfo_->domChildren.find(bb);
+        if (children != domInfo_->domChildren.end()) {
+            for (auto *child : children->second)
                 renameBlock(child);
-            }
         }
 
-        // 5. 恢复栈
-        for (auto &info : allocas) {
-            auto &stk = stacks[info.alloca];
-            while (stk.size() > savedSizes[info.alloca])
-                stk.pop();
+        for (auto &entry : savedDepths) {
+            auto &stack = valueStacks[entry.first];
+            while (stack.size() > entry.second)
+                stack.pop();
         }
     };
 
-    renameBlock(entryBlock);
+    renameBlock(entryBlock_);
 
-    // 所有 alloca 加入删除队列
-    for (auto &info : allocas)
-        toDelete.insert(info.alloca);
+    for (auto &info : allocas_) {
+        if (valueStacks.count(info.alloca))
+            toDelete_.insert(info.alloca);
+    }
 }
 
-// -----------------------------------------------------------------------
-// SROA 预处理：将聚合 alloca [N x T] 拆分为标量 alloca T
-// -----------------------------------------------------------------------
+bool Mem2Reg::instructionDominates(Instruction *def, Instruction *use) const {
+    BasicBlock *defBB = def->parent_;
+    BasicBlock *useBB = use->parent_;
 
-void Mem2Reg::runSROA() {
-    // 不在遍历 basic_blocks 时直接修改，避免迭代器失效
+    if (defBB != useBB)
+        return domInfo_->dominates(defBB, useBB);
+
+    bool sawDef = false;
+    for (auto *inst : defBB->instr_list_) {
+        if (inst == def) sawDef = true;
+        if (inst == use) return sawDef;
+    }
+    return false;
+}
+
+Value *Mem2Reg::zeroValueFor(Type *ty) const {
+    if (ty->tid_ == Type::IntegerTyID)
+        return new ConstantInt(ty, 0);
+    if (ty->tid_ == Type::FloatTyID)
+        return new ConstantFloat(ty, 0.0f);
+    return nullptr;
+}
+
+void Mem2Reg::eraseMarkedInstructions() {
+    for (auto *inst : toDelete_) {
+        if (!inst->parent_) continue;
+        inst->parent_->delete_instr(inst);
+    }
+}
+
+bool Mem2Reg::runScalarReplacement() {
     std::vector<AllocaInst *> candidates;
-    for (auto bb : currentFunc->basic_blocks_) {
-        for (auto inst : bb->instr_list_) {
+    for (auto *bb : currentFunc_->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
             if (inst->op_id_ != Instruction::Alloca) continue;
-            auto alloca = static_cast<AllocaInst *>(inst);
-            // 只对聚合类型（数组）alloca 做 SROA，标量 alloca 交给 mem2reg
-            if (alloca->alloca_ty_->tid_ == Type::ArrayTyID) {
-                if (isSROACandidate(alloca))
-                    candidates.push_back(alloca);
-            }
+
+            auto *alloca = static_cast<AllocaInst *>(inst);
+            if (alloca->alloca_ty_->tid_ != Type::ArrayTyID) continue;
+            if (isScalarReplacementCandidate(alloca))
+                candidates.push_back(alloca);
         }
     }
-    for (auto alloca : candidates)
+
+    for (auto *alloca : candidates)
         rewriteAlloca(alloca);
+    return !candidates.empty();
 }
 
-bool Mem2Reg::isSROACandidate(AllocaInst *alloca) {
+bool Mem2Reg::isScalarReplacementCandidate(AllocaInst *alloca) {
     for (auto &use : alloca->use_list_) {
-        auto user = dynamic_cast<Instruction *>(use.val_);
-        if (!user) return false;
-
-        // 只接受 GEP 作为 alloca 的直接使用者
-        if (user->op_id_ != Instruction::GetElementPtr)
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user || user->op_id_ != Instruction::GetElementPtr)
             return false;
 
-        auto gep = static_cast<GetElementPtrInst *>(user);
-
-        // 检查 GEP 的结果类型是否为标量指针
+        auto *gep = static_cast<GetElementPtrInst *>(user);
         assert(gep->type_->tid_ == Type::PointerTyID);
+
         Type *resultTy = static_cast<PointerType *>(gep->type_)->contained_;
         if (!isScalarType(resultTy))
             return false;
 
-        // 检查所有索引是否为编译期常量
         std::vector<int> indices;
         if (!getConstantIndices(gep, indices))
             return false;
 
-        // 检查 GEP 的每个使用者是否为 Load 或 Store
         for (auto &gepUse : gep->use_list_) {
-            auto gepUser = dynamic_cast<Instruction *>(gepUse.val_);
+            auto *gepUser = dynamic_cast<Instruction *>(gepUse.val_);
             if (!gepUser) return false;
             if (gepUser->op_id_ != Instruction::Load &&
                 gepUser->op_id_ != Instruction::Store)
                 return false;
         }
     }
+
     return true;
 }
 
 void Mem2Reg::rewriteAlloca(AllocaInst *alloca) {
-    BasicBlock *entryBB = currentFunc->basic_blocks_.front();
+    BasicBlock *entryBB = currentFunc_->basic_blocks_.front();
+    std::map<std::vector<int>, AllocaInst *> scalarSlots;
 
-    // 索引元组 → 新标量 alloca 的映射
-    std::map<std::vector<int>, AllocaInst *> newAllocas;
-
-    // 复制 use_list 以避免在遍历中修改时迭代器失效
     auto allocaUses = alloca->use_list_;
     for (auto &use : allocaUses) {
-        auto gep = static_cast<GetElementPtrInst *>(use.val_);
+        auto *gep = static_cast<GetElementPtrInst *>(use.val_);
 
-        // 提取常量下标元组
         std::vector<int> indices;
         bool ok = getConstantIndices(gep, indices);
-        assert(ok && "indices should be constant (checked in isSROACandidate)");
+        assert(ok && "SROA candidate should only contain constant indices");
         (void)ok;
 
-        // 若该下标元组尚未分配标量 alloca，则创建
-        if (newAllocas.find(indices) == newAllocas.end()) {
-            Type *scalarTy =
-                static_cast<PointerType *>(gep->type_)->contained_;
-            auto newAlloca = new AllocaInst(scalarTy, entryBB, true);
+        auto slot = scalarSlots.find(indices);
+        if (slot == scalarSlots.end()) {
+            Type *scalarTy = static_cast<PointerType *>(gep->type_)->contained_;
+            auto *newAlloca = new AllocaInst(scalarTy, entryBB, true);
             entryBB->add_instruction_front(newAlloca);
-            newAllocas[indices] = newAlloca;
+            slot = scalarSlots.emplace(indices, newAlloca).first;
         }
 
-        AllocaInst *scalarAlloca = newAllocas[indices];
-
+        AllocaInst *scalarAlloca = slot->second;
         auto gepUses = gep->use_list_;
         for (auto &gepUse : gepUses) {
-            auto gepUser = dynamic_cast<Instruction *>(gepUse.val_);
-            int argNo = gepUse.arg_no_;
-            gepUser->set_operand(argNo, scalarAlloca);
+            auto *gepUser = dynamic_cast<Instruction *>(gepUse.val_);
+            gepUser->set_operand(gepUse.arg_no_, scalarAlloca);
         }
-        toDelete.insert(gep);
+        toDelete_.insert(gep);
     }
-    toDelete.insert(alloca);
+
+    toDelete_.insert(alloca);
 }
 
 bool Mem2Reg::getConstantIndices(GetElementPtrInst *gep,
-                                  std::vector<int> &indices) {
-    // GEP 操作数布局：[0]=base_ptr, [1]=首层解引用(0), [2]=第一维下标, ...
-    // 提取 operand[2], operand[4], ... 即所有实际维度下标
+                                 std::vector<int> &indices) {
     for (unsigned i = 2; i < gep->num_ops_; i += 2) {
-        auto idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
+        auto *idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
         if (!idx) return false;
         indices.push_back(static_cast<int>(idx->value_));
     }
@@ -409,48 +470,4 @@ bool Mem2Reg::getConstantIndices(GetElementPtrInst *gep,
 
 bool Mem2Reg::isScalarType(Type *ty) {
     return ty->tid_ == Type::IntegerTyID || ty->tid_ == Type::FloatTyID;
-}
-
-// -----------------------------------------------------------------------
-// 入口
-// -----------------------------------------------------------------------
-void Mem2Reg::runOnFunction(Function *func) {
-    currentFunc = func;
-    entryBlock = func->basic_blocks_.front();
-    if (entryBlock->pre_bbs_.size() != 0) return; // 入口块不应有前驱
-
-    // 清理旧数据
-    toDelete.clear();
-    phiToAlloca.clear();
-
-    // Phase 1: SROA — 拆分聚合 alloca → 标量 alloca
-    runSROA();
-
-    // Phase 2: Mem2Reg — 标量 alloca 提升为 SSA 寄存器
-    domInfo_ = &func->getDominatorInfo();
-
-    // 收集 alloca
-    analyseAlloca();
-
-    size_t kept = 0;
-    for (size_t r = 0; r < allocas.size(); ++r) {
-        AllocaInfo &info = allocas[r];
-        if (removeUnusedAlloca(info) || rewriteSingleStoreAlloca(info) ||
-            promoteSingleBlockAlloca(info))
-            continue; 
-        insertPhiNodes(info);
-        if (kept != r)
-            allocas[kept] = std::move(allocas[r]);
-        ++kept;
-    }
-    allocas.erase(allocas.begin() + kept, allocas.end());
-
-    // 全局重命名
-    rename();
-
-    // 物理删除标记的指令（SROA 的 GEP/旧 alloca + mem2reg 的 load/store/alloca）
-    for (auto inst : toDelete) {
-        if (inst->parent_ == nullptr) continue;
-        inst->parent_->delete_instr(inst);
-    }
 }
