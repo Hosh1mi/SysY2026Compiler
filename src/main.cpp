@@ -251,8 +251,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
-    addCorrelatedCleanup(pm);
-    addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
