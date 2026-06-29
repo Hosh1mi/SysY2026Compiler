@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/globalScalarPromotion.hpp"
+#include "../../include/mid/analysis/basicAliasAnalysis.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
 #include "../../include/mid/ir/type.hpp"
@@ -34,35 +35,37 @@ static bool scalarGlobalAddressEscapes(GlobalVariable *gv) {
     return false;
 }
 
-static bool hasBlockingCall(Function *func) {
+static bool callMayTouchGlobal(CallInst *call, GlobalVariable *gv,
+                               BasicAliasAnalysis &BAA) {
+    auto *callee = dynamic_cast<Function *>(
+        call->get_operand(call->num_ops_ - 1));
+    // Indirect call: unknown target, conservatively block.
+    if (!callee)
+        return true;
+    // SysY runtime library functions (declarations) are separately compiled
+    // and cannot name a user-defined global; if the scalar global's address
+    // has not escaped, such calls cannot access it through a pointer either.
+    if (callee->is_declaration())
+        return false;
+    if (callee->hasSemFlag(SemFlag::FnPure))
+        return false;
+    return BAA.getCallModRef(call, gv) != ModRefInfo::NoModRef;
+}
+
+static bool hasBlockingCallForGlobal(Function *func, GlobalVariable *gv,
+                                     BasicAliasAnalysis &BAA) {
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *call = dynamic_cast<CallInst *>(inst);
             if (!call) continue;
-
-            auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
-            // Indirect call: unknown target, conservatively block.
-            if (!callee)
+            if (callMayTouchGlobal(call, gv, BAA))
                 return true;
-            // SysY runtime library functions (declarations) are separately
-            // compiled and cannot name a user-defined global; a scalar int
-            // global's address never escapes (no `&` in SysY), so such calls
-            // can never read or write a promotable scalar global. Crossing
-            // them is safe.
-            if (callee->is_declaration())
-                continue;
-            if (callee->hasSemFlag(SemFlag::FnPure))
-                continue;
-            // A user-defined non-pure function may load/store the global
-            // directly; conservatively block promotion in this function.
-            return true;
         }
     }
     return false;
 }
 
-static void promoteInFunction(Function *func) {
+static void promoteInFunction(Function *func, BasicAliasAnalysis &BAA) {
     // Phase 1: collect scalar globals in *first-seen* IR order, and snapshot
     // pre-existing load/store instructions for later redirection.
     //
@@ -79,7 +82,9 @@ static void promoteInFunction(Function *func) {
     auto promotable = [&](GlobalVariable *gv) -> bool {
         auto it = promotableCache.find(gv);
         if (it != promotableCache.end()) return it->second;
-        bool ok = isScalarIntGlobal(gv) && !scalarGlobalAddressEscapes(gv);
+        bool ok = isScalarIntGlobal(gv) &&
+                  !scalarGlobalAddressEscapes(gv) &&
+                  !hasBlockingCallForGlobal(func, gv, BAA);
         promotableCache[gv] = ok;
         return ok;
     };
@@ -164,12 +169,10 @@ static void promoteInFunction(Function *func) {
 }
 
 void GlobalScalarPromotion::execute(Module *module) {
+    BasicAliasAnalysis BAA;
+    BAA.analyze(module);
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
-        // Only promote across calls that provably do not observe memory.
-        // Readonly/unknown calls may still read the global, so they keep
-        // the existing hard barrier semantics.
-        if (hasBlockingCall(func)) continue;
-        promoteInFunction(func);
+        promoteInFunction(func, BAA);
     }
 }
