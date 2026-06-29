@@ -2433,14 +2433,20 @@ bool runMachineMemoryOptimization(MachineFunction &func) {
 }
 
 bool runMachineBranchOptimization(MachineFunction &func) {
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
-			    tryMachineAndTBZ(func.blocks[b], i, liveness) ||
 			    tryMachineFallthroughBranch(func, b, i) ||
 			    tryMachineBranchThreading(func, b, i) ||
 			    tryMachineRemoveDeadForwarder(func, b, i))
+				return true;
+		}
+	}
+
+	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
+			if (tryMachineAndTBZ(func.blocks[b], i, liveness))
 				return true;
 		}
 	}

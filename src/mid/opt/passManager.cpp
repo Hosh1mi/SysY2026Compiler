@@ -1,6 +1,7 @@
 #include "../../include/mid/opt/passManager.hpp"
 #include "../../include/mid/analysis/loopVerify.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -31,6 +32,8 @@ static size_t countInstructions(Module *module) {
 }
 
 PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
+    const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
+    auto start = std::chrono::steady_clock::now();
     if (dump_ir_) {
         std::cerr << "; === IR Before " << pass.name() << " ===\n"
                   << module->print() << "\n";
@@ -54,6 +57,14 @@ PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
     if (dump_ir_) {
         std::cerr << "; === IR After " << pass.name() << " ===\n"
                   << module->print() << "\n";
+    }
+    if (profilePasses) {
+        auto end = std::chrono::steady_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        std::cerr << "[PassProfile] " << pass.name()
+                  << " " << us << " us"
+                  << " insts=" << countInstructions(module)
+                  << "\n";
     }
     return preserved;
 }

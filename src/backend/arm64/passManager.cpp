@@ -2,17 +2,55 @@
 
 #include "../../include/backend/arm64/passes.hpp"
 
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <utility>
+
+namespace {
+size_t countMachineInstructions(const MachineFunction &function) {
+    size_t count = 0;
+    for (const auto &block : function.blocks)
+        count += block.instrs.size();
+    return count;
+}
+}
 
 void Arm64MachinePassManager::addPass(
     std::unique_ptr<Arm64MachineFunctionPass> pass) {
     passes_.push_back(std::move(pass));
 }
 
-bool Arm64MachinePassManager::run(MachineFunction &function) {
+bool Arm64MachinePassManager::run(MachineFunction &function, bool localFixedPoint) {
     bool changed = false;
-    for (auto &pass : passes_)
-        changed |= pass->run(function);
+    const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
+    for (auto &pass : passes_) {
+        int localIterations = 0;
+        bool passChangedAny = false;
+        do {
+            auto start = std::chrono::steady_clock::now();
+            bool passChanged = pass->run(function);
+            changed |= passChanged;
+            passChangedAny |= passChanged;
+            if (profilePasses) {
+                auto end = std::chrono::steady_clock::now();
+                auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+                std::cerr << "[MachinePassProfile] " << function.name << " "
+                          << pass->name() << " " << us << " us"
+                          << " changed=" << (passChanged ? 1 : 0)
+                          << " instrs=" << countMachineInstructions(function)
+                          << "\n";
+            }
+            if (!localFixedPoint || !passChanged)
+                break;
+            ++localIterations;
+        } while (localIterations < 256);
+
+        if (profilePasses && localFixedPoint && passChangedAny && localIterations >= 256) {
+            std::cerr << "[MachinePassProfile] WARNING " << function.name << " "
+                      << pass->name() << " hit local iteration limit\n";
+        }
+    }
     return changed;
 }
 
@@ -36,10 +74,24 @@ Arm64MachineOptimizationPipeline::Arm64MachineOptimizationPipeline(
 
 void Arm64MachineOptimizationPipeline::run(MachineFunction &function) {
     if (enableOptimizations_) {
-        cleanup_.run(function);
-        while (optimizations_.run(function))
-            cleanup_.run(function);
-        cleanup_.run(function);
+        const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
+        cleanup_.run(function, true);
+        int rounds = 0;
+        while (optimizations_.run(function, true)) {
+            ++rounds;
+            if (profilePasses)
+                std::cerr << "[MachinePipeline] " << function.name
+                          << " round=" << rounds
+                          << " instrs=" << countMachineInstructions(function)
+                          << "\n";
+            cleanup_.run(function, true);
+        }
+        if (profilePasses)
+            std::cerr << "[MachinePipeline] " << function.name
+                      << " converged_rounds=" << rounds
+                      << " instrs=" << countMachineInstructions(function)
+                      << "\n";
+        cleanup_.run(function, true);
     }
     // Scheduling is terminal: running code motion, instruction combining or
     // address-mode formation afterwards would invalidate its dependency and
