@@ -26,23 +26,18 @@ private:
         Instruction  *updateInst;      // the add/sub instruction in latch
     };
 
-    struct PackedOperand {
-        enum Kind { CONTIGUOUS, IV_STEP, GATHER, INVARIANT };
-        Kind   kind;
-        Type  *scalarTy;
-        Value *source;                 // phi / invariant scalar
-        int    laneStride;             // elements between adjacent lanes
-    };
-
     struct ReductionGroup {
+        struct PointerPhi {
+            PhiInst *phi;
+            Value   *initVal;
+            int      step;
+        };
+
         PhiInst       *accPhi;         // loop-carried reduction phi
         Value         *initVal;        // initial scalar accumulator
-        Value         *latchValue;     // final scalar value at latch edge
-        PackedOperand  lhs;
-        PackedOperand  rhs;
-        int            scalarStep;     // scalar elements consumed per original iter
-        bool           isAdd = false;  // true: acc += ...（求和/点积）; false: acc -= lhs*rhs（乘-减链）
-        bool           noMul = false;  // true: 每 lane 值 = lhs（求和）; false: lhs*rhs（点积/乘-减）
+        std::vector<Value*> contributionTerms; // scalar terms independent of accPhi
+        std::vector<PointerPhi> pointerPhis;   // pointer recurrences used by terms
+        bool           isAdd = false;  // true: acc += contribution; false: acc -= contribution
     };
 
     // ── Memory access description ──────────────────────────────────────
