@@ -130,8 +130,34 @@ private:
     IntRange getSelectRange(SelectInst *sel, BasicBlock *ctx);
     IntRange getSCEVRange(Value *v, BasicBlock *ctx);
     IntRange getNormalizedReturnRange();
-    bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod);
-    bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting) const;
+    struct ArgRangeRequirement {
+        unsigned argNo = 0;
+        long long lower = 0;
+        long long upper = 0;
+
+        bool operator==(const ArgRangeRequirement &o) const {
+            return argNo == o.argNo && lower == o.lower && upper == o.upper;
+        }
+    };
+    struct ReturnSummary;
+
+    bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod,
+                                   std::vector<ArgRangeRequirement> *requirements = nullptr);
+    bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting);
+    IntRange getSummaryRange(Value *v, BasicBlock *ctx, long long mod,
+                             std::vector<ArgRangeRequirement> *requirements,
+                             std::set<Value *> &visiting);
+    bool ensureNonNegativeForSummary(Value *v, BasicBlock *ctx, long long mod,
+                                     std::vector<ArgRangeRequirement> *requirements,
+                                     std::set<Value *> &visiting);
+    bool callSatisfiesSummaryRequirements(CallInst *call, const std::vector<ArgRangeRequirement> &requirements,
+                                          long long mod, BasicBlock *ctx,
+                                          std::vector<ArgRangeRequirement> *callerRequirements,
+                                          std::set<Value *> &visiting);
+    bool addArgumentRequirement(Argument *arg, long long lower, long long upper,
+                                std::vector<ArgRangeRequirement> &requirements);
+    bool summaryAppliesToCall(CallInst *call, const ReturnSummary &summary, BasicBlock *ctx);
+    bool valueMatchesAbsMod(Value *v, long long mod, std::set<Value *> &visiting);
     long long getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx);
     long long inferDirectReturnModulus(Value *v) const;
     long long getNormalizedValueMod(Value *v, BasicBlock *ctx);
@@ -199,8 +225,11 @@ private:
         bool computed = false;
         bool computing = false;
         bool known = false;
+        bool absKnown = false;
         long long pendingModulus = 0;
         long long modulus = 0;
+        std::vector<ArgRangeRequirement> pendingRequirements;
+        std::vector<ArgRangeRequirement> requirements;
     };
     ReturnSummary returnSummary_;
 };
