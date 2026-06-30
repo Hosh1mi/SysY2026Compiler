@@ -8,7 +8,7 @@
 class Arm64MachinePassManager {
 public:
     void addPass(std::unique_ptr<Arm64MachineFunctionPass> pass);
-    bool run(MachineFunction &function);
+    bool run(MachineFunction &function, bool localFixedPoint = false);
 
 private:
     std::vector<std::unique_ptr<Arm64MachineFunctionPass>> passes_;
@@ -26,4 +26,3 @@ private:
     Arm64MachinePassManager optimizations_;
     Arm64MachinePassManager scheduler_;
 };
-

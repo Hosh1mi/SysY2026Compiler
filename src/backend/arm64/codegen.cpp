@@ -5,6 +5,8 @@
 #include "../../include/backend/arm64/passManager.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -18,8 +20,17 @@
 #endif
 
 void Arm64CodeGen::generate() {
+    const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
+    auto codegenStart = std::chrono::steady_clock::now();
+    auto sectionStart = codegenStart;
     Arm64IRPreparationPipeline(enable_regalloc_, !no_pre_schedule_,
                                dump_pre_machine_instr_, std::cerr).run(m_);
+    if (profilePasses) {
+        auto now = std::chrono::steady_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - sectionStart).count();
+        std::cerr << "[CodegenProfile] ir-prep " << us << " us\n";
+        sectionStart = now;
+    }
     MachineModule module;
 
     // 1. 分类全局变量
@@ -85,24 +96,51 @@ void Arm64CodeGen::generate() {
                     machineFunc.name = f->name_;
                     MachineEmitter emitter(machineFunc);
 
+                    auto funcStart = std::chrono::steady_clock::now();
                     Arm64FuncContext ctx(f, emitter, enable_regalloc_);
                     ctx.generate();
+                    if (std::getenv("PROFILE_PASSES")) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - funcStart).count();
+                        std::cerr << "[CodegenProfile] " << f->name_
+                                  << " ctx-generate " << us << " us\n";
+                        funcStart = now;
+                    }
 
                     auto it = std::find(funcs.begin(), funcs.end(), f);
                     size_t idx = it - funcs.begin();
                     Arm64MachineOptimizationPipeline pipeline(
                         !no_peephole_, !no_schedule_ && enable_regalloc_);
                     pipeline.run(machineFunc);
+                    if (std::getenv("PROFILE_PASSES")) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - funcStart).count();
+                        std::cerr << "[CodegenProfile] " << f->name_
+                                  << " machine-opt " << us << " us\n";
+                        funcStart = now;
+                    }
                     if (dump_machine_instr_) {
                         std::cerr << dumpMachineFunction(machineFunc);
                     }
                     results[idx] = printMachineFunction(machineFunc);
+                    if (std::getenv("PROFILE_PASSES")) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - funcStart).count();
+                        std::cerr << "[CodegenProfile] " << f->name_
+                                  << " print-function " << us << " us\n";
+                    }
                 }
             });
         }
         for (auto &th : threads) {
             th.join();
         }
+    }
+    if (profilePasses) {
+        auto now = std::chrono::steady_clock::now();
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(now - sectionStart).count();
+        std::cerr << "[CodegenProfile] functions-total " << us << " us\n";
+        sectionStart = now;
     }
 
     // 5. 输出 .text + 函数代码
@@ -126,6 +164,13 @@ void Arm64CodeGen::generate() {
     emitGroup("\t.section .rodata", rodata);
 
     os_ << printMachineModule(module);
+    if (profilePasses) {
+        auto now = std::chrono::steady_clock::now();
+        auto finalUs = std::chrono::duration_cast<std::chrono::microseconds>(now - sectionStart).count();
+        auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(now - codegenStart).count();
+        std::cerr << "[CodegenProfile] module-print " << finalUs << " us\n";
+        std::cerr << "[CodegenProfile] total " << totalUs << " us\n";
+    }
 }
 
 static int globalTypeSize(Type *ty) {
