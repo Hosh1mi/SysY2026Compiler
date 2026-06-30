@@ -2588,7 +2588,6 @@ bool runMachineBranchOptimization(MachineFunction &func) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
 			    tryMachineSiblingTailCall(func, b, i) ||
-			    tryMachineAndTBZ(func.blocks[b], i, liveness) ||
 			    tryMachineFallthroughBranch(func, b, i) ||
 			    tryMachineBranchThreading(func, b, i) ||
 			    tryMachineRemoveDeadForwarder(func, b, i))
