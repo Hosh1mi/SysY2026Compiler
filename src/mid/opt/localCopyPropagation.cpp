@@ -1,14 +1,28 @@
 #include "../../include/mid/opt/localCopyPropagation.hpp"
 #include <map>
+#include <vector>
+
+namespace {
+
+Value *resolveCopy(Value *value, std::map<Value *, Value *> &copies) {
+    std::vector<Value *> path;
+    Value *cur = value;
+    while (true) {
+        auto it = copies.find(cur);
+        if (it == copies.end() || it->second == cur) break;
+        path.push_back(cur);
+        cur = it->second;
+    }
+    for (auto *v : path) copies[v] = cur;
+    return cur;
+}
+
+} // namespace
 
 void LocalCopyPropagation::execute(Module *module) {
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto func : module->function_list_) {
-            if (func->is_declaration()) continue;
-            if (runOnFunction(func)) changed = true;
-        }
+    for (auto func : module->function_list_) {
+        if (func->is_declaration()) continue;
+        runOnFunction(func);
     }
 }
 
@@ -20,35 +34,22 @@ bool LocalCopyPropagation::runOnFunction(Function *func) {
         for (auto inst : bb->instr_list_) {
             if (inst->is_phi()) continue;
 
-            // Replace operands with known copies
+            // Replace operands with the final representative of local identity copies.
             for (unsigned i = 0; i < inst->num_ops_; i++) {
                 Value *op = inst->get_operand(i);
-                auto it = copies.find(op);
-                if (it != copies.end() && it->second != op) {
-                    op->remove_used(inst, i);
-                    inst->set_operand(i, it->second);
+                Value *rep = resolveCopy(op, copies);
+                if (rep != op) {
+                    inst->set_operand(i, rep);
                     changed = true;
                 }
             }
 
-            // Kill copies: any value-producing instruction kills itself
-            // as the destination of a copy
+            // A redefined SSA value cannot keep an old representative.
             copies.erase(inst);
-
-            // Kill copies where this instruction is the source
-            // (the source value might be clobbered)
-            if (inst->is_store() || inst->is_call()) {
-                for (auto it = copies.begin(); it != copies.end(); ) {
-                    if (it->second == inst || it->first == inst)
-                        it = copies.erase(it);
-                    else
-                        ++it;
-                }
-            }
 
             // Record identity copies
             if (isIdentityCopy(inst)) {
-                copies[inst] = inst->get_operand(0);
+                copies[inst] = resolveCopy(inst->get_operand(0), copies);
             }
         }
     }
@@ -56,12 +57,11 @@ bool LocalCopyPropagation::runOnFunction(Function *func) {
 }
 
 bool LocalCopyPropagation::isIdentityCopy(Instruction *inst) {
+    if (!inst || inst->num_ops_ == 0) return false;
     if (inst->op_id_ == Instruction::ZExt) {
-        auto srcTy = inst->get_operand(0)->type_;
-        if (srcTy->tid_ == Type::IntegerTyID &&
-            static_cast<IntegerType*>(srcTy)->num_bits_ == 32) {
-            return true; // zext i32 to i32 is a nop
-        }
+        auto *srcTy = dynamic_cast<IntegerType *>(inst->get_operand(0)->type_);
+        auto *dstTy = dynamic_cast<IntegerType *>(inst->type_);
+        return srcTy && dstTy && srcTy->num_bits_ == dstTy->num_bits_;
     }
     if (inst->op_id_ == Instruction::BitCast) {
         if (inst->get_operand(0)->type_ == inst->type_)

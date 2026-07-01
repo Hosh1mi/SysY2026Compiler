@@ -15,6 +15,11 @@ Value* visitCast(Instruction *inst) {
     Value *op = inst->get_operand(0);
     Type *ty = inst->type_;
 
+    if ((inst->op_id_ == Instruction::ZExt || inst->op_id_ == Instruction::BitCast) &&
+        op->type_ == ty) {
+        return op;
+    }
+
     if (auto *ci = as_const_int(op)) {
         switch (inst->op_id_) {
         case Instruction::ZExt:
