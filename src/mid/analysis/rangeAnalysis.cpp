@@ -487,40 +487,20 @@ RangeAnalysis::IntRange RangeAnalysis::getCallRange(CallInst *call, BasicBlock *
     if (!callee || callee->is_declaration()) return IntRange::top();
     if (callee == func_) {
         auto selfSummary = getNormalizedReturnRange();
-        if (selfSummary.valid && !selfSummary.isTop && !selfSummary.isBottom &&
-            summaryAppliesToCall(call, returnSummary_, ctx)) {
+        if (selfSummary.valid && !selfSummary.isTop && !selfSummary.isBottom) {
             if (ctx) selfSummary = applyFacts(call, selfSummary, ctx);
             return selfSummary;
         }
-        if (returnSummary_.absKnown && returnSummary_.modulus > 0) {
-            auto absRange = IntRange::bounded(-(returnSummary_.modulus - 1),
-                                             returnSummary_.modulus - 1);
-            if (ctx) absRange = applyFacts(call, absRange, ctx);
-            return absRange;
-        }
         if (returnSummary_.computing && returnSummary_.pendingModulus > 0) {
-            std::set<Value *> valueVisiting;
-            if (callSatisfiesSummaryRequirements(call, returnSummary_.pendingRequirements,
-                                                 returnSummary_.pendingModulus, ctx, nullptr,
-                                                 valueVisiting))
-                return IntRange::bounded(0, returnSummary_.pendingModulus - 1);
-            return IntRange::bounded(-(returnSummary_.pendingModulus - 1),
-                                     returnSummary_.pendingModulus - 1);
+            return IntRange::bounded(0, returnSummary_.pendingModulus - 1);
         }
     }
     if (AM_->isRangeAnalysisActive(callee)) return IntRange::top();
     auto &calleeRA = AM_->getRangeAnalysis(callee);
     auto summaryRange = calleeRA.getNormalizedReturnRange();
-    if (summaryRange.valid && !summaryRange.isTop && !summaryRange.isBottom &&
-        calleeRA.summaryAppliesToCall(call, calleeRA.returnSummary_, ctx)) {
+    if (summaryRange.valid && !summaryRange.isTop && !summaryRange.isBottom) {
         if (ctx) summaryRange = applyFacts(call, summaryRange, ctx);
         return summaryRange;
-    }
-    if (calleeRA.returnSummary_.absKnown && calleeRA.returnSummary_.modulus > 0) {
-        auto absRange = IntRange::bounded(-(calleeRA.returnSummary_.modulus - 1),
-                                         calleeRA.returnSummary_.modulus - 1);
-        if (ctx) absRange = applyFacts(call, absRange, ctx);
-        return absRange;
     }
 
     IntRange result = IntRange::bottom();
@@ -807,7 +787,6 @@ RangeAnalysis::IntRange RangeAnalysis::getICmpRange(ICmpInst *icmp, BasicBlock *
 
 RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBlock *ctx) {
     if (!sel) return IntRange::top();
-
     auto condRange = getRange(sel->get_operand(0), ctx);
     if (condRange.isSingleton()) {
         return condRange.lower ? getRange(sel->get_operand(1), ctx)
@@ -1016,7 +995,7 @@ long long RangeAnalysis::getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx) {
 }
 
 bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
-                                           std::set<Value *> &visiting) {
+                                           std::set<Value *> &visiting) const {
     if (!v || !visiting.insert(v).second) return true;
 
     if (auto *inst = dynamic_cast<Instruction *>(v);
@@ -1048,10 +1027,9 @@ bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
         }
         if (callee && !callee->is_declaration() && AM_ &&
             !AM_->isRangeAnalysisActive(callee)) {
-            auto &calleeRA = AM_->getRangeAnalysis(callee);
-            calleeRA.getNormalizedReturnRange();
-            if (calleeRA.returnSummary_.known) {
-                long long callMod = calleeRA.returnSummary_.modulus;
+            auto summary = AM_->getRangeAnalysis(callee).getNormalizedReturnRange();
+            if (summary.valid && !summary.isTop && !summary.isBottom) {
+                long long callMod = summary.upper + 1;
                 if (mod == 0 || mod == callMod) {
                     mod = callMod;
                     return true;
@@ -1078,406 +1056,36 @@ bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
     return true;
 }
 
-bool RangeAnalysis::addArgumentRequirement(Argument *arg, long long lower, long long upper,
-                                           std::vector<ArgRangeRequirement> &requirements) {
-    if (!arg || arg->parent_ != func_) return false;
-
-    for (auto &req : requirements) {
-        if (req.argNo != arg->arg_no_) continue;
-        long long newLower = std::max(req.lower, lower);
-        long long newUpper = std::min(req.upper, upper);
-        if (newLower > newUpper) return false;
-        req.lower = newLower;
-        req.upper = newUpper;
-        return true;
-    }
-
-    requirements.push_back({arg->arg_no_, lower, upper});
-    std::sort(requirements.begin(), requirements.end(),
-              [](const ArgRangeRequirement &a, const ArgRangeRequirement &b) {
-                  return a.argNo < b.argNo;
-              });
-    return true;
-}
-
-RangeAnalysis::IntRange RangeAnalysis::getSummaryRange(
-    Value *v, BasicBlock *ctx, long long mod,
-    std::vector<ArgRangeRequirement> *requirements,
-    std::set<Value *> &visiting) {
-    if (!v || !visiting.insert(v).second) return IntRange::top();
-
-    auto finish = [&](IntRange r) {
-        visiting.erase(v);
-        return r;
-    };
-
-    if (auto *ci = dynamic_cast<ConstantInt *>(v))
-        return finish(getConstantRange(ci));
-
-    if (auto *arg = dynamic_cast<Argument *>(v)) {
-        if (arg->parent_ == func_ && requirements) {
-            for (const auto &req : *requirements) {
-                if (req.argNo == arg->arg_no_)
-                    return finish(IntRange::bounded(req.lower, req.upper));
-            }
-            return finish(IntRange::top());
-        }
-        return finish(getRange(v, ctx));
-    }
-
-    if (auto *call = dynamic_cast<CallInst *>(v)) {
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-        if (callee == func_ && returnSummary_.pendingModulus == mod &&
-            callSatisfiesSummaryRequirements(call, returnSummary_.pendingRequirements,
-                                             mod, ctx, requirements, visiting))
-            return finish(IntRange::bounded(0, mod - 1));
-
-        if (callee && !callee->is_declaration() && AM_ &&
-            !AM_->isRangeAnalysisActive(callee)) {
-            auto &calleeRA = AM_->getRangeAnalysis(callee);
-            calleeRA.getNormalizedReturnRange();
-            if (calleeRA.returnSummary_.known && calleeRA.returnSummary_.modulus == mod &&
-                callSatisfiesSummaryRequirements(call, calleeRA.returnSummary_.requirements,
-                                                 mod, ctx, requirements, visiting))
-                return finish(IntRange::bounded(0, mod - 1));
-        }
-
-        if (requirements) return finish(IntRange::top());
-        return finish(getRange(v, ctx));
-    }
-
-    if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        IntRange result = IntRange::bottom();
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
-            auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
-            auto incoming = getSummaryRange(phi->get_operand(i), predBB, mod, requirements, visiting);
-            result = result.isBottom ? incoming : result.join(incoming);
-        }
-        return finish(result.valid ? result : IntRange::top());
-    }
-
-    if (auto *sel = dynamic_cast<SelectInst *>(v)) {
-        auto matchesAddConst = [](Value *value, Value *base, long long c) {
-            auto *bin = dynamic_cast<BinaryInst *>(value);
-            if (!bin || bin->op_id_ != Instruction::Add) return false;
-            long long rhs = 0;
-            return bin->get_operand(0) == base && getConstInt(bin->get_operand(1), rhs) && rhs == c;
-        };
-        auto matchesSubConst = [](Value *value, Value *base, long long c) {
-            auto *bin = dynamic_cast<BinaryInst *>(value);
-            if (!bin || bin->op_id_ != Instruction::Sub) return false;
-            long long rhs = 0;
-            return bin->get_operand(0) == base && getConstInt(bin->get_operand(1), rhs) && rhs == c;
-        };
-        auto matchesHighNormalize = [&](Value *value, Value *base, long long normalizeMod) {
-            auto *highSel = dynamic_cast<SelectInst *>(value);
-            if (!highSel) return false;
-            auto *cmp = dynamic_cast<ICmpInst *>(highSel->get_operand(0));
-            long long rhs = 0;
-            return cmp && cmp->icmp_op_ == ICmpInst::ICMP_SGE &&
-                   cmp->get_operand(0) == base && getConstInt(cmp->get_operand(1), rhs) &&
-                   rhs == normalizeMod && matchesSubConst(highSel->get_operand(1), base, normalizeMod) &&
-                   highSel->get_operand(2) == base;
-        };
-
-        if (auto *cmp = dynamic_cast<ICmpInst *>(sel->get_operand(0))) {
-            long long negMod = 0;
-            if (cmp->icmp_op_ == ICmpInst::ICMP_SLE &&
-                getConstInt(cmp->get_operand(1), negMod) && negMod < 0) {
-                Value *base = cmp->get_operand(0);
-                long long normalizeMod = -negMod;
-                if (normalizeMod == mod &&
-                    matchesAddConst(sel->get_operand(1), base, normalizeMod) &&
-                    matchesHighNormalize(sel->get_operand(2), base, normalizeMod)) {
-                    auto baseRange = getSummaryRange(base, ctx, mod, requirements, visiting);
-                    if (baseRange.valid && !baseRange.isTop && !baseRange.isBottom &&
-                        normalizeMod <= std::numeric_limits<long long>::max() / 2 &&
-                        baseRange.lower >= 0 && baseRange.upper < 2 * normalizeMod)
-                        return finish(IntRange::bounded(0, normalizeMod - 1));
-                    if (baseRange.valid && !baseRange.isTop && !baseRange.isBottom &&
-                        normalizeMod <= std::numeric_limits<long long>::max() / 2 &&
-                        baseRange.lower > -(2 * normalizeMod) && baseRange.upper < 2 * normalizeMod)
-                        return finish(IntRange::bounded(-(normalizeMod - 1), normalizeMod - 1));
-                }
-            }
-        }
-
-        auto lhs = getSummaryRange(sel->get_operand(1), ctx, mod, requirements, visiting);
-        auto rhs = getSummaryRange(sel->get_operand(2), ctx, mod, requirements, visiting);
-        return finish(lhs.join(rhs));
-    }
-
-    if (auto *bin = dynamic_cast<BinaryInst *>(v)) {
-        auto lhs = getSummaryRange(bin->get_operand(0), ctx, mod, requirements, visiting);
-        auto rhs = getSummaryRange(bin->get_operand(1), ctx, mod, requirements, visiting);
-        if (!lhs.valid || !rhs.valid) return finish(IntRange::top());
-        if (lhs.isBottom || rhs.isBottom) return finish(IntRange::bottom());
-        if (lhs.isTop || rhs.isTop) {
-            if (bin->op_id_ == Instruction::SRem) {
-                auto *divisor = dynamic_cast<ConstantInt *>(bin->get_operand(1));
-                if (divisor && divisor->value_ > 0 &&
-                    ensureNonNegativeForSummary(bin->get_operand(0), ctx, mod, requirements, visiting))
-                    return finish(IntRange::bounded(0, divisor->value_ - 1));
-            }
-            return finish(IntRange::top());
-        }
-
-        switch (bin->op_id_) {
-        case Instruction::Add: {
-            long long lo = 0, hi = 0;
-            if (!addBounds(lhs.lower, rhs.lower, lo) ||
-                !addBounds(lhs.upper, rhs.upper, hi))
-                return finish(IntRange::top());
-            return finish(IntRange::bounded(lo, hi));
-        }
-        case Instruction::Sub: {
-            long long lo = 0, hi = 0;
-            if (!subtractBounds(lhs.lower, rhs.upper, lo) ||
-                !subtractBounds(lhs.upper, rhs.lower, hi))
-                return finish(IntRange::top());
-            return finish(IntRange::bounded(lo, hi));
-        }
-        case Instruction::SDiv: {
-            if (!rhs.isSingleton() || rhs.lower <= 0) return finish(IntRange::top());
-            return finish(IntRange::bounded(lhs.lower / rhs.lower, lhs.upper / rhs.lower));
-        }
-        case Instruction::SRem: {
-            if (!rhs.isSingleton() || rhs.lower <= 0) return finish(IntRange::top());
-            if (!lhs.knownNonNegative() &&
-                !ensureNonNegativeForSummary(bin->get_operand(0), ctx, mod, requirements, visiting))
-                return finish(IntRange::top());
-            return finish(IntRange::bounded(0, rhs.lower - 1));
-        }
-        case Instruction::Shl: {
-            if (!lhs.knownNonNegative() || !rhs.isSingleton()) return finish(IntRange::top());
-            long long shift = rhs.lower;
-            if (shift < 0 || shift >= 63) return finish(IntRange::top());
-            long long lo = 0, hi = 0;
-            if (!multiplyBounds(lhs.lower, 1LL << shift, lo) ||
-                !multiplyBounds(lhs.upper, 1LL << shift, hi))
-                return finish(IntRange::top());
-            return finish(IntRange::bounded(lo, hi));
-        }
-        case Instruction::AShr:
-        case Instruction::LShr: {
-            if (!lhs.knownNonNegative() || !rhs.isSingleton()) return finish(IntRange::top());
-            long long shift = rhs.lower;
-            if (shift < 0 || shift >= 63) return finish(IntRange::top());
-            return finish(IntRange::bounded(lhs.lower >> shift, lhs.upper >> shift));
-        }
-        default:
-            if (requirements) return finish(IntRange::top());
-            return finish(getRange(v, ctx));
-        }
-    }
-
-    if (requirements) return finish(IntRange::top());
-    return finish(getRange(v, ctx));
-}
-
-bool RangeAnalysis::ensureNonNegativeForSummary(
-    Value *v, BasicBlock *ctx, long long mod,
-    std::vector<ArgRangeRequirement> *requirements,
-    std::set<Value *> &visiting) {
-    if (!v) return false;
-
-    auto r = getSummaryRange(v, ctx, mod, requirements, visiting);
-    if (r.valid && !r.isTop && !r.isBottom && r.lower >= 0) return true;
-
-    if (auto *arg = dynamic_cast<Argument *>(v)) {
-        if (!requirements || arg->parent_ != func_) return false;
-        return addArgumentRequirement(arg, 0, std::numeric_limits<long long>::max(), *requirements);
-    }
-
-    if (auto *bin = dynamic_cast<BinaryInst *>(v)) {
-        switch (bin->op_id_) {
-        case Instruction::Add:
-            return ensureNonNegativeForSummary(bin->get_operand(0), ctx, mod, requirements, visiting) &&
-                   ensureNonNegativeForSummary(bin->get_operand(1), ctx, mod, requirements, visiting);
-        case Instruction::Shl:
-        case Instruction::AShr:
-        case Instruction::LShr:
-        case Instruction::SDiv:
-            return ensureNonNegativeForSummary(bin->get_operand(0), ctx, mod, requirements, visiting);
-        case Instruction::SRem: {
-            auto *divisor = dynamic_cast<ConstantInt *>(bin->get_operand(1));
-            return divisor && divisor->value_ > 0 &&
-                   ensureNonNegativeForSummary(bin->get_operand(0), ctx, mod, requirements, visiting);
-        }
-        default:
-            break;
-        }
-    }
-
-    if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
-            auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
-            if (!ensureNonNegativeForSummary(phi->get_operand(i), predBB, mod, requirements, visiting))
-                return false;
-        }
-        return true;
-    }
-
-    if (auto *sel = dynamic_cast<SelectInst *>(v)) {
-        return ensureNonNegativeForSummary(sel->get_operand(1), ctx, mod, requirements, visiting) &&
-               ensureNonNegativeForSummary(sel->get_operand(2), ctx, mod, requirements, visiting);
-    }
-
-    if (auto *call = dynamic_cast<CallInst *>(v)) {
-        auto range = getSummaryRange(call, ctx, mod, requirements, visiting);
-        return range.valid && !range.isTop && !range.isBottom && range.lower >= 0;
-    }
-
-    return false;
-}
-
-bool RangeAnalysis::callSatisfiesSummaryRequirements(
-    CallInst *call, const std::vector<ArgRangeRequirement> &requirements,
-    long long mod, BasicBlock *ctx,
-    std::vector<ArgRangeRequirement> *callerRequirements,
-    std::set<Value *> &visiting) {
-    if (!call) return false;
-    for (const auto &req : requirements) {
-        if (req.argNo >= call->num_ops_ - 1) return false;
-        Value *actual = call->get_operand(req.argNo);
-        auto range = callerRequirements
-                         ? getSummaryRange(actual, ctx, mod, callerRequirements, visiting)
-                         : getRange(actual, ctx);
-        if (range.valid && !range.isTop && !range.isBottom &&
-            range.lower >= req.lower && range.upper <= req.upper)
-            continue;
-
-        if (req.lower == 0 && req.upper == std::numeric_limits<long long>::max() &&
-            callerRequirements &&
-            ensureNonNegativeForSummary(actual, ctx, mod, callerRequirements, visiting))
-            continue;
-
-        return false;
-    }
-    return true;
-}
-
-bool RangeAnalysis::summaryAppliesToCall(CallInst *call, const ReturnSummary &summary, BasicBlock *ctx) {
-    if (!summary.known || summary.modulus <= 0) return false;
-    std::set<Value *> visiting;
-    return callSatisfiesSummaryRequirements(call, summary.requirements, summary.modulus,
-                                            ctx, nullptr, visiting);
-}
-
-bool RangeAnalysis::valueMatchesAbsMod(Value *v, long long mod, std::set<Value *> &visiting) {
-    if (!v || mod <= 0 || !visiting.insert(v).second) return true;
-
-    auto finish = [&](bool result) {
-        visiting.erase(v);
-        return result;
-    };
-
-    if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
-        long long value = ci->value_;
-        return finish(value > -mod && value < mod);
-    }
-
-    if (auto *inst = dynamic_cast<Instruction *>(v);
-        inst && inst->op_id_ == Instruction::SRem) {
-        auto *divisor = dynamic_cast<ConstantInt *>(inst->get_operand(1));
-        return finish(divisor && divisor->value_ == mod);
-    }
-
-    if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
-            if (!valueMatchesAbsMod(phi->get_operand(i), mod, visiting))
-                return finish(false);
-        }
-        return finish(true);
-    }
-
-    if (auto *sel = dynamic_cast<SelectInst *>(v)) {
-        return finish(valueMatchesAbsMod(sel->get_operand(1), mod, visiting) &&
-                      valueMatchesAbsMod(sel->get_operand(2), mod, visiting));
-    }
-
-    if (auto *call = dynamic_cast<CallInst *>(v)) {
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-        if (callee == func_ && returnSummary_.computing &&
-            returnSummary_.pendingModulus == mod) {
-            return finish(true);
-        }
-        if (callee && !callee->is_declaration() && AM_ &&
-            !AM_->isRangeAnalysisActive(callee)) {
-            auto &calleeRA = AM_->getRangeAnalysis(callee);
-            calleeRA.getNormalizedReturnRange();
-            return finish(calleeRA.returnSummary_.absKnown &&
-                          calleeRA.returnSummary_.modulus == mod);
-        }
-    }
-
-    auto range = getRange(v, nullptr);
-    return finish(range.valid && !range.isTop && !range.isBottom &&
-                  range.lower > -mod && range.upper < mod);
-}
-
-bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod,
-                                              std::vector<ArgRangeRequirement> *requirements) {
+bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod) {
     if (mod <= 0) return false;
-    if (!requirements && getDirectNormalizedSRemMod(v, ctx) == mod) return true;
-
-    if (auto *inst = dynamic_cast<Instruction *>(v);
-        inst && inst->op_id_ == Instruction::SRem) {
-        auto *divisor = dynamic_cast<ConstantInt *>(inst->get_operand(1));
-        if (divisor && divisor->value_ == mod) {
-            std::set<Value *> visiting;
-            return ensureNonNegativeForSummary(inst->get_operand(0), ctx, mod,
-                                               requirements, visiting);
-        }
-    }
-
-    if (requirements) {
-        std::set<Value *> visiting;
-        auto summaryRange = getSummaryRange(v, ctx, mod, requirements, visiting);
-        if (summaryRange.valid && !summaryRange.isTop && !summaryRange.isBottom &&
-            summaryRange.lower >= 0 && summaryRange.upper < mod)
-            return true;
-    }
+    if (inferDirectReturnModulus(v) == mod) return true;
 
     if (auto *phi = dynamic_cast<PhiInst *>(v)) {
         for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
-            if (!valueMatchesNormalizedMod(phi->get_operand(i), predBB, mod, requirements))
+            if (!valueMatchesNormalizedMod(phi->get_operand(i), predBB, mod))
                 return false;
         }
         return true;
     }
 
     if (auto *sel = dynamic_cast<SelectInst *>(v)) {
-        return valueMatchesNormalizedMod(sel->get_operand(1), ctx, mod, requirements) &&
-               valueMatchesNormalizedMod(sel->get_operand(2), ctx, mod, requirements);
+        return valueMatchesNormalizedMod(sel->get_operand(1), ctx, mod) &&
+               valueMatchesNormalizedMod(sel->get_operand(2), ctx, mod);
     }
 
     if (auto *call = dynamic_cast<CallInst *>(v)) {
         auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
         if (callee == func_ && returnSummary_.computing && returnSummary_.pendingModulus == mod) {
-            std::set<Value *> visiting;
-            return callSatisfiesSummaryRequirements(call, returnSummary_.pendingRequirements,
-                                                    mod, ctx, requirements, visiting);
+            return true;
         }
         if (callee && !callee->is_declaration() && AM_ &&
             !AM_->isRangeAnalysisActive(callee)) {
-            auto &calleeRA = AM_->getRangeAnalysis(callee);
-            calleeRA.getNormalizedReturnRange();
-            if (calleeRA.returnSummary_.known && calleeRA.returnSummary_.modulus == mod) {
-                std::set<Value *> visiting;
-                return callSatisfiesSummaryRequirements(call, calleeRA.returnSummary_.requirements,
-                                                        mod, ctx, requirements, visiting);
+            auto summary = AM_->getRangeAnalysis(callee).getNormalizedReturnRange();
+            if (summary.valid && !summary.isTop && !summary.isBottom &&
+                summary.lower == 0 && summary.upper + 1 == mod) {
+                return true;
             }
-        }
-    }
-
-    {
-        std::set<Value *> visiting;
-        auto summaryRange = getSummaryRange(v, ctx, mod, requirements, visiting);
-        if (summaryRange.valid && !summaryRange.isTop && !summaryRange.isBottom &&
-            summaryRange.lower >= 0 && summaryRange.upper < mod) {
-            return true;
         }
     }
 
@@ -1504,13 +1112,13 @@ RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRange() {
     bool sawReturn = false;
     bool ok = true;
     long long candidateMod = 0;
+    std::set<Value *> visitedValues;
 
     for (auto *bb : func_->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *ret = dynamic_cast<ReturnInst *>(inst);
             if (!ret || ret->num_ops_ == 0) continue;
             sawReturn = true;
-            std::set<Value *> visitedValues;
             if (!inferNormalizedModulus(ret->get_operand(0), candidateMod, visitedValues)) {
                 ok = false;
                 break;
@@ -1521,42 +1129,17 @@ RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRange() {
 
     if (ok && candidateMod > 0) {
         returnSummary_.pendingModulus = candidateMod;
-        bool absOk = true;
         for (auto *bb : func_->basic_blocks_) {
             for (auto *inst : bb->instr_list_) {
                 auto *ret = dynamic_cast<ReturnInst *>(inst);
                 if (!ret || ret->num_ops_ == 0) continue;
-                std::set<Value *> absVisited;
-                if (!valueMatchesAbsMod(ret->get_operand(0), candidateMod, absVisited)) {
-                    absOk = false;
+                if (!valueMatchesNormalizedMod(ret->get_operand(0), ret->parent_, candidateMod)) {
+                    ok = false;
                     break;
                 }
             }
-            if (!absOk) break;
+            if (!ok) break;
         }
-        returnSummary_.absKnown = absOk;
-
-        std::vector<ArgRangeRequirement> requirements;
-        for (unsigned iter = 0; iter <= func_->arguments_.size() + 2; ++iter) {
-            auto before = requirements;
-            returnSummary_.pendingRequirements = requirements;
-            ok = true;
-            for (auto *bb : func_->basic_blocks_) {
-                for (auto *inst : bb->instr_list_) {
-                    auto *ret = dynamic_cast<ReturnInst *>(inst);
-                    if (!ret || ret->num_ops_ == 0) continue;
-                    if (!valueMatchesNormalizedMod(ret->get_operand(0), ret->parent_,
-                                                   candidateMod, &requirements)) {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (!ok) break;
-            }
-            if (!ok || requirements == before) break;
-            if (iter == func_->arguments_.size() + 2) ok = false;
-        }
-        returnSummary_.pendingRequirements = requirements;
     } else if (candidateMod == 0) {
         ok = false;
     }
@@ -1565,23 +1148,7 @@ RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRange() {
     returnSummary_.computed = true;
     returnSummary_.pendingModulus = 0;
     returnSummary_.known = ok && sawReturn && candidateMod > 0;
-    returnSummary_.absKnown = returnSummary_.absKnown && sawReturn && candidateMod > 0;
-    returnSummary_.modulus = (returnSummary_.known || returnSummary_.absKnown) ? candidateMod : 0;
-    returnSummary_.requirements = returnSummary_.known ? returnSummary_.pendingRequirements
-                                                       : std::vector<ArgRangeRequirement>{};
-    returnSummary_.pendingRequirements.clear();
-
-    if (debugEnabled()) {
-        std::cerr << "[RangeAnalysis] return-summary func="
-                  << (func_ ? func_->name_ : "<null>")
-                  << " known=" << returnSummary_.known
-                  << " absKnown=" << returnSummary_.absKnown
-                  << " candidate=" << candidateMod
-                  << " ok=" << ok
-                  << " sawReturn=" << sawReturn
-                  << " mod=" << returnSummary_.modulus
-                  << " reqs=" << returnSummary_.requirements.size() << "\n";
-    }
+    returnSummary_.modulus = returnSummary_.known ? candidateMod : 0;
 
     if (!returnSummary_.known) return IntRange::top();
     return IntRange::bounded(0, returnSummary_.modulus - 1);
