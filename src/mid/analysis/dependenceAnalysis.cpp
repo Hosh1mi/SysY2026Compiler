@@ -91,15 +91,16 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
     if (g1->num_ops_ != g2->num_ops_) return r;
     unsigned n_idx = g1->num_ops_ - 1;
 
-    // 逐维提取仿射差异；某维无法仿射化时标记为"不透明"而【不】污染其它维。
-    // 关键：一个维度不透明，只说明该维地址不可解析；它不会凭空给别的循环层
-    // 引入依赖。某层 IV 的方向只取决于它是否真的进入下标（仿射维看系数、
-    // 不透明维看 use-def 可达性）。
+    // 逐维提取【两侧各自】的仿射下标（instance-separated）。acc1 用迭代实例 i1，
+    // acc2 用迭代实例 i2——两个实例的同名 IV 是【独立变量】，绝不做同迭代抵消。
+    // 这是循环携带依赖判定的关键：同迭代 diff 只能证"同一次迭代不撞地址"，
+    // 不能证跨迭代无依赖（如 a[i+1] 写 vs a[i] 读，距离 1 的真 RAW 携带依赖）。
+    // 某维任一侧无法仿射化时标记为 opaque，只影响该维，不污染其它维。
     struct Dim {
         bool       affine = false;
-        AffineExpr diff;            // affine=true 时有效
-        Value     *v1 = nullptr;    // affine=false 时保留两侧原始下标
-        Value     *v2 = nullptr;
+        AffineExpr e1, e2;          // affine=true 时有效（分别是 acc1/acc2 的下标）
+        Value     *o1 = nullptr;    // 原始下标（opaque 时用于 use-def 可达判定）
+        Value     *o2 = nullptr;
     };
     std::vector<Dim> dims;
     dims.reserve(n_idx);
@@ -109,49 +110,75 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
         AffineExpr a = AA_->analyze(o1);
         AffineExpr b = AA_->analyze(o2);
         Dim d;
-        if (a.valid && b.valid) { d.affine = true;  d.diff = a - b; }
-        else                    { d.affine = false; d.v1 = o1; d.v2 = o2; }
+        d.o1 = o1;
+        d.o2 = o2;
+        if (a.valid && b.valid) { d.affine = true; d.e1 = a; d.e2 = b; }
         dims.push_back(d);
     }
 
-    // GCD test：只能用【可仿射维】证明无解（不透明维无法贡献独立性）。
-    //   某可仿射维 gcd(c_iv) 不整除 c_const → 该维永不重合 → 整对独立。
-    bool gcd_proves_independent = false;
+    // GCD test（instance-separated）：某可仿射维的依赖方程
+    //   Σ A_iv·i1_iv − Σ B_iv·i2_iv = e2.const − e1.const
+    // 里全体整系数（两侧的 A_iv 与 B_iv 都算，因 i1/i2 是独立变量）的 gcd
+    // 不整除右端常数 → 该维无整数解 → 整对无依赖。任一维证得即独立。
     for (auto &d : dims) {
         if (!d.affine) continue;
         long g = 0;
-        for (auto &kv : d.diff.coeffs) g = gcdAbs(g, (long)kv.second);
+        for (auto &kv : d.e1.coeffs) g = gcdAbs(g, (long)kv.second);
+        for (auto &kv : d.e2.coeffs) g = gcdAbs(g, (long)kv.second);
+        long rhs = (long)d.e2.constant - (long)d.e1.constant;
         if (g == 0) {
-            if (d.diff.constant != 0) { gcd_proves_independent = true; break; }
+            if (rhs != 0) { r.provably_independent = true; return r; }
         } else {
-            if (d.diff.constant % g != 0) { gcd_proves_independent = true; break; }
+            if (rhs % g != 0) { r.provably_independent = true; return r; }
         }
-    }
-    if (gcd_proves_independent) {
-        r.provably_independent = true;
-        return r;
     }
 
-    // 方向：某层 IV 若在任一维真正进入下标 → ANY（不精确判符号）；否则 EQ。
-    //   仿射维：看 diff 里该 IV 的系数是否非零。
-    //   不透明维：用 use-def 反向可达判断 IV 是否喂入该维任一侧；无法确定即保守 ANY。
-    // 注意若两访问在某可仿射维差为非零常数本应独立，已被上面 GCD 提前返回。
+    // 方向：对每个共同嵌套循环 L（IV=kIV），判断依赖是否【强制 i1_L = i2_L】。
+    //   强 SIV：kIV 只出现在唯一一维、两侧系数相等(s≠0)、该维再无其它 IV →
+    //     该维方程 s·i1_L + c1 = s·i2_L + c2 精确给出距离 δ = i2_L − i1_L =
+    //     (c1 − c2)/s，方向取 δ 符号（δ=0 才是 EQ=不携带）。
+    //   kIV 完全不进任何下标 → 地址对 L 不变 → 任意 L 迭代对同址 → ANY（携带）。
+    //   其余（系数不等/耦合多 IV/跨多维/opaque 里含 kIV）→ 无法证等 → 保守 ANY。
     for (Loop *loop : r.commonLoops) {
-        PhiInst *iv = loop->canonicalIV;
-        if (!iv) {
-            r.direction.push_back(DIR_ANY);
-            continue;
-        }
-        bool ivAppears = false;
+        PhiInst *kIV = loop->canonicalIV;
+        if (!kIV) { r.direction.push_back(DIR_ANY); continue; }
+
+        int  dimsWithKiv = 0;
+        bool coupled = false, kivInOpaque = false;
+        long dist = 0;
+        bool distKnown = false;
         for (auto &d : dims) {
-            if (d.affine) {
-                if (d.diff.coeffOf(iv) != 0) { ivAppears = true; break; }
-            } else {
-                if (!AffineAnalysis::provablyIndependentOfIV(d.v1, iv) ||
-                    !AffineAnalysis::provablyIndependentOfIV(d.v2, iv)) { ivAppears = true; break; }
+            if (!d.affine) {
+                // opaque 维：kIV 可能喂入任一侧即无法给出干净方向 → 保守。
+                if (!AffineAnalysis::provablyIndependentOfIV(d.o1, kIV) ||
+                    !AffineAnalysis::provablyIndependentOfIV(d.o2, kIV))
+                    kivInOpaque = true;
+                continue;
             }
+            long a = d.e1.coeffOf(kIV);
+            long b = d.e2.coeffOf(kIV);
+            if (a == 0 && b == 0) continue;   // kIV 不在此维
+            dimsWithKiv++;
+            bool otherIv = false;
+            for (auto &kv : d.e1.coeffs)
+                if (kv.first != kIV && kv.second != 0) otherIv = true;
+            for (auto &kv : d.e2.coeffs)
+                if (kv.first != kIV && kv.second != 0) otherIv = true;
+            if (a != b || otherIv) { coupled = true; continue; }  // 非强 SIV
+            long num = (long)d.e1.constant - (long)d.e2.constant;  // = δ·s
+            if (num % a == 0) { dist = num / a; distKnown = true; }
+            else coupled = true;   // GCD 理应已拦，兜底保守
         }
-        r.direction.push_back(ivAppears ? DIR_ANY : DIR_EQ);
+
+        if (kivInOpaque || coupled || dimsWithKiv > 1)
+            r.direction.push_back(DIR_ANY);
+        else if (dimsWithKiv == 0)
+            r.direction.push_back(DIR_ANY);         // 地址对 L 不变 → 携带
+        else if (distKnown)
+            r.direction.push_back(dist == 0 ? DIR_EQ
+                                            : (dist > 0 ? DIR_LT : DIR_GT));
+        else
+            r.direction.push_back(DIR_ANY);
     }
 
     return r;
@@ -205,22 +232,14 @@ bool DependenceAnalysis::isInterchangeLegal(
 // ── 单层并行性 ─────────────────────────────────────────────────────────────
 // L 是否携带依赖（不同 L 迭代之间存在内存依赖）。
 //
-// 对每对可能别名、含 store 的访问 (a1,a2)：它们【只在相同 L 迭代】碰撞才不携带
-// 依赖。判据（kIV = L 的规范 IV）：
-//   - 逐维取仿射差 diff = idx1 - idx2；某维 GCD 不整除 → 整对独立，跳过。
-//   - 若 kIV 出现在某维 diff（系数≠0）：两访问对 k 的依赖【不同】，不同 k 迭代
-//     可能碰撞 → 携带。
-//   - 否则 kIV 在 diff 中抵消：
-//       · 若 kIV 确实出现在 a1 的下标里（两访问 k-依赖相同）→ 仅相同 k 碰撞 →
-//         不携带（loop-independent）。
-//       · 若 kIV 根本不在 a1 下标里（地址对 k 不变）→ 每个 k 迭代写同一地址 →
-//         携带（loop-invariant 碰撞，如 reduction 写回 / 计时循环里的定址写）。
-//   - 无法仿射化的维：用 use-def 保守判断 kIV 是否可能进入下标。
+// 复用 test() 的 instance-separated 判定：对每对可能别名、含 store 的访问，
+// 若已证独立则跳过；否则查该对在 L 这一层的方向——方向为 EQ（依赖强制
+// i1_L=i2_L，仅同迭代碰撞）才不携带，其余（LT/GT/ANY，或 L 不在共同嵌套层、
+// 访问无法解析）一律判为携带。无 canonical IV 时 test() 已对该层给出 ANY。
 bool DependenceAnalysis::loopCarriesDependence(
     Loop *L, const std::vector<Instruction *> &accesses)
 {
-    PhiInst *kIV = L->canonicalIV;
-    if (!kIV) return true;
+    if (!L) return true;
 
     int n = (int)accesses.size();
     for (int i = 0; i < n; i++) {
@@ -228,42 +247,14 @@ bool DependenceAnalysis::loopCarriesDependence(
             bool has_store = accesses[i]->is_store() || accesses[j]->is_store();
             if (!has_store) continue;   // read-read 无依赖
 
-            auto *g1 = accessGEP(accesses[i]);
-            auto *g2 = accessGEP(accesses[j]);
-            if (!g1 || !g2) return true;                 // 访问无法解析 → 保守
-            if (!sameBase(gepBase(g1), gepBase(g2))) continue;   // 不别名
-            if (g1->num_ops_ != g2->num_ops_) return true;
+            Result r = test(accesses[i], accesses[j]);
+            if (r.provably_independent) continue;
 
-            unsigned n_idx = g1->num_ops_ - 1;
-            bool kInDiff = false, kInA1 = false, indep = false;
-            for (unsigned d = 0; d < n_idx && !kInDiff; d++) {
-                Value *o1 = g1->get_operand(d + 1);
-                Value *o2 = g2->get_operand(d + 1);
-                AffineExpr e1 = AA_->analyze(o1);
-                AffineExpr e2 = AA_->analyze(o2);
-                if (e1.valid && e2.valid) {
-                    AffineExpr diff = e1 - e2;
-                    long g = 0;
-                    for (auto &kv : diff.coeffs) g = gcdAbs(g, (long)kv.second);
-                    if ((g == 0 && diff.constant != 0) ||
-                        (g != 0 && diff.constant % g != 0))
-                        indep = true;
-                    if (diff.coeffOf(kIV) != 0) kInDiff = true;
-                    if (e1.coeffOf(kIV) != 0)   kInA1   = true;
-                } else {
-                    // 不透明维：kIV 若可能进入任一侧 → 视作 diff 含 kIV（保守）
-                    if (!AffineAnalysis::provablyIndependentOfIV(o1, kIV) ||
-                        !AffineAnalysis::provablyIndependentOfIV(o2, kIV))
-                        kInDiff = true;
-                    if (!AffineAnalysis::provablyIndependentOfIV(o1, kIV))
-                        kInA1 = true;
-                }
-            }
-
-            if (indep)    continue;        // 某维永不重合 → 独立
-            if (kInDiff)  return true;      // k-依赖不同 → 跨迭代碰撞
-            if (kInA1)    continue;         // k-依赖相同 → 仅同迭代碰撞
-            return true;                    // 地址对 k 不变 → 每迭代碰撞，携带
+            auto it = std::find(r.commonLoops.begin(), r.commonLoops.end(), L);
+            if (it == r.commonLoops.end()) return true;   // 无法定位 L → 保守携带
+            size_t idx = it - r.commonLoops.begin();
+            if (idx >= r.direction.size()) return true;   // 方向缺失 → 保守
+            if (r.direction[idx] != DIR_EQ) return true;  // 非同迭代 → 携带
         }
     }
     return false;
