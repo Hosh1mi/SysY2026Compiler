@@ -77,7 +77,7 @@ void Arm64MachineOptimizationPipeline::run(MachineFunction &function) {
         const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
         cleanup_.run(function, true);
         int rounds = 0;
-        while (optimizations_.run(function, true)) {
+        while (optimizations_.run(function, true) && rounds < 256) {
             ++rounds;
             if (profilePasses)
                 std::cerr << "[MachinePipeline] " << function.name
