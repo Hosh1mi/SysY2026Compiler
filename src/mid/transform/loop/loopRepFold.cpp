@@ -1,6 +1,6 @@
-#include "../../include/mid/opt/loopRepFold.hpp"
-#include "../../include/mid/analysis/analysisManager.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/loopRepFold.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>

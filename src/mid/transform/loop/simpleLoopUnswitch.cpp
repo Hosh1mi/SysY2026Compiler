@@ -1,6 +1,6 @@
-#include "../../include/mid/opt/simpleLoopUnswitch.hpp"
-#include "../../include/mid/opt/cfgUtils.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/simpleLoopUnswitch.hpp"
+#include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
 #include <cstdlib>

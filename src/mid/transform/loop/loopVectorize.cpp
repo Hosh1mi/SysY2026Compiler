@@ -1,5 +1,5 @@
-#include "../../include/mid/opt/loopVectorize.hpp"
-#include "../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/opt/loopVectorize.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include <stack>
 #include <queue>
 #include <algorithm>

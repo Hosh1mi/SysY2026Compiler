@@ -1,5 +1,5 @@
-#include "../../include/mid/opt/loopDeletion.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/loopDeletion.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
 #include <cstdlib>

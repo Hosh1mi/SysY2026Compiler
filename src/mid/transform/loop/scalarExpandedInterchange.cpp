@@ -1,8 +1,8 @@
-#include "../../include/mid/opt/scalarExpandedInterchange.hpp"
-#include "../../include/mid/opt/cfgUtils.hpp"
-#include "../../include/mid/ir/constant.hpp"
-#include "../../include/mid/ir/globalVariable.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/scalarExpandedInterchange.hpp"
+#include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/ir/constant.hpp"
+#include "../../../include/mid/ir/globalVariable.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
 #include <set>

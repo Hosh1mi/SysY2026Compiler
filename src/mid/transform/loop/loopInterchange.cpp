@@ -1,12 +1,12 @@
-#include "../../include/mid/opt/loopInterchange.hpp"
-#include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
-#include "../../include/mid/opt/cfgUtils.hpp"
-#include "../../include/mid/ir/basicBlock.hpp"
-#include "../../include/mid/ir/constant.hpp"
-#include "../../include/mid/ir/function.hpp"
-#include "../../include/mid/ir/globalVariable.hpp"
-#include "../../include/mid/ir/instruction.hpp"
-#include "../../include/mid/ir/module.hpp"
+#include "../../../include/mid/opt/loopInterchange.hpp"
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/ir/basicBlock.hpp"
+#include "../../../include/mid/ir/constant.hpp"
+#include "../../../include/mid/ir/function.hpp"
+#include "../../../include/mid/ir/globalVariable.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/ir/module.hpp"
 
 #include <cstdlib>
 #include <functional>

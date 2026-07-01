@@ -1,5 +1,5 @@
-#include "../../include/mid/opt/inductiveRangeCheckElimination.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/inductiveRangeCheckElimination.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 #include <unordered_set>
 
 #include <algorithm>
