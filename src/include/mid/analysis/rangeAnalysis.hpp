@@ -145,13 +145,45 @@ private:
     bool callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx);
     bool allCallSitesSatisfyReturnRequirements();
 
+    struct MemoryKey {
+        Value *base = nullptr;
+        Type *elemType = nullptr;
+        long long constantOffset = 0;
+        Value *symbolicIndex = nullptr;
+        long long symbolicScale = 0;
+
+        bool operator<(const MemoryKey &o) const {
+            if (base != o.base) return base < o.base;
+            if (elemType != o.elemType) return elemType < o.elemType;
+            if (constantOffset != o.constantOffset) return constantOffset < o.constantOffset;
+            if (symbolicIndex != o.symbolicIndex) return symbolicIndex < o.symbolicIndex;
+            return symbolicScale < o.symbolicScale;
+        }
+
+        bool operator==(const MemoryKey &o) const {
+            return base == o.base &&
+                   elemType == o.elemType &&
+                   constantOffset == o.constantOffset &&
+                   symbolicIndex == o.symbolicIndex &&
+                   symbolicScale == o.symbolicScale;
+        }
+
+        bool hasSymbolicOffset() const {
+            return symbolicIndex != nullptr;
+        }
+    };
+
     struct MemoryFactSet {
         std::map<Value *, long long> pointerUpper;
         std::map<Value *, long long> pointerAbsUpper;
+        std::map<MemoryKey, long long> elementUpper;
+        std::map<MemoryKey, long long> elementAbsUpper;
 
         bool operator==(const MemoryFactSet &o) const {
             return pointerUpper == o.pointerUpper &&
-                   pointerAbsUpper == o.pointerAbsUpper;
+                   pointerAbsUpper == o.pointerAbsUpper &&
+                   elementUpper == o.elementUpper &&
+                   elementAbsUpper == o.elementAbsUpper;
         }
 
         bool operator!=(const MemoryFactSet &o) const {
@@ -164,6 +196,12 @@ private:
     void computeMemoryFacts();
     void transferMemoryFact(Instruction *inst, MemoryFactSet &facts);
     void killMemoryFactsFor(Value *ptr, MemoryFactSet &facts, BasicAliasAnalysis &AA);
+    bool getMemoryKey(Value *ptr, MemoryKey &key) const;
+    bool decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey &key) const;
+    bool addMemoryKeyOffset(MemoryKey &key, Value *idx, long long scale) const;
+    bool addMemoryKeyOffset(MemoryKey &key, long long offset) const;
+    bool typeElementCount(Type *ty, Type *elemType, long long &count) const;
+    void killElementFactsFor(Value *ptr, MemoryFactSet &facts, BasicAliasAnalysis &AA);
     static MemoryFactSet meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts);
 
     TruthValue compareRanges(ICmpInst::ICmpOp pred, const IntRange &lhs,

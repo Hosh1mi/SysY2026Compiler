@@ -566,7 +566,7 @@ RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBloc
             std::find(returnSummary_.nonNegativeArgs.begin(),
                       returnSummary_.nonNegativeArgs.end(),
                       arg->arg_no_) != returnSummary_.nonNegativeArgs.end()) {
-            auto reqRange = IntRange::bounded(0, returnSummary_.modulus - 1);
+            auto reqRange = IntRange::bounded(0, std::numeric_limits<long long>::max());
             result = result.intersect(reqRange);
         }
     }
@@ -807,6 +807,141 @@ RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBloc
     return t.join(f);
 }
 
+bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, long long offset) const {
+    return addBounds(key.constantOffset, offset, key.constantOffset);
+}
+
+bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, Value *idx, long long scale) const {
+    long long constIdx = 0;
+    if (getConstInt(idx, constIdx)) {
+        long long delta = 0;
+        if (!multiplyBounds(constIdx, scale, delta)) return false;
+        return addMemoryKeyOffset(key, delta);
+    }
+
+    if (!idx || scale == 0) return scale == 0;
+    if (!key.symbolicIndex) {
+        key.symbolicIndex = idx;
+        key.symbolicScale = scale;
+        return true;
+    }
+    if (key.symbolicIndex != idx) return false;
+    return addBounds(key.symbolicScale, scale, key.symbolicScale);
+}
+
+bool RangeAnalysis::typeElementCount(Type *ty, Type *elemType, long long &count) const {
+    if (!ty || !elemType) return false;
+    if (ty == elemType) {
+        count = 1;
+        return true;
+    }
+    auto *arrTy = dynamic_cast<ArrayType *>(ty);
+    if (!arrTy) return false;
+    long long nested = 0;
+    if (!typeElementCount(arrTy->contained_, elemType, nested)) return false;
+    return multiplyBounds(static_cast<long long>(arrTy->num_elements_), nested, count);
+}
+
+bool RangeAnalysis::decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey &key) const {
+    if (!ptr || !elemType) return false;
+
+    auto *inst = dynamic_cast<Instruction *>(ptr);
+    if (!inst) {
+        key = MemoryKey{};
+        key.base = ptr;
+        key.elemType = elemType;
+        return true;
+    }
+
+    if (inst->op_id_ == Instruction::BitCast) {
+        return decomposeMemoryAddress(inst->get_operand(0), elemType, key);
+    }
+
+    if (inst->op_id_ != Instruction::GetElementPtr) {
+        key = MemoryKey{};
+        key.base = ptr;
+        key.elemType = elemType;
+        return true;
+    }
+
+    auto *gep = static_cast<GetElementPtrInst *>(inst);
+    if (gep->num_ops_ < 2) return false;
+
+    Value *basePtr = gep->get_operand(0);
+    auto *basePtrTy = dynamic_cast<PointerType *>(basePtr->type_);
+    if (!basePtrTy) return false;
+
+    if (!decomposeMemoryAddress(basePtr, elemType, key)) return false;
+
+    Type *curTy = basePtrTy->contained_;
+    bool pointerToArray = dynamic_cast<ArrayType *>(curTy) != nullptr;
+
+    for (unsigned idxNo = 1; idxNo < gep->num_ops_; ++idxNo) {
+        Value *idx = gep->get_operand(idxNo);
+
+        if (pointerToArray && idxNo == 1) {
+            long long leading = 0;
+            if (!getConstInt(idx, leading) || leading != 0) return false;
+            continue;
+        }
+
+        long long scale = 0;
+        if (auto *arrTy = dynamic_cast<ArrayType *>(curTy)) {
+            if (!typeElementCount(arrTy->contained_, elemType, scale)) return false;
+            curTy = arrTy->contained_;
+        } else {
+            if (!typeElementCount(curTy, elemType, scale)) return false;
+        }
+
+        if (!addMemoryKeyOffset(key, idx, scale)) return false;
+    }
+
+    return true;
+}
+
+bool RangeAnalysis::getMemoryKey(Value *ptr, MemoryKey &key) const {
+    auto *ptrTy = ptr ? dynamic_cast<PointerType *>(ptr->type_) : nullptr;
+    if (!ptrTy) return false;
+
+    Type *elemType = ptrTy->contained_;
+    key = MemoryKey{};
+    if (!decomposeMemoryAddress(ptr, elemType, key)) return false;
+    return key.base && key.elemType == elemType;
+}
+
+void RangeAnalysis::killElementFactsFor(Value *ptr, MemoryFactSet &facts,
+                                        BasicAliasAnalysis &AA) {
+    MemoryKey killKey;
+    bool knownKey = getMemoryKey(ptr, killKey);
+    Value *killBase = knownKey ? killKey.base : AA.getUnderlyingObject(ptr);
+
+    auto shouldKill = [&](const MemoryKey &factKey) {
+        if (!knownKey) {
+            return !killBase || factKey.base == killBase;
+        }
+        if (factKey.base != killKey.base) return false;
+        if (killKey.hasSymbolicOffset() || factKey.hasSymbolicOffset())
+            return true;
+        return factKey.elemType == killKey.elemType &&
+               factKey.constantOffset == killKey.constantOffset;
+    };
+
+    for (auto it = facts.elementUpper.begin(); it != facts.elementUpper.end();) {
+        if (shouldKill(it->first)) {
+            it = facts.elementUpper.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = facts.elementAbsUpper.begin(); it != facts.elementAbsUpper.end();) {
+        if (shouldKill(it->first)) {
+            it = facts.elementAbsUpper.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 RangeAnalysis::MemoryFactSet
 RangeAnalysis::meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts) {
     MemoryFactSet result;
@@ -831,6 +966,22 @@ RangeAnalysis::meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts) {
                 ++it;
             }
         }
+        for (auto it = result.elementUpper.begin(); it != result.elementUpper.end();) {
+            auto jt = predFacts[i].elementUpper.find(it->first);
+            if (jt == predFacts[i].elementUpper.end() || jt->second != it->second) {
+                it = result.elementUpper.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = result.elementAbsUpper.begin(); it != result.elementAbsUpper.end();) {
+            auto jt = predFacts[i].elementAbsUpper.find(it->first);
+            if (jt == predFacts[i].elementAbsUpper.end() || jt->second != it->second) {
+                it = result.elementAbsUpper.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     return result;
 }
@@ -848,8 +999,12 @@ void RangeAnalysis::killMemoryFactsFor(Value *ptr, MemoryFactSet &facts,
     if (!ptr) {
         facts.pointerUpper.clear();
         facts.pointerAbsUpper.clear();
+        facts.elementUpper.clear();
+        facts.elementAbsUpper.clear();
         return;
     }
+
+    killElementFactsFor(ptr, facts, AA);
 
     for (auto it = facts.pointerUpper.begin(); it != facts.pointerUpper.end();) {
         if (AA.alias(it->first, ptr) != AliasResult::NoAlias) {
@@ -875,14 +1030,22 @@ void RangeAnalysis::transferMemoryFact(Instruction *inst, MemoryFactSet &facts) 
     if (inst->is_store()) {
         auto *ptr = inst->get_operand(1);
         killMemoryFactsFor(ptr, facts, AA);
+        MemoryKey key;
+        bool hasKey = getMemoryKey(ptr, key);
 
         long long upperPlusOne = getNormalizedValueMod(inst->get_operand(0), inst->parent_);
-        if (upperPlusOne > 0)
+        if (upperPlusOne > 0) {
             facts.pointerUpper[ptr] = upperPlusOne - 1;
+            if (hasKey)
+                facts.elementUpper[key] = upperPlusOne - 1;
+        }
 
         uint32_t absUpper = 0;
-        if (ValueFacts::knownAbsBound(inst->get_operand(0), absUpper))
+        if (ValueFacts::knownAbsBound(inst->get_operand(0), absUpper)) {
             facts.pointerAbsUpper[ptr] = absUpper;
+            if (hasKey)
+                facts.elementAbsUpper[key] = absUpper;
+        }
         return;
     }
 
@@ -899,6 +1062,20 @@ void RangeAnalysis::transferMemoryFact(Instruction *inst, MemoryFactSet &facts) 
              it != facts.pointerAbsUpper.end();) {
             if (isModSet(AA.getCallModRef(call, it->first))) {
                 it = facts.pointerAbsUpper.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = facts.elementUpper.begin(); it != facts.elementUpper.end();) {
+            if (isModSet(AA.getCallModRef(call, it->first.base))) {
+                it = facts.elementUpper.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = facts.elementAbsUpper.begin(); it != facts.elementAbsUpper.end();) {
+            if (isModSet(AA.getCallModRef(call, it->first.base))) {
+                it = facts.elementAbsUpper.erase(it);
             } else {
                 ++it;
             }
@@ -978,6 +1155,17 @@ RangeAnalysis::IntRange RangeAnalysis::getLoadRange(LoadInst *load, BasicBlock *
     if (absIt != facts.pointerAbsUpper.end()) {
         long long upper = absIt->second;
         return IntRange::bounded(-upper, upper);
+    }
+    MemoryKey key;
+    if (getMemoryKey(load->get_operand(0), key)) {
+        auto elemIt = facts.elementUpper.find(key);
+        if (elemIt != facts.elementUpper.end())
+            return IntRange::bounded(0, elemIt->second);
+        auto elemAbsIt = facts.elementAbsUpper.find(key);
+        if (elemAbsIt != facts.elementAbsUpper.end()) {
+            long long upper = elemAbsIt->second;
+            return IntRange::bounded(-upper, upper);
+        }
     }
     return IntRange::top();
 }
@@ -1206,8 +1394,7 @@ bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *
             contextRA = &AM_->getRangeAnalysis(caller);
         }
         auto range = contextRA->getRange(actual, ctx);
-        if (!range.valid || range.isTop || range.isBottom ||
-            range.lower < 0 || range.upper >= modulus) {
+        if (!range.valid || range.isTop || range.isBottom || range.lower < 0) {
             return false;
         }
     }
