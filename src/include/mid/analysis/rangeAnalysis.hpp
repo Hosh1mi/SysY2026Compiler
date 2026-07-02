@@ -130,11 +130,20 @@ private:
     IntRange getSelectRange(SelectInst *sel, BasicBlock *ctx);
     IntRange getSCEVRange(Value *v, BasicBlock *ctx);
     IntRange getNormalizedReturnRange();
+    IntRange getNormalizedReturnRangeForCall(CallInst *call, BasicBlock *ctx);
+    void computeNormalizedReturnSummary();
     bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod);
     bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting) const;
     long long getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx);
     long long inferDirectReturnModulus(Value *v) const;
     long long getNormalizedValueMod(Value *v, BasicBlock *ctx);
+    bool proveOrRequireNonNegative(Value *v, BasicBlock *ctx);
+    bool isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx);
+    bool isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx, std::set<Value *> &visiting);
+    bool addPendingNonNegativeArg(unsigned argNo);
+    bool hasPendingNonNegativeArg(unsigned argNo) const;
+    bool callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx);
+    bool allCallSitesSatisfyReturnRequirements();
 
     struct MemoryFactSet {
         std::map<Value *, long long> pointerUpper;
@@ -199,8 +208,11 @@ private:
         bool computed = false;
         bool computing = false;
         bool known = false;
+        bool conditionalKnown = false;
         long long pendingModulus = 0;
         long long modulus = 0;
+        std::vector<unsigned> pendingNonNegativeArgs;
+        std::vector<unsigned> nonNegativeArgs;
     };
     ReturnSummary returnSummary_;
 };
