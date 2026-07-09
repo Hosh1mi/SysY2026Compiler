@@ -559,6 +559,24 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     if (!pointerPhis.empty() && usedPointerPhis != pointerPhis.size())
         return reject("unused-pointer-phi");
 
+    auto isReductionExemptPhi = [&](Instruction *inst) -> bool {
+        if (!inst->is_phi() || inst->parent_ != loop.header) return false;
+        if (inst == iv.phi || inst == accPhi) return true;
+        for (const auto &p : pointerPhis)
+            if (p.phi == inst) return true;
+        return false;
+    };
+    for (auto *bb : loop.blocks) {
+        for (auto *inst : bb->instr_list_) {
+            if (isReductionExemptPhi(inst)) continue;
+            for (const auto &u : inst->use_list_) {
+                auto *user = dynamic_cast<Instruction*>(u.val_);
+                if (user && user->parent_ && !loop.blocks.count(user->parent_))
+                    return reject("reduction-live-out");
+            }
+        }
+    }
+
     for (auto *bb : loop.blocks) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() || inst->isTerminator()) continue;
@@ -849,18 +867,19 @@ bool LoopVectorize::hasSafeMemoryDependencies(const Loop &loop,
                 continue;
             }
 
-            bool readBeforeWriteSamePtr =
-                (a.ptr == b.ptr || isSameLaneAccess(a.inst, b.inst)) &&
-                ((a.isLoad && b.isStore && a.order < b.order) ||
-                 (b.isLoad && a.isStore && b.order < a.order));
-            if (readBeforeWriteSamePtr) {
-                if (isLoopVectorizeAADebugEnabled()) {
-                    std::cerr << "[LoopVectorize:AA] allow same-address-rmw ptr_a="
-                              << formatLoopVectorizeValue(a.ptr)
-                              << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
-                              << "\n";
+            bool sameLane = (a.ptr == b.ptr || isSameLaneAccess(a.inst, b.inst));
+            if (sameLane) {
+                bool aLoadBStore = (a.isLoad && b.isStore && a.order < b.order);
+                bool bLoadAStore = (b.isLoad && a.isStore && b.order < a.order);
+                if (aLoadBStore || bLoadAStore) {
+                    if (isLoopVectorizeAADebugEnabled()) {
+                        std::cerr << "[LoopVectorize:AA] allow forward-dep ptr_a="
+                                  << formatLoopVectorizeValue(a.ptr)
+                                  << " ptr_b=" << formatLoopVectorizeValue(b.ptr)
+                                  << "\n";
+                    }
+                    continue;
                 }
-                continue;
             }
 
             if (isLoopVectorizeAADebugEnabled()) {
@@ -968,6 +987,35 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
     //    from vectorization
     if (loads.empty() && stores.empty()) {
         return false;
+    }
+
+    // 7b. 最小成本模型（与 reduction 路径对齐）：
+    //   - 常量上界且 trip < 2*VF：向量序言 + 余数循环固定开销不值
+    //   - 体指令数/内存访问比过高：向量化收益被寄存器压力吃掉
+    {
+        auto *headerBr = loop.header->get_terminator();
+        if (headerBr && headerBr->is_br() && headerBr->num_ops_ == 3) {
+            if (auto *cmp = dynamic_cast<ICmpInst*>(headerBr->get_operand(0))) {
+                Value *bnd = nullptr;
+                if (cmp->get_operand(0) == iv.phi) bnd = cmp->get_operand(1);
+                else if (cmp->get_operand(1) == iv.phi) bnd = cmp->get_operand(0);
+                if (auto *cb = dynamic_cast<ConstantInt*>(bnd)) {
+                    long long trip = (iv.stride > 0)
+                                         ? (long long)cb->value_ / iv.stride
+                                         : (long long)cb->value_;
+                    if (trip < 2 * VECTORIZE_FACTOR)
+                        return false;
+                }
+            }
+        }
+        size_t memCount = loads.size() + stores.size();
+        size_t bodyCount = 0;
+        for (auto bb : loop.blocks)
+            for (auto inst : bb->instr_list_)
+                if (!inst->isTerminator() && !inst->is_phi())
+                    ++bodyCount;
+        if (memCount > 0 && bodyCount / memCount > 8)
+            return false;
     }
 
     if (!hasSafeMemoryDependencies(loop, loads, stores, BAA)) {
@@ -1461,6 +1509,16 @@ void LoopVectorize::emitVectorizedLoop(
 
     // Bound must be loop-invariant
     if (!isLoopInvariant(bound, loop.blocks)) return;
+
+    // Preheader must be a dedicated single-successor block branching
+    // unconditionally to origHeader.  The CFG rewrite below assumes this
+    // (it patches the preheader terminator's only operand); a non-dedicated
+    // preheader (conditional branch / multiple successors) would leave the
+    // CFG broken.  Mirrors the guard in emitReductionVectorizedLoop.
+    auto *preheaderBr = preheader ? preheader->get_terminator() : nullptr;
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1 ||
+        preheaderBr->get_operand(0) != origHeader)
+        return;
 
     // ── Create new blocks ──────────────────────────────────────────
 
@@ -2210,7 +2268,7 @@ void LoopVectorize::emitVectorizedLoop(
     }
 
     // Redirect the preheader branch: preheader -> vecHeader (instead of origHeader)
-    auto *preheaderBr = preheader->get_terminator();
+    // preheaderBr 已在函数开头校验为 dedicated 单后继无条件跳转至 origHeader
     for (unsigned i = 0; i < preheaderBr->num_ops_; i++) {
         if (preheaderBr->get_operand(i) == origHeader) {
             preheaderBr->get_operand(i)->remove_use(preheaderBr->use_pos_[i]);

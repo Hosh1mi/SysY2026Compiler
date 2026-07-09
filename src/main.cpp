@@ -255,6 +255,11 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
+    // 重新规范化循环形：Unroll/IVSR/RepFold 可能产生非 simplify 形
+    // （多前驱 preheader、非 dedicated exit），第二次 LoopVectorize 依赖
+    // preheader/singleExit 的标准性，否则 CFG 改写会破裂。
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
