@@ -1729,8 +1729,11 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 
 		// Folding moves the pointer update before intervening instructions.
 		// Keep it local to non-trapping instructions independent of the base.
-		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
-		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		// mayLoad/mayStore alone is not a reason to bail: a load/store to a
+		// *different* address register does not affect the post-index base.
+		// lineUsesReg already catches any instruction that reads or writes
+		// addr.base; calls/barriers are still unsafe (aliasing, ordering).
+		if (block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
 		    lineUsesReg(line, addr.base))
 			return false;
 	}
@@ -2247,8 +2250,11 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			foundAdd = true;
 			break;
 		}
-		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
-		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		// mayLoad/mayStore alone is not a reason to bail: a load/store to a
+		// *different* address register does not affect the post-index base.
+		// lineUsesReg already catches any instruction that reads or writes
+		// postBase; calls/barriers are still unsafe (aliasing, ordering).
+		if (block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
 		    lineUsesReg(line, postBase))
 			return false;
 	}
