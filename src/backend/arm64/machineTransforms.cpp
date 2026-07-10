@@ -261,6 +261,157 @@ static bool isCallBarrier(const std::string &m) {
 	return m == "bl" || m == "blr";
 }
 
+static bool isReturnReg(const std::string &reg) {
+	return reg == "w0" || reg == "x0" || reg == "s0" || reg == "d0";
+}
+
+static std::string tailCallLabelName(const MachineInstr &inst) {
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Label)
+		return "";
+	std::string text = trim(inst.text);
+	if (!text.empty() && text.back() == ':')
+		text.pop_back();
+	return text;
+}
+
+static bool isUncondBranchTo(const MachineInstr &inst, std::string &target) {
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction || line.mnemonic != "b" ||
+	    line.operands.size() != 1)
+		return false;
+	target = line.operands[0];
+	return true;
+}
+
+static bool isDirectCall(const MachineInstr &inst, std::string &target) {
+	ParsedLine line = parseLine(inst.text);
+	if (line.kind != LineKind::Instruction || line.mnemonic != "bl" ||
+	    line.operands.size() != 1)
+		return false;
+	target = line.operands[0];
+	return !target.empty();
+}
+
+static int findBlockByLabel(const MachineFunction &func, const std::string &label) {
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		if (!func.blocks[b].instrs.empty() &&
+		    tailCallLabelName(func.blocks[b].instrs.front()) == label)
+			return static_cast<int>(b);
+	}
+	return -1;
+}
+
+static bool collectEpilogueBody(const MachineFunction &func,
+                                std::vector<MachineInstr> &body) {
+	const std::string epilogueLabel = ".L" + func.name + "_epilogue";
+	int epilogueBlock = findBlockByLabel(func, epilogueLabel);
+	if (epilogueBlock < 0)
+		return false;
+
+	const auto &instrs = func.blocks[epilogueBlock].instrs;
+	if (instrs.size() < 2)
+		return false;
+
+	ParsedLine ret = parseLine(instrs.back().text);
+	if (ret.kind != LineKind::Instruction || ret.mnemonic != "ret")
+		return false;
+
+	body.clear();
+	for (size_t i = 1; i + 1 < instrs.size(); ++i) {
+		ParsedLine line = parseLine(instrs[i].text);
+		if (line.kind != LineKind::Instruction)
+			return false;
+		if (line.mnemonic == "b" || line.mnemonic == "bl" ||
+		    line.mnemonic == "blr" || line.mnemonic == "ret" ||
+		    line.mnemonic == "br")
+			return false;
+		body.push_back(instrs[i]);
+	}
+	return true;
+}
+
+static bool matchReturnForwarder(const MachineFunction &func,
+                                 const std::string &label,
+                                 const std::string &tempReg) {
+	int blockIdx = findBlockByLabel(func, label);
+	if (blockIdx < 0)
+		return false;
+	const auto &instrs = func.blocks[blockIdx].instrs;
+	if (instrs.size() != 3)
+		return false;
+
+	ParsedLine move = parseLine(instrs[1].text);
+	if (move.kind != LineKind::Instruction ||
+	    (move.mnemonic != "mov" && move.mnemonic != "fmov") ||
+	    move.operands.size() != 2 ||
+	    !isReturnReg(move.operands[0]) ||
+	    !samePhysicalReg(move.operands[1], tempReg))
+		return false;
+
+	std::string branchTarget;
+	if (!isUncondBranchTo(instrs[2], branchTarget))
+		return false;
+	return branchTarget == ".L" + func.name + "_epilogue";
+}
+
+static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
+                                      size_t instrIdx) {
+	if (blockIdx >= func.blocks.size())
+		return false;
+	auto &block = func.blocks[blockIdx];
+	if (instrIdx >= block.instrs.size())
+		return false;
+
+	std::string callee;
+	if (!isDirectCall(block.instrs[instrIdx], callee))
+		return false;
+
+	std::vector<MachineInstr> epilogueBody;
+	if (!collectEpilogueBody(func, epilogueBody))
+		return false;
+
+	size_t eraseEnd = instrIdx + 1;
+	if (eraseEnd >= block.instrs.size())
+		return false;
+
+	std::string branchTarget;
+	if (isUncondBranchTo(block.instrs[eraseEnd], branchTarget)) {
+		if (branchTarget != ".L" + func.name + "_epilogue")
+			return false;
+		++eraseEnd;
+	} else {
+		ParsedLine saveMove = parseLine(block.instrs[eraseEnd].text);
+		if (saveMove.kind != LineKind::Instruction ||
+		    (saveMove.mnemonic != "mov" && saveMove.mnemonic != "fmov") ||
+		    saveMove.operands.size() != 2 ||
+		    !regClass(saveMove.operands[0]) ||
+		    !isReturnReg(saveMove.operands[1]))
+			return false;
+		const std::string tempReg = saveMove.operands[0];
+		if (eraseEnd + 1 >= block.instrs.size() ||
+		    !isUncondBranchTo(block.instrs[eraseEnd + 1], branchTarget) ||
+		    !matchReturnForwarder(func, branchTarget, tempReg))
+			return false;
+		eraseEnd += 2;
+	}
+
+	std::vector<MachineInstr> replacement;
+	replacement.reserve(epilogueBody.size() + 1);
+	for (auto inst : epilogueBody) {
+		inst.originalIndex = block.instrs[instrIdx].originalIndex;
+		replacement.push_back(std::move(inst));
+	}
+	replacement.push_back(parseMachineInstr("\tb " + callee,
+	                                       block.instrs[instrIdx].originalIndex));
+
+	block.instrs.erase(block.instrs.begin() + instrIdx,
+	                   block.instrs.begin() + eraseEnd);
+	block.instrs.insert(block.instrs.begin() + instrIdx,
+	                    replacement.begin(), replacement.end());
+	return true;
+}
+
 // ── RULE implementations ────────────────────────────────────────────
 // Each returns true if it made a change.
 
@@ -1578,8 +1729,11 @@ static bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 
 		// Folding moves the pointer update before intervening instructions.
 		// Keep it local to non-trapping instructions independent of the base.
-		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
-		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		// mayLoad/mayStore alone is not a reason to bail: a load/store to a
+		// *different* address register does not affect the post-index base.
+		// lineUsesReg already catches any instruction that reads or writes
+		// addr.base; calls/barriers are still unsafe (aliasing, ordering).
+		if (block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
 		    lineUsesReg(line, addr.base))
 			return false;
 	}
@@ -2096,8 +2250,11 @@ static bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			foundAdd = true;
 			break;
 		}
-		if (block.instrs[addIdx].mayLoad || block.instrs[addIdx].mayStore ||
-		    block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
+		// mayLoad/mayStore alone is not a reason to bail: a load/store to a
+		// *different* address register does not affect the post-index base.
+		// lineUsesReg already catches any instruction that reads or writes
+		// postBase; calls/barriers are still unsafe (aliasing, ordering).
+		if (block.instrs[addIdx].isCall || block.instrs[addIdx].isBarrier ||
 		    lineUsesReg(line, postBase))
 			return false;
 	}
@@ -2436,6 +2593,7 @@ bool runMachineBranchOptimization(MachineFunction &func) {
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
+			    tryMachineSiblingTailCall(func, b, i) ||
 			    tryMachineFallthroughBranch(func, b, i) ||
 			    tryMachineBranchThreading(func, b, i) ||
 			    tryMachineRemoveDeadForwarder(func, b, i))

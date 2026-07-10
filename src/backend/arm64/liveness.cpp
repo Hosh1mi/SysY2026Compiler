@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <sstream>
 
 namespace {
 
@@ -33,10 +32,8 @@ std::string labelName(std::string label) {
 std::string mnemonic(const MachineInstr &inst) {
     std::string t = trim(inst.text);
     if (t.empty()) return "";
-    std::istringstream in(t);
-    std::string op;
-    in >> op;
-    return lower(op);
+    size_t sp = t.find_first_of(" \t");                                           
+    return sp == std::string::npos ? lower(t) : lower(t.substr(0, sp));  
 }
 
 std::vector<std::string> splitOperands(const std::string &operandText) {
@@ -65,24 +62,25 @@ std::vector<std::string> operands(const MachineInstr &inst) {
     return splitOperands(t.substr(sp + 1));
 }
 
-std::set<std::string> callerSavedRegs() {
-    std::set<std::string> regs;
-    for (int r = 0; r <= 18; ++r)
-        regs.insert("r" + std::to_string(r));
-    for (int r = 0; r <= 7; ++r)
-        regs.insert("v" + std::to_string(r));
-    for (int r = 16; r <= 31; ++r)
-        regs.insert("v" + std::to_string(r));
-    regs.insert(kMachineFlagsReg);
+const std::set<std::string> &callerSavedRegs() {                                  
+    static const std::set<std::string> regs = []() {                              
+        std::set<std::string> r;                                                  
+        for (int i = 0; i <= 18; ++i)  r.insert("r" + std::to_string(i));         
+        for (int i = 0; i <= 7; ++i)   r.insert("v" + std::to_string(i));         
+        for (int i = 16; i <= 31; ++i) r.insert("v" + std::to_string(i));         
+        r.insert(kMachineFlagsReg);                                               
+        return r;                                                                 
+    }(); 
     return regs;
 }
 
-std::set<std::string> physicalBoundaryRegs() {
-    std::set<std::string> regs;
-    for (int r = 0; r <= 30; ++r)
-        regs.insert("r" + std::to_string(r));
-    for (int r = 0; r <= 31; ++r)
-        regs.insert("v" + std::to_string(r));
+const std::set<std::string> &physicalBoundaryRegs() {                             
+    static const std::set<std::string> regs = []() {                              
+        std::set<std::string> r;                                                  
+        for (int i = 0; i <= 30; ++i) r.insert("r" + std::to_string(i));          
+        for (int i = 0; i <= 31; ++i) r.insert("v" + std::to_string(i));          
+        return r;                                                                 
+    }(); 
     return regs;
 }
 
@@ -120,7 +118,7 @@ std::set<std::string> effectiveDefs(const MachineInstr &inst) {
         defs.insert(kMachineFlagsReg);
 
     if (inst.opcode == MOpcode::Call) {
-        auto clobbers = callerSavedRegs();
+        const auto &clobbers = callerSavedRegs();
         defs.insert(clobbers.begin(), clobbers.end());
     }
 
@@ -209,7 +207,7 @@ MachineLivenessResult MachineLiveness::analyze(const MachineFunction &func) cons
 
     std::vector<std::set<std::string>> instrLiveIn(flat.size());
     std::vector<std::set<std::string>> instrLiveOut(flat.size());
-    const auto boundaryRegs = physicalBoundaryRegs();
+    const auto &boundaryRegs = physicalBoundaryRegs();
     bool changed;
     do {
         changed = false;
