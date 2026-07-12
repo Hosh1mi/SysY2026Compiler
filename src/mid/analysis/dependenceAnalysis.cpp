@@ -215,7 +215,18 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
             return r;
         }
         // Banerjee 方向细化：逐层测试 = / < / >，逐维取交集
+        // 关键：仅对真正进入下标的 IV 做 Banerjee 方向推导；
+        //       系数全为 0 的 IV 不参与地址计算，方向恒为 EQ
+        //       （与回退粗粒度分析的语义一致）。
         for (size_t k = 0; k < r.commonLoops.size(); k++) {
+            PhiInst *kIV = r.commonLoops[k]->canonicalIV;
+            if (!kIV) { r.direction.push_back(DIR_ANY); continue; }
+
+            bool ivInDiff = false;
+            for (auto &d : dims)
+                if (d.affine && d.diff.coeffOf(kIV) != 0) { ivInDiff = true; break; }
+            if (!ivInDiff) { r.direction.push_back(DIR_EQ); continue; }
+
             bool eqOk = true, ltOk = true, gtOk = true;
             for (auto &d : dims) {
                 auto rEq = computeBanerjee(d.diff, r.commonLoops, (int)k, 0);
