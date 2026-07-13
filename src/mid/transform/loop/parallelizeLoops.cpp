@@ -219,7 +219,12 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     std::vector<Instruction *> stores, accesses;
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
-            if (dynamic_cast<CallInst *>(inst)) return fail("call in loop");
+            if (auto *call = dynamic_cast<CallInst *>(inst)) {
+                auto *callee = dynamic_cast<Function *>(
+                    call->get_operand(call->num_ops_ - 1));
+                if (!callee || !callee->hasSemFlag(SemFlag::FnPure))
+                    return fail("call in loop");
+            }
             if (dynamic_cast<AllocaInst *>(inst)) return fail("alloca in loop");
             if (inst->is_store()) {
                 Value *ptr = inst->get_operand(1);
@@ -270,6 +275,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 Value *op = inst->get_operand(i);
                 if (dynamic_cast<Constant *>(op) ||
                     dynamic_cast<GlobalVariable *>(op) ||
+                    dynamic_cast<Function *>(op) ||
                     dynamic_cast<BasicBlock *>(op))
                     continue;
                 if (definedInLoop(op, loop.blocks)) continue;
@@ -382,6 +388,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                 Value *op = inst->get_operand(i);
                 if (dynamic_cast<Constant *>(op) ||
                     dynamic_cast<GlobalVariable *>(op) ||
+                    dynamic_cast<Function *>(op) ||
                     dynamic_cast<BasicBlock *>(op))
                     continue;
                 if (definedInLoop(op, loop.blocks)) continue;
