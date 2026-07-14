@@ -5,6 +5,17 @@
 #include <string>
 #include <vector>
 
+// Convert an extracted low-bit test into a bit-test branch:
+//
+//   and wN, wX, #1
+//   cbz/cbnz wN, label
+//
+// becomes:
+//
+//   tbz/tbnz wX, #0, label
+//
+// The same rule also handles the equivalent tst/cmp + b.eq/b.ne forms, and
+// the x-register variant.
 static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
                              const MachineLivenessResult &liveness) {
 	const MachineInstr &andLine = block.instrs[idx];
@@ -422,4 +433,3 @@ bool runMachineBranchOptimization(MachineFunction &func) {
 	}
 	return false;
 }
-
