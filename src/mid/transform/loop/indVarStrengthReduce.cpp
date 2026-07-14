@@ -1,5 +1,5 @@
-#include "../../include/mid/opt/indVarStrengthReduce.hpp"
-#include "../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/opt/indVarStrengthReduce.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>

@@ -1,9 +1,9 @@
-#include "../../include/mid/opt/parallelizeLoops.hpp"
-#include "../../include/mid/analysis/analysisManager.hpp"
-#include "../../include/mid/analysis/affineAnalysis.hpp"
-#include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
-#include "../../include/mid/analysis/dependenceAnalysis.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/parallelizeLoops.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/analysis/affineAnalysis.hpp"
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/analysis/dependenceAnalysis.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>

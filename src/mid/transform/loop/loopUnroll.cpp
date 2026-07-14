@@ -1,4 +1,4 @@
-#include "../../include/mid/opt/loopUnroll.hpp"
+#include "../../../include/mid/opt/loopUnroll.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -726,7 +726,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         if (term && term->num_ops_ == 3 && bb != latch)
             ++condBranchBlocks;
     }
-    if (bodyInstCount > 16 || bodyInstCount > MAX_STRUCTURED_LOOP_INSTS)
+    if (bodyInstCount > MAX_STRUCTURED_LOOP_INSTS)
         return debugStructuredReject(func, loop, "too-many-body-insts");
     if (condBranchBlocks > 1)
         return debugStructuredReject(func, loop, "too-many-branches");

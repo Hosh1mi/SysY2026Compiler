@@ -1,6 +1,6 @@
-#include "../../include/mid/opt/loopSimplify.hpp"
-#include "../../include/mid/ir/instruction.hpp"
-#include "../../include/mid/ir/constant.hpp"
+#include "../../../include/mid/opt/loopSimplify.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/ir/constant.hpp"
 
 #include <algorithm>
 #include <vector>

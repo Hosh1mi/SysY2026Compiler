@@ -1,6 +1,6 @@
-#include "../../include/mid/opt/loopInvariantCodeMotion.hpp"
-#include "../../include/mid/analysis/analysisManager.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 
 void LICM::execute(Module *module) {

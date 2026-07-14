@@ -7,8 +7,8 @@
 //      exits 保证前驱全在循环内，且 def 支配 exit ⇒ def 支配各前驱）。
 //   3. 循环外的 use 改写到支配它的那个 exit phi。
 
-#include "../../include/mid/opt/lcssa.hpp"
-#include "../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/opt/lcssa.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
 #include <map>

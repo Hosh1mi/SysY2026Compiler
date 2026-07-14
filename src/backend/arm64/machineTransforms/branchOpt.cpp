@@ -158,6 +158,83 @@ static std::string labelName(const MachineInstr &inst) {
 	return label;
 }
 
+static bool isReturnReg(const std::string &reg) {
+	return reg == "w0" || reg == "x0" || reg == "s0" || reg == "d0";
+}
+
+static bool isUncondBranchTo(const MachineInstr &inst, std::string &target) {
+	if (inst.opcodeText != "b" || inst.rawOperands.size() != 1)
+		return false;
+	target = inst.rawOperands[0];
+	return true;
+}
+
+static bool isDirectCall(const MachineInstr &inst, std::string &target) {
+	if (inst.opcodeText != "bl" || inst.rawOperands.size() != 1)
+		return false;
+	target = inst.rawOperands[0];
+	return !target.empty();
+}
+
+static int findBlockByLabel(const MachineFunction &func, const std::string &label) {
+	for (size_t b = 0; b < func.blocks.size(); ++b) {
+		if (!func.blocks[b].instrs.empty() &&
+		    labelName(func.blocks[b].instrs.front()) == label)
+			return static_cast<int>(b);
+	}
+	return -1;
+}
+
+static bool collectEpilogueBody(const MachineFunction &func,
+                                std::vector<MachineInstr> &body) {
+	const std::string epilogueLabel = ".L" + func.name + "_epilogue";
+	int epilogueBlock = findBlockByLabel(func, epilogueLabel);
+	if (epilogueBlock < 0)
+		return false;
+
+	const auto &instrs = func.blocks[epilogueBlock].instrs;
+	if (instrs.size() < 2)
+		return false;
+	if (instrs.back().opcodeText != "ret")
+		return false;
+
+	body.clear();
+	for (size_t i = 1; i + 1 < instrs.size(); ++i) {
+		const MachineInstr &line = instrs[i];
+		if (line.isLabelLike)
+			return false;
+		if (line.opcodeText == "b" || line.opcodeText == "bl" ||
+		    line.opcodeText == "blr" || line.opcodeText == "ret" ||
+		    line.opcodeText == "br")
+			return false;
+		body.push_back(instrs[i]);
+	}
+	return true;
+}
+
+static bool matchReturnForwarder(const MachineFunction &func,
+                                 const std::string &label,
+                                 const std::string &tempReg) {
+	int blockIdx = findBlockByLabel(func, label);
+	if (blockIdx < 0)
+		return false;
+	const auto &instrs = func.blocks[blockIdx].instrs;
+	if (instrs.size() != 3)
+		return false;
+
+	const MachineInstr &move = instrs[1];
+	if ((move.opcodeText != "mov" && move.opcodeText != "fmov") ||
+	    move.rawOperands.size() != 2 ||
+	    !isReturnReg(move.rawOperands[0]) ||
+	    !peephSamePhysicalReg(move.rawOperands[1], tempReg))
+		return false;
+
+	std::string branchTarget;
+	if (!isUncondBranchTo(instrs[2], branchTarget))
+		return false;
+	return branchTarget == ".L" + func.name + "_epilogue";
+}
+
 static bool nextVisibleIsLabel(const MachineFunction &func,
                                size_t blockIdx,
                                size_t instrIdx,
@@ -412,11 +489,67 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	return true;
 }
 
+static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
+                                      size_t instrIdx) {
+	if (blockIdx >= func.blocks.size())
+		return false;
+	auto &block = func.blocks[blockIdx];
+	if (instrIdx >= block.instrs.size())
+		return false;
+
+	std::string callee;
+	if (!isDirectCall(block.instrs[instrIdx], callee))
+		return false;
+
+	std::vector<MachineInstr> epilogueBody;
+	if (!collectEpilogueBody(func, epilogueBody))
+		return false;
+
+	size_t eraseEnd = instrIdx + 1;
+	if (eraseEnd >= block.instrs.size())
+		return false;
+
+	std::string branchTarget;
+	if (isUncondBranchTo(block.instrs[eraseEnd], branchTarget)) {
+		if (branchTarget != ".L" + func.name + "_epilogue")
+			return false;
+		++eraseEnd;
+	} else {
+		const MachineInstr &saveMove = block.instrs[eraseEnd];
+		if ((saveMove.opcodeText != "mov" && saveMove.opcodeText != "fmov") ||
+		    saveMove.rawOperands.size() != 2 ||
+		    !peephRegClass(saveMove.rawOperands[0]) ||
+		    !isReturnReg(saveMove.rawOperands[1]))
+			return false;
+		const std::string tempReg = saveMove.rawOperands[0];
+		if (eraseEnd + 1 >= block.instrs.size() ||
+		    !isUncondBranchTo(block.instrs[eraseEnd + 1], branchTarget) ||
+		    !matchReturnForwarder(func, branchTarget, tempReg))
+			return false;
+		eraseEnd += 2;
+	}
+
+	std::vector<MachineInstr> replacement;
+	replacement.reserve(epilogueBody.size() + 1);
+	for (auto inst : epilogueBody) {
+		inst.originalIndex = block.instrs[instrIdx].originalIndex;
+		replacement.push_back(std::move(inst));
+	}
+	replacement.push_back(parseMachineInstr("\tb " + callee,
+	                                       block.instrs[instrIdx].originalIndex));
+
+	block.instrs.erase(block.instrs.begin() + instrIdx,
+	                   block.instrs.begin() + eraseEnd);
+	block.instrs.insert(block.instrs.begin() + instrIdx,
+	                    replacement.begin(), replacement.end());
+	return true;
+}
 
 bool runMachineBranchOptimization(MachineFunction &func) {
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
+			    tryMachineSiblingTailCall(func, b, i) ||
 			    tryMachineFallthroughBranch(func, b, i) ||
 			    tryMachineBranchThreading(func, b, i) ||
 			    tryMachineRemoveDeadForwarder(func, b, i))

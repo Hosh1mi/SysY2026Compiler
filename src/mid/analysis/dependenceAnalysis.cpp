@@ -60,6 +60,70 @@ static std::vector<Loop *> commonNest(Loop *l1, Loop *l2) {
     return common;   // 顶层在前
 }
 
+// ── Banerjee 不等式测试 ──────────────────────────────────────────────────
+// Banerjee 测试通过计算仿射差表达式在 IV 界约束下的 min/max，
+// 实现更精确的依赖方向和独立性判断。
+//   - 独立性：全范围 lo>0 或 hi<0 → 无解 → 独立（GCD 失败时补充）
+//   - 方向细化：约束 Δ_k≤-1 / Δ_k=0 / Δ_k≥1，判断各方向是否可行
+
+static long long getConstantTripCount(Loop *loop) {
+    auto *ci = dynamic_cast<ConstantInt *>(loop->tripCount);
+    return ci ? (long long)ci->value_ : -1;
+}
+
+static bool allLoopsHaveConstantTrip(const std::vector<Loop *> &loops) {
+    for (auto *loop : loops)
+        if (getConstantTripCount(loop) < 0) return false;
+    return true;
+}
+
+struct BanerjeeRange { long long lo; long long hi; bool valid; };
+
+// 核心：计算 diff = c_const + Σ c_i·Δ_i 在给定 Δ 范围下的 min/max
+// loops: 共同嵌套循环（最外层在前），与 diff 中的 IV 对应
+// constrainedIdx: -1=全范围，k=约束 loops[k] 的 Δ：
+//   dirSign<0 → Δ∈[-(N-1),-1]  (方向 '<')
+//   dirSign=0 → Δ=0            (方向 '=')
+//   dirSign>0 → Δ∈[1,N-1]      (方向 '>')
+static BanerjeeRange computeBanerjee(const AffineExpr         &diff,
+                                     const std::vector<Loop *> &loops,
+                                     int constrainedIdx, int dirSign) {
+    long long loVal = diff.constant;
+    long long hiVal = diff.constant;
+
+    for (size_t i = 0; i < loops.size(); i++) {
+        long long N = getConstantTripCount(loops[i]);
+        if (N < 0) return {0, 0, false};
+        if (N <= 1 && (int)i == constrainedIdx && dirSign != 0)
+            return {0, 0, false};
+
+        PhiInst   *iv = loops[i]->canonicalIV;
+        long long  c  = iv ? (long long)diff.coeffOf(iv) : 0;
+
+        long long dLo, dHi;
+        if ((int)i == constrainedIdx) {
+            if      (dirSign < 0) { dLo = -(N - 1); dHi = -1;    }
+            else if (dirSign > 0) { dLo = 1;        dHi = N - 1; }
+            else                  { dLo = 0;        dHi = 0;     }
+        } else {
+            dLo = -(N - 1);
+            dHi = N - 1;
+        }
+        if (dLo > dHi) return {0, 0, false};
+
+        if (c >= 0) { loVal += c * dLo; hiVal += c * dHi; }
+        else        { loVal += c * dHi; hiVal += c * dLo; }
+    }
+    return {loVal, hiVal, true};
+}
+
+// 全范围 Banerjee 独立性测试（每维独立，任一无解即独立）
+static bool banerjeeIndependent(const AffineExpr         &diff,
+                                const std::vector<Loop *> &loops) {
+    auto r = computeBanerjee(diff, loops, -1, 0);
+    return r.valid && (r.lo > 0 || r.hi < 0);
+}
+
 // ── 主测试 ──────────────────────────────────────────────────────────────
 
 DependenceAnalysis::Result
@@ -132,10 +196,58 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
         return r;
     }
 
-    // 方向：某层 IV 若在任一维真正进入下标 → ANY（不精确判符号）；否则 EQ。
-    //   仿射维：看 diff 里该 IV 的系数是否非零。
-    //   不透明维：用 use-def 反向可达判断 IV 是否喂入该维任一侧；无法确定即保守 ANY。
-    // 注意若两访问在某可仿射维差为非零常数本应独立，已被上面 GCD 提前返回。
+    // ── Banerjee 增强 ──────────────────────────────────────────────────────
+    // GCD 未能证明独立时，尝试 Banerjee 测试
+    // 前提：所有维度仿射化且所有循环有常量 trip count
+    bool allCanBanerjee = allLoopsHaveConstantTrip(r.commonLoops);
+    for (auto &d : dims) { if (!d.affine) allCanBanerjee = false; }
+    if (allCanBanerjee) {
+        // Banerjee 独立性测试（逐维，任一无解即独立）
+        bool banerjee_independent = false;
+        for (auto &d : dims) {
+            if (banerjeeIndependent(d.diff, r.commonLoops)) {
+                banerjee_independent = true;
+                break;
+            }
+        }
+        if (banerjee_independent) {
+            r.provably_independent = true;
+            return r;
+        }
+        // Banerjee 方向细化：逐层测试 = / < / >，逐维取交集
+        // 关键：仅对真正进入下标的 IV 做 Banerjee 方向推导；
+        //       系数全为 0 的 IV 不参与地址计算，方向恒为 EQ
+        //       （与回退粗粒度分析的语义一致）。
+        for (size_t k = 0; k < r.commonLoops.size(); k++) {
+            PhiInst *kIV = r.commonLoops[k]->canonicalIV;
+            if (!kIV) { r.direction.push_back(DIR_ANY); continue; }
+
+            bool ivInDiff = false;
+            for (auto &d : dims)
+                if (d.affine && d.diff.coeffOf(kIV) != 0) { ivInDiff = true; break; }
+            if (!ivInDiff) { r.direction.push_back(DIR_EQ); continue; }
+
+            bool eqOk = true, ltOk = true, gtOk = true;
+            for (auto &d : dims) {
+                auto rEq = computeBanerjee(d.diff, r.commonLoops, (int)k, 0);
+                auto rLt = computeBanerjee(d.diff, r.commonLoops, (int)k, -1);
+                auto rGt = computeBanerjee(d.diff, r.commonLoops, (int)k, 1);
+                if (!rEq.valid || rEq.lo > 0 || rEq.hi < 0) eqOk = false;
+                if (!rLt.valid || rLt.lo > 0 || rLt.hi < 0) ltOk = false;
+                if (!rGt.valid || rGt.lo > 0 || rGt.hi < 0) gtOk = false;
+            }
+            Dir dir;
+            if (ltOk && gtOk)                              dir = DIR_ANY;
+            else if (ltOk && !gtOk)                        dir = DIR_LT;
+            else if (gtOk && !ltOk)                        dir = DIR_GT;
+            else if (eqOk && !ltOk && !gtOk)              dir = DIR_EQ;
+            else                                           dir = DIR_ANY;
+            r.direction.push_back(dir);
+        }
+        return r;
+    }
+
+    // ── 回退：粗粒度方向（IV 出现在下标 → ANY，否则 EQ） ─────────────────
     for (Loop *loop : r.commonLoops) {
         PhiInst *iv = loop->canonicalIV;
         if (!iv) {
@@ -190,13 +302,17 @@ bool DependenceAnalysis::isInterchangeLegal(
             Dir d_o = r.direction[idx_o];
             Dir d_i = r.direction[idx_i];
 
-            // 反转条件：原本 outer < inner > → 交换后变 outer > inner < 反转
-            // 但我们的方向只到 ANY 粒度，没法判 < 还是 >，所以：
-            //   - 若两者都是 EQ → 安全
-            //   - 否则保守判定：若 outer 不是 EQ（说明有依赖跨外层）且 inner 不是 EQ → 不安全
-            if (d_o != DIR_EQ && d_i != DIR_EQ) {
-                return false;
+            // Banerjee 提供精确 < / = / > 时，仅 (<,>) (>,<) 反转非法。
+            // 含 DIR_ANY 时回退到旧保守规则：
+            //   仅当另一方为 EQ 时才安全（=,* 或 *,=），否则未知方向可能反转为非法。
+            if (d_o == DIR_ANY || d_i == DIR_ANY) {
+                if (d_o != DIR_EQ && d_i != DIR_EQ)
+                    return false;
+                continue;
             }
+            bool lt_gt = (d_o == DIR_LT && d_i == DIR_GT) ||
+                         (d_o == DIR_GT && d_i == DIR_LT);
+            if (lt_gt) return false;
         }
     }
     return true;

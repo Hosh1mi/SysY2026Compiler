@@ -1,12 +1,12 @@
-#include "../../include/mid/opt/loopInterchange.hpp"
-#include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
-#include "../../include/mid/opt/cfgUtils.hpp"
-#include "../../include/mid/ir/basicBlock.hpp"
-#include "../../include/mid/ir/constant.hpp"
-#include "../../include/mid/ir/function.hpp"
-#include "../../include/mid/ir/globalVariable.hpp"
-#include "../../include/mid/ir/instruction.hpp"
-#include "../../include/mid/ir/module.hpp"
+#include "../../../include/mid/opt/loopInterchange.hpp"
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/ir/basicBlock.hpp"
+#include "../../../include/mid/ir/constant.hpp"
+#include "../../../include/mid/ir/function.hpp"
+#include "../../../include/mid/ir/globalVariable.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
+#include "../../../include/mid/ir/module.hpp"
 
 #include <cstdlib>
 #include <functional>
@@ -327,6 +327,143 @@ bool applyParallelSink(Function *func, Loop *K) {
     removeUnreachableBlocks(func);
     return true;
 }
+
+// ── parallel float ──────────────────────────────────────────────────────
+// Interchange K (outer, carries dependence) with M (inner, parallel).
+//
+// Before: for K { for M { body } }
+// After:  for M { for K { body } }
+//
+// M's header may contain non-phi instructions that depend on K's IV
+// (e.g., a guard like A[i][k]==1).  We split M_header: phi(s) move to
+// a new outer header (mOuter); the rest stays as the inner loop body.
+// M's loop condition may be in the latch (non-canonical form) — that's
+// fine, the condition stays in the latch.
+
+bool applyInterchange(Function *func, Loop *K, Loop *M) {
+    Module *module = func->parent_;
+
+    BasicBlock *kHeader = K->header;
+    BasicBlock *kPre    = K->preheader;
+    BasicBlock *kLatch  = K->singleLatch();
+    BasicBlock *kExit   = K->singleExit();
+    if (!kHeader || !kPre || !kLatch || !kExit) return false;
+
+    BasicBlock *mHeader = M->header;
+    BasicBlock *mPre    = M->preheader;
+    BasicBlock *mLatch  = M->singleLatch();
+    if (!mHeader || !mPre || !mLatch) return false;
+
+    if (K->children.size() != 1) return false;
+
+    auto hasPhi = [](BasicBlock *bb) -> bool {
+        return !bb->instr_list_.empty() && bb->instr_list_.front()->is_phi();
+    };
+    if (hasPhi(kExit) || hasPhi(kLatch) || hasPhi(mLatch)) return false;
+
+    std::vector<PhiInst *> mPhis;
+    for (auto *inst : mHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        mPhis.push_back(static_cast<PhiInst *>(inst));
+    }
+    if (mPhis.empty()) return false;
+
+    for (auto *inst : mHeader->instr_list_) {
+        if (inst->is_phi()) continue;
+        if (inst->isTerminator()) break;
+        if (inst->is_call()) return false;
+    }
+
+    auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 3000); };
+
+    auto *mOuter = new BasicBlock(module, "li_float_" + bbNum(), func);
+
+    for (auto *phi : mPhis) {
+        mHeader->remove_instr(phi);
+        mOuter->add_instruction(phi);
+    }
+
+    new BranchInst(mPre, mOuter);
+    mOuter->add_succ_basic_block(mPre);
+    mPre->add_pre_basic_block(mOuter);
+
+    for (auto *phi : mPhis) {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i + 1) == mPre)
+                phi->set_operand(i + 1, kPre);
+    }
+    for (auto *inst : kHeader->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i + 1) == kPre)
+                phi->set_operand(i + 1, mPre);
+    }
+
+    auto isInMExits = [&](BasicBlock *bb) -> bool {
+        return std::find(M->exits.begin(), M->exits.end(), bb) != M->exits.end();
+    };
+
+    // 1. K_pre → mOuter (was → kHeader)
+    replaceBranchTarget(kPre, kHeader, mOuter);
+
+    // 2. K_header: body → mHeader, exit → mLatch
+    {
+        BasicBlock *bodySucc = nullptr, *exitSucc = nullptr;
+        auto *term = kHeader->get_terminator();
+        for (unsigned i = 1; i < term->num_ops_; i++) {
+            auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
+            if (!succ) continue;
+            if (K->isInLoop(succ)) bodySucc = succ;
+            else                   exitSucc = succ;
+        }
+        if (bodySucc) replaceBranchTarget(kHeader, bodySucc, mHeader);
+        if (exitSucc) replaceBranchTarget(kHeader, exitSucc, mLatch);
+    }
+
+    // 3. M_pre: enter → kHeader, skip → mLatch
+    {
+        BasicBlock *enterSucc = nullptr, *skipSucc = nullptr;
+        for (auto *succ : mPre->succ_bbs_) {
+            if (isInMExits(succ)) skipSucc = succ;
+            else                  enterSucc = succ;
+        }
+        if (enterSucc) replaceBranchTarget(mPre, enterSucc, kHeader);
+        if (skipSucc)  replaceBranchTarget(mPre, skipSucc,  mLatch);
+    }
+
+    // 4. Blocks inside M that branch to mLatch → branch to kLatch
+    {
+        std::vector<BasicBlock *> predsToRetarget;
+        for (auto *pred : mLatch->pre_bbs_) {
+            if (pred == mLatch) continue;
+            if (!M->isInLoop(pred)) continue;
+            predsToRetarget.push_back(pred);
+        }
+        for (auto *pred : predsToRetarget)
+            replaceBranchTarget(pred, mLatch, kLatch);
+    }
+
+    // 5. M_latch: continue → mOuter, exit → kExit
+    {
+        BasicBlock *continueSucc = nullptr, *exitSucc = nullptr;
+        for (auto *succ : mLatch->succ_bbs_) {
+            if (isInMExits(succ)) exitSucc = succ;
+            else                  continueSucc = succ;
+        }
+        if (continueSucc) replaceBranchTarget(mLatch, continueSucc, mOuter);
+        if (exitSucc)     replaceBranchTarget(mLatch, exitSucc,     kExit);
+    }
+
+    // Update phis in blocks whose predecessors changed
+    retargetPhiPred(kExit, kHeader, mLatch);
+    retargetPhiPred(kLatch, mLatch, mHeader);
+    for (auto *phi : mPhis)
+        retargetPhiPred(mPre, mHeader, mOuter);
+
+    removeUnreachableBlocks(func);
+    return true;
+}
 } // namespace
 
 void LoopInterchange::execute(Module *module) {
@@ -407,13 +544,77 @@ bool LoopInterchange::runOnFunction(Function *func) {
             break;
         }
 
-        if (!target) break;
-        if (!applyParallelSink(func, target)) {
+        if (target) {
+            if (applyParallelSink(func, target)) {
+                everChanged = true;
+                continue;
+            }
             if (debugEnabled())
                 std::cerr << "[LoopInterchange] applyParallelSink bailed\n";
-            break;   
         }
-        everChanged = true;
+
+        // Phase 2: parallel float — K carries dependence, M (child) is parallel.
+        // Interchange K and M so the reduction loop moves closer to innermost,
+        // reducing the reuse distance of the reduction variable.
+        {
+            Loop *floatK = nullptr;
+            Loop *floatM = nullptr;
+            for (auto &Lp : LI.allLoops()) {
+                Loop *K = Lp.get();
+                if (K->children.empty())  continue;
+                if (!K->hasCanonicalIV()) continue;
+                if (!K->preheader || !K->singleLatch() || !K->singleExit()) continue;
+
+                bool scalarCarried = false;
+                for (auto *inst : K->header->instr_list_) {
+                    if (!inst->is_phi()) break;
+                    if (inst != K->canonicalIV) { scalarCarried = true; break; }
+                }
+                if (scalarCarried) continue;
+
+                std::vector<Instruction *>       accs;
+                std::vector<GetElementPtrInst *> geps;
+                collectAccesses(K, accs, geps);
+
+                if (DA.isLoopParallel(K, accs)) continue;
+
+                if (K->children.size() != 1) continue;
+                Loop *M = K->children[0];
+                if (!M->preheader || !M->singleLatch()) continue;
+
+                if (!DA.isInterchangeLegal(K, M, accs)) { dbg(K, "float: not legal"); continue; }
+
+                bool profitable = !M->children.empty();
+                if (!profitable) {
+                    Loop *deepest = deepestCanonicalDescendant(K);
+                    if (deepest && deepest != K) {
+                        long before = CM.totalStride(geps, deepest->canonicalIV);
+                        long after  = CM.totalStride(geps, K->canonicalIV);
+                        if (before >= 0 && after >= 0 && after < before)
+                            profitable = true;
+                    }
+                }
+                if (!profitable) { dbg(K, "float: not profitable"); continue; }
+
+                if (debugEnabled())
+                    std::cerr << "[LoopInterchange] float candidate K=" << func->name_ << "/"
+                              << K->header->name_ << " M=" << M->header->name_ << "\n";
+                floatK = K;
+                floatM = M;
+                break;
+            }
+
+            if (floatK) {
+                if (applyInterchange(func, floatK, floatM)) {
+                    everChanged = true;
+                    continue;
+                }
+                if (debugEnabled())
+                    std::cerr << "[LoopInterchange] applyInterchange bailed\n";
+            }
+        }
+
+        break;
     }
     return everChanged;
 }

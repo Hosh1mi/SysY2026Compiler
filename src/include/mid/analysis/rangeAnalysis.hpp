@@ -130,19 +130,60 @@ private:
     IntRange getSelectRange(SelectInst *sel, BasicBlock *ctx);
     IntRange getSCEVRange(Value *v, BasicBlock *ctx);
     IntRange getNormalizedReturnRange();
+    IntRange getNormalizedReturnRangeForCall(CallInst *call, BasicBlock *ctx);
+    void computeNormalizedReturnSummary();
     bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod);
     bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting) const;
     long long getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx);
     long long inferDirectReturnModulus(Value *v) const;
     long long getNormalizedValueMod(Value *v, BasicBlock *ctx);
+    bool proveOrRequireNonNegative(Value *v, BasicBlock *ctx);
+    bool isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx);
+    bool isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx, std::set<Value *> &visiting);
+    bool addPendingNonNegativeArg(unsigned argNo);
+    bool hasPendingNonNegativeArg(unsigned argNo) const;
+    bool callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx);
+    bool allCallSitesSatisfyReturnRequirements();
+
+    struct MemoryKey {
+        Value *base = nullptr;
+        Type *elemType = nullptr;
+        long long constantOffset = 0;
+        Value *symbolicIndex = nullptr;
+        long long symbolicScale = 0;
+
+        bool operator<(const MemoryKey &o) const {
+            if (base != o.base) return base < o.base;
+            if (elemType != o.elemType) return elemType < o.elemType;
+            if (constantOffset != o.constantOffset) return constantOffset < o.constantOffset;
+            if (symbolicIndex != o.symbolicIndex) return symbolicIndex < o.symbolicIndex;
+            return symbolicScale < o.symbolicScale;
+        }
+
+        bool operator==(const MemoryKey &o) const {
+            return base == o.base &&
+                   elemType == o.elemType &&
+                   constantOffset == o.constantOffset &&
+                   symbolicIndex == o.symbolicIndex &&
+                   symbolicScale == o.symbolicScale;
+        }
+
+        bool hasSymbolicOffset() const {
+            return symbolicIndex != nullptr;
+        }
+    };
 
     struct MemoryFactSet {
         std::map<Value *, long long> pointerUpper;
         std::map<Value *, long long> pointerAbsUpper;
+        std::map<MemoryKey, long long> elementUpper;
+        std::map<MemoryKey, long long> elementAbsUpper;
 
         bool operator==(const MemoryFactSet &o) const {
             return pointerUpper == o.pointerUpper &&
-                   pointerAbsUpper == o.pointerAbsUpper;
+                   pointerAbsUpper == o.pointerAbsUpper &&
+                   elementUpper == o.elementUpper &&
+                   elementAbsUpper == o.elementAbsUpper;
         }
 
         bool operator!=(const MemoryFactSet &o) const {
@@ -155,6 +196,12 @@ private:
     void computeMemoryFacts();
     void transferMemoryFact(Instruction *inst, MemoryFactSet &facts);
     void killMemoryFactsFor(Value *ptr, MemoryFactSet &facts, BasicAliasAnalysis &AA);
+    bool getMemoryKey(Value *ptr, MemoryKey &key) const;
+    bool decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey &key) const;
+    bool addMemoryKeyOffset(MemoryKey &key, Value *idx, long long scale) const;
+    bool addMemoryKeyOffset(MemoryKey &key, long long offset) const;
+    bool typeElementCount(Type *ty, Type *elemType, long long &count) const;
+    void killElementFactsFor(Value *ptr, MemoryFactSet &facts, BasicAliasAnalysis &AA);
     static MemoryFactSet meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts);
 
     TruthValue compareRanges(ICmpInst::ICmpOp pred, const IntRange &lhs,
@@ -199,8 +246,11 @@ private:
         bool computed = false;
         bool computing = false;
         bool known = false;
+        bool conditionalKnown = false;
         long long pendingModulus = 0;
         long long modulus = 0;
+        std::vector<unsigned> pendingNonNegativeArgs;
+        std::vector<unsigned> nonNegativeArgs;
     };
     ReturnSummary returnSummary_;
 };
