@@ -28,6 +28,22 @@ static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
 
 
 
+// Delay a pure add/sub to a fallthrough copy-back:
+//
+//   add temp, src, #imm
+//   ...
+//   b.cond exit
+//   mov dst, temp
+//
+// becomes:
+//
+//   ...
+//   b.cond exit
+//   add dst, src, #imm
+//
+// The operation now executes on exactly the path where the copy executed.
+// Source registers must remain unchanged across the move, and precise
+// instruction-CFG liveness must prove that the old temporary dies at the copy.
 static bool tryMachineDelayAddSubToCopy(
     MachineBasicBlock &block, size_t idx,
     const MachineLivenessResult &liveness) {
