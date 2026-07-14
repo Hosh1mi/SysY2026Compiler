@@ -1,18 +1,4 @@
 #include "../../../include/backend/arm64/machineTransforms/transforms.hpp"
-#include "../../../include/backend/arm64/machineTransforms/utils.hpp"
-#include <cctype>
-#include <cstdlib>
-#include <iterator>
-#include <map>
-#include <limits>
-#include <set>
-#include <string>
-#include <vector>
-
-
-
-
-// ── tryMachineSelfMove: used only by runMachinePeephole ────────────
 
 static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
 	auto &inst = block.instrs[idx];
