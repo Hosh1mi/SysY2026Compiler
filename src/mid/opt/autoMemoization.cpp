@@ -92,7 +92,7 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
     }
 
     // 没有命中任何候选时，IR 完全未变；保留分析结果避免下游 pass 重算导致
-    // 决策变动（实测会影响 huffman 之类用例的 codegen 质量）
+    // 非候选模块的 codegen 决策发生无关变化。
     if (arrayFuncs.empty() && hashFuncs.empty()) return PreservedAnalyses::all();
     return PreservedAnalyses::none();
 }
@@ -155,8 +155,8 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
 
     // 读全局的函数：仅当其读取的全局在模块任何位置都不被 store 改写时才可缓存。
     // 缓存常驻 BSS 且永不失效，若某全局在两次调用之间被改（典型：调用 f 的
-    // 循环体里 `G[i]=..`），缓存会返回旧值 → WA。knapsack 的 weight/value 仅经
-    // getarray 通过指针写入（IR 中无 store），仍可安全缓存。
+    // 循环体里 `G[i]=..`），缓存会返回旧值 → WA。仅对未被模块内 store 修改的
+    // 全局读应用缓存。
     if (readsMem && readsMutatedGlobal(f)) return false;
 
     return true;

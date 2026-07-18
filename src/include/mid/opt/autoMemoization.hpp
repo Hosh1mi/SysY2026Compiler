@@ -26,8 +26,7 @@ public:
     //
     // 即使本 pass 实现完全空操作，仅 make_unique<AutoMemoization>() 的
     // 一次堆分配也会推移后续 IR 对象指针值，下游基于 std::set<pointer*>
-    // 的迭代会改变次序，实测让 huffman 等无关用例变慢 ~100ms。
-    // 模块无候选时直接不加 pass，pipeline 与原状完全一致。
+    // 的迭代会改变次序。模块无候选时直接不加 pass，pipeline 与原状完全一致。
     static bool moduleHasAnyCandidate(Module *m);
 
     // 哈希记忆化的核心变换；公开以便 AccumElim 等 pass 在 pipeline 早期
@@ -44,14 +43,12 @@ private:
     static constexpr unsigned MIN_SELF_CALLS = 2;
     static constexpr unsigned BOUND_MARGIN = 5;
     static constexpr unsigned MAX_BOUND = 16384;
-    // 单参数推不出 bound 时的本地兜底（如 knapsack 的 w：不作为 GEP 下标，
-    // 但实际取值通常很小）。最终是否走数组路径，仍由总乘积 ≤ ARRAY_PRODUCT_LIMIT
-    // 决定；本兜底不会让 BSS 失控。
+    // 单参数推不出 bound 时的本地兜底。最终是否走数组路径，仍由总乘积
+    // ≤ ARRAY_PRODUCT_LIMIT 决定；本兜底不会让 BSS 失控。
     static constexpr unsigned DEFAULT_BOUND = 1024;
 
     // 数组路径乘积上限：超过则改走哈希。
     // 1.5M 元素 × i32 × 2 张表（flag+val）= 12 MB BSS 上限。
-    // 选取理由：knapsack 现行 product ≈ 0.98M，留余量但不浪费 BSS。
     static constexpr unsigned ARRAY_PRODUCT_LIMIT = 1500000;
 
     bool isCandidate(Function *f, BasicAliasAnalysis &baa,
