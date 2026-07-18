@@ -1,5 +1,5 @@
 #pragma once
-#include "machine.hpp"
+#include "../machine.hpp"
 
 // Machine transform rule groups. Each entry point performs at most one
 // rewrite; the pass pipeline owns convergence and phase ordering.

@@ -375,6 +375,15 @@ MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
         }
     }
 
+    {
+        std::string t2 = trim(line);
+        size_t sp2 = t2.find_first_of(" \t");
+        if (sp2 != std::string::npos) {
+            std::string rest2 = trim(t2.substr(sp2 + 1));
+            if (!rest2.empty())
+                mi.rawOperands = splitOperands(rest2);
+        }
+    }
     annotateMemoryInfo(mi);
     return mi;
 }
@@ -426,6 +435,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
     rest = trim(rest);
     mi.opcodeText = op;
     auto operands = splitOperands(rest);
+    mi.rawOperands = operands;
 
     auto defFirstUseRest = [&]() {
         if (!operands.empty())
