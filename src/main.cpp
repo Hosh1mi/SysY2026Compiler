@@ -24,6 +24,7 @@
 #include "include/mid/opt/inductiveRangeCheckElimination.hpp"
 #include "include/mid/opt/phiOpSink.hpp"
 #include "include/mid/opt/loopInvariantCodeMotion.hpp"
+#include "include/mid/opt/loopMemoryScalarPromotion.hpp"
 #include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
@@ -272,6 +273,9 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
+    // 位于 Unroll 之后、所有 CFG cleanup 之后：保留条件写的冷路径，
+    // 避免 value phi 被折成无条件计算的 select。
+    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
 }
 
 // RISC-V 后端中端管线。BOOM v3 无 SIMD，且当前没有 RISC-V 并行
@@ -313,6 +317,8 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<UnifyExitNodes>());
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
+    // 与 ARM 一致，避免后续 CFG cleanup 把条件更新转换为无条件 select。
+    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
 }
 
 static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
