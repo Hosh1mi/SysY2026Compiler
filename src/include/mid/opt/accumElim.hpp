@@ -16,11 +16,11 @@ class Function;
 // 变换为：
 //     aux(x...) 返回 i32：
 //         若该路径最终命中 acc-dep base，返回累计 Δ + C0；
-//         若命中 cap base，返回 INT_MIN（SENTINEL）。
+//         若命中 cap base，返回占位 0，并通过 kind side-channel 标记。
 //     f(x..., acc) 改写为：
 //         r = aux(x...);
-//         return r == SENTINEL ? Kcap : r + acc;
-// 并在 aux 入口装 AutoMemoization 的哈希缓存。
+//         return kind ? Kcap : r + acc;
+// 并在 aux 入口装同时缓存 value/kind 的哈希缓存。
 //
 // 通用结构特征（不依赖函数名或具体输入）：
 //   1. 纯函数 + 自递归

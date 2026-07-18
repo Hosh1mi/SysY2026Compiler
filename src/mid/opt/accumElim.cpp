@@ -3,7 +3,7 @@
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/irBuilder.hpp"
 
-#include <climits>
+#include <algorithm>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,8 +12,6 @@
 #define DBG(...) do { } while (0)
 
 namespace {
-
-constexpr int SENTINEL = INT_MIN;
 
 // 单个候选函数的所有提取出来的语义信息
 struct Pattern {
@@ -361,11 +359,12 @@ static bool detect(Function *f, Pattern &pat) {
 //   * self-call → aux-call（同位置插入；返回值替换原 self-call）
 //   * 合并 ret PHI / 直接 ret 的 incoming 值在 phase 2 按 IncomingInfo 重写：
 //       - ACC_DEP: 直接是 ConstInt(delta)（来自 valMap 预绑定）
-//       - CAP: 改成 ConstInt(SENTINEL)
-//       - SELF_CALL_PASS: 把 sourceBB 的终止符切成 sentinel-check + 两条尾巴 BB
-static Function *buildAux(const Pattern &pat) {
+//       - CAP: value 返回占位 0，kind side-channel 写 1
+//       - SELF_CALL_PASS: 根据递归调用写出的 kind side-channel 分流
+static Function *buildAux(const Pattern &pat, GlobalVariable *&kindGV) {
     Function *f = pat.f;
     Module *m = f->parent_;
+    auto *i32 = m->int32_ty_;
 
     // 构造 aux 的类型：去掉 acc-arg
     std::vector<Type *> paramTys;
@@ -375,6 +374,8 @@ static Function *buildAux(const Pattern &pat) {
     }
     auto *auxTy = new FunctionType(m->int32_ty_, paramTys);
     auto *aux = new Function(auxTy, "__accumelim_aux_" + f->name_, m);
+    kindGV = new GlobalVariable("__accumelim_kind_" + f->name_, m, i32,
+                                false, new ConstantInt(i32, 0));
 
     std::unordered_map<Value *, Value *> valMap;
     std::unordered_map<BasicBlock *, BasicBlock *> bbMap;
@@ -542,25 +543,16 @@ static Function *buildAux(const Pattern &pat) {
 
     // ── Phase 2: 重写 ret 与 mergePhi 的 incoming ──
     //
-    // 对每个 ClonedRet：
-    //   - 若 mergePhi 存在：遍历它在 pat.mergedRets 里的 incomings 列表（顺序与
-    //     原 PHI 一致），按种类重写 PHI 操作数：
-    //       * ACC_DEP: 操作数已经是 ConstInt(delta)（valMap 预绑定），保留
-    //       * CAP: 替换为 ConstInt(SENTINEL)
-    //       * SELF_CALL_PASS: 拆 sourceBB 的终止符为
-    //             cond_br (eq newCallV, SENT) sent_BB val_BB
-    //         sent_BB / val_BB 各 br 到原 retBB，PHI 里把原 incoming 拆成 2 个
-    //   - 若无 mergePhi（直接 ret 单值）：根据 incomings[0] 重写 newRet 的 ret 值
-    //     * SELF_CALL_PASS 时还要拆 newRetBB 的 terminator（前面的 ret 删除，
-    //       换成 cond_br 到 sent/val BB）
-    auto *i32 = m->int32_ty_;
-    auto sent = [&]() { return new ConstantInt(i32, SENTINEL); };
-    auto cap  = [&]() { return new ConstantInt(i32, pat.capConst); }; (void)cap;
+    // kind side-channel: 0 表示 aux 返回的是可加到 acc 的 delta；1 表示 cap。
+    auto zero = [&]() { return new ConstantInt(i32, 0); };
+    auto one  = [&]() { return new ConstantInt(i32, 1); };
 
     for (auto &cr : clonedRets) {
         if (!cr.orig) continue;
         if (cr.newPhi) {
             PhiInst *phi = cr.newPhi;
+            auto *kindPhi = PhiInst::create_phi(i32, cr.newRetBB);
+            cr.newRetBB->add_instruction_front(kindPhi);
             const auto &incs = cr.orig->incomings;
             // PHI 操作数布局 [val0, bb0, val1, bb1, ...]
             // incs 顺序与原 PHI 一致；逐对处理
@@ -570,52 +562,62 @@ static Function *buildAux(const Pattern &pat) {
                 BasicBlock *sourceBB = dynamic_cast<BasicBlock *>(
                     phi->get_operand(bbIdx));
                 if (incs[k].kind == Pattern::IncomingInfo::ACC_DEP) {
-                    // 已经是 ConstInt(delta)（valMap 预绑定后的 mapOp 结果），
-                    // 无需改写
+                    phi->set_operand(valIdx, new ConstantInt(i32, incs[k].delta));
+                    kindPhi->addIncoming(zero(), sourceBB);
                 } else if (incs[k].kind == Pattern::IncomingInfo::CAP) {
-                    phi->set_operand(valIdx, sent());
+                    phi->set_operand(valIdx, zero());
+                    kindPhi->addIncoming(one(), sourceBB);
                 } else {  // SELF_CALL_PASS
                     auto *newCallV = valMap.at(incs[k].selfCall);
-                    // 当前 sourceBB 的 terminator 是 `br retBB`，要换成
-                    // cond_br eq SENT? sentBB : valBB
                     Instruction *term = sourceBB->get_terminator();
                     sourceBB->delete_instr(term);
-                    auto *eq = new ICmpInst(ICmpInst::ICMP_EQ, newCallV, sent(),
-                                              sourceBB);
-                    auto *sentBB = new BasicBlock(m, "aux_sent_" + sourceBB->name_, aux);
+                    auto *childKind = new LoadInst(kindGV, sourceBB);
+                    auto *isCap = new ICmpInst(ICmpInst::ICMP_NE, childKind, zero(),
+                                               sourceBB);
+                    auto *capBB = new BasicBlock(m, "aux_cap_" + sourceBB->name_, aux);
                     auto *valBB  = new BasicBlock(m, "aux_val_"  + sourceBB->name_, aux);
-                    new BranchInst(eq, sentBB, valBB, sourceBB);
-                    new BranchInst(cr.newRetBB, sentBB);
+                    new BranchInst(isCap, capBB, valBB, sourceBB);
+                    new BranchInst(cr.newRetBB, capBB);
                     auto *addV = new BinaryInst(i32, Instruction::Add, newCallV,
                                                   new ConstantInt(i32, incs[k].delta),
                                                   valBB);
                     new BranchInst(cr.newRetBB, valBB);
-                    // 改 PHI：第 k 对 → (SENT, sentBB)，再 append (addV, valBB)
-                    phi->set_operand(valIdx, sent());
-                    phi->set_operand(bbIdx, sentBB);
+                    phi->set_operand(valIdx, zero());
+                    phi->set_operand(bbIdx, capBB);
                     phi->addIncoming(addV, valBB);
+                    kindPhi->addIncoming(one(), capBB);
+                    kindPhi->addIncoming(zero(), valBB);
                 }
             }
+            auto *kindStore = new StoreInst(kindPhi, kindGV, cr.newRetBB, true);
+            cr.newRetBB->add_instruction_before_inst(kindStore, cr.newRet);
         } else {
             // 直接 ret 单个值
             const Pattern::IncomingInfo &inc = cr.orig->incomings[0];
             if (inc.kind == Pattern::IncomingInfo::ACC_DEP) {
                 cr.newRet->set_operand(0, new ConstantInt(i32, inc.delta));
+                auto *kindStore = new StoreInst(zero(), kindGV, cr.newRetBB, true);
+                cr.newRetBB->add_instruction_before_inst(kindStore, cr.newRet);
             } else if (inc.kind == Pattern::IncomingInfo::CAP) {
-                cr.newRet->set_operand(0, sent());
+                cr.newRet->set_operand(0, zero());
+                auto *kindStore = new StoreInst(one(), kindGV, cr.newRetBB, true);
+                cr.newRetBB->add_instruction_before_inst(kindStore, cr.newRet);
             } else {  // SELF_CALL_PASS in retBB
                 auto *newCallV = valMap.at(inc.selfCall);
                 // 删除 newRet，改 retBB 终止符为 cond_br
                 cr.newRetBB->delete_instr(cr.newRet);
-                auto *eq = new ICmpInst(ICmpInst::ICMP_EQ, newCallV, sent(),
-                                          cr.newRetBB);
-                auto *sentBB = new BasicBlock(m, "aux_sent_" + cr.newRetBB->name_, aux);
+                auto *childKind = new LoadInst(kindGV, cr.newRetBB);
+                auto *isCap = new ICmpInst(ICmpInst::ICMP_NE, childKind, zero(),
+                                           cr.newRetBB);
+                auto *capBB = new BasicBlock(m, "aux_cap_" + cr.newRetBB->name_, aux);
                 auto *valBB  = new BasicBlock(m, "aux_val_"  + cr.newRetBB->name_, aux);
-                new BranchInst(eq, sentBB, valBB, cr.newRetBB);
-                new ReturnInst(sent(), sentBB);
+                new BranchInst(isCap, capBB, valBB, cr.newRetBB);
+                new StoreInst(one(), kindGV, capBB);
+                new ReturnInst(zero(), capBB);
                 auto *addV = new BinaryInst(i32, Instruction::Add, newCallV,
                                               new ConstantInt(i32, inc.delta),
                                               valBB);
+                new StoreInst(zero(), kindGV, valBB);
                 new ReturnInst(addV, valBB);
             }
         }
@@ -626,8 +628,137 @@ static Function *buildAux(const Pattern &pat) {
     return aux;
 }
 
-// 把原 f 的函数体替换为 `r = aux(non-acc-args); return r==SENT ? capConst : r + acc;`
-static void rewriteOriginal(const Pattern &pat, Function *aux) {
+static void addKindAwareHashMemoization(Function *f, GlobalVariable *kindGV) {
+    Module *m = f->parent_;
+    auto *i32 = m->int32_ty_;
+    unsigned nArgs = f->arguments_.size();
+    unsigned slotFields = 1 + nArgs + 2; // valid + keys + value + kind
+    unsigned totalI32 = AutoMemoization::HASH_SLOTS * slotFields;
+
+    static constexpr int P1 = 0x45D9F3B;
+    static constexpr int P2 = 0x119DE1F3;
+
+    Type *arrTy = m->get_array_type(i32, totalI32);
+    auto *hashGV = new GlobalVariable("__memo_hash_" + f->name_, m, arrTy,
+                                       false, new ConstantZero(arrTy));
+
+    BasicBlock *oldEntry = f->basic_blocks_.front();
+    if (oldEntry->name_ == "label_entry")
+        oldEntry->name_ = "label_entry_uncached";
+
+    auto *newEntry = new BasicBlock(m, "label_entry", f);
+    auto *checkKey = new BasicBlock(m, "memo_check_key", f);
+    auto *hitBB = new BasicBlock(m, "memo_hit", f);
+
+    auto &bbs = f->basic_blocks_;
+    auto pull = [&](BasicBlock *bb) {
+        bbs.erase(std::remove(bbs.begin(), bbs.end(), bb), bbs.end());
+    };
+    pull(newEntry);
+    pull(checkKey);
+    pull(hitBB);
+    bbs.insert(bbs.begin(), {newEntry, checkKey, hitBB});
+
+    auto *builder = new IRStmtBuilder(newEntry, m);
+
+    auto computeBase = [&](BasicBlock *bb) -> Value * {
+        Value *hashVal = nullptr;
+        for (unsigned i = 0; i < nArgs; ++i) {
+            int p = (i == 0) ? P1 : P2;
+            auto *mul = new BinaryInst(i32, Instruction::Mul,
+                                       f->arguments_[i],
+                                       new ConstantInt(i32, p), bb);
+            if (!hashVal)
+                hashVal = mul;
+            else
+                hashVal = new BinaryInst(i32, Instruction::Xor, hashVal, mul, bb);
+        }
+        auto *idx = new BinaryInst(
+            i32, Instruction::And, hashVal,
+            new ConstantInt(i32, static_cast<int>(AutoMemoization::HASH_MASK)), bb);
+        return new BinaryInst(i32, Instruction::Mul, idx,
+                              new ConstantInt(i32, static_cast<int>(slotFields)), bb);
+    };
+
+    auto gepSlot = [&](Value *base, unsigned fieldIdx, BasicBlock *bb) -> Value * {
+        Value *off = base;
+        if (fieldIdx != 0) {
+            off = new BinaryInst(i32, Instruction::Add, base,
+                                 new ConstantInt(i32, static_cast<int>(fieldIdx)), bb);
+        }
+        std::vector<Value *> idxs = {new ConstantInt(i32, 0), off};
+        return new GetElementPtrInst(hashGV, idxs, bb);
+    };
+
+    Value *base = computeBase(newEntry);
+    Value *validPtr = gepSlot(base, 0, newEntry);
+    builder->set_insert_point(newEntry);
+    auto *validVal = builder->create_load(validPtr);
+    auto *isValid = builder->create_icmp_ne(validVal, new ConstantInt(i32, 0));
+    builder->create_cond_br(isValid, checkKey, oldEntry);
+
+    Value *baseCK = computeBase(checkKey);
+    Value *allEq = nullptr;
+    for (unsigned i = 0; i < nArgs; ++i) {
+        Value *keyPtr = gepSlot(baseCK, 1 + i, checkKey);
+        auto *load = new LoadInst(keyPtr, checkKey);
+        auto *eq = new ICmpInst(ICmpInst::ICMP_EQ, load, f->arguments_[i], checkKey);
+        if (!allEq)
+            allEq = eq;
+        else
+            allEq = new BinaryInst(m->int1_ty_, Instruction::And, allEq, eq, checkKey);
+    }
+    builder->set_insert_point(checkKey);
+    builder->create_cond_br(allEq, hitBB, oldEntry);
+
+    Value *baseHit = computeBase(hitBB);
+    Value *valPtrHit = gepSlot(baseHit, 1 + nArgs, hitBB);
+    Value *kindPtrHit = gepSlot(baseHit, 2 + nArgs, hitBB);
+    builder->set_insert_point(hitBB);
+    auto *cachedVal = builder->create_load(valPtrHit);
+    auto *cachedKind = builder->create_load(kindPtrHit);
+    builder->create_store(cachedKind, kindGV);
+    builder->create_ret(cachedVal);
+
+    std::vector<std::pair<BasicBlock *, ReturnInst *>> retSites;
+    for (auto *bb : f->basic_blocks_) {
+        if (bb == newEntry || bb == checkKey || bb == hitBB)
+            continue;
+        auto *term = bb->get_terminator();
+        if (term && term->is_ret() && term->num_ops_ > 0)
+            retSites.push_back({bb, static_cast<ReturnInst *>(term)});
+    }
+
+    for (auto &site : retSites) {
+        BasicBlock *retBB = site.first;
+        ReturnInst *retInst = site.second;
+        Value *retVal = retInst->get_operand(0);
+
+        retBB->delete_instr(retInst);
+        Value *baseRet = computeBase(retBB);
+
+        builder->set_insert_point(retBB);
+        for (unsigned i = 0; i < nArgs; ++i) {
+            Value *keyPtr = gepSlot(baseRet, 1 + i, retBB);
+            builder->create_store(f->arguments_[i], keyPtr);
+        }
+        Value *valPtrRet = gepSlot(baseRet, 1 + nArgs, retBB);
+        builder->create_store(retVal, valPtrRet);
+        auto *kindVal = builder->create_load(kindGV);
+        Value *kindPtrRet = gepSlot(baseRet, 2 + nArgs, retBB);
+        builder->create_store(kindVal, kindPtrRet);
+        Value *validPtrRet = gepSlot(baseRet, 0, retBB);
+        builder->create_store(new ConstantInt(i32, 1), validPtrRet);
+        builder->create_ret(retVal);
+    }
+
+    f->set_instr_name();
+    f->invalidateDominatorInfo();
+    delete builder;
+}
+
+// 把原 f 的函数体替换为 `kind ? capConst : value + acc`。
+static void rewriteOriginal(const Pattern &pat, Function *aux, GlobalVariable *kindGV) {
     Function *f = pat.f;
     Module *m = f->parent_;
 
@@ -653,10 +784,10 @@ static void rewriteOriginal(const Pattern &pat, Function *aux) {
         auxArgs.push_back(f->arguments_[i]);
     }
     auto *call = builder.create_call(aux, auxArgs);
-    auto *eq   = builder.create_icmp_eq(call,
-                                          new ConstantInt(m->int32_ty_, SENTINEL));
+    auto *kind = builder.create_load(kindGV);
+    auto *isCap = builder.create_icmp_ne(kind, new ConstantInt(m->int32_ty_, 0));
     auto *sum  = builder.create_iadd(call, f->arguments_[pat.accIdx]);
-    auto *sel  = new SelectInst(eq,
+    auto *sel  = new SelectInst(isCap,
                                   new ConstantInt(m->int32_ty_, pat.capConst),
                                   sum,
                                   newEntry);
@@ -695,9 +826,10 @@ void AccumElim::execute(Module *module) {
     }
 
     for (auto &pat : patterns) {
-        Function *aux = buildAux(pat);
+        GlobalVariable *kindGV = nullptr;
+        Function *aux = buildAux(pat, kindGV);
         if (!aux) continue;       // 克隆失败（含不支持指令），跳过这个候选
-        rewriteOriginal(pat, aux);
-        AutoMemoization::transformHash(aux);
+        rewriteOriginal(pat, aux, kindGV);
+        addKindAwareHashMemoization(aux, kindGV);
     }
 }
