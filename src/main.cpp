@@ -10,6 +10,8 @@
 #include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/jumpThreadingLite.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
+#include "include/mid/opt/accumElim.hpp"
+#include "include/mid/opt/autoMemoization.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
 #include "include/mid/opt/instCombine.hpp"
@@ -198,6 +200,8 @@ static void addSsaPreparation(PassManager &pm) {
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<EarlyCSE>());
     addCanonicalCleanup(pm);
+    // AccumElim 必须跑在 TRE 之前：依赖看见自调用的形参/实参链。
+    pm.addPass(std::make_unique<AccumElim>());
     pm.addPass(std::make_unique<TailRecursionEliminate>());
 }
 
@@ -225,9 +229,28 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     addDeepCleanup(pm);
 }
 
+static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
+    pm.addPass(std::make_unique<GVN>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CodeSink>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<TailDuplication>());
+    pm.addPass(std::make_unique<UnifyExitNodes>());
+    addCorrelatedCleanup(pm);
+    pm.addPass(std::make_unique<LateValueCleanup>());
+    // 位于 Unroll 之后、所有 CFG cleanup 之后：保留条件写的冷路径，
+    // 避免 value phi 被折成无条件计算的 select。
+    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    // AutoMemoization 放在所有中端 pass 之后、codegen 之前。
+    // 仅在模块确实存在候选时才加，避免对其他用例的非确定性副作用。
+    if (AutoMemoization::moduleHasAnyCandidate(m)) {
+        pm.addPass(std::make_unique<AutoMemoization>());
+    }
+}
+
 // ARM64 后端中端管线。目标相关 pass 在这里显式列出，避免目标能力通过
 // 布尔参数间接拼装而导致 ARM/RISC-V 管线错配。
-static void buildArm64Pipeline(PassManager &pm, int optLevel) {
+static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     if (optLevel < 1)
         return;
 
@@ -264,23 +287,12 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
-
-    pm.addPass(std::make_unique<GVN>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<CodeSink>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<TailDuplication>());
-    pm.addPass(std::make_unique<UnifyExitNodes>());
-    addCorrelatedCleanup(pm);
-    pm.addPass(std::make_unique<LateValueCleanup>());
-    // 位于 Unroll 之后、所有 CFG cleanup 之后：保留条件写的冷路径，
-    // 避免 value phi 被折成无条件计算的 select。
-    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    addLateTargetIndependentPasses(pm, m);
 }
 
 // RISC-V 后端中端管线。BOOM v3 无 SIMD，且当前没有 RISC-V 并行
 // runtime，因此本函数不加入 LoopVectorize 或 ParallelizeLoops。
-static void buildRiscvPipeline(PassManager &pm, int optLevel) {
+static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
     if (optLevel < 1)
         return;
 
@@ -319,13 +331,16 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel) {
     pm.addPass(std::make_unique<LateValueCleanup>());
     // 与 ARM 一致，避免后续 CFG cleanup 把条件更新转换为无条件 select。
     pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    if (AutoMemoization::moduleHasAnyCandidate(m)) {
+        pm.addPass(std::make_unique<AutoMemoization>());
+    }
 }
 
-static void buildOptimizationPipeline(PassManager &pm, int optLevel) {
+static void buildOptimizationPipeline(PassManager &pm, int optLevel, Module *m) {
     if (kTargetArch == TargetArch::Riscv)
-        buildRiscvPipeline(pm, optLevel);
+        buildRiscvPipeline(pm, optLevel, m);
     else
-        buildArm64Pipeline(pm, optLevel);
+        buildArm64Pipeline(pm, optLevel, m);
 }
 
 template <class CodeGen>
@@ -416,7 +431,7 @@ int main(int argc, char **argv) {
     PassManager pm;
     pm.setDumpIR(options.dumpIR);
     pm.setVerifyIR(options.verifyIR);
-    buildOptimizationPipeline(pm, options.optLevel);
+    buildOptimizationPipeline(pm, options.optLevel, m.get());
     pm.run(m.get());
 
     std::ofstream fout;
