@@ -1085,6 +1085,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         }
         if (directRet) {
             dstReg = isFloat(inst->type_) ? "s0" : (isPtr(inst->type_) ? "x0" : "w0");
+            bindValueToReg(inst, dstReg);
         } else {
             if (isFloat(inst->type_))
                 dstReg = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
@@ -1353,26 +1354,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Ret: {
         if (inst->num_ops_ > 0) {
             auto val = inst->get_operand(0);
-            // If val is a scalar Select whose only user is this Ret,
-            // select emission already wrote the result to the return register.
-            bool alreadyInReturnReg = false;
-            if (isInt(val->type_) || isPtr(val->type_) || isFloat(val->type_)) {
-                if (auto *si = dynamic_cast<SelectInst*>(val)) {
-                    if (si->use_list_.size() == 1) alreadyInReturnReg = true;
-                }
-            }
-            if (!alreadyInReturnReg) {
-                if (isFloat(val->type_)) {
-                    std::string r = loadFloat(val);
-                    emitMoveMachine("s0", r, "fmov");
-                } else if (isPtr(val->type_)) {
-                    std::string r = loadAddr(val);
-                    emitMoveMachine("x0", r);
-                } else {
-                    std::string r = loadInt(val);
-                    emitMoveMachine("w0", r);
-                }
-            }
+            if (isFloat(val->type_))
+                materializeFloatInReg(val, "s0");
+            else if (isPtr(val->type_))
+                materializeAddrInReg(val, "x0");
+            else
+                materializeIntInReg(val, "w0");
         }
         if (needsFrame_)
             emitBranchMachine("\tb .L" + func_->name_ + "_epilogue");
@@ -1503,38 +1490,63 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             }
         }
 
+        // Materialize constants and addresses directly in their ABI register.
+        // Memory-resident SSA values are staged first, then participate in the
+        // same parallel-copy boundary as register-resident values.  Keeping
+        // fixed-register assignment separate from value materialization avoids
+        // extending ABI-register definitions through unrelated computations.
         // 传递参数 (寄存器 + 栈)
         intArg = 0; floatArg = 0;
         int stackIdx = 0;   // 栈参数写入偏移 (相对于 sp)
         for (unsigned i = 0; i < numArgs; i++) {
             auto arg = call->get_operand(i);
             if (isFloat(arg->type_)) {
-                std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadFloat(arg);
                 if (floatArg < 8) {
-                    emitMoveMachine("s" + std::to_string(floatArg++), r, "fmov");
+                    std::string dst = "s" + std::to_string(floatArg++);
+                    auto temp = callArgTemps.find(arg);
+                    if (temp != callArgTemps.end())
+                        emitMoveMachine(dst, temp->second, "fmov");
+                    else if (dynamic_cast<ConstantFloat*>(arg))
+                        materializeFloatInReg(arg, dst);
+                    else {
+                        std::string src = loadFloat(arg);
+                        emitMoveMachine(dst, src, "fmov");
+                    }
                 } else {
+                    std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadFloat(arg);
                     emitStoreMemMachine(r, "[sp, #" + std::to_string(stackIdx * 8) + "]", {r, "sp"});
                     stackIdx++;
                 }
             } else if (isPtr(arg->type_)) {
-                std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadAddr(arg);
                 if (intArg < 8) {
-                    emitMoveMachine("x" + std::to_string(intArg++), r);
+                    std::string dst = "x" + std::to_string(intArg++);
+                    auto temp = callArgTemps.find(arg);
+                    if (temp != callArgTemps.end())
+                        emitMoveMachine(dst, temp->second);
+                    else if (dynamic_cast<GlobalVariable*>(arg) ||
+                             dynamic_cast<ConstantInt*>(arg) ||
+                             dynamic_cast<AllocaInst*>(arg))
+                        materializeAddrInReg(arg, dst);
+                    else {
+                        std::string src = loadAddr(arg);
+                        emitMoveMachine(dst, src);
+                    }
                 } else {
+                    std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadAddr(arg);
                     emitStoreMemMachine(r, "[sp, #" + std::to_string(stackIdx * 8) + "]", {r, "sp"});
                     stackIdx++;
                 }
             } else {
                 if (intArg < 8) {
                     std::string dst = "w" + std::to_string(intArg++);
-                    if (auto *ci = dynamic_cast<ConstantInt*>(arg)) {
-                        if (ci->value_ == 0)
-                            emitMoveMachine(dst, "wzr");
-                        else
-                            emitIntConst(ci->value_, dst);
-                    } else {
-                        std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
-                        emitMoveMachine(dst, r);
+                    auto temp = callArgTemps.find(arg);
+                    if (temp != callArgTemps.end())
+                        emitMoveMachine(dst, temp->second);
+                    else if (dynamic_cast<ConstantInt*>(arg))
+                        materializeIntInReg(arg, dst);
+                    else {
+                        std::string src = loadInt(arg);
+                        emitMoveMachine(dst, src);
                     }
                 } else {
                     std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);

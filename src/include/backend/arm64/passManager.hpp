@@ -8,9 +8,13 @@
 class Arm64MachinePassManager {
 public:
     void addPass(std::unique_ptr<Arm64MachineFunctionPass> pass);
-    bool run(MachineFunction &function, bool localFixedPoint = false);
+    bool runOnce(MachineFunction &function, MachineAnalysisManager &analyses);
+    bool runEachToFixedPoint(MachineFunction &function,
+                             MachineAnalysisManager &analyses);
 
 private:
+    bool runPass(Arm64MachineFunctionPass &pass, MachineFunction &function,
+                 MachineAnalysisManager &analyses, bool toFixedPoint);
     std::vector<std::unique_ptr<Arm64MachineFunctionPass>> passes_;
 };
 

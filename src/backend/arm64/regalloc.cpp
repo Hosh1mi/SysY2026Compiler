@@ -50,6 +50,26 @@ size_t Arm64RegAlloc::stableIndex(Value *v) const {
                                     : stableOrder_.size() - 1 - it->second;
 }
 
+int Arm64RegAlloc::preferredArgumentReg(Value *v) const {
+    if (!preferArgumentRegs_ || !dynamic_cast<Argument*>(v)) return -1;
+
+    int intArg = 0;
+    int floatArg = 0;
+    for (auto *arg : func_->arguments_) {
+        if (isAllocatableFloatValue(arg->type_)) {
+            int reg = floatArg++;
+            if (arg == v) return reg < 8 ? reg : -1;
+        } else if (isAllocatableIntValue(arg->type_) ||
+                   isAllocatablePtrValue(arg->type_)) {
+            int reg = intArg++;
+            if (arg == v) return reg < 8 ? reg : -1;
+        } else if (arg == v) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
 void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                                const std::vector<int> &colorToReg, bool isFloat,
                                const std::set<int> &callerSavedRegs,
@@ -246,6 +266,18 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
 
     // Select phase
     std::map<Value*, int> colors;
+    auto preferredColorForNode = [&](Value *node) {
+        auto memberIt = members.find(node);
+        if (memberIt == members.end()) return -1;
+        for (auto *member : memberIt->second) {
+            int preferredReg = preferredArgumentReg(member);
+            if (preferredReg < 0) continue;
+            auto preferred = std::find(colorToReg.begin(), colorToReg.end(), preferredReg);
+            if (preferred != colorToReg.end())
+                return static_cast<int>(preferred - colorToReg.begin());
+        }
+        return -1;
+    };
     while (!stack.empty()) {
         Value *v = stack.back();
         stack.pop_back();
@@ -264,10 +296,17 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         };
 
         int color = -1;
+        // ABI argument registers are preferences, not permanent colors.  This
+        // removes entry copies when the color is genuinely available while
+        // allowing the register to be reused after the argument dies.
+        int preferredColor = preferredColorForNode(v);
+        if (preferredColor >= 0 && colorAllowed(preferredColor) &&
+            !neighborColors.count(preferredColor))
+            color = preferredColor;
         // Biased: prefer color of already-colored phi partners
         // （没能合并的 affinity 对仍可通过同色偏好消除拷贝）
         auto affIt = phiAffinity.find(v);
-        if (affIt != phiAffinity.end()) {
+        if (color < 0 && affIt != phiAffinity.end()) {
             std::vector<Value*> partners(affIt->second.begin(), affIt->second.end());
             std::sort(partners.begin(), partners.end(),
                       [this](Value *a, Value *b) {
@@ -284,8 +323,28 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             }
         }
         if (color < 0) {
+            // Do not consume an uncolored interfering argument's ABI color if
+            // another color is available.  Non-neighbors are intentionally
+            // ignored, so the physical register becomes reusable at liveness
+            // boundaries instead of being reserved for the whole function.
+            std::set<int> pendingArgumentColors;
+            for (auto *neighbor : adj[v]) {
+                if (colors.count(neighbor)) continue;
+                int pending = preferredColorForNode(neighbor);
+                if (pending >= 0) pendingArgumentColors.insert(pending);
+            }
             for (int c = 0; c < K; c++) {
-                if (colorAllowed(c) && !neighborColors.count(c)) { color = c; break; }
+                if (colorAllowed(c) && !neighborColors.count(c) &&
+                    !pendingArgumentColors.count(c)) {
+                    color = c;
+                    break;
+                }
+            }
+            for (int c = 0; color < 0 && c < K; c++) {
+                if (colorAllowed(c) && !neighborColors.count(c)) {
+                    color = c;
+                    break;
+                }
             }
         }
         if (color >= 0) {
@@ -739,45 +798,37 @@ std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
 
 Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
     RegPalette pal;
-    // 扫描已预着色（叶函数参数）的寄存器，着色时排除它们。
-    std::set<int> precoloredInt, precoloredFloat;
-    for (auto &kv : assignedRegs_) {
-        const std::string &r = kv.second;
-        if (r.empty()) continue;
-        if (r[0] == 'w' || r[0] == 'x') precoloredInt.insert(std::stoi(r.substr(1)));
-        else if (r[0] == 's')            precoloredFloat.insert(std::stoi(r.substr(1)));
-    }
     if (isLeaf) {
         const int callerInt[] = {0,1,2,3,4,5,6,7,9};
         for (int r : callerInt) {
-            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.intColorToReg.push_back(r);
             pal.callerSavedInt.insert(r);
         }
         for (int r = 19; r <= 28; ++r)
-            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.intColorToReg.push_back(r);
         const int callerFloat[] = {0,1,2,3,4,5,6,7,16};
         for (int r : callerFloat) {
-            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.floatColorToReg.push_back(r);
             pal.callerSavedFloat.insert(r);
         }
         for (int r = 8; r <= 15; ++r)
-            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.floatColorToReg.push_back(r);
     } else {
         const int callerInt[] = {9,0,1,2,3,4,5,6,7};
         for (int r : callerInt) {
-            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.intColorToReg.push_back(r);
             pal.callerSavedInt.insert(r);
         }
         for (int r = 19; r <= 28; ++r)
-            if (!precoloredInt.count(r)) pal.intColorToReg.push_back(r);
+            pal.intColorToReg.push_back(r);
         for (int r = 0; r <= 7; ++r) {
-            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.floatColorToReg.push_back(r);
             pal.callerSavedFloat.insert(r);
         }
-        if (!precoloredFloat.count(16)) pal.floatColorToReg.push_back(16);
+        pal.floatColorToReg.push_back(16);
         pal.callerSavedFloat.insert(16);
         for (int r = 8; r <= 15; ++r)
-            if (!precoloredFloat.count(r)) pal.floatColorToReg.push_back(r);
+            pal.floatColorToReg.push_back(r);
     }
     // NEON palette: v8-v15 are all callee-saved on AArch64, so callerSavedNEON stays empty.
     for (int r = 8; r <= 15; ++r) pal.neonColorToReg.push_back(r);
@@ -866,7 +917,7 @@ void Arm64RegAlloc::allocate() {
         for (auto *inst : bb->instr_list_)
             stableOrder_[inst] = stableId++;
 
-    // ---- 1. Leaf detection + argument pre-coloring ----
+    // ---- 1. Leaf detection ----
     bool isLeaf = true;
     for (auto bb : func_->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
@@ -874,21 +925,7 @@ void Arm64RegAlloc::allocate() {
         }
         if (!isLeaf) break;
     }
-    if (isLeaf) {
-        int intArgIdx = 0, floatArgIdx = 0;
-        for (auto arg : func_->arguments_) {
-            if (!canAssignRegister(arg)) continue;
-            if (isAllocatableFloatValue(arg->type_)) {
-                if (floatArgIdx < 8)
-                    assignedRegs_[arg] = "s" + std::to_string(floatArgIdx++);
-            } else {
-                if (intArgIdx < 8) {
-                    bool isPtr = isAllocatablePtrValue(arg->type_);
-                    assignedRegs_[arg] = (isPtr ? "x" : "w") + std::to_string(intArgIdx++);
-                }
-            }
-        }
-    }
+    preferArgumentRegs_ = isLeaf;
 
     // ---- 2. RPO block order & predecessor map ----
     std::map<BasicBlock*, std::vector<BasicBlock*>> preds;

@@ -3,6 +3,7 @@
 #include "machine.hpp"
 
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -19,4 +20,14 @@ struct MachineLivenessResult {
 class MachineLiveness {
 public:
     MachineLivenessResult analyze(const MachineFunction &func) const;
+};
+
+class MachineAnalysisManager {
+public:
+    const MachineLivenessResult &liveness(const MachineFunction &func);
+    void invalidate();
+
+private:
+    const MachineFunction *function_ = nullptr;
+    std::optional<MachineLivenessResult> liveness_;
 };

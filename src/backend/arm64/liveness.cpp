@@ -15,13 +15,6 @@ std::string trim(const std::string &s) {
     return s.substr(begin, end - begin);
 }
 
-std::string lower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return s;
-}
-
 std::string labelName(std::string label) {
     label = trim(label);
     if (!label.empty() && label.back() == ':')
@@ -30,36 +23,11 @@ std::string labelName(std::string label) {
 }
 
 std::string mnemonic(const MachineInstr &inst) {
-    std::string t = trim(inst.text);
-    if (t.empty()) return "";
-    size_t sp = t.find_first_of(" \t");                                           
-    return sp == std::string::npos ? lower(t) : lower(t.substr(0, sp));  
-}
-
-std::vector<std::string> splitOperands(const std::string &operandText) {
-    std::vector<std::string> operands;
-    std::string cur;
-    int bracketDepth = 0;
-    for (char c : operandText) {
-        if (c == '[') bracketDepth++;
-        if (c == ']') bracketDepth--;
-        if (c == ',' && bracketDepth == 0) {
-            operands.push_back(trim(cur));
-            cur.clear();
-        } else {
-            cur.push_back(c);
-        }
-    }
-    if (!trim(cur).empty())
-        operands.push_back(trim(cur));
-    return operands;
+    return inst.opcodeText;
 }
 
 std::vector<std::string> operands(const MachineInstr &inst) {
-    std::string t = trim(inst.text);
-    size_t sp = t.find_first_of(" \t");
-    if (sp == std::string::npos) return {};
-    return splitOperands(t.substr(sp + 1));
+    return inst.asmOperands;
 }
 
 const std::set<std::string> &callerSavedRegs() {                                  
@@ -250,4 +218,18 @@ MachineLivenessResult MachineLiveness::analyze(const MachineFunction &func) cons
     }
 
     return result;
+}
+
+const MachineLivenessResult &MachineAnalysisManager::liveness(
+    const MachineFunction &func) {
+    if (function_ != &func || !liveness_) {
+        function_ = &func;
+        liveness_ = MachineLiveness().analyze(func);
+    }
+    return *liveness_;
+}
+
+void MachineAnalysisManager::invalidate() {
+    function_ = nullptr;
+    liveness_.reset();
 }

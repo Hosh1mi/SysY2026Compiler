@@ -119,18 +119,18 @@ bool peephIsInertLine(const MachineInstr &inst) {
 }
 
 bool peephLineReadsReg(const MachineInstr &l, const std::string &r) {
-	if (l.rawOperands.empty()) return false;
-	for (size_t i = 1; i < l.rawOperands.size(); ++i)
-		if (l.rawOperands[i] == r || peephSamePhysicalReg(l.rawOperands[i], r)) return true;
+	if (l.asmOperands.empty()) return false;
+	for (size_t i = 1; i < l.asmOperands.size(); ++i)
+		if (l.asmOperands[i] == r || peephSamePhysicalReg(l.asmOperands[i], r)) return true;
 	if (l.opcodeText == "str" || l.opcodeText == "stp" || l.opcodeText == "stur" ||
 	    l.opcodeText == "cbnz" || l.opcodeText == "cbz" ||
 	    l.opcodeText == "cmp" || l.opcodeText == "fcmp" || l.opcodeText == "tst")
-		if (l.rawOperands[0] == r || peephSamePhysicalReg(l.rawOperands[0], r)) return true;
+		if (l.asmOperands[0] == r || peephSamePhysicalReg(l.asmOperands[0], r)) return true;
 	return false;
 }
 
 bool peephLineUsesReg(const MachineInstr &l, const std::string &r) {
-	for (const auto &op : l.rawOperands) {
+	for (const auto &op : l.asmOperands) {
 		if (op == r || peephSamePhysicalReg(op, r)) return true;
 		MemOperand mem = peephParseMemOp(op);
 		if (mem.valid && peephSamePhysicalReg(mem.base, r)) return true;
@@ -148,8 +148,8 @@ bool peephLineUsesReg(const MachineInstr &l, const std::string &r) {
 bool peephLineWritesReg(const MachineInstr &l, const std::string &r) {
 	if ((l.opcodeText == "ldr" || l.opcodeText == "str" ||
 	     l.opcodeText == "ld1" || l.opcodeText == "st1") &&
-	    l.rawOperands.size() >= 3) {
-		MemOperand mem = peephParseMemOp(l.rawOperands[1]);
+	    l.asmOperands.size() >= 3) {
+		MemOperand mem = peephParseMemOp(l.asmOperands[1]);
 		if (mem.valid && peephSamePhysicalReg(mem.base, r))
 			return true;
 	}
@@ -160,8 +160,8 @@ bool peephLineWritesReg(const MachineInstr &l, const std::string &r) {
 	    l.opcodeText == "ret" || l.opcodeText == "st1")
 		return false;
 	if (l.opcodeText == "ldp") {
-		for (int i = 0; i < 2 && i < (int)l.rawOperands.size(); ++i) {
-			const std::string &op = l.rawOperands[i];
+		for (int i = 0; i < 2 && i < (int)l.asmOperands.size(); ++i) {
+			const std::string &op = l.asmOperands[i];
 			if (op == r) return true;
 			if (op.size() >= 2 && r.size() >= 2 &&
 			    ((op[0] == 'w' || op[0] == 'x') && (r[0] == 'w' || r[0] == 'x')) &&
@@ -169,8 +169,8 @@ bool peephLineWritesReg(const MachineInstr &l, const std::string &r) {
 		}
 		return false;
 	}
-	if (!l.rawOperands.empty()) {
-		const std::string &dst = l.rawOperands[0];
+	if (!l.asmOperands.empty()) {
+		const std::string &dst = l.asmOperands[0];
 		if (dst == r) return true;
 		if (peephSamePhysicalReg(dst, r)) return true;
 	}

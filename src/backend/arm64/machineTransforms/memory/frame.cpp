@@ -11,17 +11,17 @@ bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &zero = inst;
 	if (zero.isLabelLike) return false;
 	if (zero.opcodeText != "movz" && zero.opcodeText != "mov") return false;
-	if (zero.rawOperands.empty()) return false;
+	if (zero.asmOperands.empty()) return false;
 
-	std::string zeroedReg = zero.rawOperands[0];
+	std::string zeroedReg = zero.asmOperands[0];
 	char cls = peephRegClass(zeroedReg);
 	if (cls != 'w' && cls != 'x') return false;
 
 	bool isZeroing = false;
-	if (zero.opcodeText == "movz" && zero.rawOperands.size() >= 2) {
-		isZeroing = zero.rawOperands[1] == "#0";
-	} else if (zero.opcodeText == "mov" && zero.rawOperands.size() >= 2) {
-		const std::string &src = zero.rawOperands[1];
+	if (zero.opcodeText == "movz" && zero.asmOperands.size() >= 2) {
+		isZeroing = zero.asmOperands[1] == "#0";
+	} else if (zero.opcodeText == "mov" && zero.asmOperands.size() >= 2) {
+		const std::string &src = zero.asmOperands[1];
 		isZeroing = src == "wzr" || src == "xzr" || src == "#0";
 	}
 	if (!isZeroing) return false;
@@ -39,9 +39,9 @@ bool tryMachineZeroStore(MachineBasicBlock &block, size_t idx,
 		if (line.isCall) return false;
 		if (peephLineWritesReg(line, zeroedReg)) return false;
 
-		if (line.opcodeText == "str" && line.rawOperands.size() >= 2 &&
-		    line.rawOperands[0] == zeroedReg) {
-			auto newOps = line.rawOperands;
+		if (line.opcodeText == "str" && line.asmOperands.size() >= 2 &&
+		    line.asmOperands[0] == zeroedReg) {
+			auto newOps = line.asmOperands;
 			newOps[0] = architecturalZero;
 			peephReplaceInstr(block.instrs[i], peephMakeInsn("str", newOps));
 			foundStore = true;
@@ -67,11 +67,11 @@ bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 
 	const MachineInstr &store = block.instrs[idx];
 	if (store.isLabelLike || store.opcodeText != "str" ||
-	    store.rawOperands.size() != 2)
+	    store.asmOperands.size() != 2)
 		return false;
 
-	MemOperand storeMem = peephParseMemOp(store.rawOperands[1]);
-	const std::string &src = store.rawOperands[0];
+	MemOperand storeMem = peephParseMemOp(store.asmOperands[1]);
+	const std::string &src = store.asmOperands[0];
 	char cls = peephRegClass(src);
 	const MachineInstr &storeMI = block.instrs[idx];
 	if (!storeMem.valid || storeMem.base != "x29" ||
@@ -97,12 +97,12 @@ bool tryMachineStoreLoadForward(MachineBasicBlock &block, size_t idx) {
 			return false;
 
 		bool exactSlotLoad = mi.mayLoad && line.opcodeText == "ldr" &&
-		                     line.rawOperands.size() == 2 && mi.memOffsetKnown &&
+		                     line.asmOperands.size() == 2 && mi.memOffsetKnown &&
 		                     mi.memBase == storeMI.memBase &&
 		                     mi.memOffset == storeMI.memOffset &&
 		                     mi.memWidth == storeMI.memWidth;
 		if (exactSlotLoad) {
-			const std::string &dst = line.rawOperands[0];
+			const std::string &dst = line.asmOperands[0];
 			if (peephRegClass(dst) != cls) return false;
 			if (peephSamePhysicalReg(src, dst)) {
 				block.instrs.erase(block.instrs.begin() + loadIdx);
@@ -145,18 +145,18 @@ bool tryMachineDeadStore(MachineBasicBlock &block, size_t idx) {
 	if (first.isLabelLike || second.isLabelLike)
 		return false;
 	if (first.opcodeText != "str" || second.opcodeText != "str") return false;
-	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
+	if (first.asmOperands.size() != 2 || second.asmOperands.size() != 2) return false;
 
-	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.asmOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.asmOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 	if (firstMem.offset != secondMem.offset) return false;
 
-	char firstClass = peephRegClass(first.rawOperands[0]);
+	char firstClass = peephRegClass(first.asmOperands[0]);
 	if (firstClass != 'w' && firstClass != 'x' && firstClass != 's' && firstClass != 'd')
 		return false;
-	if (peephRegClass(second.rawOperands[0]) != firstClass) return false;
+	if (peephRegClass(second.asmOperands[0]) != firstClass) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;
@@ -170,16 +170,16 @@ bool tryMachineMergeStores(MachineBasicBlock &block, size_t idx) {
 	if (first.isLabelLike || second.isLabelLike)
 		return false;
 	if (first.opcodeText != "str" || second.opcodeText != "str") return false;
-	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
+	if (first.asmOperands.size() != 2 || second.asmOperands.size() != 2) return false;
 
-	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.asmOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.asmOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 
-	char cls = peephRegClass(first.rawOperands[0]);
+	char cls = peephRegClass(first.asmOperands[0]);
 	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
-	if (peephRegClass(second.rawOperands[0]) != cls) return false;
+	if (peephRegClass(second.asmOperands[0]) != cls) return false;
 
 	int stride = peephRegSize(cls);
 	int diff = secondMem.offset - firstMem.offset;
@@ -189,8 +189,8 @@ bool tryMachineMergeStores(MachineBasicBlock &block, size_t idx) {
 	int lowerOffset = firstIsLower ? firstMem.offset : secondMem.offset;
 	if (!validPairOffset(lowerOffset, stride)) return false;
 
-	std::string lowerReg = firstIsLower ? first.rawOperands[0] : second.rawOperands[0];
-	std::string higherReg = firstIsLower ? second.rawOperands[0] : first.rawOperands[0];
+	std::string lowerReg = firstIsLower ? first.asmOperands[0] : second.asmOperands[0];
+	std::string higherReg = firstIsLower ? second.asmOperands[0] : first.asmOperands[0];
 	std::string addr = "[x29, #" + std::to_string(lowerOffset) + "]";
 
 	if (firstIsLower) {
@@ -213,15 +213,15 @@ bool tryMachineMergeLoads(MachineBasicBlock &block, size_t idx) {
 	if (first.isLabelLike || second.isLabelLike)
 		return false;
 	if (first.opcodeText != "ldr" || second.opcodeText != "ldr") return false;
-	if (first.rawOperands.size() != 2 || second.rawOperands.size() != 2) return false;
+	if (first.asmOperands.size() != 2 || second.asmOperands.size() != 2) return false;
 
-	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
-	MemOperand secondMem = peephParseMemOp(second.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.asmOperands[1]);
+	MemOperand secondMem = peephParseMemOp(second.asmOperands[1]);
 	if (!firstMem.valid || !secondMem.valid) return false;
 	if (firstMem.base != "x29" || secondMem.base != "x29") return false;
 
-	const std::string &firstDst = first.rawOperands[0];
-	const std::string &secondDst = second.rawOperands[0];
+	const std::string &firstDst = first.asmOperands[0];
+	const std::string &secondDst = second.asmOperands[0];
 	char cls = peephRegClass(firstDst);
 	if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd') return false;
 	if (peephRegClass(secondDst) != cls) return false;

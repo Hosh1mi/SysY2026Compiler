@@ -64,8 +64,11 @@ struct MachineInstr {
     std::string opcodeText;
     MOpcode opcode = MOpcode::Unknown;
     std::vector<MachineOperand> operands;
+    // Assembly operands in source order. Post-RA analyses and transforms use
+    // this representation instead of reparsing `text`; `operands` remains the
+    // typed virtual/physical operand list used by pre-RA scheduling.
+    std::vector<std::string> asmOperands;
 
-    std::vector<std::string> rawOperands; // comma-split text operands from inst text
     std::set<std::string> defs;
     std::set<std::string> uses;
 

@@ -7,7 +7,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 RESULT_FILE="$PROJ_DIR/test/results/result_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
 TEST_DIR="$PROJ_DIR/test/performance"
-CACHE_DIR="$PROJ_DIR/tmp"
+CACHE_DIR="$SCRIPT_DIR/tmp"
 
 mkdir -p "$RESULT_DIR" "$CACHE_DIR"
 

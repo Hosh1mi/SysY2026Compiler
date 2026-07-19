@@ -21,11 +21,11 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &andLine = block.instrs[idx];
 	if (andLine.isLabelLike) return false;
 	if (andLine.opcodeText != "and") return false;
-	if (andLine.rawOperands.size() != 3) return false;
-	if (andLine.rawOperands[2] != "#1") return false;
+	if (andLine.asmOperands.size() != 3) return false;
+	if (andLine.asmOperands[2] != "#1") return false;
 
-	const std::string &tempReg = andLine.rawOperands[0];
-	const std::string &srcReg  = andLine.rawOperands[1];
+	const std::string &tempReg = andLine.asmOperands[0];
+	const std::string &srcReg  = andLine.asmOperands[1];
 	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
 	if (peephRegClass(srcReg) != cls) return false;
@@ -45,10 +45,10 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		if (peephLineWritesReg(line, tempReg)) return false;
 
 		// ── Direct cbz / cbnz ──────────────────────────────────
-		bool isCbz  = (line.opcodeText == "cbz"  && line.rawOperands.size() >= 2 &&
-		               line.rawOperands[0] == tempReg);
-		bool isCbnz = (line.opcodeText == "cbnz" && line.rawOperands.size() >= 2 &&
-		               line.rawOperands[0] == tempReg);
+		bool isCbz  = (line.opcodeText == "cbz"  && line.asmOperands.size() >= 2 &&
+		               line.asmOperands[0] == tempReg);
+		bool isCbnz = (line.opcodeText == "cbnz" && line.asmOperands.size() >= 2 &&
+		               line.asmOperands[0] == tempReg);
 
 		// Bail on other control-flow barriers (unrelated cbz/cbnz, ret, b, etc.)
 		if (!isCbz && !isCbnz && peephIsControlFlowBarrier(line))
@@ -65,7 +65,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 			}
 			if (usedElsewhere) return false;
 
-			const std::string &label = line.rawOperands[1];
+			const std::string &label = line.asmOperands[1];
 			std::string newMnemonic = isCbz ? "tbz" : "tbnz";
 			peephReplaceInstr(block.instrs[i],
 			                    peephMakeInsn(newMnemonic,
@@ -75,11 +75,11 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 		}
 
 		// ── tst wN, wN  or  cmp wN, #0 → b.eq / b.ne ─────────
-		bool isTst = (line.opcodeText == "tst" && line.rawOperands.size() >= 2 &&
-		              line.rawOperands[0] == tempReg && line.rawOperands[1] == tempReg);
-		bool isCmpZero = (line.opcodeText == "cmp" && line.rawOperands.size() >= 2 &&
-		                  line.rawOperands[0] == tempReg &&
-		                  line.rawOperands[1] == "#0");
+		bool isTst = (line.opcodeText == "tst" && line.asmOperands.size() >= 2 &&
+		              line.asmOperands[0] == tempReg && line.asmOperands[1] == tempReg);
+		bool isCmpZero = (line.opcodeText == "cmp" && line.asmOperands.size() >= 2 &&
+		                  line.asmOperands[0] == tempReg &&
+		                  line.asmOperands[1] == "#0");
 
 		if (!isTst && !isCmpZero) {
 			// tempReg is used by some other instruction — bail out
@@ -118,7 +118,7 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 
 			bool isSupportedBranch =
 				(brLine.opcodeText == "b.eq" || brLine.opcodeText == "b.ne") &&
-				brLine.rawOperands.size() >= 1;
+				brLine.asmOperands.size() >= 1;
 			if (isSupportedBranch) {
 				auto liveIt = liveness.instrLiveOut.find(&block.instrs[branchIdx]);
 				if (liveIt == liveness.instrLiveOut.end() ||
@@ -126,18 +126,18 @@ static bool tryMachineAndTBZ(MachineBasicBlock &block, size_t idx,
 					return false;
 			}
 
-			if (brLine.opcodeText == "b.eq" && brLine.rawOperands.size() >= 1) {
+			if (brLine.opcodeText == "b.eq" && brLine.asmOperands.size() >= 1) {
 				peephReplaceInstr(block.instrs[branchIdx],
 				                    peephMakeInsn("tbz",
-				                                    {srcReg, "#0", brLine.rawOperands[0]}));
+				                                    {srcReg, "#0", brLine.asmOperands[0]}));
 				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
 				block.instrs.erase(block.instrs.begin() + idx); // remove and
 				return true;
 			}
-			if (brLine.opcodeText == "b.ne" && brLine.rawOperands.size() >= 1) {
+			if (brLine.opcodeText == "b.ne" && brLine.asmOperands.size() >= 1) {
 				peephReplaceInstr(block.instrs[branchIdx],
 				                    peephMakeInsn("tbnz",
-				                                    {srcReg, "#0", brLine.rawOperands[0]}));
+				                                    {srcReg, "#0", brLine.asmOperands[0]}));
 				block.instrs.erase(block.instrs.begin() + i);   // remove tst/cmp
 				block.instrs.erase(block.instrs.begin() + idx); // remove and
 				return true;
@@ -163,16 +163,16 @@ static bool isReturnReg(const std::string &reg) {
 }
 
 static bool isUncondBranchTo(const MachineInstr &inst, std::string &target) {
-	if (inst.opcodeText != "b" || inst.rawOperands.size() != 1)
+	if (inst.opcodeText != "b" || inst.asmOperands.size() != 1)
 		return false;
-	target = inst.rawOperands[0];
+	target = inst.asmOperands[0];
 	return true;
 }
 
 static bool isDirectCall(const MachineInstr &inst, std::string &target) {
-	if (inst.opcodeText != "bl" || inst.rawOperands.size() != 1)
+	if (inst.opcodeText != "bl" || inst.asmOperands.size() != 1)
 		return false;
-	target = inst.rawOperands[0];
+	target = inst.asmOperands[0];
 	return !target.empty();
 }
 
@@ -224,9 +224,9 @@ static bool matchReturnForwarder(const MachineFunction &func,
 
 	const MachineInstr &move = instrs[1];
 	if ((move.opcodeText != "mov" && move.opcodeText != "fmov") ||
-	    move.rawOperands.size() != 2 ||
-	    !isReturnReg(move.rawOperands[0]) ||
-	    !peephSamePhysicalReg(move.rawOperands[1], tempReg))
+	    move.asmOperands.size() != 2 ||
+	    !isReturnReg(move.asmOperands[0]) ||
+	    !peephSamePhysicalReg(move.asmOperands[1], tempReg))
 		return false;
 
 	std::string branchTarget;
@@ -258,11 +258,11 @@ static bool nextVisibleIsLabel(const MachineFunction &func,
 // 注意 "bl" 是调用不是分支。
 static int branchTargetOperandIndex(const MachineInstr &line) {
 	const std::string &m = line.opcodeText;
-	if (m == "b" && line.rawOperands.size() == 1) return 0;
-	if (m.size() > 2 && m.compare(0, 2, "b.") == 0 && line.rawOperands.size() == 1)
+	if (m == "b" && line.asmOperands.size() == 1) return 0;
+	if (m.size() > 2 && m.compare(0, 2, "b.") == 0 && line.asmOperands.size() == 1)
 		return 0;
-	if ((m == "cbz" || m == "cbnz") && line.rawOperands.size() == 2) return 1;
-	if ((m == "tbz" || m == "tbnz") && line.rawOperands.size() == 3) return 2;
+	if ((m == "cbz" || m == "cbnz") && line.asmOperands.size() == 2) return 1;
+	if ((m == "tbz" || m == "tbnz") && line.asmOperands.size() == 3) return 2;
 	return -1;
 }
 
@@ -305,9 +305,9 @@ static std::string resolveForwardTarget(const MachineFunction &func,
 		if (!findFirstInstrAfterLabel(func, target, b, i))
 			return target;
 		const MachineInstr &line = func.blocks[b].instrs[i];
-		if (line.opcodeText != "b" || line.rawOperands.size() != 1)
+		if (line.opcodeText != "b" || line.asmOperands.size() != 1)
 			return target;
-		target = line.rawOperands[0];
+		target = line.asmOperands[0];
 	}
 	return "";
 }
@@ -323,11 +323,11 @@ static bool tryMachineBranchThreading(MachineFunction &func,
 	if (line.isLabelLike) return false;
 	int ti = branchTargetOperandIndex(line);
 	if (ti < 0) return false;
-	const std::string target = line.rawOperands[ti];
+	const std::string target = line.asmOperands[ti];
 	std::string finalTarget = resolveForwardTarget(func, target);
 	if (finalTarget.empty() || finalTarget == target) return false;
 
-	auto newBranchOps = line.rawOperands;
+	auto newBranchOps = line.asmOperands;
 	newBranchOps[ti] = finalTarget;
 	peephReplaceInstr(inst, peephMakeInsn(line.opcodeText, newBranchOps));
 	return true;
@@ -356,7 +356,7 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 		for (const auto &other : bb.instrs) {
 			const MachineInstr &l = other;
 			if (l.isLabelLike) continue;
-			for (const auto &op : l.rawOperands)
+			for (const auto &op : l.asmOperands)
 				if (op == label) return false;
 		}
 	}
@@ -372,7 +372,7 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 				if (peephIsInertLine(l))
 					continue;
 				if (!l.isLabelLike &&
-				    ((l.opcodeText == "b" && l.rawOperands.size() == 1) ||
+				    ((l.opcodeText == "b" && l.asmOperands.size() == 1) ||
 				     l.opcodeText == "ret"))
 					ok = true;
 				goto prevChecked;
@@ -391,7 +391,7 @@ static bool tryMachineRemoveDeadForwarder(MachineFunction &func,
 			if (peephIsInertLine(l))
 				continue;
 			if (!l.isLabelLike && l.opcodeText == "b" &&
-			    l.rawOperands.size() == 1) {
+			    l.asmOperands.size() == 1) {
 				func.blocks[bIdx].instrs.erase(func.blocks[bIdx].instrs.begin() + iIdx);
 				block.instrs.erase(block.instrs.begin() + instrIdx);
 				return true;
@@ -409,8 +409,8 @@ static bool tryMachineFallthroughBranch(MachineFunction &func,
 	auto &inst = block.instrs[instrIdx];
 	const MachineInstr &line = inst;
 	if (line.isLabelLike) return false;
-	if (line.opcodeText != "b" || line.rawOperands.size() != 1) return false;
-	if (!nextVisibleIsLabel(func, blockIdx, instrIdx, line.rawOperands[0])) return false;
+	if (line.opcodeText != "b" || line.asmOperands.size() != 1) return false;
+	if (!nextVisibleIsLabel(func, blockIdx, instrIdx, line.asmOperands[0])) return false;
 
 	block.instrs.erase(block.instrs.begin() + instrIdx);
 	return true;
@@ -428,9 +428,9 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	const MachineInstr &copy = block.instrs[instrIdx];
 	if (copy.isLabelLike) return false;
 	if (copy.opcodeText != "mov" && copy.opcodeText != "fmov") return false;
-	if (copy.rawOperands.size() != 2) return false;
-	const std::string tempReg = copy.rawOperands[0];
-	const std::string srcReg = copy.rawOperands[1];
+	if (copy.asmOperands.size() != 2) return false;
+	const std::string tempReg = copy.asmOperands[0];
+	const std::string srcReg = copy.asmOperands[1];
 	if (!peephRegClass(tempReg) || peephRegClass(tempReg) != peephRegClass(srcReg)) return false;
 
 	size_t returnMoveBlock = 0, returnMoveInstr = 0;
@@ -450,7 +450,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 			if (line.isLabelLike) return false;
 			if (!crossedLabel ||
 			    (line.opcodeText != "mov" && line.opcodeText != "fmov") ||
-			    line.rawOperands.size() != 2 || line.rawOperands[1] != tempReg)
+			    line.asmOperands.size() != 2 || line.asmOperands[1] != tempReg)
 				return false;
 			returnMoveBlock = b;
 			returnMoveInstr = i;
@@ -463,7 +463,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 	const MachineInstr &returnMove =
 		func.blocks[returnMoveBlock].instrs[returnMoveInstr];
 	if (returnMove.opcodeText != copy.opcodeText) return false;
-	if (peephRegClass(returnMove.rawOperands[0]) != peephRegClass(tempReg)) return false;
+	if (peephRegClass(returnMove.asmOperands[0]) != peephRegClass(tempReg)) return false;
 
 	bool foundRet = false;
 	for (size_t b = returnMoveBlock; b < func.blocks.size() && !foundRet; ++b) {
@@ -483,7 +483,7 @@ static bool tryMachineFoldCopyIntoReturn(MachineFunction &func,
 
 	peephReplaceInstr(block.instrs[instrIdx],
 	                    peephMakeInsn(copy.opcodeText,
-	                                    {returnMove.rawOperands[0], srcReg}));
+	                                    {returnMove.asmOperands[0], srcReg}));
 	MachineInstr ret = parseMachineInstr("\tret", block.instrs[instrIdx].originalIndex);
 	block.instrs.insert(block.instrs.begin() + instrIdx + 1, std::move(ret));
 	return true;
@@ -517,11 +517,11 @@ static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
 	} else {
 		const MachineInstr &saveMove = block.instrs[eraseEnd];
 		if ((saveMove.opcodeText != "mov" && saveMove.opcodeText != "fmov") ||
-		    saveMove.rawOperands.size() != 2 ||
-		    !peephRegClass(saveMove.rawOperands[0]) ||
-		    !isReturnReg(saveMove.rawOperands[1]))
+		    saveMove.asmOperands.size() != 2 ||
+		    !peephRegClass(saveMove.asmOperands[0]) ||
+		    !isReturnReg(saveMove.asmOperands[1]))
 			return false;
-		const std::string tempReg = saveMove.rawOperands[0];
+		const std::string tempReg = saveMove.asmOperands[0];
 		if (eraseEnd + 1 >= block.instrs.size() ||
 		    !isUncondBranchTo(block.instrs[eraseEnd + 1], branchTarget) ||
 		    !matchReturnForwarder(func, branchTarget, tempReg))
@@ -545,7 +545,7 @@ static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
 	return true;
 }
 
-bool runMachineBranchOptimization(MachineFunction &func) {
+bool runMachineCFGOptimization(MachineFunction &func) {
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
@@ -557,7 +557,11 @@ bool runMachineBranchOptimization(MachineFunction &func) {
 		}
 	}
 
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+	return false;
+}
+
+bool runMachineBitBranchOptimization(
+    MachineFunction &func, const MachineLivenessResult &liveness) {
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineAndTBZ(func.blocks[b], i, liveness))

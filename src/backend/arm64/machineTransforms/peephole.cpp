@@ -5,8 +5,8 @@ static bool tryMachineSelfMove(MachineBasicBlock &block, size_t idx) {
 	const MachineInstr &line = inst;
 	if (line.isLabelLike) return false;
 	if (line.opcodeText != "mov" && line.opcodeText != "fmov") return false;
-	if (line.rawOperands.size() < 2) return false;
-	if (line.rawOperands[0] != line.rawOperands[1]) return false;
+	if (line.asmOperands.size() < 2) return false;
+	if (line.asmOperands[0] != line.asmOperands[1]) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx);
 	return true;

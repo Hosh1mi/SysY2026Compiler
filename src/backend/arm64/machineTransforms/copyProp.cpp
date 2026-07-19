@@ -13,14 +13,14 @@ static bool tryMachineSwapMov(MachineBasicBlock &block, size_t idx) {
 	if (first.isLabelLike || second.isLabelLike)
 		return false;
 	if (first.opcodeText != "mov" || second.opcodeText != "mov") return false;
-	if (first.rawOperands.size() < 2 || second.rawOperands.size() < 2) return false;
+	if (first.asmOperands.size() < 2 || second.asmOperands.size() < 2) return false;
 
-	const std::string &rA = first.rawOperands[0];
-	const std::string &rB = first.rawOperands[1];
+	const std::string &rA = first.asmOperands[0];
+	const std::string &rB = first.asmOperands[1];
 	if (rA == rB) return false;
 	if (rB.empty() || rB[0] == '#') return false;
 	if (!peephRegClass(rA) || !peephRegClass(rB)) return false;
-	if (second.rawOperands[0] != rB || second.rawOperands[1] != rA) return false;
+	if (second.asmOperands[0] != rB || second.asmOperands[1] != rA) return false;
 
 	block.instrs.erase(block.instrs.begin() + idx + 1);
 	return true;
@@ -32,19 +32,19 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
 
 	const MachineInstr &first = block.instrs[idx];
 	if (first.isLabelLike) return false;
-	if (first.opcodeText != "mov" || first.rawOperands.size() != 2) return false;
+	if (first.opcodeText != "mov" || first.asmOperands.size() != 2) return false;
 
-	const std::string &tempReg = first.rawOperands[0];
-	const std::string &srcReg = first.rawOperands[1];
+	const std::string &tempReg = first.asmOperands[0];
+	const std::string &srcReg = first.asmOperands[1];
 	if (tempReg == srcReg) return false;
 	if (!peephRegClass(tempReg)) return false;
 
 	const MachineInstr &second = block.instrs[idx + 1];
 	if (second.isLabelLike) return false;
-	if (second.opcodeText != "mov" || second.rawOperands.size() != 2) return false;
-	if (second.rawOperands[1] != tempReg) return false;
+	if (second.opcodeText != "mov" || second.asmOperands.size() != 2) return false;
+	if (second.asmOperands[1] != tempReg) return false;
 
-	const std::string &dstReg = second.rawOperands[0];
+	const std::string &dstReg = second.asmOperands[0];
 	if (peephRegClass(dstReg) != peephRegClass(tempReg)) return false;
 
 	if (!peephRegDeadAfter(block, idx + 1, tempReg, liveness)) return false;
@@ -56,9 +56,9 @@ static bool tryMachineForwardMov(MachineBasicBlock &block, size_t idx,
 }
 
 static bool isRetargetablePureDef(const MachineInstr &line) {
-	if (line.isLabelLike || line.rawOperands.empty())
+	if (line.isLabelLike || line.asmOperands.empty())
 		return false;
-	if (!peephRegClass(line.rawOperands[0]))
+	if (!peephRegClass(line.asmOperands[0]))
 		return false;
 	if (line.setsFlags || line.isCall ||
 	    peephIsControlFlowBarrier(line))
@@ -85,11 +85,11 @@ static bool tryMachineRetargetCopyDest(
 	if (!isRetargetablePureDef(producer)) return false;
 	if (copy.isLabelLike) return false;
 	if (copy.opcodeText != "mov" && copy.opcodeText != "fmov") return false;
-	if (copy.rawOperands.size() != 2) return false;
+	if (copy.asmOperands.size() != 2) return false;
 
-	const std::string &tempReg = producer.rawOperands[0];
-	const std::string &dstReg = copy.rawOperands[0];
-	const std::string &copySrc = copy.rawOperands[1];
+	const std::string &tempReg = producer.asmOperands[0];
+	const std::string &dstReg = copy.asmOperands[0];
+	const std::string &copySrc = copy.asmOperands[1];
 	if (!peephSamePhysicalReg(copySrc, tempReg)) return false;
 	if (peephSamePhysicalReg(dstReg, tempReg)) {
 		block.instrs.erase(block.instrs.begin() + idx + 1);
@@ -117,7 +117,7 @@ static bool tryMachineRetargetCopyDest(
 			return false;
 	}
 
-	std::vector<std::string> operands = producer.rawOperands;
+	std::vector<std::string> operands = producer.asmOperands;
 	operands[0] = dstReg;
 	peephReplaceInstr(block.instrs[idx],
 	                  peephMakeInsn(producer.opcodeText, operands));
@@ -162,10 +162,10 @@ static bool tryMachineRetargetVectorCopyDest(
 
 	const MachineInstr &producer = block.instrs[idx];
 	const MachineInstr &copy = block.instrs[idx + 1];
-	if (producer.isLabelLike || producer.rawOperands.empty())
+	if (producer.isLabelLike || producer.asmOperands.empty())
 		return false;
 	if (copy.isLabelLike || copy.opcodeText != "mov" ||
-	    copy.rawOperands.size() != 2)
+	    copy.asmOperands.size() != 2)
 		return false;
 
 	static const std::set<std::string> vecPureDef = {
@@ -176,9 +176,9 @@ static bool tryMachineRetargetVectorCopyDest(
 	if (!vecPureDef.count(producer.opcodeText)) return false;
 
 	std::string prodNum, prodArr, dstNum, dstArr, srcNum, srcArr;
-	if (!splitVectorOperand(producer.rawOperands[0], prodNum, prodArr)) return false;
-	if (!splitVectorOperand(copy.rawOperands[0], dstNum, dstArr)) return false;
-	if (!splitVectorOperand(copy.rawOperands[1], srcNum, srcArr)) return false;
+	if (!splitVectorOperand(producer.asmOperands[0], prodNum, prodArr)) return false;
+	if (!splitVectorOperand(copy.asmOperands[0], dstNum, dstArr)) return false;
+	if (!splitVectorOperand(copy.asmOperands[1], srcNum, srcArr)) return false;
 	if (dstArr != ".16b" || srcArr != ".16b" || srcNum != prodNum) return false;
 
 	if (dstNum == prodNum) {
@@ -191,7 +191,7 @@ static bool tryMachineRetargetVectorCopyDest(
 	for (const auto &def : block.instrs[idx].defs)
 		if (liveIt->second.count(def)) return false;
 
-	std::vector<std::string> operands = producer.rawOperands;
+	std::vector<std::string> operands = producer.asmOperands;
 	operands[0] = "v" + dstNum + prodArr;
 	peephReplaceInstr(block.instrs[idx],
 	                  peephMakeInsn(producer.opcodeText, operands));
@@ -214,7 +214,7 @@ static bool canPropagateCopy(const MachineInstr &line,
 		return replaced;
 	};
 
-	rewrittenOps = line.rawOperands;
+	rewrittenOps = line.asmOperands;
 	if (line.opcodeText == "cmp" || line.opcodeText == "cmn" || line.opcodeText == "fcmp" ||
 	    line.opcodeText == "tst" || line.opcodeText == "ccmp") {
 		return rewriteUses({0, 1});
@@ -229,10 +229,10 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &copy = block.instrs[idx];
 	if (copy.isLabelLike) return false;
 	if (copy.opcodeText != "mov" && copy.opcodeText != "fmov") return false;
-	if (copy.rawOperands.size() != 2) return false;
+	if (copy.asmOperands.size() != 2) return false;
 
-	const std::string &tempReg = copy.rawOperands[0];
-	const std::string &srcReg = copy.rawOperands[1];
+	const std::string &tempReg = copy.asmOperands[0];
+	const std::string &srcReg = copy.asmOperands[1];
 	if (tempReg == srcReg || peephSamePhysicalReg(tempReg, srcReg)) return false;
 	if (srcReg == "sp" || srcReg == "wzr" || srcReg == "xzr") return false;
 
@@ -276,8 +276,8 @@ static bool tryMachineCopyPropagate(MachineBasicBlock &block, size_t idx,
 	return false;
 }
 
-bool runMachineCopyPropagation(MachineFunction &func) {
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+bool runMachineCopyPropagation(MachineFunction &func,
+                               const MachineLivenessResult &liveness) {
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineSwapMov(func.blocks[b], i) ||

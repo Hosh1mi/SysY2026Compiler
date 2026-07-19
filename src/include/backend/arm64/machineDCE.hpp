@@ -1,5 +1,5 @@
 #pragma once
 
-#include "machine.hpp"
+#include "liveness.hpp"
 
-bool machineDCE(MachineFunction &func);
+bool machineDCE(MachineFunction &func, const MachineLivenessResult &liveness);

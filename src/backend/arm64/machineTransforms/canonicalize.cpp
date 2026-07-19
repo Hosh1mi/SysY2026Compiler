@@ -30,22 +30,22 @@ static bool tryMachineVectorLdStAlias(MachineBasicBlock &block, size_t idx) {
 		return false;
 	if (line.opcodeText != "ld1" && line.opcodeText != "st1")
 		return false;
-	if (line.rawOperands.size() != 2 && line.rawOperands.size() != 3)
+	if (line.asmOperands.size() != 2 && line.asmOperands.size() != 3)
 		return false;
 
-	std::string qReg = parseFullVectorListReg(line.rawOperands[0]);
+	std::string qReg = parseFullVectorListReg(line.asmOperands[0]);
 	if (qReg.empty())
 		return false;
 
-	MemOperand addr = peephParseMemOp(line.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(line.asmOperands[1]);
 	if (!addr.valid || addr.offset != 0)
 		return false;
-	if (line.rawOperands.size() == 3 && line.rawOperands[2] != "#16")
+	if (line.asmOperands.size() == 3 && line.asmOperands[2] != "#16")
 		return false;
 
-	std::vector<std::string> operands = {qReg, line.rawOperands[1]};
-	if (line.rawOperands.size() == 3)
-		operands.push_back(line.rawOperands[2]);
+	std::vector<std::string> operands = {qReg, line.asmOperands[1]};
+	if (line.asmOperands.size() == 3)
+		operands.push_back(line.asmOperands[2]);
 	peephReplaceInstr(block.instrs[idx],
 	                    peephMakeInsn(line.opcodeText == "ld1" ? "ldr" : "str",
 	                                    operands));

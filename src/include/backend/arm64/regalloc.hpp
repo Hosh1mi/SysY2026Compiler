@@ -30,6 +30,7 @@ public:
 private:
     bool canAssignRegister(Value *v) const;
     size_t stableIndex(Value *v) const;
+    int preferredArgumentReg(Value *v) const;
 
     /// 计算逆后序(RPO)块序,并填充每个块的前驱表。
     std::vector<BasicBlock*> computeBlockOrder(
@@ -95,7 +96,7 @@ private:
         std::set<int> callerSavedInt, callerSavedFloat, callerSavedNEON;
     };
 
-    /// 按叶/非叶函数规则构建三个寄存器类的调色板，排除已预着色的寄存器。
+    /// 按叶/非叶函数规则构建三个寄存器类的调色板。
     RegPalette buildRegPalette(bool isLeaf) const;
 
     void colorPool(const std::vector<Interval> &pool,
@@ -111,4 +112,5 @@ private:
     std::map<Value*, size_t> stableOrder_;
     std::map<Value*, std::string> assignedRegs_;
     std::map<int, std::string> promotedConsts_;
+    bool preferArgumentRegs_ = false;
 };

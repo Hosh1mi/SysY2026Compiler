@@ -26,14 +26,14 @@ static bool tryMachineDelayAddSubToCopy(
 	const MachineInstr &alu = block.instrs[idx];
 	if (alu.isLabelLike) return false;
 	if (alu.opcodeText != "add" && alu.opcodeText != "sub") return false;
-	if (alu.rawOperands.size() != 3) return false;
+	if (alu.asmOperands.size() != 3) return false;
 
-	const std::string tempReg = alu.rawOperands[0];
+	const std::string tempReg = alu.asmOperands[0];
 	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
-	if (peephRegClass(alu.rawOperands[1]) != cls && alu.rawOperands[1] != "sp")
+	if (peephRegClass(alu.asmOperands[1]) != cls && alu.asmOperands[1] != "sp")
 		return false;
-	if (alu.rawOperands[2].empty() || alu.rawOperands[2][0] != '#')
+	if (alu.asmOperands[2].empty() || alu.asmOperands[2][0] != '#')
 		return false;
 
 	std::set<std::string> sourceRegs = block.instrs[idx].uses;
@@ -48,11 +48,11 @@ static bool tryMachineDelayAddSubToCopy(
 			return false;
 		++seen;
 
-		bool isCopy = line.opcodeText == "mov" && line.rawOperands.size() == 2 &&
-		              line.rawOperands[1] == tempReg;
+		bool isCopy = line.opcodeText == "mov" && line.asmOperands.size() == 2 &&
+		              line.asmOperands[1] == tempReg;
 		if (isCopy) {
 			if (!sawConditionalBranch) return false;
-			const std::string &dstReg = line.rawOperands[0];
+			const std::string &dstReg = line.asmOperands[0];
 			if (peephRegClass(dstReg) != cls || dstReg == tempReg) return false;
 
 			auto liveIt = liveness.instrLiveOut.find(&block.instrs[i]);
@@ -66,7 +66,7 @@ static bool tryMachineDelayAddSubToCopy(
 					return false;
 			}
 
-			std::vector<std::string> operands = alu.rawOperands;
+			std::vector<std::string> operands = alu.asmOperands;
 			operands[0] = dstReg;
 			peephReplaceInstr(block.instrs[i],
 			                    peephMakeInsn(alu.opcodeText, operands));
@@ -92,17 +92,17 @@ static bool tryMachineDelayAddSubToCopy(
 				return false;
 			if (line.opcodeText.size() < 3 ||
 			    line.opcodeText[0] != 'b' || line.opcodeText[1] != '.' ||
-			    line.rawOperands.size() != 1)
+			    line.asmOperands.size() != 1)
 				return false;
 			sawConditionalBranch = true;
-			branchTarget = line.rawOperands[0];
+			branchTarget = line.asmOperands[0];
 		}
 	}
 	return false;
 }
 
-bool runMachineCodeMotion(MachineFunction &func) {
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+bool runMachineCodeMotion(MachineFunction &func,
+                          const MachineLivenessResult &liveness) {
 	for (auto &block : func.blocks)
 		for (size_t i = 0; i < block.instrs.size(); ++i)
 			if (tryMachineDelayAddSubToCopy(block, i, liveness))

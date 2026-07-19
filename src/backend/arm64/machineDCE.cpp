@@ -52,29 +52,19 @@ bool canDelete(const MachineInstr &inst, const std::set<std::string> &liveOut) {
 
 } // namespace
 
-bool machineDCE(MachineFunction &func) {
-    bool changedAny = false;
-    bool changed;
-    do {
-        changed = false;
-        MachineLivenessResult liveness = MachineLiveness().analyze(func);
-        for (auto &block : func.blocks) {
-            for (auto it = block.instrs.begin(); it != block.instrs.end(); ++it) {
-                auto liveIt = liveness.instrLiveOut.find(&*it);
-                if (liveIt == liveness.instrLiveOut.end())
-                    continue;
+bool machineDCE(MachineFunction &func,
+                const MachineLivenessResult &liveness) {
+    for (auto &block : func.blocks) {
+        for (auto it = block.instrs.begin(); it != block.instrs.end(); ++it) {
+            auto liveIt = liveness.instrLiveOut.find(&*it);
+            if (liveIt == liveness.instrLiveOut.end())
+                continue;
 
-                if (canDelete(*it, liveIt->second)) {
-                    block.instrs.erase(it);
-                    changed = true;
-                    changedAny = true;
-                    break;
-                }
+            if (canDelete(*it, liveIt->second)) {
+                block.instrs.erase(it);
+                return true;
             }
-            if (changed)
-                break;
         }
-    } while (changed);
-
-    return changedAny;
+    }
+    return false;
 }

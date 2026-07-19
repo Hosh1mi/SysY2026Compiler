@@ -84,15 +84,16 @@ ARM64 后端接收中端已经完成优化的 `Module`，目标为 ARMv8-A/AArch
 4. **全局对象分类**：常量进入 `.rodata`，有非零初始化的可写对象进入 `.data`，零初始化对象进入 `.bss`；同时输出外部函数声明。
 5. **逐函数 ARM64 lowering**：各函数可以并行处理，但最终按 IR 中的函数顺序输出。
    - 查找统一 epilogue，准备 PHI 边 copy。
-   - `-O1` 下计算 live interval、调用穿越信息和冲突图，分别为整数、标量浮点及合法 NEON 值着色；无法分配的值保留栈槽。调用穿越值只使用 ABI 允许的 callee-saved 寄存器。
+   - `-O1` 下计算 live interval、调用穿越信息和冲突图，分别为整数、标量浮点及合法 NEON 值着色；无法分配的值保留栈槽。调用穿越值只使用 ABI 允许的 callee-saved 寄存器。叶函数参数也进入同一套活跃区间和冲突图，ABI 入参寄存器只是偏好色而非全函数永久保留色，因此参数死亡后其寄存器可以被普通值复用。
    - 选择有利于 fallthrough 的基本块布局。
-   - 生成 prologue、参数搬运、标量/浮点/NEON 指令、地址计算、分支、调用、PHI copy 和 epilogue。常数强度削减只使用对全部输入成立的等价 ARM64 序列，并检查立即数编码范围。
-6. **Machine IR 优化（仅 `-O1`）**：`Arm64MachineOptimizationPipeline` 调度命名 pass，并重复到所有 pass 均无改动。每次可能产生死定义的迭代后运行 Machine DCE。
+   - 生成 prologue、参数搬运、标量/浮点/NEON 指令、地址计算、分支、调用、PHI copy 和 epilogue。ABI 固定返回寄存器由统一的目标寄存器物化接口处理，常量和栈值不再无条件经过 scratch copy；调用参数按并行复制边界处理，常量/静态地址直接写入 ABI 寄存器，内存驻留 SSA 值先物化再复制，避免把 ABI 固定寄存器定义跨过无关计算。常数强度削减只使用对全部输入成立的等价 ARM64 序列，并检查立即数编码范围。
+6. **Machine IR 优化（仅 `-O1`）**：`Arm64MachineOptimizationPipeline` 调度命名 pass，并重复到所有 pass 均无改动。MachineInstr 持久保存 opcode、顺序操作数、defs/uses 和内存属性，后 RA 分析与变换不重新解析汇编字符串。管线统一缓存活跃性；实际 rewrite 后失效，无改动的相邻 pass 复用。fixed point 不设静默迭代截断，若状态重复则报告 rewrite cycle。
    - `arm64-copy-propagation`：copy forwarding、copy destination retarget 和受限 copy propagation；依赖物理寄存器别名和活跃性。
    - `arm64-instruction-combine`：立即数、shifted add/sub 和 multiply-add 等 ARM64 合并；检查寄存器宽度及编码合法性。
    - `arm64-code-motion`：在完整 CFG 活跃性证明下，把纯 add/sub 延迟到条件分支的 fallthrough 路径。
    - `arm64-memory-optimization`：零值 store、store-load forwarding、死 store、pair load/store 和 post-index；无法证明地址、宽度和屏障安全时不变换。
-   - `arm64-branch-optimization`：位测试分支合并、返回块折叠、fallthrough branch 删除、跳转穿透和无用 forwarder 清理；删除 NZCV 定义前必须证明 flags 在后继不活跃。
+   - `arm64-cfg-optimization`：返回块折叠、fallthrough branch 删除、跳转穿透和无用 forwarder 清理。
+   - `arm64-bit-branch-optimization`：在完整活跃性证明下合并位测试分支；删除 NZCV 定义前必须证明 flags 在后继不活跃。
    - `arm64-canonicalization`：把等价的单寄存器 NEON load/store 规范化为统一形式。
    - `arm64-local-cse`：消除局部重复的 ADRP 和 frame-address 计算。
    - `arm64-peephole`：只保留无需数据流或 CFG 分析的自搬移删除。

@@ -3,6 +3,8 @@
 #include "../../include/mid/ir/ir.hpp"
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -363,6 +365,79 @@ std::string Arm64FuncContext::loadAddr(Value *v) {
     return r;
 }
 
+std::string Arm64FuncContext::residentReg(Value *v, bool asAddress) const {
+    auto fixed = fixedValueRegs_.find(v);
+    if (fixed != fixedValueRegs_.end()) {
+        std::string reg = fixed->second;
+        if (asAddress && !reg.empty() && reg[0] == 'w')
+            reg[0] = 'x';
+        return reg;
+    }
+    return assignedReg(v, asAddress);
+}
+
+void Arm64FuncContext::bindValueToReg(Value *v, const std::string &reg) {
+    fixedValueRegs_[v] = reg;
+}
+
+void Arm64FuncContext::materializeIntInReg(Value *v, const std::string &dst) {
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
+        emitIntConst(ci->value_, dst);
+        return;
+    }
+    std::string src = residentReg(v);
+    if (!src.empty()) {
+        emitMoveMachine(dst, src);
+        return;
+    }
+    emitLoadRegMachine(dst, getSlot(v));
+}
+
+void Arm64FuncContext::materializeFloatInReg(Value *v, const std::string &dst) {
+    if (auto *cf = dynamic_cast<ConstantFloat*>(v)) {
+        emitFloatConst(cf->value_, dst);
+        return;
+    }
+    std::string src = residentReg(v);
+    if (!src.empty()) {
+        emitMoveMachine(dst, src, "fmov");
+        return;
+    }
+    emitLoadRegMachine(dst, getSlot(v));
+}
+
+void Arm64FuncContext::materializeAddrInReg(Value *v, const std::string &dst) {
+    if (auto *gv = dynamic_cast<GlobalVariable*>(v)) {
+        emitGlobalAddr(gv, dst);
+        return;
+    }
+    if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
+        emitIntConst(ci->value_, dst);
+        return;
+    }
+    std::string src = residentReg(v, true);
+    if (!src.empty()) {
+        emitMoveMachine(dst, src);
+        return;
+    }
+    if (auto *alloca = dynamic_cast<AllocaInst*>(v)) {
+        int off = getSlot(alloca);
+        int magnitude = off < 0 ? -off : off;
+        const std::string opcode = off < 0 ? "sub" : "add";
+        if (magnitude <= 4095) {
+            emitRawAluMachine("\t" + opcode + " " + dst + ", x29, #" +
+                                  std::to_string(magnitude),
+                              dst, {"x29"});
+        } else {
+            std::string scratch = dst == "x17" ? "x16" : "x17";
+            emitIntConst(magnitude, scratch);
+            emitBinaryMachine(opcode, dst, "x29", scratch);
+        }
+        return;
+    }
+    emitLoadRegMachine(dst, getSlot(v));
+}
+
 // ---- store from register to slot ----
 
 void Arm64FuncContext::storeInt(Value *v, const std::string &reg) {
@@ -498,17 +573,55 @@ void Arm64FuncContext::storeVector(Value *v, const std::string &reg) {
 
 void Arm64FuncContext::emitIntConst(int val, const std::string &reg) {
     uint32_t u = (uint32_t)val;
-    emitMachineInstr(MachineInstr::make(
-        "\tmovz " + reg + ", #" + std::to_string(u & 0xFFFF),
-        MOpcode::Mov, {reg}));
-    if ((u >> 16) & 0xFFFF) {
+    uint32_t lo = u & 0xFFFF;
+    uint32_t hi = u >> 16;
+    std::string dst = reg;
+    if (!dst.empty() && dst[0] == 'x')
+        dst[0] = 'w';
+
+    // `mov` is the assembler alias for a single MOVZ or MOVN. Use it when one
+    // wide-move instruction represents the complete i32 value; otherwise
+    // retain the explicit two-instruction construction.
+    if (hi == 0 || lo == 0 || hi == 0xFFFF) {
+        std::string imm = hi == 0xFFFF ? std::to_string(val)
+                                       : std::to_string(u);
         emitMachineInstr(MachineInstr::make(
-            "\tmovk " + reg + ", #" + std::to_string((u >> 16) & 0xFFFF) + ", lsl #16",
-            MOpcode::Mov, {reg}, {reg}));
+            "\tmov " + dst + ", #" + imm, MOpcode::Mov, {dst}));
+        return;
     }
+    emitMachineInstr(MachineInstr::make(
+        "\tmovz " + dst + ", #" + std::to_string(lo),
+        MOpcode::Mov, {dst}));
+    emitMachineInstr(MachineInstr::make(
+        "\tmovk " + dst + ", #" + std::to_string(hi) + ", lsl #16",
+        MOpcode::Mov, {dst}, {dst}));
+}
+
+static bool isAArch64FloatImmediate(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    for (uint32_t imm8 = 0; imm8 < 256; ++imm8) {
+        uint32_t b = (imm8 >> 6) & 1;
+        uint32_t exponent = ((b ^ 1) << 7) |
+                            (b ? 0x7C : 0) |
+                            ((imm8 >> 4) & 0x3);
+        uint32_t expanded = ((imm8 >> 7) << 31) |
+                            (exponent << 23) |
+                            ((imm8 & 0xF) << 19);
+        if (expanded == bits)
+            return true;
+    }
+    return false;
 }
 
 void Arm64FuncContext::emitFloatConst(float val, const std::string &reg) {
+    if (isAArch64FloatImmediate(val)) {
+        std::ostringstream imm;
+        imm << std::setprecision(9) << val;
+        emitMachineInstr(MachineInstr::make(
+            "\tfmov " + reg + ", #" + imm.str(), MOpcode::Mov, {reg}));
+        return;
+    }
     int bits;
     std::memcpy(&bits, &val, sizeof(bits));
     uint32_t u = (uint32_t)bits;

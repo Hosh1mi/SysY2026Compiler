@@ -39,6 +39,8 @@ void Arm64FuncContext::emitMachineInstrLine(const std::string &line, MOpcode opc
 
 void Arm64FuncContext::emitMoveMachine(const std::string &dst, const std::string &src,
                                        const std::string &opcode) {
+    if (dst == src)
+        return;
     emitMachineInstrLine("\t" + opcode + " " + dst + ", " + src,
                          MOpcode::Mov, {dst}, {src});
 }
@@ -254,6 +256,7 @@ void Arm64FuncContext::generate() {
     preparePhi();
     blockSkipped_.clear();
     cselHandled_.clear();
+    fixedValueRegs_.clear();
 
     emitPrologue();
     if (!func_->basic_blocks_.empty())

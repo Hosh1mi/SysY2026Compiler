@@ -3,8 +3,8 @@
 #include "memory/postIndex.hpp"
 #include "memory/wideCopy.hpp"
 
-bool runMachineMemoryOptimization(MachineFunction &func) {
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+bool runMachineMemoryOptimization(MachineFunction &func,
+                                  const MachineLivenessResult &liveness) {
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
 			if (tryMachineWidenI32CopyWindow(func, block, i, liveness) ||

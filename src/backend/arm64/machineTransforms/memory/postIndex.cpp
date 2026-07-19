@@ -9,8 +9,8 @@
 
 static bool isSimpleNeonMemOp(const MachineInstr &line) {
 	return (line.opcodeText == "ld1" || line.opcodeText == "st1") &&
-	       line.rawOperands.size() == 2 &&
-	       line.rawOperands[0].find('{') != std::string::npos;
+	       line.asmOperands.size() == 2 &&
+	       line.asmOperands[0].find('{') != std::string::npos;
 }
 
 static bool parseHashImmediate(const std::string &operand, int &value) {
@@ -30,19 +30,19 @@ bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 	const MachineInstr &mem = block.instrs[idx];
 	if (mem.isLabelLike) return false;
 	if (mem.opcodeText != "ldr" && mem.opcodeText != "str") return false;
-	if (mem.rawOperands.size() != 2) return false;
+	if (mem.asmOperands.size() != 2) return false;
 
-	char valueClass = peephRegClass(mem.rawOperands[0]);
+	char valueClass = peephRegClass(mem.asmOperands[0]);
 	if (valueClass != 'w' && valueClass != 'x' && valueClass != 's' &&
 	    valueClass != 'd' && valueClass != 'q')
 		return false;
 
-	MemOperand addr = peephParseMemOp(mem.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(mem.asmOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
 	if (peephRegClass(addr.base) != 'x' || addr.base == "sp") return false;
 	// Base/data overlap with writeback is constrained-unpredictable for some
 	// load/store encodings, so keep those cases in their original form.
-	if (peephSamePhysicalReg(mem.rawOperands[0], addr.base)) return false;
+	if (peephSamePhysicalReg(mem.asmOperands[0], addr.base)) return false;
 
 	const size_t scanEnd = std::min(block.instrs.size(), idx + 6);
 	for (size_t addIdx = idx + 1; addIdx < scanEnd; ++addIdx) {
@@ -50,15 +50,15 @@ bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 		if (line.isLabelLike) return false;
 
 		if ((line.opcodeText == "add" || line.opcodeText == "sub") &&
-		    line.rawOperands.size() == 3 && line.rawOperands[0] == addr.base &&
-		    line.rawOperands[1] == addr.base) {
+		    line.asmOperands.size() == 3 && line.asmOperands[0] == addr.base &&
+		    line.asmOperands[1] == addr.base) {
 			int amount = 0;
-			if (!parseHashImmediate(line.rawOperands[2], amount) || amount <= 0)
+			if (!parseHashImmediate(line.asmOperands[2], amount) || amount <= 0)
 				return false;
 			int writeback = line.opcodeText == "add" ? amount : -amount;
 			if (writeback < -256 || writeback > 255) return false;
 
-			std::vector<std::string> operands = mem.rawOperands;
+			std::vector<std::string> operands = mem.asmOperands;
 			operands.push_back("#" + std::to_string(writeback));
 			peephReplaceInstr(block.instrs[idx],
 			                    peephMakeInsn(mem.opcodeText, operands));
@@ -87,7 +87,7 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 		return false;
 	if (!isSimpleNeonMemOp(mem)) return false;
 
-	MemOperand addr = peephParseMemOp(mem.rawOperands[1]);
+	MemOperand addr = peephParseMemOp(mem.asmOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
 	if (addr.base.empty() || addr.base == "sp") return false;
 
@@ -98,8 +98,8 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 			const MachineInstr &copy = block.instrs[copyIdx];
 			if (copy.isLabelLike)
 				break;
-			if (copy.opcodeText != "mov" || copy.rawOperands.size() != 2 ||
-			    copy.rawOperands[0] != addr.base || peephRegClass(copy.rawOperands[1]) != 'x')
+			if (copy.opcodeText != "mov" || copy.asmOperands.size() != 2 ||
+			    copy.asmOperands[0] != addr.base || peephRegClass(copy.asmOperands[1]) != 'x')
 				continue;
 
 			bool clobbered = false;
@@ -108,13 +108,13 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 				if (between.isLabelLike ||
 				    block.instrs[j].isCall || block.instrs[j].isBarrier ||
 				    peephLineWritesReg(between, addr.base) ||
-				    peephLineWritesReg(between, copy.rawOperands[1])) {
+				    peephLineWritesReg(between, copy.asmOperands[1])) {
 					clobbered = true;
 					break;
 				}
 			}
 			if (!clobbered) {
-				postBase = copy.rawOperands[1];
+				postBase = copy.asmOperands[1];
 				break;
 			}
 		}
@@ -128,9 +128,9 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 		const MachineInstr &line = block.instrs[addIdx];
 		if (line.isLabelLike)
 			return false;
-		if (line.opcodeText == "add" && line.rawOperands.size() == 3 &&
-		    line.rawOperands[0] == postBase && line.rawOperands[1] == postBase &&
-		    line.rawOperands[2] == "#16") {
+		if (line.opcodeText == "add" && line.asmOperands.size() == 3 &&
+		    line.asmOperands[0] == postBase && line.asmOperands[1] == postBase &&
+		    line.asmOperands[2] == "#16") {
 			foundAdd = true;
 			break;
 		}
@@ -145,7 +145,7 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 	if (!foundAdd)
 		return false;
 
-	std::vector<std::string> operands = mem.rawOperands;
+	std::vector<std::string> operands = mem.asmOperands;
 	operands[1] = "[" + postBase + "]";
 	operands.push_back("#16");
 	peephReplaceInstr(block.instrs[idx],

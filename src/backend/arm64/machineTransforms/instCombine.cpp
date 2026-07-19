@@ -25,15 +25,15 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
                                     const MachineLivenessResult &liveness) {
 	const MachineInstr &movz = block.instrs[idx];
 	if (movz.isLabelLike) return false;
-	if (movz.opcodeText != "movz") return false;
-	if (movz.rawOperands.size() != 2) return false;
+	if (movz.opcodeText != "movz" && movz.opcodeText != "mov") return false;
+	if (movz.asmOperands.size() != 2) return false;
 
-	std::string tempReg = movz.rawOperands[0];
+	std::string tempReg = movz.asmOperands[0];
 	if (!isScratchReg(tempReg)) return false;
 	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
 
-	const std::string &imm = movz.rawOperands[1];
+	const std::string &imm = movz.asmOperands[1];
 	if (imm.empty() || imm[0] != '#') return false;
 	int value = std::atoi(imm.c_str() + 1);
 	if (value < 0 || value > kAddSubImm12Max) return false;
@@ -47,26 +47,26 @@ static bool tryMachineImmediateFold(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &outMov = block.instrs[movIdx];
 
 	if (alu.opcodeText != "add" && alu.opcodeText != "sub") return false;
-	if (alu.rawOperands.size() != 3) return false;
+	if (alu.asmOperands.size() != 3) return false;
 
-	std::string middleReg = alu.rawOperands[0];
+	std::string middleReg = alu.asmOperands[0];
 	if (!isScratchReg(middleReg)) return false;
 	if (peephRegClass(middleReg) != cls) return false;
 
 	std::string sourceReg;
-	if (alu.rawOperands[2] == tempReg) {
-		sourceReg = alu.rawOperands[1];
-	} else if (alu.opcodeText == "add" && alu.rawOperands[1] == tempReg) {
-		sourceReg = alu.rawOperands[2];
+	if (alu.asmOperands[2] == tempReg) {
+		sourceReg = alu.asmOperands[1];
+	} else if (alu.opcodeText == "add" && alu.asmOperands[1] == tempReg) {
+		sourceReg = alu.asmOperands[2];
 	} else {
 		return false;
 	}
 	if (sourceReg == tempReg) return false;
 	if (!validAddSubSourceForClass(sourceReg, cls)) return false;
 
-	if (outMov.opcodeText != "mov" || outMov.rawOperands.size() != 2) return false;
-	if (outMov.rawOperands[1] != middleReg) return false;
-	std::string dstReg = outMov.rawOperands[0];
+	if (outMov.opcodeText != "mov" || outMov.asmOperands.size() != 2) return false;
+	if (outMov.asmOperands[1] != middleReg) return false;
+	std::string dstReg = outMov.asmOperands[0];
 	if (peephRegClass(dstReg) != cls) return false;
 
 	if (!peephRegDeadAfter(block, movIdx, middleReg, liveness)) return false;
@@ -86,16 +86,16 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &alu = block.instrs[idx];
 	if (alu.isLabelLike) return false;
 	if (alu.opcodeText != "add" && alu.opcodeText != "sub") return false;
-	if (alu.rawOperands.size() != 3) return false;
+	if (alu.asmOperands.size() != 3) return false;
 
-	const std::string &imm = alu.rawOperands[2];
+	const std::string &imm = alu.asmOperands[2];
 	if (imm.empty() || imm[0] != '#') return false;
 
-	std::string tempReg = alu.rawOperands[0];
+	std::string tempReg = alu.asmOperands[0];
 	if (!isScratchReg(tempReg)) return false;
 	char cls = peephRegClass(tempReg);
 	if (cls != 'w' && cls != 'x') return false;
-	if (!validAddSubSourceForClass(alu.rawOperands[1], cls)) return false;
+	if (!validAddSubSourceForClass(alu.asmOperands[1], cls)) return false;
 
 	auto window = peephInstrWindow(block, idx + 1, 6);
 	for (size_t movIdx : window) {
@@ -104,12 +104,12 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 		if (line.isCall) return false;
 		if (peephLineWritesReg(line, tempReg)) return false;
 
-		bool isMov = line.opcodeText == "mov" && line.rawOperands.size() == 2;
+		bool isMov = line.opcodeText == "mov" && line.asmOperands.size() == 2;
 		if (peephLineUsesReg(line, tempReg) && !isMov) return false;
-		if (!isMov || line.rawOperands[1] != tempReg)
+		if (!isMov || line.asmOperands[1] != tempReg)
 			continue;
 
-		std::string dstReg = line.rawOperands[0];
+		std::string dstReg = line.asmOperands[0];
 		if (peephRegClass(dstReg) != cls) return false;
 
 		if (dstReg == tempReg) {
@@ -126,7 +126,7 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 
 		if (!peephRegDeadAfter(block, movIdx, tempReg, liveness)) return false;
 
-		std::vector<std::string> newOperands = alu.rawOperands;
+		std::vector<std::string> newOperands = alu.asmOperands;
 		newOperands[0] = dstReg;
 		peephReplaceInstr(block.instrs[idx], peephMakeInsn(alu.opcodeText, newOperands));
 		block.instrs.erase(block.instrs.begin() + movIdx);
@@ -154,10 +154,10 @@ static bool tryMachineFoldAddSubMov(MachineBasicBlock &block, size_t idx,
 static bool tryMachineFoldMovIntoAddSub(MachineBasicBlock &block, size_t idx) {
 	const MachineInstr &copy = block.instrs[idx];
 	if (copy.isLabelLike) return false;
-	if (copy.opcodeText != "mov" || copy.rawOperands.size() != 2) return false;
+	if (copy.opcodeText != "mov" || copy.asmOperands.size() != 2) return false;
 
-	const std::string dstReg = copy.rawOperands[0];
-	const std::string srcReg = copy.rawOperands[1];
+	const std::string dstReg = copy.asmOperands[0];
+	const std::string srcReg = copy.asmOperands[1];
 	if (dstReg == srcReg || peephSamePhysicalReg(dstReg, srcReg)) return false;
 	char cls = peephRegClass(dstReg);
 	if (cls != 'w' && cls != 'x') return false;
@@ -174,11 +174,11 @@ static bool tryMachineFoldMovIntoAddSub(MachineBasicBlock &block, size_t idx) {
 
 		bool isSelfAddSub =
 		    (line.opcodeText == "add" || line.opcodeText == "sub") &&
-		    line.rawOperands.size() == 3 &&
-		    line.rawOperands[0] == dstReg && line.rawOperands[1] == dstReg &&
-		    !line.rawOperands[2].empty() && line.rawOperands[2][0] == '#';
+		    line.asmOperands.size() == 3 &&
+		    line.asmOperands[0] == dstReg && line.asmOperands[1] == dstReg &&
+		    !line.asmOperands[2].empty() && line.asmOperands[2][0] == '#';
 		if (isSelfAddSub) {
-			std::vector<std::string> newOperands = line.rawOperands;
+			std::vector<std::string> newOperands = line.asmOperands;
 			newOperands[1] = srcReg;
 			peephReplaceInstr(block.instrs[aluIdx],
 			                  peephMakeInsn(line.opcodeText, newOperands));
@@ -207,16 +207,16 @@ static bool tryMachineShiftedAddSubFusion(
 
 	const MachineInstr &shift = block.instrs[idx];
 	if (shift.isLabelLike || shift.opcodeText != "lsl" ||
-	    shift.rawOperands.size() != 3)
+	    shift.asmOperands.size() != 3)
 		return false;
 
-	const std::string &shiftDst = shift.rawOperands[0];
-	const std::string &shiftSrc = shift.rawOperands[1];
+	const std::string &shiftDst = shift.asmOperands[0];
+	const std::string &shiftSrc = shift.asmOperands[1];
 	char cls = peephRegClass(shiftDst);
 	if ((cls != 'w' && cls != 'x') || peephRegClass(shiftSrc) != cls)
 		return false;
 
-	const std::string &amountText = shift.rawOperands[2];
+	const std::string &amountText = shift.asmOperands[2];
 	if (amountText.size() < 2 || amountText[0] != '#') return false;
 	char *end = nullptr;
 	long amount = std::strtol(amountText.c_str() + 1, &end, 10);
@@ -227,12 +227,12 @@ static bool tryMachineShiftedAddSubFusion(
 	const MachineInstr &consumer = block.instrs[idx + 1];
 	if (consumer.isLabelLike ||
 	    (consumer.opcodeText != "add" && consumer.opcodeText != "sub") ||
-	    consumer.rawOperands.size() != 3)
+	    consumer.asmOperands.size() != 3)
 		return false;
 
-	const std::string &dst = consumer.rawOperands[0];
-	const std::string &lhs = consumer.rawOperands[1];
-	const std::string &rhs = consumer.rawOperands[2];
+	const std::string &dst = consumer.asmOperands[0];
+	const std::string &lhs = consumer.asmOperands[1];
+	const std::string &rhs = consumer.asmOperands[2];
 	if (peephRegClass(dst) != cls) return false;
 
 	std::string base;
@@ -272,11 +272,11 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 
 	const MachineInstr &mul = block.instrs[idx];
 	if (mul.isLabelLike) return false;
-	if (mul.opcodeText != "mul" || mul.rawOperands.size() != 3) return false;
+	if (mul.opcodeText != "mul" || mul.asmOperands.size() != 3) return false;
 
-	const std::string &mulDst = mul.rawOperands[0];
-	const std::string &mulOp1 = mul.rawOperands[1];
-	const std::string &mulOp2 = mul.rawOperands[2];
+	const std::string &mulDst = mul.asmOperands[0];
+	const std::string &mulOp1 = mul.asmOperands[1];
+	const std::string &mulOp2 = mul.asmOperands[2];
 	char cls = peephRegClass(mulDst);
 	if (cls != 'w' && cls != 'x') return false;
 	if (peephRegClass(mulOp1) != cls || peephRegClass(mulOp2) != cls) return false;
@@ -287,9 +287,9 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 
 	const MachineInstr *consumerPtr = &block.instrs[consumerIdx];
 	if (consumerPtr->isLabelLike) return false;
-	if (consumerPtr->opcodeText == "mov" && consumerPtr->rawOperands.size() == 2 &&
-	    consumerPtr->rawOperands[1] == mulDst && peephRegClass(consumerPtr->rawOperands[0]) == cls) {
-		forwardedReg = consumerPtr->rawOperands[0];
+	if (consumerPtr->opcodeText == "mov" && consumerPtr->asmOperands.size() == 2 &&
+	    consumerPtr->asmOperands[1] == mulDst && peephRegClass(consumerPtr->asmOperands[0]) == cls) {
+		forwardedReg = consumerPtr->asmOperands[0];
 		if (peephSamePhysicalReg(forwardedReg, mulOp1) ||
 		    peephSamePhysicalReg(forwardedReg, mulOp2))
 			return false;
@@ -302,11 +302,11 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	const MachineInstr &consumer = *consumerPtr;
 
 	if (consumer.opcodeText != "add" && consumer.opcodeText != "sub") return false;
-	if (consumer.rawOperands.size() != 3) return false;
+	if (consumer.asmOperands.size() != 3) return false;
 
-	const std::string &dst = consumer.rawOperands[0];
-	const std::string &lhs = consumer.rawOperands[1];
-	const std::string &rhs = consumer.rawOperands[2];
+	const std::string &dst = consumer.asmOperands[0];
+	const std::string &lhs = consumer.asmOperands[1];
+	const std::string &rhs = consumer.asmOperands[2];
 	if (peephRegClass(dst) != cls) return false;
 
 	std::string replacementMnemonic;
@@ -354,8 +354,8 @@ static bool tryMachineMulAddFusion(MachineBasicBlock &block, size_t idx,
 	return true;
 }
 
-bool runMachineInstructionCombine(MachineFunction &func) {
-	MachineLivenessResult liveness = MachineLiveness().analyze(func);
+bool runMachineInstructionCombine(MachineFunction &func,
+                                  const MachineLivenessResult &liveness) {
 	for (auto &block : func.blocks) {
 		for (size_t i = 0; i < block.instrs.size(); ++i) {
 			if (tryMachineImmediateFold(block, i, liveness) ||

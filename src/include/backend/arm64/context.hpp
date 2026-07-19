@@ -110,6 +110,15 @@ private:
     std::string loadAddr(Value *v);
     std::string loadVector(Value *v);
 
+    // Materialize a value in a register required by the ABI or instruction
+    // encoding. Unlike load*(), these helpers never allocate an intermediate
+    // scratch register.
+    void materializeIntInReg(Value *v, const std::string &dst);
+    void materializeFloatInReg(Value *v, const std::string &dst);
+    void materializeAddrInReg(Value *v, const std::string &dst);
+    std::string residentReg(Value *v, bool asAddress = false) const;
+    void bindValueToReg(Value *v, const std::string &reg);
+
     // store from register to slot
     void storeInt(Value *v, const std::string &reg);
     void storeFloat(Value *v, const std::string &reg);
@@ -157,6 +166,10 @@ private:
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)
+    // Values deliberately produced in an ABI-constrained register during
+    // lowering. This is separate from graph coloring because the constraint
+    // belongs to instruction selection.
+    std::map<Value*, std::string> fixedValueRegs_;
     // 循环内提升的大常量：常量值 → 专属寄存器（入口/call 后按可达使用选择性物化）
     std::map<int, std::string> promotedConsts_;
 

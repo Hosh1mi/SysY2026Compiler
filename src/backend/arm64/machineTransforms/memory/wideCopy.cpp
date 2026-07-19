@@ -80,7 +80,7 @@ static bool chooseDeadQReg(const MachineFunction &func,
 			const MachineInstr &line = inst;
 			if (line.isLabelLike)
 				continue;
-			for (const auto &op : line.rawOperands) {
+			for (const auto &op : line.asmOperands) {
 				char cls = 0;
 				std::string num;
 				if (peephParsePhysicalReg(op, cls, num) &&
@@ -125,10 +125,10 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 
 	const MachineInstr &first = block.instrs[idx];
 	if (first.isLabelLike || first.opcodeText != "ldr" ||
-	    first.rawOperands.size() != 2 || !isPlainGPRReg(first.rawOperands[0], 'w'))
+	    first.asmOperands.size() != 2 || !isPlainGPRReg(first.asmOperands[0], 'w'))
 		return false;
 
-	MemOperand firstMem = peephParseMemOp(first.rawOperands[1]);
+	MemOperand firstMem = peephParseMemOp(first.asmOperands[1]);
 	if (!firstMem.valid || firstMem.base == "sp")
 		return false;
 
@@ -140,15 +140,15 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		const MachineInstr &line = block.instrs[i];
 		if (line.isLabelLike)
 			break;
-		for (const auto &op : line.rawOperands) {
+		for (const auto &op : line.asmOperands) {
 			MemOperand mem = peephParseMemOp(op);
 			if (mem.valid && peephRegClass(mem.base) == 'x' && !env.count(mem.base))
 				env[mem.base] = {mem.base, 0, true};
 		}
 		if ((line.opcodeText == "mov" || line.opcodeText == "add") &&
-		    !line.rawOperands.empty() && peephRegClass(line.rawOperands[0]) == 'x' &&
-		    !env.count(line.rawOperands[0]))
-			env[line.rawOperands[0]] = {line.rawOperands[0], 0, true};
+		    !line.asmOperands.empty() && peephRegClass(line.asmOperands[0]) == 'x' &&
+		    !env.count(line.asmOperands[0]))
+			env[line.asmOperands[0]] = {line.asmOperands[0], 0, true};
 	}
 	if (!env.count(firstMem.base))
 		env[firstMem.base] = {firstMem.base, 0, true};
@@ -233,13 +233,13 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		    line.opcodeText == "tbz" || line.opcodeText == "tbnz")
 			break;
 
-		if (line.opcodeText == "mov" && line.rawOperands.size() == 2 &&
-		    peephRegClass(line.rawOperands[0]) == 'x' && peephRegClass(line.rawOperands[1]) == 'x') {
-			auto srcIt = env.find(line.rawOperands[1]);
+		if (line.opcodeText == "mov" && line.asmOperands.size() == 2 &&
+		    peephRegClass(line.asmOperands[0]) == 'x' && peephRegClass(line.asmOperands[1]) == 'x') {
+			auto srcIt = env.find(line.asmOperands[1]);
 			if (srcIt == env.end() || !srcIt->second.valid)
 				return false;
-			invalidateReg(line.rawOperands[0]);
-			env[line.rawOperands[0]] = srcIt->second;
+			invalidateReg(line.asmOperands[0]);
+			env[line.asmOperands[0]] = srcIt->second;
 			if (hasFinalPointerUpdates()) {
 				replaceEnd = i;
 				complete = true;
@@ -248,17 +248,17 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			continue;
 		}
 
-		if (line.opcodeText == "add" && line.rawOperands.size() == 3 &&
-		    peephRegClass(line.rawOperands[0]) == 'x' && peephRegClass(line.rawOperands[1]) == 'x' &&
-		    !line.rawOperands[2].empty() && line.rawOperands[2][0] == '#') {
-			auto srcIt = env.find(line.rawOperands[1]);
+		if (line.opcodeText == "add" && line.asmOperands.size() == 3 &&
+		    peephRegClass(line.asmOperands[0]) == 'x' && peephRegClass(line.asmOperands[1]) == 'x' &&
+		    !line.asmOperands[2].empty() && line.asmOperands[2][0] == '#') {
+			auto srcIt = env.find(line.asmOperands[1]);
 			if (srcIt == env.end() || !srcIt->second.valid)
 				return false;
 			int amount = 0;
-			if (!parseHashImmediate(line.rawOperands[2], amount))
+			if (!parseHashImmediate(line.asmOperands[2], amount))
 				return false;
-			invalidateReg(line.rawOperands[0]);
-			env[line.rawOperands[0]] = {srcIt->second.base,
+			invalidateReg(line.asmOperands[0]);
+			env[line.asmOperands[0]] = {srcIt->second.base,
 			                         srcIt->second.offset + amount,
 			                         true};
 			if (hasFinalPointerUpdates()) {
@@ -269,13 +269,13 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			continue;
 		}
 
-		if (line.opcodeText == "add" && line.rawOperands.size() == 3 &&
-		    peephRegClass(line.rawOperands[0]) == 'w' && line.rawOperands[0] == line.rawOperands[1] &&
-		    line.rawOperands[2] == "#4") {
+		if (line.opcodeText == "add" && line.asmOperands.size() == 3 &&
+		    peephRegClass(line.asmOperands[0]) == 'w' && line.asmOperands[0] == line.asmOperands[1] &&
+		    line.asmOperands[2] == "#4") {
 			if (sawCounterInc)
 				return false;
 			sawCounterInc = true;
-			counterReg = line.rawOperands[0];
+			counterReg = line.asmOperands[0];
 			invalidateReg(counterReg);
 			if (hasFinalPointerUpdates()) {
 				replaceEnd = i;
@@ -286,14 +286,14 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		}
 
 		if (line.opcodeText == "ldr" &&
-		    (line.rawOperands.size() == 2 || line.rawOperands.size() == 3) &&
-		    isPlainGPRReg(line.rawOperands[0], 'w')) {
-			MemOperand mem = peephParseMemOp(line.rawOperands[1]);
+		    (line.asmOperands.size() == 2 || line.asmOperands.size() == 3) &&
+		    isPlainGPRReg(line.asmOperands[0], 'w')) {
+			MemOperand mem = peephParseMemOp(line.asmOperands[1]);
 			if (!mem.valid)
 				return false;
 			int postInc = 0;
-			if (line.rawOperands.size() == 3 &&
-			    !parseHashImmediate(line.rawOperands[2], postInc))
+			if (line.asmOperands.size() == 3 &&
+			    !parseHashImmediate(line.asmOperands[2], postInc))
 				return false;
 			PointerExpr expr = memoryExpr(mem, env);
 			if (!expr.valid)
@@ -303,9 +303,9 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			} else if (srcBase != expr.base) {
 				return false;
 			}
-			invalidateReg(line.rawOperands[0]);
-			loadValue[line.rawOperands[0]] = expr;
-			if (line.rawOperands.size() == 3)
+			invalidateReg(line.asmOperands[0]);
+			loadValue[line.asmOperands[0]] = expr;
+			if (line.asmOperands.size() == 3)
 				env[mem.base] = {expr.base, expr.offset + postInc, true};
 			if (hasFinalPointerUpdates()) {
 				replaceEnd = i;
@@ -316,17 +316,17 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		}
 
 		if (line.opcodeText == "str" &&
-		    (line.rawOperands.size() == 2 || line.rawOperands.size() == 3) &&
-		    isPlainGPRReg(line.rawOperands[0], 'w')) {
-			auto valIt = loadValue.find(line.rawOperands[0]);
+		    (line.asmOperands.size() == 2 || line.asmOperands.size() == 3) &&
+		    isPlainGPRReg(line.asmOperands[0], 'w')) {
+			auto valIt = loadValue.find(line.asmOperands[0]);
 			if (valIt == loadValue.end() || !valIt->second.valid)
 				return false;
-			MemOperand mem = peephParseMemOp(line.rawOperands[1]);
+			MemOperand mem = peephParseMemOp(line.asmOperands[1]);
 			if (!mem.valid)
 				return false;
 			int postInc = 0;
-			if (line.rawOperands.size() == 3 &&
-			    !parseHashImmediate(line.rawOperands[2], postInc))
+			if (line.asmOperands.size() == 3 &&
+			    !parseHashImmediate(line.asmOperands[2], postInc))
 				return false;
 			PointerExpr dst = memoryExpr(mem, env);
 			if (!dst.valid)
@@ -339,7 +339,7 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 			if (dst.offset != valIt->second.offset)
 				return false;
 			copies.push_back({dst.offset});
-			if (line.rawOperands.size() == 3)
+			if (line.asmOperands.size() == 3)
 				env[mem.base] = {dst.base, dst.offset + postInc, true};
 			if (hasFinalPointerUpdates()) {
 				replaceEnd = i;
@@ -353,10 +353,10 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 		    block.instrs[i].isCall || block.instrs[i].isBarrier)
 			return false;
 
-		if (!line.rawOperands.empty()) {
-			char cls = peephRegClass(line.rawOperands[0]);
+		if (!line.asmOperands.empty()) {
+			char cls = peephRegClass(line.asmOperands[0]);
 			if (cls == 'w' || cls == 'x')
-				invalidateReg(line.rawOperands[0]);
+				invalidateReg(line.asmOperands[0]);
 		}
 		if (hasFinalPointerUpdates()) {
 			replaceEnd = i;
@@ -387,21 +387,21 @@ bool tryMachineWidenI32CopyWindow(MachineFunction &func,
 
 	for (size_t i = idx; i <= replaceEnd; ++i) {
 		const MachineInstr &line = block.instrs[i];
-		if (line.isLabelLike || line.rawOperands.empty())
+		if (line.isLabelLike || line.asmOperands.empty())
 			continue;
-		char cls = peephRegClass(line.rawOperands[0]);
+		char cls = peephRegClass(line.asmOperands[0]);
 		if (cls != 'w' && cls != 'x' && cls != 's' && cls != 'd' &&
 		    cls != 'q' && cls != 'v')
 			continue;
 		std::string liveName;
 		int regNo = 0;
-		if (parseRegisterNumber(line.rawOperands[0], cls, regNo))
+		if (parseRegisterNumber(line.asmOperands[0], cls, regNo))
 			liveName = machineLiveRegName(cls, regNo);
 		if (liveName.empty())
 			continue;
-		if (peephSamePhysicalReg(line.rawOperands[0], srcUpdateReg) ||
-		    peephSamePhysicalReg(line.rawOperands[0], dstUpdateReg) ||
-		    peephSamePhysicalReg(line.rawOperands[0], counterReg))
+		if (peephSamePhysicalReg(line.asmOperands[0], srcUpdateReg) ||
+		    peephSamePhysicalReg(line.asmOperands[0], dstUpdateReg) ||
+		    peephSamePhysicalReg(line.asmOperands[0], counterReg))
 			continue;
 		if (liveAfter.count(liveName))
 			return false;
