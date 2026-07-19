@@ -10,7 +10,6 @@
 #include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/jumpThreadingLite.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
-#include "include/mid/opt/accumElim.hpp"
 #include "include/mid/opt/autoMemoization.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
@@ -200,8 +199,6 @@ static void addSsaPreparation(PassManager &pm) {
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<EarlyCSE>());
     addCanonicalCleanup(pm);
-    // AccumElim 必须跑在 TRE 之前：依赖看见自调用的形参/实参链。
-    pm.addPass(std::make_unique<AccumElim>());
     pm.addPass(std::make_unique<TailRecursionEliminate>());
 }
 

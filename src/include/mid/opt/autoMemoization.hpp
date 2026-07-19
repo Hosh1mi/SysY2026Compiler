@@ -29,15 +29,6 @@ public:
     // 的迭代会改变次序。模块无候选时直接不加 pass，pipeline 与原状完全一致。
     static bool moduleHasAnyCandidate(Module *m);
 
-    // 哈希记忆化的核心变换；公开以便 AccumElim 等 pass 在 pipeline 早期
-    // 直接对刚生成的 aux 函数加缓存（绕过 array/hash 选路决策）。
-    static void transformHash(Function *f);
-
-    // ── 哈希参数 / 槽布局常量；公开以便共享同一槽格式 ──
-    static constexpr unsigned HASH_BITS = 16;
-    static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
-    static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
-
 private:
     static constexpr unsigned MAX_ARGS = 2;
     static constexpr unsigned MIN_SELF_CALLS = 2;
@@ -51,10 +42,15 @@ private:
     // 1.5M 元素 × i32 × 2 张表（flag+val）= 12 MB BSS 上限。
     static constexpr unsigned ARRAY_PRODUCT_LIMIT = 1500000;
 
+    static constexpr unsigned HASH_BITS = 16;
+    static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
+    static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
+
     bool isCandidate(Function *f, BasicAliasAnalysis &baa,
                      unsigned &selfCallCount, unsigned &externalCallCount);
     bool functionReadsMemory(Function *f);
     bool readsMutatedGlobal(Function *f);
     unsigned deriveArgBound(Function *f, Argument *arg);
     void transform(Function *f, const std::vector<unsigned> &bounds);
+    void transformHash(Function *f);
 };
