@@ -677,9 +677,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
         if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
-            std::string base = allocAddrReg();
-            emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
-                                 MOpcode::Adr, {base});
+            std::string base = globalPageBase(gv);
             if (isFloat(val->type_)) {
                 std::string r = loadFloat(val);
                 emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
@@ -720,9 +718,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
         if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
-            std::string base = allocAddrReg();
-            emitMachineInstrLine("\tadrp " + base + ", " + gv->name_,
-                                 MOpcode::Adr, {base});
+            std::string base = globalPageBase(gv);
             if (isFloat(inst->type_)) {
                 std::string r = hasAssignedReg(inst) ? assignedReg(inst) : allocFloatReg();
                 emitLoadMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {base});

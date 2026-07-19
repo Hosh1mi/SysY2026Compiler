@@ -77,6 +77,8 @@ private:
     void emitGepIndexStep(std::string &addr, Value *idx, int elemSize,
                           Instruction *inst);
     void emitLivePromotedConstsFrom(BasicBlock *bb, Instruction *after);
+    void prepareGlobalPageBases();
+    std::string globalPageBase(GlobalVariable *gv);
     bool promotedConstReachableBeforeClobber(BasicBlock *bb, Instruction *after,
                                              int val,
                                              std::set<BasicBlock*> &visited) const;
@@ -172,6 +174,12 @@ private:
     std::map<Value*, std::string> fixedValueRegs_;
     // 循环内提升的大常量：常量值 → 专属寄存器（入口/call 后按可达使用选择性物化）
     std::map<int, std::string> promotedConsts_;
+    // One repeated global page base per basic block may live in x8. SysY has
+    // no indirect-result ABI use for x8, and this cache is enabled only in
+    // leaf functions, so calls cannot clobber it.
+    std::map<BasicBlock*, GlobalVariable*> globalPageBaseForBlock_;
+    GlobalVariable *currentGlobalPageBase_ = nullptr;
+    bool currentGlobalPageMaterialized_ = false;
 
     struct PhiCopy {
         BasicBlock *pred;

@@ -640,10 +640,33 @@ void Arm64FuncContext::emitFloatConst(float val, const std::string &reg) {
 }
 
 void Arm64FuncContext::emitGlobalAddr(GlobalVariable *gv, const std::string &reg) {
+    if (currentGlobalPageBase_ == gv && reg != "x8") {
+        std::string base = globalPageBase(gv);
+        emitMachineInstr(MachineInstr::make(
+            "\tadd " + reg + ", " + base + ", :lo12:" + gv->name_,
+            MOpcode::Alu, {reg}, {base}));
+        return;
+    }
     emitMachineInstr(MachineInstr::make(
         "\tadrp " + reg + ", " + gv->name_,
         MOpcode::Adr, {reg}));
     emitMachineInstr(MachineInstr::make(
         "\tadd " + reg + ", " + reg + ", :lo12:" + gv->name_,
         MOpcode::Alu, {reg}, {reg}));
+}
+
+std::string Arm64FuncContext::globalPageBase(GlobalVariable *gv) {
+    if (currentGlobalPageBase_ == gv) {
+        if (!currentGlobalPageMaterialized_) {
+            emitMachineInstr(MachineInstr::make(
+                "\tadrp x8, " + gv->name_, MOpcode::Adr, {"x8"}));
+            currentGlobalPageMaterialized_ = true;
+        }
+        return "x8";
+    }
+
+    std::string base = allocAddrReg();
+    emitMachineInstr(MachineInstr::make(
+        "\tadrp " + base + ", " + gv->name_, MOpcode::Adr, {base}));
+    return base;
 }

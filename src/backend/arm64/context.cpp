@@ -252,6 +252,9 @@ void Arm64FuncContext::generate() {
     }
     for (const auto &kv : promotedConsts_)
         reservedIntRegs_.insert(std::stoi(kv.second.substr(1)));
+    prepareGlobalPageBases();
+    if (!globalPageBaseForBlock_.empty())
+        reservedIntRegs_.insert(8);
 
     preparePhi();
     blockSkipped_.clear();
@@ -263,9 +266,52 @@ void Arm64FuncContext::generate() {
         emitLivePromotedConstsFrom(func_->basic_blocks_[0], nullptr);
     reorderBlocks();
     for (auto bb : func_->basic_blocks_) {
+        auto cached = globalPageBaseForBlock_.find(bb);
+        currentGlobalPageBase_ = cached == globalPageBaseForBlock_.end()
+                                     ? nullptr : cached->second;
+        currentGlobalPageMaterialized_ = false;
         emitBlock(bb);
     }
+    currentGlobalPageBase_ = nullptr;
     emitEpilogue();
+}
+
+void Arm64FuncContext::prepareGlobalPageBases() {
+    globalPageBaseForBlock_.clear();
+    if (!enableRegAlloc_)
+        return;
+
+    for (auto *bb : func_->basic_blocks_)
+        for (auto *inst : bb->instr_list_)
+            if (inst->is_call())
+                return;
+
+    for (auto *bb : func_->basic_blocks_) {
+        std::map<GlobalVariable*, int> uses;
+        for (auto *inst : bb->instr_list_) {
+            Value *address = nullptr;
+            if (inst->op_id_ == Instruction::Load && inst->num_ops_ >= 1)
+                address = inst->get_operand(0);
+            else if (inst->op_id_ == Instruction::Store && inst->num_ops_ >= 2)
+                address = inst->get_operand(1);
+            else if (inst->op_id_ == Instruction::GetElementPtr && inst->num_ops_ >= 1)
+                address = inst->get_operand(0);
+            if (auto *global = dynamic_cast<GlobalVariable*>(address))
+                ++uses[global];
+        }
+
+        GlobalVariable *best = nullptr;
+        int bestUses = 1;
+        for (const auto &entry : uses) {
+            if (entry.second > bestUses ||
+                (entry.second == bestUses && best && entry.first->name_ < best->name_)) {
+                best = entry.first;
+                bestUses = entry.second;
+            }
+        }
+        if (best)
+            globalPageBaseForBlock_[bb] = best;
+    }
 }
 
 void Arm64FuncContext::reorderBlocks() {
