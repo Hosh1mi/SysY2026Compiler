@@ -10,6 +10,7 @@
 #include "include/mid/opt/correlatedValuePropagation.hpp"
 #include "include/mid/opt/jumpThreadingLite.hpp"
 #include "include/mid/opt/tailRecursionEliminate.hpp"
+#include "include/mid/opt/radixRecurrenceEliminate.hpp"
 #include "include/mid/opt/autoMemoization.hpp"
 #include "include/mid/opt/mem2reg.hpp"
 #include "include/mid/opt/earlyCSE.hpp"
@@ -197,6 +198,7 @@ static void addSsaPreparation(PassManager &pm) {
     pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<Mem2Reg>());
+    pm.addPass(std::make_unique<RadixRecurrenceEliminate>());
     pm.addPass(std::make_unique<EarlyCSE>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<TailRecursionEliminate>());
