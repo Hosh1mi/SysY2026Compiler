@@ -29,6 +29,7 @@ public:
 
 private:
     bool canAssignRegister(Value *v) const;
+    size_t stableIndex(Value *v) const;
 
     /// 计算逆后序(RPO)块序,并填充每个块的前驱表。
     std::vector<BasicBlock*> computeBlockOrder(
@@ -105,6 +106,9 @@ private:
                    const std::function<bool(Value*, Value*)> &trulyInterferes);
 
     Function *func_;
+    // Canonical argument/instruction order.  Pointer-keyed maps remain useful
+    // for lookup, but no allocation decision may depend on their iteration.
+    std::map<Value*, size_t> stableOrder_;
     std::map<Value*, std::string> assignedRegs_;
     std::map<int, std::string> promotedConsts_;
 };

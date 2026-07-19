@@ -1287,13 +1287,21 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         }
     }
 
-    for (auto &[val, uses] : liveOuts) {
-        auto *mergePhi = PhiInst::create_phi(val->type_, exitBB);
-        exitBB->add_instruction_front(mergePhi);
-        mergePhi->addIncoming(val, latch);
-        mergePhi->addIncoming(mapFinal(val), remCheck);
-        for (auto &use : uses)
-            use.user->set_operand(use.idx, mergePhi);
+    // `liveOuts` is keyed by pointer for lookup only.  Iterating that map would
+    // make the order of the newly prepended phis depend on process addresses.
+    // Revisit the loop in canonical IR order when materializing those phis.
+    for (auto *bb : loop.blocksOrdered) {
+        for (auto *val : bb->instr_list_) {
+            auto liveOutIt = liveOuts.find(val);
+            if (liveOutIt == liveOuts.end()) continue;
+            auto &uses = liveOutIt->second;
+            auto *mergePhi = PhiInst::create_phi(val->type_, exitBB);
+            exitBB->add_instruction_front(mergePhi);
+            mergePhi->addIncoming(val, latch);
+            mergePhi->addIncoming(mapFinal(val), remCheck);
+            for (auto &use : uses)
+                use.user->set_operand(use.idx, mergePhi);
+        }
     }
 
     return true;
@@ -1572,7 +1580,12 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     }
 
     // 9. 其他循环外使用：在 exitBB 顶部补汇合 phi 后改写
-    for (auto &[val, uses] : liveOuts) {
+    // Preserve the source instruction order; pointer-key order changes under
+    // ASLR and `add_instruction_front` would otherwise expose that variation.
+    for (auto *val : header->instr_list_) {
+        auto liveOutIt = liveOuts.find(val);
+        if (liveOutIt == liveOuts.end()) continue;
+        auto &uses = liveOutIt->second;
         auto *mergePhi = PhiInst::create_phi(val->type_, exitBB);
         exitBB->add_instruction_front(mergePhi);
         mergePhi->addIncoming(val, header);

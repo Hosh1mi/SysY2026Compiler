@@ -146,10 +146,11 @@ private:
     bool isSameOrDescendantLoop(Loop *candidate, Loop *ancestor) const;
     bool containsVaryingAddRec(const SCEV *s, Loop *loop) const;
     static std::string keyForPointer(const void *ptr);
-    static std::string keyForSCEV(const SCEV *s);
+    std::string keyForSCEV(const SCEV *s) const;
 
     const LoopInfo *LI_;
     std::vector<std::unique_ptr<SCEV>> nodes_;
+    std::map<const SCEV*, size_t> scevOrder_;
     std::map<std::string, const SCEV*> unique_;
     std::map<Value*, const SCEV*> value_cache_;
     std::set<Value*> visiting_;

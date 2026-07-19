@@ -1,17 +1,15 @@
 #!/bin/bash
-# arm_performance.sh — ARM 原生环境, 测试 performance (含计时)
-# 输出: test/results/result_performance.txt
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-RESULT_FILE="$PROJ_DIR/test/results/result_performance_${TIMESTAMP}.txt"
+RESULT_FILE="$PROJ_DIR/test/results/result_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
 TEST_DIR="$PROJ_DIR/test/performance"
+CACHE_DIR="$PROJ_DIR/tmp/arm_performance"
 
-mkdir -p "$RESULT_DIR"
+mkdir -p "$RESULT_DIR" "$CACHE_DIR"
 
 if [ ! -f "$BUILD_DIR/compiler" ]; then
     echo "Error: compiler not found at $BUILD_DIR/compiler"
@@ -28,22 +26,11 @@ if [ -t 1 ]; then
     RESET=$(tput sgr0 2>/dev/null || true)
 fi
 
-format_time() {
-    local total_us=$1
-    local us=$((total_us % 1000000))
-    local total_s=$((total_us / 1000000))
-    local s=$((total_s % 60))
-    local total_m=$((total_s / 60))
-    local m=$((total_m % 60))
-    local h=$((total_m / 60))
-    printf "%dH-%dM-%dS-%dus" $h $m $s $us
-}
-
 > "$RESULT_FILE"
 
 PASS=0; FAIL=0; TOTAL=0
 
-echo "========== Performance Tests =========="
+echo "========== Performance Final Tests =========="
 
 for sy in "$TEST_DIR"/*.sy; do
     [ ! -f "$sy" ] && continue
@@ -57,17 +44,54 @@ for sy in "$TEST_DIR"/*.sy; do
     num=$(echo "$base" | grep -oE '^[0-9]+' || echo "$base")
     name=$(echo "$base" | sed 's/^[0-9]*_//')
 
-    # 1. SysY -> ARM64 asm
-    ./compiler -S "$sy" -o "/tmp/${base}.s" -O1 2>/dev/null
+    cached_asm="$CACHE_DIR/${base}.s"
+    candidate_asm="$CACHE_DIR/${base}.candidate.s"
+    cached_time="$CACHE_DIR/${base}.time"
+    runtime_stderr="$CACHE_DIR/${base}.stderr"
+    elf="/tmp/${base}.elf"
+
+    # 1. Always compile, then compare the complete assembly with the previous
+    #    successful run.  A cached time is usable only when its assembly is
+    #    byte-identical and the runtime-reported time has a valid format.
+    ./compiler -S "$sy" -o "$candidate_asm" -O1 2>/dev/null
     if [ $? -ne 0 ]; then
+        rm -f "$candidate_asm"
         echo "${RED}CE${RESET} ${num} ${name}"
         echo "$base : CE" >> "$RESULT_FILE"
         FAIL=$((FAIL + 1))
         continue
     fi
 
+    cache_hit=0
+    elapsed=""
+    if [ -f "$cached_asm" ] && cmp -s "$candidate_asm" "$cached_asm" &&
+       [ -f "$cached_time" ]; then
+        elapsed=$(sed -nE 's/^([0-9]+H-[0-9]+M-[0-9]+S-[0-9]+us)$/\1/p' "$cached_time" | tail -n 1)
+        if [ -n "$elapsed" ]; then
+            cache_hit=1
+        fi
+    fi
+
+    if [ "$cache_hit" -eq 1 ]; then
+        rm -f "$candidate_asm"
+        echo "${GREEN}AC${RESET} ${num} ${name}  ${elapsed} (From Cache)"
+        echo "$base : AC" >> "$RESULT_FILE"
+        echo "Total time : $elapsed" >> "$RESULT_FILE"
+        PASS=$((PASS + 1))
+        continue
+    fi
+
+    if [ ! -f "$cached_asm" ] || ! cmp -s "$candidate_asm" "$cached_asm"; then
+        mv -f "$candidate_asm" "$cached_asm"
+        # The old time belongs to different code and must never survive a
+        # failed link or run of the replacement assembly.
+        rm -f "$cached_time"
+    else
+        rm -f "$candidate_asm"
+    fi
+
     # 2. Native gcc assemble + link
-    gcc "/tmp/${base}.s" -o "/tmp/${base}.elf" \
+    gcc "$cached_asm" -o "$elf" \
         -L "$LIB_DIR" -lsysy -static 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "${RED}LE${RESET} ${num} ${name}"
@@ -76,16 +100,16 @@ for sy in "$TEST_DIR"/*.sy; do
         continue
     fi
 
-    # 3. Run natively with timing
-    start_ns=$(date +%s%N 2>/dev/null)
+    # 3. Run natively.  The SysY runtime reports the measured region on
+    #    stderr as `TOTAL: <H>-<M>-<S>-<us>`; that is the authoritative time.
     if [ -f "$infile" ]; then
-        outtext=$("/tmp/${base}.elf" < "$infile" 2>/dev/null)
+        outtext=$("$elf" < "$infile" 2>"$runtime_stderr")
     else
-        outtext=$("/tmp/${base}.elf" 2>/dev/null)
+        outtext=$("$elf" 2>"$runtime_stderr")
     fi
     exitcode=$?
-    end_ns=$(date +%s%N 2>/dev/null)
-    elapsed_us=$(((end_ns - start_ns) / 1000))
+    elapsed=$(sed -nE 's/^TOTAL: ([0-9]+H-[0-9]+M-[0-9]+S-[0-9]+us)$/\1/p' "$runtime_stderr" | tail -n 1)
+    rm -f "$runtime_stderr"
 
     # 4. Format result
     if [ -z "$outtext" ]; then
@@ -98,10 +122,17 @@ for sy in "$TEST_DIR"/*.sy; do
     norm_result=$(printf '%s' "$result" | sed -E 's/[[:space:]]+$//')
     norm_exp=$(printf '%s' "$exp" | sed -E 's/[[:space:]]+$//')
     if [ "$norm_result" = "$norm_exp" ]; then
-        echo "${GREEN}AC${RESET} ${num} ${name}  $(format_time $elapsed_us)"
-        echo "$base : AC" >> "$RESULT_FILE"
-        echo "Total time : $(format_time $elapsed_us)" >> "$RESULT_FILE"
-        PASS=$((PASS + 1))
+        if [ -n "$elapsed" ]; then
+            printf '%s\n' "$elapsed" > "$cached_time"
+            echo "${GREEN}AC${RESET} ${num} ${name}  $elapsed"
+            echo "$base : AC" >> "$RESULT_FILE"
+            echo "Total time : $elapsed" >> "$RESULT_FILE"
+            PASS=$((PASS + 1))
+        else
+            echo "${RED}TE${RESET} ${num} ${name} (missing runtime TOTAL)"
+            echo "$base : TE" >> "$RESULT_FILE"
+            FAIL=$((FAIL + 1))
+        fi
     elif [ $exitcode -ge 128 ]; then
         sig=$((exitcode - 128))
         echo "${RED}SIG${sig}${RESET} ${num} ${name}"
@@ -115,7 +146,7 @@ for sy in "$TEST_DIR"/*.sy; do
         FAIL=$((FAIL + 1))
     fi
 
-    rm -f "/tmp/${base}.s" "/tmp/${base}.elf"
+    rm -f "$elf"
 done
 
 echo ""

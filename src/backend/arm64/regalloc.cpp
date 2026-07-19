@@ -41,6 +41,15 @@ bool Arm64RegAlloc::canAssignRegister(Value *v) const {
     return isAllocatableIntValue(v->type_) || isAllocatableFloatValue(v->type_) || isAllocatablePtrValue(v->type_) || isAllocatableNEONValue(v->type_);
 }
 
+size_t Arm64RegAlloc::stableIndex(Value *v) const {
+    auto it = stableOrder_.find(v);
+    // Prefer later definitions when graph decisions otherwise tie.  The
+    // simplify stack is LIFO, so this leaves earlier values to be selected
+    // first while keeping the choice independent of allocation addresses.
+    return it == stableOrder_.end() ? stableOrder_.size()
+                                    : stableOrder_.size() - 1 - it->second;
+}
+
 void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                                const std::vector<int> &colorToReg, bool isFloat,
                                const std::set<int> &callerSavedRegs,
@@ -52,7 +61,10 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
 
     std::vector<Interval> sorted = pool;
     std::sort(sorted.begin(), sorted.end(),
-              [](const Interval &a, const Interval &b) { return a.start < b.start; });
+              [this](const Interval &a, const Interval &b) {
+                  if (a.start != b.start) return a.start < b.start;
+                  return stableIndex(a.value) < stableIndex(b.value);
+              });
     std::map<Value*, Interval> intervalForValue;
     for (auto &iv : sorted) intervalForValue[iv.value] = iv;
 
@@ -92,8 +104,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     for (auto &iv : sorted) {
         auto it = phiAffinity.find(iv.value);
         if (it == phiAffinity.end()) continue;
-        for (auto *p : it->second) {
-            if (iv.value < p && intervalForValue.count(p))
+        std::vector<Value*> partners(it->second.begin(), it->second.end());
+        std::sort(partners.begin(), partners.end(),
+                  [this](Value *a, Value *b) {
+                      return stableIndex(a) < stableIndex(b);
+                  });
+        for (auto *p : partners) {
+            if (stableIndex(iv.value) < stableIndex(p) && intervalForValue.count(p))
                 affEdges.push_back({iv.value, p});
         }
     }
@@ -178,7 +195,12 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     // Simplify phase
     std::vector<Value*> nodes;
     nodes.reserve(adj.size());
-    for (auto &kv : adj) nodes.push_back(kv.first);
+    std::set<Value*> addedNodes;
+    for (auto &iv : sorted) {
+        Value *root = ufFind(iv.value);
+        if (adj.count(root) && addedNodes.insert(root).second)
+            nodes.push_back(root);
+    }
     int N = (int)nodes.size();
     std::unordered_map<Value*, int> idOf;
     idOf.reserve(N * 2);
@@ -203,7 +225,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     while (remaining > 0) {
         int pick = -1;
         for (int i = 0; i < N; i++) {
-            if (inWL[i] && deg[i] < K) { pick = i; break; }
+            if (!inWL[i] || deg[i] >= K) continue;
+            if (pick < 0 || deg[i] < deg[pick]) pick = i;
         }
         if (pick < 0) {
             double bestCost = 1e100;
@@ -245,7 +268,12 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         // （没能合并的 affinity 对仍可通过同色偏好消除拷贝）
         auto affIt = phiAffinity.find(v);
         if (affIt != phiAffinity.end()) {
-            for (auto partner : affIt->second) {
+            std::vector<Value*> partners(affIt->second.begin(), affIt->second.end());
+            std::sort(partners.begin(), partners.end(),
+                      [this](Value *a, Value *b) {
+                          return stableIndex(a) < stableIndex(b);
+                      });
+            for (auto partner : partners) {
                 auto pc = colors.find(ufFind(partner));
                 if (pc != colors.end() &&
                     colorAllowed(pc->second) &&
@@ -455,17 +483,29 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
         spillCost[iv.value] = cost;
     }
 
-    // Propagate phi affinity costs: ensure phi partners have similar spill cost
-    // so the whole group gets registers or spills together.
-    for (auto &[v, partners] : phiAffinity) {
+    // Preserve the allocator's one-pass affinity propagation, but visit the
+    // values in canonical IR order instead of pointer-map order.
+    std::vector<Value*> affinityOrder;
+    affinityOrder.reserve(intervals.size());
+    for (auto &iv : intervals) affinityOrder.push_back(iv.value);
+    std::sort(affinityOrder.begin(), affinityOrder.end(),
+              [this](Value *a, Value *b) {
+                  return stableIndex(a) < stableIndex(b);
+              });
+    for (auto *v : affinityOrder) {
         double maxCost = spillCost[v];
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                maxCost = std::max(maxCost, spillCost[partner]);
+        auto it = phiAffinity.find(v);
+        if (it != phiAffinity.end())
+            for (auto *partner : it->second) {
+                auto costIt = spillCost.find(partner);
+                if (costIt != spillCost.end())
+                    maxCost = std::max(maxCost, costIt->second);
+            }
         spillCost[v] = maxCost;
-        for (auto *partner : partners)
-            if (spillCost.count(partner))
-                spillCost[partner] = maxCost;
+        if (it != phiAffinity.end())
+            for (auto *partner : it->second)
+                if (spillCost.count(partner))
+                    spillCost[partner] = maxCost;
     }
 
     return spillCost;
@@ -818,6 +858,14 @@ void Arm64RegAlloc::promoteLoopConstants(
 }
 
 void Arm64RegAlloc::allocate() {
+    stableOrder_.clear();
+    size_t stableId = 0;
+    for (auto *arg : func_->arguments_)
+        stableOrder_[arg] = stableId++;
+    for (auto *bb : func_->basic_blocks_)
+        for (auto *inst : bb->instr_list_)
+            stableOrder_[inst] = stableId++;
+
     // ---- 1. Leaf detection + argument pre-coloring ----
     bool isLeaf = true;
     for (auto bb : func_->basic_blocks_) {

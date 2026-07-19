@@ -50,8 +50,9 @@ public:
     BitOp op;
     Value *source; unsigned idx;
     BE a, b;
-    BitExpr(BitOp o, Value *s = nullptr, unsigned i = 0, BE x = nullptr, BE y = nullptr)
-        : op(o), source(s), idx(i), a(x), b(y) {}
+    uint64_t stableId;
+    BitExpr(BitOp o, Value *s, unsigned i, BE x, BE y, uint64_t id)
+        : op(o), source(s), idx(i), a(x), b(y), stableId(id) {}
 };
 
 struct BEKey {
@@ -100,13 +101,14 @@ public:
         BEKey key{op, src, idx, a, b};
         auto it = cache_.find(key);
         if (it != cache_.end()) return it->second.get();
-        auto owned = std::make_unique<BitExpr>(op, src, idx, a, b);
+        auto owned = std::make_unique<BitExpr>(op, src, idx, a, b, nextId_++);
         BE result = owned.get();
         cache_.emplace(key, std::move(owned));
         return result;
     }
 private:
     std::unordered_map<BEKey, std::unique_ptr<BitExpr>, BEHash> cache_;
+    uint64_t nextId_ = 0;
 };
 
 static thread_local BitExprArena *t_arena = nullptr;
@@ -150,7 +152,7 @@ static BE And_(BE a, BE b) {
     // Absorption: a & (a | x) = a;  a & (x | a) = a.
     if (b->op == BitOp::OR && (b->a == a || b->b == a)) return a;
     if (a->op == BitOp::OR && (a->a == b || a->b == b)) return b;
-    if (a > b) std::swap(a, b);
+    if (a->stableId > b->stableId) std::swap(a, b);
     return intern(BitOp::AND, nullptr, 0, a, b);
 }
 
@@ -182,7 +184,7 @@ static BE Or_(BE a, BE b) {
     }
     // (~a | x) absorbs (a & y) when x == y: (~a | x) | (a & x) = ~a | x | (a&x) = ~a | x
     // Skipped — these patterns are rare in our domain.
-    if (a > b) std::swap(a, b);
+    if (a->stableId > b->stableId) std::swap(a, b);
     return intern(BitOp::OR, nullptr, 0, a, b);
 }
 
@@ -193,7 +195,7 @@ static BE Xor_(BE a, BE b) {
     if (a == b) return Zero();
     if (a == One()) return Not_(b);
     if (b == One()) return Not_(a);
-    if (a > b) std::swap(a, b);
+    if (a->stableId > b->stableId) std::swap(a, b);
     return intern(BitOp::XOR, nullptr, 0, a, b);
 }
 

@@ -199,6 +199,7 @@ const SCEVAddRecExpr *ScalarEvolution::getAddRecForLoop(const SCEV *s, Loop *loo
 
 void ScalarEvolution::clear() {
     nodes_.clear();
+    scevOrder_.clear();
     unique_.clear();
     value_cache_.clear();
     visiting_.clear();
@@ -311,6 +312,7 @@ const SCEV *ScalarEvolution::getConstant(Type *type, long long value) {
 
     nodes_.push_back(std::make_unique<SCEVConstant>(type, value));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -322,6 +324,7 @@ const SCEV *ScalarEvolution::getUnknown(Value *value) {
 
     nodes_.push_back(std::make_unique<SCEVUnknown>(value));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -333,6 +336,7 @@ const SCEV *ScalarEvolution::getCouldNotCompute(Type *type) {
 
     nodes_.push_back(std::make_unique<SCEVCouldNotCompute>(type));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -365,7 +369,9 @@ const SCEV *ScalarEvolution::getAddExpr(std::vector<const SCEV*> operands, Type 
         flat.push_back(getConstant(type, constant));
 
     std::sort(flat.begin(), flat.end(),
-              [](const SCEV *a, const SCEV *b) { return keyForSCEV(a) < keyForSCEV(b); });
+              [this](const SCEV *a, const SCEV *b) {
+                  return keyForSCEV(a) < keyForSCEV(b);
+              });
 
     std::vector<const SCEV*> cleaned;
     cleaned.reserve(flat.size());
@@ -385,6 +391,7 @@ const SCEV *ScalarEvolution::getAddExpr(std::vector<const SCEV*> operands, Type 
 
     nodes_.push_back(std::make_unique<SCEVAddExpr>(type, cleaned));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -418,7 +425,9 @@ const SCEV *ScalarEvolution::getMulExpr(std::vector<const SCEV*> operands, Type 
         flat.push_back(getConstant(type, constant));
 
     std::sort(flat.begin(), flat.end(),
-              [](const SCEV *a, const SCEV *b) { return keyForSCEV(a) < keyForSCEV(b); });
+              [this](const SCEV *a, const SCEV *b) {
+                  return keyForSCEV(a) < keyForSCEV(b);
+              });
 
     std::vector<const SCEV*> cleaned;
     cleaned.reserve(flat.size());
@@ -438,6 +447,7 @@ const SCEV *ScalarEvolution::getMulExpr(std::vector<const SCEV*> operands, Type 
 
     nodes_.push_back(std::make_unique<SCEVMulExpr>(type, cleaned));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -454,6 +464,7 @@ const SCEV *ScalarEvolution::getAddRecExpr(const SCEV *start, const SCEV *step,
 
     nodes_.push_back(std::make_unique<SCEVAddRecExpr>(type, start, step, loop, phi));
     const SCEV *s = nodes_.back().get();
+    scevOrder_[s] = scevOrder_.size();
     unique_[key] = s;
     return s;
 }
@@ -489,9 +500,10 @@ std::string ScalarEvolution::keyForPointer(const void *ptr) {
     return oss.str();
 }
 
-std::string ScalarEvolution::keyForSCEV(const SCEV *s) {
+std::string ScalarEvolution::keyForSCEV(const SCEV *s) const {
     if (!s) return "<null>";
-    std::ostringstream oss;
-    oss << static_cast<int>(s->kind()) << "@" << s;
-    return oss.str();
+    auto it = scevOrder_.find(s);
+    if (it == scevOrder_.end()) return "<unknown-scev>";
+    return std::to_string(static_cast<int>(s->kind())) + "#" +
+           std::to_string(it->second);
 }
