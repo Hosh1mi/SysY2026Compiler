@@ -286,6 +286,46 @@ BinaryInst *binary(Module *module, BasicBlock *block, Instruction::OpID op,
     return new BinaryInst(module->int32_ty_, op, lhs, rhs, block);
 }
 
+Value *boundedSignedRem(Module *module, BasicBlock *block, Value *value,
+                        int modulus) {
+    auto constant = [&](int v) -> ConstantInt * {
+        return new ConstantInt(module->int32_ty_, v);
+    };
+
+    auto *minusMod = binary(module, block, Instruction::Sub,
+                            value, constant(modulus));
+    auto *geMod = new ICmpInst(ICmpInst::ICMP_SGE,
+                               value, constant(modulus), block);
+    auto *nonNegative = new SelectInst(geMod, minusMod, value, block);
+
+    auto *plusMod = binary(module, block, Instruction::Add,
+                           value, constant(modulus));
+    auto *leMinusMod = new ICmpInst(ICmpInst::ICMP_SLE,
+                                    value, constant(-modulus), block);
+    return new SelectInst(leMinusMod, plusMod, nonNegative, block);
+}
+
+Value *boundedNonNegativeRem(Module *module, BasicBlock *block, Value *value,
+                             int modulus) {
+    auto *mod = new ConstantInt(module->int32_ty_, modulus);
+    auto *minusMod = binary(module, block, Instruction::Sub, value, mod);
+    auto *geMod = new ICmpInst(ICmpInst::ICMP_SGE, value,
+                               new ConstantInt(module->int32_ty_, modulus),
+                               block);
+    return new SelectInst(geMod, minusMod, value, block);
+}
+
+Value *remOfDoubledRadixState(Module *module, BasicBlock *block,
+                              Value *doubled, int modulus) {
+    // The radix state is always the result of `srem x, modulus`, hence it is
+    // in (-(modulus - 1), modulus - 1).  For modulus <= 2^30, doubling cannot
+    // overflow i32 and the signed remainder is one conditional add/subtract.
+    if (modulus <= (1 << 30))
+        return boundedSignedRem(module, block, doubled, modulus);
+    return binary(module, block, Instruction::SRem,
+                  doubled, new ConstantInt(module->int32_ty_, modulus));
+}
+
 void rewrite(const Match &match, Module *module) {
     Function *function = match.function;
     Argument *addend = match.addend;
@@ -293,68 +333,98 @@ void rewrite(const Match &match, Module *module) {
     discardBody(function);
 
     auto *entry = new BasicBlock(module, "label_radix_entry", function);
-    auto *init = new BasicBlock(module, "label_radix_init", function);
-    auto *loop = new BasicBlock(module, "label_radix_loop", function);
-    auto *body = new BasicBlock(module, "label_radix_body", function);
-    auto *odd = new BasicBlock(module, "label_radix_odd", function);
-    auto *latch = new BasicBlock(module, "label_radix_latch", function);
     auto *zero = new BasicBlock(module, "label_radix_zero", function);
-    auto *exit = new BasicBlock(module, "label_radix_exit", function);
+    auto *init = new BasicBlock(module, "label_radix_init", function);
 
     auto constant = [&](int value) -> ConstantInt * {
         return new ConstantInt(module->int32_ty_, value);
     };
 
+    auto buildLoop = [&](const std::string &prefix, BasicBlock *initBlock,
+                         Value *initial, bool fastOdd) {
+        auto *loop = new BasicBlock(module, prefix + "_loop", function);
+        auto *body = new BasicBlock(module, prefix + "_body", function);
+        auto *odd = new BasicBlock(module, prefix + "_odd", function);
+        auto *latch = new BasicBlock(module, prefix + "_latch", function);
+        auto *exit = new BasicBlock(module, prefix + "_exit", function);
+
+        auto *leadingZeros = new UnaryInst(module->int32_ty_, Instruction::Clz,
+                                           digits, initBlock);
+        auto *topShift = binary(module, initBlock, Instruction::Sub,
+                                constant(31), leadingZeros);
+        auto *topMask = binary(module, initBlock, Instruction::Shl,
+                               constant(1), topShift);
+        auto *initialMask = binary(module, initBlock, Instruction::LShr,
+                                   topMask, constant(1));
+        new BranchInst(loop, initBlock);
+
+        auto *current = PhiInst::create_phi(module->int32_ty_, loop);
+        auto *mask = PhiInst::create_phi(module->int32_ty_, loop);
+        loop->add_instruction(current);
+        loop->add_instruction(mask);
+        current->add_phi_pair_operand(initial, initBlock);
+        mask->add_phi_pair_operand(initialMask, initBlock);
+        auto *hasMore = new ICmpInst(ICmpInst::ICMP_NE, mask, constant(0), loop);
+        new BranchInst(hasMore, body, exit, loop);
+
+        auto *doubled = binary(module, body, Instruction::Add, current, current);
+        Value *evenResult = fastOdd
+            ? boundedNonNegativeRem(module, body, doubled, match.modulus)
+            : remOfDoubledRadixState(module, body, doubled, match.modulus);
+        auto *selectedBit = binary(module, body, Instruction::And, digits, mask);
+        auto *isOdd = new ICmpInst(ICmpInst::ICMP_NE,
+                                   selectedBit, constant(0), body);
+        new BranchInst(isOdd, odd, latch, body);
+
+        auto *withAddend = binary(module, odd, Instruction::Add,
+                                  evenResult, addend);
+        Value *oddResult = fastOdd
+            ? boundedNonNegativeRem(module, odd, withAddend, match.modulus)
+            : binary(module, odd, Instruction::SRem,
+                     withAddend, constant(match.modulus));
+        new BranchInst(latch, odd);
+
+        auto *next = PhiInst::create_phi(module->int32_ty_, latch);
+        latch->add_instruction(next);
+        next->add_phi_pair_operand(evenResult, body);
+        next->add_phi_pair_operand(oddResult, odd);
+        auto *nextMask = binary(module, latch, Instruction::LShr,
+                                mask, constant(1));
+        new BranchInst(loop, latch);
+        current->add_phi_pair_operand(next, latch);
+        mask->add_phi_pair_operand(nextMask, latch);
+
+        new ReturnInst(current, exit);
+    };
+
     auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, digits, constant(0), entry);
-    new BranchInst(positive, init, zero, entry);
+    if (match.modulus <= (1 << 30)) {
+        auto *nonNegativeCheck =
+            new BasicBlock(module, "label_radix_fast_nonneg_check", function);
+        auto *upperCheck =
+            new BasicBlock(module, "label_radix_fast_upper_check", function);
+        auto *fastInit =
+            new BasicBlock(module, "label_radix_fast_init", function);
+
+        new BranchInst(positive, nonNegativeCheck, zero, entry);
+        auto *nonNegative = new ICmpInst(ICmpInst::ICMP_SGE,
+                                         addend, constant(0),
+                                         nonNegativeCheck);
+        new BranchInst(nonNegative, upperCheck, init, nonNegativeCheck);
+        auto *belowMod = new ICmpInst(ICmpInst::ICMP_SLT,
+                                      addend, constant(match.modulus),
+                                      upperCheck);
+        new BranchInst(belowMod, fastInit, init, upperCheck);
+        buildLoop("label_radix_fast", fastInit, addend, true);
+    } else {
+        new BranchInst(positive, init, zero, entry);
+    }
 
     auto *initial = binary(module, init, Instruction::SRem,
                            addend, constant(match.modulus));
-    auto *leadingZeros = new UnaryInst(module->int32_ty_, Instruction::Clz,
-                                       digits, init);
-    auto *topShift = binary(module, init, Instruction::Sub,
-                            constant(31), leadingZeros);
-    auto *topMask = binary(module, init, Instruction::Shl,
-                           constant(1), topShift);
-    auto *initialMask = binary(module, init, Instruction::LShr,
-                               topMask, constant(1));
-    new BranchInst(loop, init);
-
-    auto *current = PhiInst::create_phi(module->int32_ty_, loop);
-    auto *mask = PhiInst::create_phi(module->int32_ty_, loop);
-    loop->add_instruction(current);
-    loop->add_instruction(mask);
-    current->add_phi_pair_operand(initial, init);
-    mask->add_phi_pair_operand(initialMask, init);
-    auto *hasMore = new ICmpInst(ICmpInst::ICMP_NE, mask, constant(0), loop);
-    new BranchInst(hasMore, body, exit, loop);
-
-    auto *doubled = binary(module, body, Instruction::Add, current, current);
-    auto *evenResult = binary(module, body, Instruction::SRem,
-                              doubled, constant(match.modulus));
-    auto *selectedBit = binary(module, body, Instruction::And, digits, mask);
-    auto *isOdd = new ICmpInst(ICmpInst::ICMP_NE,
-                               selectedBit, constant(0), body);
-    new BranchInst(isOdd, odd, latch, body);
-
-    auto *withAddend = binary(module, odd, Instruction::Add,
-                              evenResult, addend);
-    auto *oddResult = binary(module, odd, Instruction::SRem,
-                             withAddend, constant(match.modulus));
-    new BranchInst(latch, odd);
-
-    auto *next = PhiInst::create_phi(module->int32_ty_, latch);
-    latch->add_instruction(next);
-    next->add_phi_pair_operand(evenResult, body);
-    next->add_phi_pair_operand(oddResult, odd);
-    auto *nextMask = binary(module, latch, Instruction::LShr,
-                            mask, constant(1));
-    new BranchInst(loop, latch);
-    current->add_phi_pair_operand(next, latch);
-    mask->add_phi_pair_operand(nextMask, latch);
+    buildLoop("label_radix", init, initial, false);
 
     new ReturnInst(constant(0), zero);
-    new ReturnInst(current, exit);
 }
 
 } // namespace
