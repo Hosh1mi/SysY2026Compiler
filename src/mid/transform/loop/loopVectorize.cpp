@@ -4,6 +4,7 @@
 #include <climits>
 #include <cstdlib>
 #include <iostream>
+#include <functional>
 
 // Cortex-A53 has 128-bit NEON registers, hence four i32/f32 lanes.
 static const int VECTORIZE_FACTOR = 4;
