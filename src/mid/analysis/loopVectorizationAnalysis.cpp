@@ -336,18 +336,25 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         addressHelpers.insert(recurrence.update);
 
     bool hasStore = false;
+    bool sawStore = false;
+    bool storesAreTerminal = true;
     for (auto *inst : plan.recipes) {
         if (inst == plan.induction.update || inst == plan.induction.compare ||
             addressHelpers.count(inst))
             continue;
-        if (inst->is_load()) continue;
+        if (inst->is_load()) {
+            if (sawStore) storesAreTerminal = false;
+            continue;
+        }
         if (inst->is_store()) {
             hasStore = true;
+            sawStore = true;
             continue;
         }
         auto *bin = dynamic_cast<BinaryInst *>(inst);
         if (!bin)
             return reject(reason, "loop contains an unsupported instruction");
+        if (sawStore) storesAreTerminal = false;
         switch (bin->op_id_) {
         case Instruction::Add:
         case Instruction::Sub:
@@ -365,6 +372,7 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
     }
     if (!hasStore)
         return reject(reason, "element-wise loop has no observable vector store");
+    plan.canDeferStoresAcrossParts = storesAreTerminal;
 
     for (auto *bb : plan.loop->blocks) {
         for (auto *inst : bb->instr_list_) {

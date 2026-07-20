@@ -1116,6 +1116,12 @@ bool LoopVectorize::emitVectorizedLoop(
         return result;
     };
 
+    struct PendingStore {
+        Value *value = nullptr;
+        Value *pointer = nullptr;
+    };
+    std::vector<PendingStore> pendingStores;
+
     for (int part = 0; part < UF; ++part) {
         Value *partIV = vecIV;
         if (part != 0) {
@@ -1251,7 +1257,10 @@ bool LoopVectorize::emitVectorizedLoop(
                 } else {
                     Value *stored = getVectorOperand(inst->get_operand(0));
                     if (!stored) return false;
-                    new StoreInst(stored, pointer, vecBody);
+                    if (UF > 1 && plan.canDeferStoresAcrossParts)
+                        pendingStores.push_back({stored, pointer});
+                    else
+                        new StoreInst(stored, pointer, vecBody);
                 }
                 continue;
             }
@@ -1266,6 +1275,9 @@ bool LoopVectorize::emitVectorizedLoop(
                                                 vecBody);
         }
     }
+
+    for (const auto &store : pendingStores)
+        new StoreInst(store.value, store.pointer, vecBody);
 
     auto *vectorStep = new ConstantInt(module->int32_ty_, vectorTrip);
     auto *vecIVNext = new BinaryInst(module->int32_ty_, Instruction::Add,

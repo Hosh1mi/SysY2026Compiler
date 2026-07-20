@@ -49,6 +49,12 @@ bool LoopDeletion::runOnFunction(Function *func) {
                 func->set_instr_name();
                 break; // LoopInfo 已过期，重新分析
             }
+            if (tryBreakSingleIterationBackedge(*loop, func)) {
+                changed = true;
+                progress = true;
+                func->set_instr_name();
+                break;
+            }
         }
     }
     return changed;
@@ -142,6 +148,150 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
     }
     for (auto *bb : doomed)
         func->remove_bb(bb);
+
+    return true;
+}
+
+bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
+                                                    Function *func) {
+    // Restrict the rewrite to the canonical two-block while form:
+    // preheader -> header -> latch -> header, with header -> exit.  In
+    // particular, an independently conditional latch must not be replaced.
+    BasicBlock *preheader = loop.preheader;
+    BasicBlock *latch = loop.singleLatch();
+    BasicBlock *exit = loop.singleExit();
+    if (!preheader || !latch || !exit || latch == loop.header ||
+        loop.blocks.size() != 2 || !loop.isInLoop(latch) ||
+        loop.exiting.size() != 1 || loop.exiting.front() != loop.header)
+        return false;
+
+    auto *preheaderBr = preheader->get_terminator();
+    auto *headerBr = loop.header->get_terminator();
+    auto *latchBr = latch->get_terminator();
+    if (!preheaderBr || !preheaderBr->is_br() ||
+        preheaderBr->num_ops_ != 1 ||
+        preheaderBr->get_operand(0) != loop.header ||
+        !headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3 ||
+        headerBr->get_operand(1) != latch ||
+        headerBr->get_operand(2) != exit ||
+        !latchBr || !latchBr->is_br() || latchBr->num_ops_ != 1 ||
+        latchBr->get_operand(0) != loop.header)
+        return false;
+
+    // LoopInfo proves init=0, step=+1 and a signed-less-than header guard.
+    // A constant bound of one therefore proves exactly one body execution.
+    if (!loop.hasCanonicalIV()) return false;
+    auto *bound = dynamic_cast<ConstantInt *>(loop.tripCount);
+    auto *compare = dynamic_cast<ICmpInst *>(headerBr->get_operand(0));
+    if (!bound || bound->value_ != 1 || !compare ||
+        compare->icmp_op_ != ICmpInst::ICMP_SLT ||
+        compare->get_operand(0) != loop.canonicalIV ||
+        compare->get_operand(1) != bound)
+        return false;
+    for (const auto &use : compare->use_list_) {
+        if (use.val_ != headerBr) return false;
+    }
+
+    struct PhiInfo {
+        PhiInst *phi = nullptr;
+        Value *initial = nullptr;
+        Value *afterIteration = nullptr;
+    };
+    std::vector<PhiInfo> phis;
+    for (auto *inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi->num_ops_ != 4) return false;
+        Value *initial = nullptr;
+        Value *afterIteration = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred == preheader)
+                initial = phi->get_operand(i);
+            else if (pred == latch)
+                afterIteration = phi->get_operand(i);
+            else
+                return false;
+        }
+        if (!initial || !afterIteration) return false;
+        phis.push_back({phi, initial, afterIteration});
+    }
+
+    // Keep the simultaneous substitution simple and dominance-safe.  Normal
+    // induction/reduction updates are instructions in the latch, not direct
+    // references to another header phi.
+    for (const auto &info : phis) {
+        for (const auto &other : phis) {
+            if (info.initial == other.phi ||
+                info.afterIteration == other.phi)
+                return false;
+        }
+    }
+
+    // LCSSA is established before LoopDeletion.  Require every outside use
+    // of a header phi to be an exit phi on the edge that will move to latch.
+    for (const auto &info : phis) {
+        for (const auto &use : info.phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || loop.isInLoop(user->parent_))
+                continue;
+            auto *exitPhi = dynamic_cast<PhiInst *>(user);
+            if (!exitPhi || exitPhi->parent_ != exit ||
+                use.arg_no_ + 1 >= exitPhi->num_ops_ ||
+                exitPhi->get_operand(use.arg_no_ + 1) != loop.header)
+                return false;
+        }
+    }
+
+    if (std::getenv("DEBUG_LOOP_DELETION"))
+        std::cerr << "[LoopDeletion] break-single-iteration-backedge func="
+                  << func->name_ << " header=" << loop.header->name_ << "\n";
+
+    // During the only body execution, every header phi has its preheader
+    // value.  After that execution, its live-out value is the latch incoming.
+    for (const auto &info : phis) {
+        std::vector<std::pair<Instruction *, unsigned>> insideUses;
+        std::vector<std::pair<Instruction *, unsigned>> outsideUses;
+        for (const auto &use : info.phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || user == compare || user == headerBr)
+                continue;
+            auto entry = std::make_pair(user, use.arg_no_);
+            if (loop.isInLoop(user->parent_))
+                insideUses.push_back(entry);
+            else
+                outsideUses.push_back(entry);
+        }
+        for (const auto &[user, operand] : insideUses)
+            user->set_operand(operand, info.initial);
+        for (const auto &[user, operand] : outsideUses)
+            user->set_operand(operand, info.afterIteration);
+    }
+
+    // The exiting edge moves from header to latch.  Values defined in header
+    // still dominate latch; phi live-outs were rewritten above.
+    for (auto *inst : exit->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == loop.header)
+                phi->set_operand(i + 1, latch);
+        }
+    }
+
+    loop.header->delete_instr(headerBr);
+    loop.header->delete_instr(compare);
+    loop.header->remove_succ_basic_block(exit);
+    exit->remove_pre_basic_block(loop.header);
+    new BranchInst(latch, loop.header);
+
+    latch->delete_instr(latchBr);
+    latch->remove_succ_basic_block(loop.header);
+    loop.header->remove_pre_basic_block(latch);
+    new BranchInst(exit, latch);
+
+    for (const auto &info : phis)
+        loop.header->delete_instr(info.phi);
 
     return true;
 }

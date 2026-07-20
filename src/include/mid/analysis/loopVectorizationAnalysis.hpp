@@ -72,6 +72,7 @@ public:
         std::unordered_map<Instruction *, size_t> accessForInst;
         int vectorWidth = DefaultVF;
         int unrollFactor = 1;
+        bool canDeferStoresAcrossParts = false;
         int scalarCost = 0;
         int vectorCost = 0;
     };

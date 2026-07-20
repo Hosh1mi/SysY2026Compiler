@@ -22,4 +22,5 @@ public:
 private:
     bool runOnFunction(Function *func);
     bool tryDelete(Loop &loop, Function *func);
+    bool tryBreakSingleIterationBackedge(Loop &loop, Function *func);
 };
