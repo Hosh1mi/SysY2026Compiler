@@ -91,7 +91,7 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
                                const std::vector<int> &colorToReg, bool isFloat,
                                const std::set<int> &callerSavedRegs,
                                const std::map<Value*, double> &spillCost,
-                               const std::map<Value*, std::set<Value*>> &phiAffinity,
+                               const std::map<Value*, std::set<Value*>> &affinity,
                                const std::function<bool(Value*, Value*)> &trulyInterferes) {
     if (pool.empty()) return;
     int K = (int)colorToReg.size();
@@ -115,8 +115,9 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         }
     }
 
-    // ---- Phi 合并（Briggs 保守准则 + George 准则）----
-    // 把 phi 相连且不真正冲突的活跃区间合并成一个节点，消除 phi 拷贝。
+    // ---- Affinity 合并（Briggs 保守准则 + George 准则）----
+    // 把亲和值且不真正冲突的活跃区间合并成一个节点，消除 phi copy 或
+    // destructive-operand copy。
     // 冲突判定先用凸包重叠（adj 有边）做快速过滤，凸包重叠时再调用
     // trulyInterferes 做精确的活跃性判定（循环 phi 与 backedge incoming
     // 虽凸包重叠但真实区间通常不冲突，精确判定能合并它们）。
@@ -139,8 +140,8 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
 
     std::vector<std::pair<Value*, Value*>> affEdges;
     for (auto &iv : sorted) {
-        auto it = phiAffinity.find(iv.value);
-        if (it == phiAffinity.end()) continue;
+        auto it = affinity.find(iv.value);
+        if (it == affinity.end()) continue;
         std::vector<Value*> partners(it->second.begin(), it->second.end());
         std::sort(partners.begin(), partners.end(),
                   [this](Value *a, Value *b) {
@@ -320,10 +321,10 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
         if (preferredColor >= 0 && colorAllowed(preferredColor) &&
             !neighborColors.count(preferredColor))
             color = preferredColor;
-        // Biased: prefer color of already-colored phi partners
+        // Biased: prefer the color of already-colored affinity partners.
         // （没能合并的 affinity 对仍可通过同色偏好消除拷贝）
-        auto affIt = phiAffinity.find(v);
-        if (color < 0 && affIt != phiAffinity.end()) {
+        auto affIt = affinity.find(v);
+        if (color < 0 && affIt != affinity.end()) {
             std::vector<Value*> partners(affIt->second.begin(), affIt->second.end());
             std::sort(partners.begin(), partners.end(),
                       [this](Value *a, Value *b) {
@@ -532,7 +533,7 @@ std::map<BasicBlock*, int> Arm64RegAlloc::computeLoopDepth(
 std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
     const std::vector<Interval> &intervals,
     const std::map<BasicBlock*, int> &loopDepth,
-    const std::map<Value*, std::set<Value*>> &phiAffinity) const {
+    const std::map<Value*, std::set<Value*>> &affinity) const {
     // spill 代价 = def 处 store + 每次 use 处 load，均按 20^(循环深度) 加权。
     // 参数已在调用方栈上无 store 代价，整体减半；下限 1.0。
     std::map<Value*, double> spillCost;
@@ -570,15 +571,15 @@ std::map<Value*, double> Arm64RegAlloc::computeSpillCost(
               });
     for (auto *v : affinityOrder) {
         double maxCost = spillCost[v];
-        auto it = phiAffinity.find(v);
-        if (it != phiAffinity.end())
+        auto it = affinity.find(v);
+        if (it != affinity.end())
             for (auto *partner : it->second) {
                 auto costIt = spillCost.find(partner);
                 if (costIt != spillCost.end())
                     maxCost = std::max(maxCost, costIt->second);
             }
         spillCost[v] = maxCost;
-        if (it != phiAffinity.end())
+        if (it != affinity.end())
             for (auto *partner : it->second)
                 if (spillCost.count(partner))
                     spillCost[partner] = maxCost;
@@ -810,23 +811,53 @@ std::vector<Arm64RegAlloc::Interval> Arm64RegAlloc::buildIntervals(
     return intervals;
 }
 
-std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildPhiAffinity(
+std::map<Value*, std::set<Value*>> Arm64RegAlloc::buildRegisterAffinity(
     const std::vector<BasicBlock*> &blocksOrder) const {
-    std::map<Value*, std::set<Value*>> phiAffinity;
+    std::map<Value*, std::set<Value*>> affinity;
+    auto addAffinity = [&](Value *a, Value *b) {
+        if (!canAssignRegister(a) || !canAssignRegister(b) ||
+            a->type_ != b->type_)
+            return;
+        affinity[a].insert(b);
+        affinity[b].insert(a);
+    };
     for (auto bb : blocksOrder) {
         for (auto inst : bb->instr_list_) {
             auto *phi = dynamic_cast<PhiInst*>(inst);
-            if (!phi || !canAssignRegister(phi)) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
-                auto val = phi->get_operand(i);
-                if (canAssignRegister(val)) {
-                    phiAffinity[phi].insert(val);
-                    phiAffinity[val].insert(phi);
-                }
+            if (phi && canAssignRegister(phi)) {
+                for (unsigned i = 0; i < phi->num_ops_; i += 2)
+                    addAffinity(phi, phi->get_operand(i));
+                continue;
+            }
+
+            // AArch64 MLA/MLS destructively updates its accumulator.  Give a
+            // vector add/sub fed by a single-use multiply an affinity to that
+            // accumulator, so instruction selection does not need register
+            // copies around the fused operation.
+            auto *root = dynamic_cast<BinaryInst *>(inst);
+            if (!root || !dynamic_cast<VectorType *>(root->type_)) continue;
+            const bool isAdd = root->is_add() || root->is_fadd();
+            const bool isSub = root->is_sub() || root->is_fsub();
+            if (!isAdd && !isSub) continue;
+
+            auto matchMul = [&](Value *value) -> BinaryInst * {
+                auto *mul = dynamic_cast<BinaryInst *>(value);
+                if (!mul || mul->type_ != root->type_ ||
+                    mul->use_list_.size() != 1)
+                    return nullptr;
+                if (root->is_fadd() || root->is_fsub())
+                    return mul->is_fmul() ? mul : nullptr;
+                return mul->is_mul() ? mul : nullptr;
+            };
+
+            if (matchMul(root->get_operand(1))) {
+                addAffinity(root, root->get_operand(0));
+            } else if (isAdd && matchMul(root->get_operand(0))) {
+                addAffinity(root, root->get_operand(1));
             }
         }
     }
-    return phiAffinity;
+    return affinity;
 }
 
 Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
@@ -984,12 +1015,13 @@ void Arm64RegAlloc::allocate() {
     // ---- 6. Loop depth ----
     std::map<BasicBlock*, int> loopDepth = computeLoopDepth(blocksOrder, preds);
 
-    // ---- 7. Phi affinity ----
-    std::map<Value*, std::set<Value*>> phiAffinity = buildPhiAffinity(blocksOrder);
+    // ---- 7. Register affinity ----
+    std::map<Value*, std::set<Value*>> affinity =
+        buildRegisterAffinity(blocksOrder);
 
     // ---- 8. Spill cost ----
     std::map<Value*, double> spillCost =
-        computeSpillCost(intervals, loopDepth, phiAffinity);
+        computeSpillCost(intervals, loopDepth, affinity);
 
     // ---- 9. Separate into register-class pools ----
     std::vector<Interval> intPool, floatPool, neonPool;
@@ -1061,9 +1093,9 @@ void Arm64RegAlloc::allocate() {
         };
 
     // ---- 11. Graph coloring (Chaitin-Briggs) ----
-    colorPool(intPool,   pal.intColorToReg,   false, pal.callerSavedInt,   spillCost, phiAffinity, trulyInterferes);
-    colorPool(floatPool, pal.floatColorToReg, true,  pal.callerSavedFloat, spillCost, phiAffinity, trulyInterferes);
-    colorPool(neonPool,  pal.neonColorToReg,  false, pal.callerSavedNEON,  spillCost, phiAffinity, trulyInterferes);
+    colorPool(intPool,   pal.intColorToReg,   false, pal.callerSavedInt,   spillCost, affinity, trulyInterferes);
+    colorPool(floatPool, pal.floatColorToReg, true,  pal.callerSavedFloat, spillCost, affinity, trulyInterferes);
+    colorPool(neonPool,  pal.neonColorToReg,  false, pal.callerSavedNEON,  spillCost, affinity, trulyInterferes);
 
     // ---- 12. Loop constant promotion ----
     // srem/sdiv 魔数乘数、Add/Sub/ICmp 大常量在循环里每次迭代重物化。

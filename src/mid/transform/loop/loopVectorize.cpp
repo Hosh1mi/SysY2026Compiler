@@ -1244,20 +1244,106 @@ bool LoopVectorize::emitVectorizedLoop(
     };
     std::vector<PendingStore> pendingStores;
 
-    for (int part = 0; part < UF; ++part) {
-        Value *partIV = vecIV;
-        if (part != 0) {
-            auto *partOffset =
-                new ConstantInt(module->int32_ty_, part * VF);
-            partIV = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                    vecIV, partOffset, vecBody);
-        }
+    std::vector<Value *> partIVs(UF, vecIV);
+    std::vector<Value *> vectorIVs(UF, nullptr);
+    std::vector<std::unordered_map<Value *, Value *>> partVectorValues(UF);
+    std::vector<std::unordered_map<size_t, Value *>> partVectorAddresses(UF);
+    for (int part = 1; part < UF; ++part) {
+        auto *partOffset = new ConstantInt(module->int32_ty_, part * VF);
+        partIVs[part] = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                      vecIV, partOffset, vecBody);
+    }
 
-        std::unordered_map<Value *, Value *> vectorValues;
-        std::unordered_map<size_t, Value *> vectorAddresses;
-        Value *vectorIV = nullptr;
+    auto buildVectorPointer = [&](
+        int part,
+        const LoopVectorizationAnalysis::MemoryAccess &access) -> Value * {
+        Value *scalarPointer = nullptr;
+        if (access.addressKind == AddressKind::Uniform) return nullptr;
+        if (access.addressKind == AddressKind::PointerRecurrence) {
+            auto found = vectorPointers.find(access.pointerPhi);
+            if (found == vectorPointers.end()) return nullptr;
+            scalarPointer = found->second;
+            int offset = access.pointerOffset;
+            // Pointer recurrence descriptors carry the element step; use it
+            // rather than byte arithmetic when selecting a UF part.
+            for (const auto &recurrence : plan.pointerRecurrences) {
+                if (recurrence.phi == access.pointerPhi) {
+                    offset = access.pointerOffset +
+                             part * VF * recurrence.step;
+                    break;
+                }
+            }
+            if (offset != 0) {
+                auto *constant = new ConstantInt(module->int32_ty_, offset);
+                scalarPointer = new GetElementPtrInst(
+                    scalarPointer, {constant}, vecBody);
+            }
+        } else {
+            scalarPointer = vectorAddressPhis[access.addressGroup];
+            if (!scalarPointer) return nullptr;
+            if (part != 0) {
+                auto *offset = new ConstantInt(module->int32_ty_, part * VF);
+                scalarPointer = new GetElementPtrInst(
+                    scalarPointer, {offset}, vecBody);
+            }
+        }
+        return new Bitcast(Instruction::BitCast, scalarPointer,
+                           vectorPointerType(access.scalarType), vecBody);
+    };
+
+    // Keep independent UF-part loads together.  On an in-order target this
+    // exposes enough work to cover load-to-use latency before arithmetic, and
+    // it also keeps the values distinct through register allocation so the
+    // machine scheduler can retain that ordering.  Dependence legality and
+    // terminal-store ordering were proved when the plan was built.
+    for (int part = 0; part < UF; ++part) {
+        auto &vectorValues = partVectorValues[part];
+        auto &vectorAddresses = partVectorAddresses[part];
+        for (auto *inst : plan.recipes) {
+            auto accessIt = plan.accessForInst.find(inst);
+            if (accessIt == plan.accessForInst.end() || !inst->is_load())
+                continue;
+            const auto &access = plan.memoryAccesses[accessIt->second];
+            if (access.addressKind == AddressKind::Uniform) {
+                auto found = uniformVectors.find(inst);
+                if (found == uniformVectors.end()) {
+                    Value *pointer = inst->get_operand(0);
+                    if (auto *gep = dynamic_cast<GetElementPtrInst *>(pointer)) {
+                        std::vector<Value *> indices;
+                        for (unsigned i = 1; i < gep->num_ops_; ++i)
+                            indices.push_back(gep->get_operand(i));
+                        auto *clone = new GetElementPtrInst(
+                            gep->get_operand(0), indices, preheader, true);
+                        preheader->add_instruction_before_terminator(clone);
+                        pointer = clone;
+                    }
+                    auto *scalarLoad = new LoadInst(pointer, preheader, true);
+                    preheader->add_instruction_before_terminator(scalarLoad);
+                    found = uniformVectors.emplace(inst,
+                                                   emitSplat(scalarLoad)).first;
+                }
+                vectorValues[inst] = found->second;
+                continue;
+            }
+            Value *pointer = nullptr;
+            auto pointerIt = vectorAddresses.find(access.addressGroup);
+            if (pointerIt != vectorAddresses.end()) {
+                pointer = pointerIt->second;
+            } else {
+                pointer = buildVectorPointer(part, access);
+                if (!pointer) return false;
+                vectorAddresses.emplace(access.addressGroup, pointer);
+            }
+            vectorValues[inst] = new LoadInst(pointer, vecBody);
+        }
+    }
+
+    for (int part = 0; part < UF; ++part) {
+        Value *partIV = partIVs[part];
+        auto &vectorValues = partVectorValues[part];
+        auto &vectorAddresses = partVectorAddresses[part];
         auto getVectorIV = [&]() -> Value * {
-            if (vectorIV) return vectorIV;
+            if (vectorIVs[part]) return vectorIVs[part];
             Value *base = nullptr;
             for (int lane = 0; lane < VF; ++lane) {
                 auto *index = new ConstantInt(module->int32_ty_, lane);
@@ -1274,10 +1360,10 @@ bool LoopVectorize::emitVectorizedLoop(
             auto *offsetVector = new ConstantVector(
                 static_cast<VectorType *>(vectorType(module->int32_ty_)),
                 offsets);
-            vectorIV = new BinaryInst(vectorType(module->int32_ty_),
-                                      Instruction::Add, base, offsetVector,
-                                      vecBody);
-            return vectorIV;
+            vectorIVs[part] = new BinaryInst(
+                vectorType(module->int32_ty_), Instruction::Add, base,
+                offsetVector, vecBody);
+            return vectorIVs[part];
         };
 
         auto getVectorOperand = [&](Value *value) -> Value * {
@@ -1289,44 +1375,6 @@ bool LoopVectorize::emitVectorizedLoop(
             if (!inst || !plan.loop->blocks.count(inst->parent_))
                 return emitSplat(value);
             return nullptr;
-        };
-
-        auto buildVectorPointer = [&](
-            const LoopVectorizationAnalysis::MemoryAccess &access) -> Value * {
-            Value *scalarPointer = nullptr;
-            if (access.addressKind == AddressKind::Uniform) return nullptr;
-            if (access.addressKind == AddressKind::PointerRecurrence) {
-                auto found = vectorPointers.find(access.pointerPhi);
-                if (found == vectorPointers.end()) return nullptr;
-                scalarPointer = found->second;
-                int offset = access.pointerOffset;
-                // Pointer recurrence descriptors carry the element step; use
-                // it rather than byte arithmetic when selecting a UF part.
-                for (const auto &recurrence : plan.pointerRecurrences) {
-                    if (recurrence.phi == access.pointerPhi) {
-                        offset = access.pointerOffset +
-                                 part * VF * recurrence.step;
-                        break;
-                    }
-                }
-                if (offset != 0) {
-                    auto *constant =
-                        new ConstantInt(module->int32_ty_, offset);
-                    scalarPointer = new GetElementPtrInst(
-                        scalarPointer, {constant}, vecBody);
-                }
-            } else {
-                scalarPointer = vectorAddressPhis[access.addressGroup];
-                if (!scalarPointer) return nullptr;
-                if (part != 0) {
-                    auto *offset =
-                        new ConstantInt(module->int32_ty_, part * VF);
-                    scalarPointer = new GetElementPtrInst(
-                        scalarPointer, {offset}, vecBody);
-                }
-            }
-            return new Bitcast(Instruction::BitCast, scalarPointer,
-                               vectorPointerType(access.scalarType), vecBody);
         };
 
         for (auto *inst : plan.recipes) {
@@ -1343,26 +1391,6 @@ bool LoopVectorize::emitVectorizedLoop(
                 const auto &access = plan.memoryAccesses[accessIt->second];
                 if (access.addressKind == AddressKind::Uniform) {
                     if (!inst->is_load()) return false;
-                    auto found = uniformVectors.find(inst);
-                    if (found == uniformVectors.end()) {
-                        Value *pointer = inst->get_operand(0);
-                        if (auto *gep =
-                                dynamic_cast<GetElementPtrInst *>(pointer)) {
-                            std::vector<Value *> indices;
-                            for (unsigned i = 1; i < gep->num_ops_; ++i)
-                                indices.push_back(gep->get_operand(i));
-                            auto *clone = new GetElementPtrInst(
-                                gep->get_operand(0), indices, preheader, true);
-                            preheader->add_instruction_before_terminator(clone);
-                            pointer = clone;
-                        }
-                        auto *scalarLoad = new LoadInst(pointer, preheader, true);
-                        preheader->add_instruction_before_terminator(scalarLoad);
-                        found = uniformVectors
-                                    .emplace(inst, emitSplat(scalarLoad))
-                                    .first;
-                    }
-                    vectorValues[inst] = found->second;
                     continue;
                 }
                 Value *pointer = nullptr;
@@ -1370,12 +1398,12 @@ bool LoopVectorize::emitVectorizedLoop(
                 if (pointerIt != vectorAddresses.end()) {
                     pointer = pointerIt->second;
                 } else {
-                    pointer = buildVectorPointer(access);
+                    pointer = buildVectorPointer(part, access);
                     if (!pointer) return false;
                     vectorAddresses.emplace(access.addressGroup, pointer);
                 }
                 if (inst->is_load()) {
-                    vectorValues[inst] = new LoadInst(pointer, vecBody);
+                    continue;
                 } else {
                     Value *stored = getVectorOperand(inst->get_operand(0));
                     if (!stored) return false;

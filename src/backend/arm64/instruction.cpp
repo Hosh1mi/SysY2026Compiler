@@ -449,9 +449,6 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         if (!matchVectorMlaMls(candidate, pattern)) continue;
         vectorMlaMlsRoots[candidate] = pattern;
         vectorMlaMlsSkipped.insert(pattern.mul);
-        if (pattern.accLoad) vectorMlaMlsSkipped.insert(pattern.accLoad);
-        if (pattern.lhsLoad) vectorMlaMlsSkipped.insert(pattern.lhsLoad);
-        if (pattern.rhsLoad) vectorMlaMlsSkipped.insert(pattern.rhsLoad);
     }
 
     for (auto it = instrs.begin(); it != instrs.end(); ++it) {
@@ -539,20 +536,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             if (hasAssignedReg(pattern.root) && rd.size() >= 2 && rd[0] == 'v')
                 usedNEONRegs_.insert(std::stoi(rd.substr(1)));
 
-            auto emitVectorLoadInto = [&](LoadInst *load, const std::string &vd) {
-                std::string addr = loadAddr(load->get_operand(0));
-                MachineInstr ld = MachineInstr::make(
-                    "\tld1 {" + vd + ".4s}, [" + addr + "]",
-                    MOpcode::Load, {vd}, {addr}, 4);
-                ld.mayLoad = true;
-                emitMachineInstr(std::move(ld));
-            };
-            auto pinMulOperand = [&](Value *val, LoadInst *load) {
-                if (load) {
-                    std::string tmp = allocNEONReg();
-                    emitVectorLoadInto(load, tmp);
-                    return tmp;
-                }
+            auto pinMulOperand = [&](Value *val) {
                 std::string reg = loadVector(val);
 
                 // An allocated SSA source is already pinned for the duration
@@ -569,17 +553,13 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                                   tmp, {reg}, MOpcode::Neon);
                 return tmp;
             };
-            std::string lhsReg = pinMulOperand(pattern.lhs, pattern.lhsLoad);
-            std::string rhsReg = pinMulOperand(pattern.rhs, pattern.rhsLoad);
+            std::string lhsReg = pinMulOperand(pattern.lhs);
+            std::string rhsReg = pinMulOperand(pattern.rhs);
 
-            if (pattern.accLoad) {
-                emitVectorLoadInto(pattern.accLoad, rd);
-            } else {
-                std::string accReg = loadVector(pattern.acc);
-                if (rd != accReg) {
-                    emitRawAluMachine("\tmov " + rd + ".16b, " + accReg + ".16b",
-                                      rd, {accReg}, MOpcode::Neon);
-                }
+            std::string accReg = loadVector(pattern.acc);
+            if (rd != accReg) {
+                emitRawAluMachine("\tmov " + rd + ".16b, " + accReg + ".16b",
+                                  rd, {accReg}, MOpcode::Neon);
             }
 
             emitRawAluMachine("\t" + std::string(pattern.opcode) + " " + rd + ".4s, " +

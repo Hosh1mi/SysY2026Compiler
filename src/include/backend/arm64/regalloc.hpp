@@ -74,15 +74,15 @@ private:
         const std::map<BasicBlock*, std::set<Value*>> &liveOut,
         const std::set<Value*> &crossesCallValues) const;
 
-    /// 构建 phi 亲和组：phi 与其所有 incoming 值双向关联。
-    std::map<Value*, std::set<Value*>> buildPhiAffinity(
+    /// 构建寄存器亲和组：包括 phi copy 和目标指令的 destructive operand。
+    std::map<Value*, std::set<Value*>> buildRegisterAffinity(
         const std::vector<BasicBlock*> &blocksOrder) const;
 
-    /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿 phi 亲和组对齐。
+    /// 每个区间的 spill 代价(按循环深度加权的使用次数),并沿寄存器亲和组对齐。
     std::map<Value*, double> computeSpillCost(
         const std::vector<Interval> &intervals,
         const std::map<BasicBlock*, int> &loopDepth,
-        const std::map<Value*, std::set<Value*>> &phiAffinity) const;
+        const std::map<Value*, std::set<Value*>> &affinity) const;
 
     /// 循环内多指令大常量提升：将高权重 32 位常量预物化到空闲寄存器。
     void promoteLoopConstants(
@@ -103,7 +103,7 @@ private:
                    const std::vector<int> &colorToReg, bool isFloat,
                    const std::set<int> &callerSavedRegs,
                    const std::map<Value*, double> &spillCost,
-                   const std::map<Value*, std::set<Value*>> &phiAffinity,
+                   const std::map<Value*, std::set<Value*>> &affinity,
                    const std::function<bool(Value*, Value*)> &trulyInterferes);
 
     Function *func_;
