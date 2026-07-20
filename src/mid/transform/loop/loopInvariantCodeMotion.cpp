@@ -135,29 +135,6 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA) {
     return changed;
 }
 
-bool LICM::eliminateSinglePredPhis(Function *func) {
-    bool anyChanged = false;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : func->basic_blocks_) {
-            if (bb->pre_bbs_.size() != 1) continue;
-            auto it = bb->instr_list_.begin();
-            while (it != bb->instr_list_.end()) {
-                auto *phi = dynamic_cast<PhiInst*>(*it);
-                if (!phi) break;
-                Value *incoming = phi->get_operand(0);
-                phi->replace_all_use_with(incoming);
-                bb->delete_instr(phi);
-                changed = true;
-                anyChanged = true;
-                it = bb->instr_list_.begin();
-            }
-        }
-    }
-    return anyChanged;
-}
-
 bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     // 单 latch 是 LoopSimplify 的后置条件；多 latch 时"来自 latch 的入边"
     // 不唯一，保守跳过
@@ -209,7 +186,7 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
 bool LICM::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return false;
 
-    bool anyChanged = eliminateSinglePredPhis(func);
+    bool anyChanged = false;
 
     // 由内向外处理。本 pass 不改 CFG，但 changed 后会失效 AM 缓存的
     // LoopInfo，Loop* 不能跨失效持有——先收集稳定的 header 列表，

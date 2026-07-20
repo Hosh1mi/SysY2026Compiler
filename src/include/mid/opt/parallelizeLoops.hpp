@@ -36,10 +36,10 @@ private:
     bool isLegalDoall(Loop &loop, const LoopShape &shape, Function *func,
                       AnalysisManager *AM,
                       const ArgumentAliasAnalysis &argAA,
-                      std::set<GlobalVariable *> *privatize);
+                      std::set<Value *> *privatize);
     void transform(Loop &loop, const LoopShape &shape, Function *func,
                    Module *module,
-                   const std::set<GlobalVariable *> &privatize);
+                   const std::set<Value *> &privatize);
 
     // 已外提的 (id, body 函数)；execute 末尾生成 dispatch
     std::vector<Function *> bodies_;

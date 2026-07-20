@@ -8,6 +8,66 @@
 #include <queue>
 #include <sstream>
 
+namespace {
+
+bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
+    if (!bb || !header) return false;
+    if (bb->succ_bbs_.size() != 1 || bb->succ_bbs_[0] != header)
+        return false;
+
+    auto *term = bb->get_terminator();
+    return term && term->is_br() && term->num_ops_ == 1 &&
+           term->get_operand(0) == header;
+}
+
+bool isAddOneOf(Value *value, PhiInst *phi) {
+    auto *add = dynamic_cast<BinaryInst *>(value);
+    if (!add || !add->is_add()) return false;
+    auto *op0 = add->get_operand(0);
+    auto *op1 = add->get_operand(1);
+    auto *c0  = dynamic_cast<ConstantInt *>(op0);
+    auto *c1  = dynamic_cast<ConstantInt *>(op1);
+    return (op0 == phi && c1 && c1->value_ == 1) ||
+           (op1 == phi && c0 && c0->value_ == 1);
+}
+
+bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
+    if (isAddOneOf(value, phi)) return true;
+
+    auto *merge = dynamic_cast<PhiInst *>(value);
+    if (!merge || merge->parent_ != latch || merge->num_ops_ == 0)
+        return false;
+
+    for (unsigned i = 0; i + 1 < merge->num_ops_; i += 2)
+        if (!isAddOneOf(merge->get_operand(i), phi))
+            return false;
+    return true;
+}
+
+bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
+    auto *term = loop->header->get_terminator();
+    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
+    if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return false;
+    if (cmp->get_operand(0) != iv) return false;
+    bound = cmp->get_operand(1);
+    return true;
+}
+
+bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
+    BasicBlock *latch = loop->singleLatch();
+    if (!latch || !stepValue) return false;
+    auto *term = latch->get_terminator();
+    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
+    if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return false;
+    if (cmp->get_operand(0) != stepValue) return false;
+    bound = cmp->get_operand(1);
+    return true;
+}
+
+} // namespace
+
 // ── Loop ───────────────────────────────────────────────────────────────────
 
 std::string Loop::print() const {
@@ -161,7 +221,9 @@ void LoopInfo::findLoops(Function *func) {
 // ── 填充 preheader / exiting / exits ───────────────────────────────────────
 
 void LoopInfo::enrichLoop(Loop *loop) {
-    // preheader: header 的循环外前驱（唯一才填）
+    // preheader: header 的唯一循环外前驱，且该前驱必须是 dedicated 的
+    // 单后继无条件跳转块。只有这种块才适合作为 LICM/IVSR/vectorize 等
+    // pass 的循环入口插入点或重定向点。
     BasicBlock *cand    = nullptr;
     int         ext_cnt = 0;
     for (auto pred : loop->header->pre_bbs_) {
@@ -170,7 +232,10 @@ void LoopInfo::enrichLoop(Loop *loop) {
             ext_cnt++;
         }
     }
-    loop->preheader = (ext_cnt == 1) ? cand : nullptr;
+    loop->preheader =
+        (ext_cnt == 1 && isDedicatedPreheader(cand, loop->header))
+            ? cand
+            : nullptr;
 
     // blocks 的 RPO 确定序视图（不可达块兜底排在最后，按指针仅作稳定性兜底）
     loop->blocksOrdered.assign(loop->blocks.begin(), loop->blocks.end());
@@ -276,6 +341,7 @@ void LoopInfo::analyzeIV(Loop *loop) {
 
     // 1. 找 header 中所有规范 phi（init=0 from preheader, step=+1 from some latch）
     PhiInst *iv = nullptr;
+    Value *ivLatchValue = nullptr;
     for (auto *inst : loop->header->instr_list_) {
         if (!inst->is_phi()) break;
         if (inst->type_->tid_ != Type::IntegerTyID) continue;
@@ -297,32 +363,25 @@ void LoopInfo::analyzeIV(Loop *loop) {
         auto *ci_init = dynamic_cast<ConstantInt *>(pre_val);
         if (!ci_init || ci_init->value_ != 0) continue;
 
-        auto *add = dynamic_cast<BinaryInst *>(latch_val);
-        if (!add || !add->is_add()) continue;
-        auto *op0 = add->get_operand(0);
-        auto *op1 = add->get_operand(1);
-        auto *c0  = dynamic_cast<ConstantInt *>(op0);
-        auto *c1  = dynamic_cast<ConstantInt *>(op1);
-        bool  ok  = (op0 == phi && c1 && c1->value_ == 1) ||
-                    (op1 == phi && c0 && c0->value_ == 1);
-        if (!ok) continue;
+        BasicBlock *singleLatch = loop->singleLatch();
+        if (!singleLatch || !isStepFromLatch(latch_val, phi, singleLatch))
+            continue;
 
         iv = phi;
+        ivLatchValue = latch_val;
         break;
     }
     if (!iv) return;
 
-    // 2. 验证 header terminator 是 br icmp_slt(iv, N)
-    auto *term = loop->header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return;
-    auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
-    if (!cmp) return;
-    if (cmp->icmp_op_ != ICmpInst::ICMP_SLT) return;
-    if (cmp->get_operand(0) != iv) return;
+    // 2. 支持 while-form header guard，也支持 LoopRotate 后的 latch guard。
+    Value *bound = nullptr;
+    if (!headerGuardTripCount(loop, iv, bound) &&
+        !latchGuardTripCount(loop, ivLatchValue, bound))
+        return;
 
     loop->canonicalIV = iv;
-    loop->tripCount   = cmp->get_operand(1);
-    loop->predicate   = cmp->icmp_op_;
+    loop->tripCount   = bound;
+    loop->predicate   = ICmpInst::ICMP_SLT;
 }
 
 // ── 调试输出 ───────────────────────────────────────────────────────────────

@@ -18,8 +18,10 @@ class PassManager {
     AnalysisManager analyses_;
     bool dump_ir_    = false;
     bool verify_ir_  = false;
+    bool loop_form_ready_ = false;
 
     PreservedAnalyses runSinglePass(Pass &pass, Module *module);
+    void verifyRepeatGroupExit(Module *module, bool completedNormally);
 
 public:
     void addPass(std::unique_ptr<Pass> pass);

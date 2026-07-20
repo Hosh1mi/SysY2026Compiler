@@ -30,7 +30,8 @@
 #include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
-#include "include/mid/opt/scalarExpandedInterchange.hpp"
+#include "include/mid/opt/scalarExpansion.hpp"
+#include "include/mid/opt/loopDistribution.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
@@ -45,6 +46,7 @@
 #include "include/mid/opt/semanticMarkerStamp.hpp"
 #include "include/mid/opt/codeSink.hpp"
 #include "include/mid/opt/tailDuplication.hpp"
+#include "include/mid/opt/analysisDump.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -54,6 +56,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -205,7 +208,8 @@ static void addSsaPreparation(PassManager &pm) {
 }
 
 static void addScalarNormalization(PassManager &pm) {
-    pm.addPass(std::make_unique<ScalarExpandedInterchange>());
+    pm.addPass(std::make_unique<ScalarExpansion>());
+    pm.addPass(std::make_unique<LoopDistribution>());
     pm.addPass(std::make_unique<Reassociate>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LocalCopyPropagation>());
@@ -226,6 +230,11 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<GlobalScalarPromotion>());
     pm.addPass(std::make_unique<Mem2Reg>());
     addDeepCleanup(pm);
+}
+
+static void addAnalysisDumpIfRequested(PassManager &pm) {
+    if (std::getenv("DEBUG_DUMP_ANALYSIS"))
+        pm.addPass(std::make_unique<AnalysisDump>());
 }
 
 static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
@@ -269,8 +278,10 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
     pm.addPass(std::make_unique<LICM>());
     addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
+    addAnalysisDumpIfRequested(pm);
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
@@ -311,8 +322,10 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
     pm.addPass(std::make_unique<LICM>());
     addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopDeletion>());
     pm.endRepeatGroup();
+    addAnalysisDumpIfRequested(pm);
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<LoopRepFold>());

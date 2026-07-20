@@ -94,6 +94,7 @@ MOpcode opcodeFor(Instruction *inst) {
         case Instruction::FDiv:
             return MOpcode::Div;
         case Instruction::InsertElement:
+        case Instruction::ExtractElement:
             return MOpcode::Neon;
         default:
             return MOpcode::Alu;
@@ -131,6 +132,7 @@ bool supportedMovable(Instruction *inst) {
         case Instruction::BitCast:
         case Instruction::Clz:
         case Instruction::InsertElement:
+        case Instruction::ExtractElement:
             return true;
         default:
             return false;

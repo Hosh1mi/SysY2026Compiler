@@ -1,4 +1,5 @@
 #include "../../../include/mid/opt/loopUnroll.hpp"
+#include "../../../include/mid/opt/lcssa.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -375,6 +376,12 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // Determine which branch successor is the body vs exit
     auto *headerBr = header->get_terminator();
     if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3) return false;
+    // The compare selected above must be the loop's actual continue
+    // condition.  A header may contain auxiliary range/overflow compares
+    // combined by an `and`; adjusting one of those as if it were the branch
+    // condition discards the other guard and can turn a bounded loop into an
+    // effectively unbounded one.
+    if (headerBr->get_operand(0) != cmpInst) return false;
     auto *trueSucc = static_cast<BasicBlock *>(headerBr->get_operand(1));
     // true → body means the condition is "continue loop" (forward loop)
     if (!loop.blocks.count(trueSucc)) return false;
@@ -549,10 +556,14 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     for (auto phi : headerPhis)
         phiToMain[phi]->addIncoming(curPhiVals[phi], unrolledBody);
 
-    // 6. Conditional branch in headerMain: true → unrolledBody, false → header (remainder)
-    new BranchInst(cmpMain, unrolledBody, header, headerMain);
+    // 6. Conditional branch in headerMain.  Exit through a single-predecessor
+    // remainder entry so the newly created main loop keeps dedicated exits.
+    BasicBlock *remEntry = new BasicBlock(module, "unroll_rem_entry", func);
+    new BranchInst(header, remEntry);
+    new BranchInst(cmpMain, unrolledBody, remEntry, headerMain);
 
-    // 7. Update original header phis: change preheader-incoming → [mainPhiVal, headerMain]
+    // 7. Update original header phis: change preheader-incoming →
+    // [mainPhiVal, remEntry]
     for (auto phi : headerPhis) {
         for (unsigned i = 0; i < phi->num_ops_; i += 2) {
             if (phi->get_operand(i + 1) != preheader) continue;
@@ -562,8 +573,8 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             // Set new incoming: value = mainPhi, block = headerMain
             phi->operands_[i]     = phiToMain[phi];
             phi->use_pos_[i]      = phiToMain[phi]->add_use(phi, i);
-            phi->operands_[i + 1] = headerMain;
-            phi->use_pos_[i + 1]  = headerMain->add_use(phi, i + 1);
+            phi->operands_[i + 1] = remEntry;
+            phi->use_pos_[i + 1]  = remEntry->add_use(phi, i + 1);
             break;
         }
     }
@@ -1599,12 +1610,12 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
 // ── Entry points ──────────────────────────────────────────────────────────
 
-void LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
-    if (func->basic_blocks_.empty()) return;
+bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
+    if (func->basic_blocks_.empty()) return false;
 
     LoopInfo LI;
     LI.analyze(func);
-    if (LI.allLoops().empty()) return;
+    if (LI.allLoops().empty()) return false;
 
     // Innermost first。unroll 成功会改 CFG（preheader 改指 headerMain），
     // 快照内其余 Loop 结构随之过期——与迁移前行为一致：外层循环因
@@ -1615,23 +1626,38 @@ void LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
     std::sort(loops.begin(), loops.end(),
               [](Loop *a, Loop *b) { return a->depth > b->depth; });
 
+    bool changed = false;
     for (auto *loop : loops) {
-        if (tryUnroll(*loop, func, func->parent_, BAA))
+        if (tryUnroll(*loop, func, func->parent_, BAA)) {
+            changed = true;
             continue;
-        if (tryUnrollStructured(*loop, func, func->parent_))
+        }
+        if (tryUnrollStructured(*loop, func, func->parent_)) {
+            changed = true;
             continue;
-        if (tryUnrollCFGRegion(*loop, func, func->parent_))
+        }
+        if (tryUnrollCFGRegion(*loop, func, func->parent_)) {
+            changed = true;
             continue;
-        tryUnrollDoWhile(*loop, func, func->parent_);
+        }
+        if (tryUnrollDoWhile(*loop, func, func->parent_))
+            changed = true;
     }
 
-    func->set_instr_name();
+    if (changed)
+        func->set_instr_name();
+    return changed;
 }
 
 void LoopUnroll::execute(Module *module) {
     BasicAliasAnalysis BAA;
     BAA.analyze(module);
+    bool changed = false;
     for (auto func : module->function_list_)
         if (!func->is_declaration())
-            runOnFunction(func, BAA);
+            changed |= runOnFunction(func, BAA);
+    if (changed) {
+        LCSSA lcssa;
+        lcssa.execute(module);
+    }
 }

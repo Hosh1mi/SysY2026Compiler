@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 
 void PassManager::addPass(std::unique_ptr<Pass> pass) {
     passes.push_back(std::move(pass));
@@ -31,42 +32,122 @@ static size_t countInstructions(Module *module) {
     return n;
 }
 
+static bool isLoopTransformPass(const std::string &name) {
+    static const std::unordered_set<std::string> loopPasses = {
+        "ScalarExpansion",
+        "LoopDistribution",
+        "LoopSimplify",
+        "LCSSA",
+        "SimpleLoopUnswitch",
+        "LoopRotate",
+        "PhiOpSink",
+        "inductiveRangeCheckElimination",
+        "LICM",
+        "LoopDeletion",
+        "LoopInterchange",
+        "ParallelizeLoops",
+        "LoopVectorize",
+        "IndVarStrengthReduce",
+        "LoopRepFold",
+        "LoopUnroll",
+    };
+    return loopPasses.count(name) != 0;
+}
+
+static bool isLoopVerifyStrictEnabled() {
+    return std::getenv("LOOP_VERIFY_STRICT") != nullptr;
+}
+
+static bool establishesLoopStructure(const std::string &name) {
+    return name == "LoopSimplify";
+}
+
+static bool establishesLCSSA(const std::string &name) {
+    return name == "LCSSA";
+}
+
+static int loopVerifyLevelAfterPass(const std::string &name,
+                                    bool loopFormReady) {
+    if (establishesLCSSA(name) && loopFormReady)
+        return 3;
+    if (establishesLoopStructure(name))
+        return 2;
+    return 1;
+}
+
+static bool canStrictlyVerifyLoopFormAfterPass(const std::string &name,
+                                               bool loopFormReady) {
+    return establishesLoopStructure(name) ||
+           (establishesLCSSA(name) && loopFormReady);
+}
+
 PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
     const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
+    const std::string passName = pass.name();
+    const size_t beforeInsts = profilePasses ? countInstructions(module) : 0;
     auto start = std::chrono::steady_clock::now();
     if (dump_ir_) {
-        std::cerr << "; === IR Before " << pass.name() << " ===\n"
+        std::cerr << "; === IR Before " << passName << " ===\n"
                   << module->print() << "\n";
     }
 
     PreservedAnalyses preserved = pass.execute(module, analyses_);
 
     if (verify_ir_) {
-        module->verify("after " + pass.name());
-        const std::string &n = pass.name();
-        if (n == "LoopSimplify")
-            verifyLoops(module, /*level=*/2, "after " + n, /*warnOnly=*/true);
-        else if (n == "LCSSA")
-            verifyLoops(module, /*level=*/3, "after " + n, /*warnOnly=*/true);
-        else if (n == "LoopRotate")
-            verifyLoops(module, /*level=*/1, "after " + n, /*warnOnly=*/true);
+        const std::string context = "after " + passName;
+        module->verify(context);
+        if (isLoopTransformPass(passName)) {
+            const bool strictLoopVerify = isLoopVerifyStrictEnabled();
+            const int loopVerifyLevel =
+                loopVerifyLevelAfterPass(passName, loop_form_ready_);
+            std::cerr << "[VERIFY] " << context << ": ok\n";
+            verifyLoopForms(module, loopVerifyLevel, context,
+                            /*warnOnly=*/!strictLoopVerify ||
+                                !canStrictlyVerifyLoopFormAfterPass(
+                                    passName, loop_form_ready_),
+                            /*reportClean=*/true);
+        }
+    }
+
+    if (establishesLoopStructure(passName)) {
+        loop_form_ready_ = true;
+    } else if (!establishesLCSSA(passName) && !preserved.preservesAll()) {
+        loop_form_ready_ = false;
     }
 
     analyses_.invalidate(module, preserved);
 
     if (dump_ir_) {
-        std::cerr << "; === IR After " << pass.name() << " ===\n"
+        std::cerr << "; === IR After " << passName << " ===\n"
                   << module->print() << "\n";
     }
     if (profilePasses) {
         auto end = std::chrono::steady_clock::now();
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-        std::cerr << "[PassProfile] " << pass.name()
+        const size_t afterInsts = countInstructions(module);
+        std::cerr << "[PassProfile] " << passName
                   << " " << us << " us"
-                  << " insts=" << countInstructions(module)
+                  << " insts=" << afterInsts
+                  << " delta=" << static_cast<long long>(afterInsts) -
+                                    static_cast<long long>(beforeInsts)
                   << "\n";
     }
     return preserved;
+}
+
+void PassManager::verifyRepeatGroupExit(Module *module, bool completedNormally) {
+    if (!verify_ir_)
+        return;
+
+    const std::string context = "after loop repeat group";
+    module->verify(context);
+    std::cerr << "[VERIFY] " << context << ": ok\n";
+
+    const bool strictLoopVerify =
+        isLoopVerifyStrictEnabled() && completedNormally;
+    verifyLoopForms(module, completedNormally ? 3 : 1, context,
+                    /*warnOnly=*/!strictLoopVerify,
+                    /*reportClean=*/true);
 }
 
 void PassManager::run(Module *module) {
@@ -85,6 +166,7 @@ void PassManager::run(Module *module) {
             if (const char *ov = std::getenv("LOOP_PIPELINE_MAX_ROUNDS"))
                 maxRounds = std::atoi(ov);
 
+            bool completedNormally = false;
             for (int round = 1; round <= maxRounds; round++) {
                 bool roundChanged = false;
                 std::string changedList;
@@ -106,7 +188,10 @@ void PassManager::run(Module *module) {
                                                : " converged")
                               << "\n";
                 if (!roundChanged)
+                {
+                    completedNormally = true;
                     break;
+                }
                 size_t now = countInstructions(module);
                 if (now > instBudget) {
                     std::cerr << "[LoopPipeline] WARNING: instruction count "
@@ -116,6 +201,7 @@ void PassManager::run(Module *module) {
                     break;
                 }
             }
+            verifyRepeatGroupExit(module, completedNormally);
             i = g.end;
             gi++;
             continue;

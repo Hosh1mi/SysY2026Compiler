@@ -1,15 +1,12 @@
 #pragma once
-#include "../ir/ir.hpp"
-#include "../analysis/basicAliasAnalysis.hpp"
-#include "../analysis/loopInfo.hpp"
-#include "pass.hpp"
-#include <set>
-#include <vector>
-#include <unordered_map>
 
-// LoopVectorize（pipeline 中暂停用，见 main.cpp / plan 阶段 5）。
-// 循环结构统一来自 LoopInfo（plan 阶段 3.1）：latch/exit 经
-// singleLatch()/singleExit() 推导。
+#include "../analysis/loopVectorizationAnalysis.hpp"
+#include "pass.hpp"
+
+#include <set>
+#include <unordered_map>
+#include <vector>
+
 class LoopVectorize : public Pass {
 public:
     void execute(Module *module) override;
@@ -17,70 +14,46 @@ public:
     std::string name() const override { return "LoopVectorize"; }
 
 private:
-    // ── Induction variable ──────────────────────────────────────────────
     struct InductionVar {
-        PhiInst      *phi;             // header phi
-        Value        *initVal;         // initial value (from preheader)
-        int           stride;          // constant stride
-        bool          isAdd;           // true for add, false for sub
-        Instruction  *updateInst;      // the add/sub instruction in latch
+        PhiInst *phi = nullptr;
+        Value *initVal = nullptr;
+        int stride = 0;
+        bool isAdd = true;
+        Instruction *updateInst = nullptr;
     };
 
     struct PackedOperand {
         enum Kind { CONTIGUOUS, IV_STEP, GATHER, INVARIANT };
-        Kind   kind;
-        Type  *scalarTy;
-        Value *source;                 // phi / invariant scalar
-        int    laneStride;             // elements between adjacent lanes
+        Kind kind;
+        Type *scalarTy;
+        Value *source;
+        int laneStride;
     };
 
     struct ReductionGroup {
-        PhiInst       *accPhi;         // loop-carried reduction phi
-        Value         *initVal;        // initial scalar accumulator
-        Value         *latchValue;     // final scalar value at latch edge
-        PackedOperand  lhs;
-        PackedOperand  rhs;
-        int            scalarStep;     // scalar elements consumed per original iter
-        bool           isAdd = false;  // true: acc += ...（求和/点积）; false: acc -= lhs*rhs（乘-减链）
-        bool           noMul = false;  // true: 每 lane 值 = lhs（求和）; false: lhs*rhs（点积/乘-减）
+        PhiInst *accPhi;
+        Value *initVal;
+        Value *latchValue;
+        PackedOperand lhs;
+        PackedOperand rhs;
+        int scalarStep;
+        bool isAdd = false;
+        bool noMul = false;
     };
 
-    // ── Memory access description ──────────────────────────────────────
-    struct MemAccess {
-        enum Kind { LOAD, STORE };
-        Kind       kind;
-        Instruction *inst;             // load or store instruction
-        Value      *basePtr;           // base pointer of the GEP chain
-        int         elementOffset;     // constant offset from base (in elements)
-    };
-
-    // ── Per-function driver ────────────────────────────────────────────
     void runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
-
-    // ── Loop analysis helpers ──────────────────────────────────────────
     bool findInductionVar(const Loop &loop, InductionVar &iv);
     bool analyzeReductionLoop(const Loop &loop, const InductionVar &iv,
                               ReductionGroup &group);
-    bool analyzeStrideAccesses(const Loop &loop, const InductionVar &iv,
-                               std::vector<MemAccess> &loads,
-                               std::vector<MemAccess> &stores);
-    bool isLoopInvariant(Value *val, const std::set<BasicBlock*> &loopBlocks);
-    Value *getBasePtr(Value *ptr);
+    bool isLoopInvariant(Value *val,
+                         const std::set<BasicBlock *> &loopBlocks);
 
-    // ── Vectorization ──────────────────────────────────────────────────
-    bool hasSafeMemoryDependencies(const Loop &loop,
-                                   const std::vector<MemAccess> &loads,
-                                   const std::vector<MemAccess> &stores,
-                                   const BasicAliasAnalysis &BAA);
     bool tryVectorize(Loop &loop, Function *func, Module *module,
                       const BasicAliasAnalysis &BAA);
     void emitReductionVectorizedLoop(const Loop &loop, const InductionVar &iv,
                                      const ReductionGroup &group,
                                      int vecWidth, Function *func,
                                      Module *module);
-    void emitVectorizedLoop(const Loop &loop, const InductionVar &iv,
-                            const std::vector<MemAccess> &loads,
-                            const std::vector<MemAccess> &stores,
-                            int vecWidth,
+    bool emitVectorizedLoop(const LoopVectorizationAnalysis::Plan &plan,
                             Function *func, Module *module);
 };

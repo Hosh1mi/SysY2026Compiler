@@ -25,6 +25,7 @@ public:
         GetElementPtr,                           // 地址计算
         ZExt, FPtoSI, SItoFP, BitCast, Clz,       // 类型转换 + 内建
         InsertElement,                            // insertelement <4 x i32> %vec, i32 %val, i32 %idx
+        ExtractElement,                           // extractelement <4 x i32> %vec, i32 %idx
         ICmp, FCmp, PHI, Call                    // 比较、phi、调用
     };
 
@@ -346,16 +347,33 @@ public:
 class LoadInst : public Instruction {
 public:
     LoadInst(Value* ptr, BasicBlock* bb) : Instruction(static_cast<PointerType*>(ptr->type_)->contained_, Instruction::Load, 1, bb) { set_operand(0, ptr); }
+    LoadInst(Value* ptr, BasicBlock* bb, bool) : Instruction(static_cast<PointerType*>(ptr->type_)->contained_, Instruction::Load, 1) {
+        set_operand(0, ptr);
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
 };
 
 // 栈上分配：%p = alloca i32
 class AllocaInst : public Instruction {
 public:
+    enum class Purpose {
+        Generic,
+        LoopExpansionScratch,
+    };
+
     AllocaInst(Type* ty, BasicBlock* bb) : Instruction(bb->parent_->parent_->get_pointer_type(ty), Instruction::Alloca, 0, bb), alloca_ty_(ty) {}
     AllocaInst(Type* ty, BasicBlock* bb, bool) : Instruction(bb->parent_->parent_->get_pointer_type(ty), Instruction::Alloca, 0), alloca_ty_(ty) { this->parent_ = bb; }
     virtual std::string print() override;
     Type* alloca_ty_;  // 分配的原始类型
+    Purpose purpose_ = Purpose::Generic;
+
+    bool isLoopExpansionScratch() const {
+        return purpose_ == Purpose::LoopExpansionScratch;
+    }
+    void markLoopExpansionScratch() {
+        purpose_ = Purpose::LoopExpansionScratch;
+    }
 };
 
 // i1 → i32 零扩展
@@ -402,6 +420,29 @@ public:
         set_operand(0, vec);
         set_operand(1, val);
         set_operand(2, idx);
+    }
+    virtual std::string print() override;
+};
+
+// 从定宽向量提取一个标量 lane。
+class ExtractElementInst : public Instruction {
+public:
+    static Type *infer_element_type(Value *vec) {
+        assert(vec->type_->tid_ == Type::VectorTyID);
+        return static_cast<VectorType *>(vec->type_)->contained_;
+    }
+
+    ExtractElementInst(Value *vec, Value *idx, BasicBlock *bb)
+        : Instruction(infer_element_type(vec), Instruction::ExtractElement,
+                      2, bb) {
+        set_operand(0, vec);
+        set_operand(1, idx);
+    }
+    ExtractElementInst(Value *vec, Value *idx, BasicBlock *bb, bool)
+        : Instruction(infer_element_type(vec), Instruction::ExtractElement, 2) {
+        set_operand(0, vec);
+        set_operand(1, idx);
+        parent_ = bb;
     }
     virtual std::string print() override;
 };

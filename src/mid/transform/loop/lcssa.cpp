@@ -8,6 +8,7 @@
 //   3. 循环外的 use 改写到支配它的那个 exit phi。
 
 #include "../../../include/mid/opt/lcssa.hpp"
+#include "../../../include/mid/analysis/loopUtils.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
@@ -60,14 +61,7 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
             if (!user || !user->parent_)
                 continue;
-            BasicBlock *useBlock = user->parent_;
-            if (user->is_phi()) {
-                // phi 的 use 位置 = 对应 incoming 块末尾
-                auto *incoming = dynamic_cast<BasicBlock *>(
-                    user->get_operand(use.arg_no_ + 1));
-                if (incoming)
-                    useBlock = incoming;
-            }
+            BasicBlock *useBlock = getSemanticUseBlock(user, use.arg_no_);
             if (!loop->isInLoop(useBlock))
                 outsideUses.emplace_back(user, use.arg_no_);
         }
@@ -95,13 +89,7 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
             continue;
 
         for (auto &[user, idx] : outsideUses) {
-            BasicBlock *useBlock = user->parent_;
-            if (user->is_phi()) {
-                auto *incoming = dynamic_cast<BasicBlock *>(
-                    user->get_operand(idx + 1));
-                if (incoming)
-                    useBlock = incoming;
-            }
+            BasicBlock *useBlock = getSemanticUseBlock(user, idx);
             for (auto &[exit, phi] : exitPhi) {
                 if (user == phi)
                     continue;           

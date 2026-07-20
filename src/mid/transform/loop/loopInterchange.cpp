@@ -9,7 +9,6 @@
 #include "../../../include/mid/ir/module.hpp"
 
 #include <cstdlib>
-#include <functional>
 #include <iostream>
 #include <set>
 #include <unordered_map>
@@ -19,37 +18,6 @@ namespace {
 
 bool debugEnabled() {
     return std::getenv("DEBUG_LOOP_INTERCHANGE") != nullptr;
-}
-
-void collectAccesses(Loop *L, std::vector<Instruction *> &accs,
-                     std::vector<GetElementPtrInst *> &geps) {
-    for (auto *bb : L->blocksOrdered) {
-        for (auto *inst : bb->instr_list_) {
-            Value *ptr = nullptr;
-            if (inst->is_load())       ptr = inst->get_operand(0);
-            else if (inst->is_store()) ptr = inst->get_operand(1);
-            else continue;
-            accs.push_back(inst);
-            if (auto *g = dynamic_cast<GetElementPtrInst *>(ptr))
-                geps.push_back(g);
-        }
-    }
-}
-
-Loop *deepestCanonicalDescendant(Loop *K) {
-    Loop *best = nullptr;
-    int bestDepth = -1;
-    std::function<void(Loop *)> dfs = [&](Loop *L) {
-        for (auto *c : L->children) {
-            if (c->hasCanonicalIV() && c->depth > bestDepth) {
-                best = c;
-                bestDepth = c->depth;
-            }
-            dfs(c);
-        }
-    };
-    dfs(K);
-    return best;
 }
 
 std::vector<Instruction *> storeSlice(BasicBlock *B) {
@@ -79,6 +47,48 @@ bool isCloneableType(Instruction *inst) {
            dynamic_cast<ZextInst *>(inst)   || dynamic_cast<FpToSiInst *>(inst) ||
            dynamic_cast<SiToFpInst *>(inst) || dynamic_cast<Bitcast *>(inst) ||
            dynamic_cast<StoreInst *>(inst);
+}
+
+bool isDiscardablePureInstruction(Instruction *inst) {
+    return inst && !inst->isTerminator() && !inst->is_store() &&
+           !inst->is_call();
+}
+
+bool isSafeOutsideSunkLoop(Instruction *inst) {
+    // Instructions interleaved with the cloned store slice remain outside the
+    // newly-created inner loop.  They must neither observe memory modified by
+    // the slice nor have side effects.  Dependence closure puts every value
+    // needed by the slice into the slice itself; the IV-use check below then
+    // proves the remaining computations invariant with respect to the loop
+    // being sunk.
+    return inst && !inst->isTerminator() && !inst->is_load() &&
+           !inst->is_store() && !inst->is_call();
+}
+
+bool latchHasSideEffects(BasicBlock *latch) {
+    if (!latch) return true;
+    for (auto *inst : latch->instr_list_) {
+        if (inst->isTerminator()) continue;
+        if (!isDiscardablePureInstruction(inst)) return true;
+    }
+    return false;
+}
+
+void deleteUnusedPureInstructions(BasicBlock *bb) {
+    if (!bb) return;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        std::vector<Instruction *> instructions(bb->instr_list_.begin(),
+                                                 bb->instr_list_.end());
+        for (auto it = instructions.rbegin(); it != instructions.rend(); ++it) {
+            Instruction *inst = *it;
+            if (isDiscardablePureInstruction(inst) && inst->use_list_.empty()) {
+                bb->delete_instr(inst);
+                changed = true;
+            }
+        }
+    }
 }
 
 using ValMap = std::unordered_map<Value *, Value *>;
@@ -165,6 +175,12 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
 }
 
 bool applyParallelSink(Function *func, Loop *K) {
+    auto reject = [&](const char *reason) {
+        if (debugEnabled())
+            std::cerr << "[LoopInterchange] parallel sink rejected: "
+                      << reason << "\n";
+        return false;
+    };
     Module  *module = func->parent_;
     Type    *i32    = module->int32_ty_;
     PhiInst *kIV    = K->canonicalIV;
@@ -173,14 +189,23 @@ bool applyParallelSink(Function *func, Loop *K) {
     BasicBlock *kPre    = K->preheader;
     BasicBlock *kLatch  = K->singleLatch();
     BasicBlock *kExit   = K->singleExit();
-    if (!kIV || !kBound || !kHeader || !kPre || !kLatch || !kExit) return false;
+    if (!kIV || !kBound || !kHeader || !kPre || !kLatch || !kExit)
+        return reject("incomplete canonical loop structure");
+    if (kLatch == kHeader || latchHasSideEffects(kLatch)) {
+        if (debugEnabled())
+            std::cerr << "[LoopInterchange] parallel sink requires a distinct, "
+                         "side-effect-free latch; header="
+                      << kHeader->name_ << " latch=" << kLatch->name_ << "\n";
+        return reject("latch is not safe to remove");
+    }
 
     auto *kbr = dynamic_cast<BranchInst *>(kHeader->get_terminator());
-    if (!kbr || kbr->num_ops_ != 3) return false;
+    if (!kbr || kbr->num_ops_ != 3)
+        return reject("header is not conditionally branched");
     auto *t1 = dynamic_cast<BasicBlock *>(kbr->get_operand(1));
     auto *t2 = dynamic_cast<BasicBlock *>(kbr->get_operand(2));
     BasicBlock *bodyEntry = K->blocks.count(t1) ? t1 : (K->blocks.count(t2) ? t2 : nullptr);
-    if (!bodyEntry) return false;
+    if (!bodyEntry) return reject("loop body entry was not found");
 
     std::vector<BasicBlock *> storeBlocks;
     std::unordered_map<BasicBlock *, std::vector<Instruction *>> slices;
@@ -196,10 +221,32 @@ bool applyParallelSink(Function *func, Loop *K) {
         slices[bb] = W;
         for (auto *w : W) unionW.insert(w);
     }
-    if (storeBlocks.empty()) return false;
+    if (storeBlocks.empty()) return reject("loop has no movable store slice");
+
+    // A value feeding the store may have been hoisted to a nested-loop
+    // preheader.  Such a value is still evaluated once per K iteration and
+    // must therefore move with K.  Close the slice over non-phi definitions
+    // inside K instead of relying on a particular block layout produced by
+    // LICM.
+    std::vector<Instruction *> dependencyWork(unionW.begin(), unionW.end());
+    while (!dependencyWork.empty()) {
+        Instruction *value = dependencyWork.back();
+        dependencyWork.pop_back();
+        for (unsigned i = 0; i < value->num_ops_; ++i) {
+            auto *dependency =
+                dynamic_cast<Instruction *>(value->get_operand(i));
+            if (!dependency || !dependency->parent_ ||
+                !K->blocks.count(dependency->parent_) || dependency->is_phi() ||
+                dependency->isTerminator())
+                continue;
+            if (unionW.insert(dependency).second)
+                dependencyWork.push_back(dependency);
+        }
+    }
 
     for (auto *w : unionW)
-        if (!isCloneableType(w)) return false;
+        if (!isCloneableType(w))
+            return reject("store slice contains an unclonable instruction");
   
     for (auto *bb : storeBlocks) {
         auto &W = slices[bb];
@@ -211,32 +258,53 @@ bool applyParallelSink(Function *func, Loop *K) {
             passedPhi = true;
             (void)passedPhi;
             if (inst == lastW) { seenLast = true; break; }
-            if (!inW.count(inst)) return false;   
+            if (!inW.count(inst) && !isSafeOutsideSunkLoop(inst))
+                return reject("store slice crosses a memory or side-effecting instruction");
         }
-        if (!seenLast) return false;
+        if (!seenLast) return reject("store slice endpoint was not found");
     }
 
     for (auto *w : unionW) {
         if (w->is_store()) continue;
         for (auto &u : w->use_list_) {
             auto *user = dynamic_cast<Instruction *>(u.val_);
-            if (!user || !unionW.count(user)) return false;
+            if (!user || !unionW.count(user)) {
+                if (debugEnabled()) {
+                    std::cerr << "[LoopInterchange] escaping slice value="
+                              << w->name_ << " op=" << w->op_id_
+                              << " user="
+                              << (user ? user->name_ : "<non-instruction>")
+                              << " user-block="
+                              << (user && user->parent_
+                                      ? user->parent_->name_
+                                      : "<none>")
+                              << "\n  value-ir: " << w->print()
+                              << "\n  user-ir: "
+                              << (user ? user->print() : "<none>")
+                              << "\n";
+                }
+                return reject("store slice value escapes the slice");
+            }
         }
     }
     
     for (auto &u : kIV->use_list_) {
         auto *user = dynamic_cast<Instruction *>(u.val_);
-        if (!user) return false;
+        if (!user) return reject("induction has a non-instruction use");
         if (unionW.count(user)) continue;
         if (user->parent_ == kHeader || user->parent_ == kLatch) continue;
-        return false;
+        if (debugEnabled())
+            std::cerr << "[LoopInterchange] escaping induction user: "
+                      << user->print() << "\n";
+        return reject("induction is used outside loop control and store slices");
     }
   
     for (auto *w : unionW) {
         for (unsigned i = 0; i < w->num_ops_; i++) {
             auto *op = dynamic_cast<Instruction *>(w->get_operand(i));
             if (!op || op == kIV || unionW.count(op)) continue;
-            if (!func->dominates(op->parent_, w->parent_)) return false;
+            if (!func->dominates(op->parent_, w->parent_))
+                return reject("store slice operand does not dominate its use");
         }
     }
     
@@ -258,7 +326,8 @@ bool applyParallelSink(Function *func, Loop *K) {
             if (inst == lastW) after = true;
         }
         auto *origTerm = tail.empty() ? nullptr : tail.back();
-        if (!origTerm || !origTerm->isTerminator()) return false;
+        if (!origTerm || !origTerm->isTerminator())
+            return reject("store block has no movable terminator tail");
 
         BasicBlock *bTail = newBB("tail");
         std::vector<BasicBlock *> origSuccs;
@@ -295,7 +364,7 @@ bool applyParallelSink(Function *func, Loop *K) {
         bool ok = true;
         for (auto *w : W) {
             cloneInstInto(w, skB, vm, unionW, kIV, localk, ok);
-            if (!ok) return false;   
+            if (!ok) return reject("failed to clone a store slice");
         }
         new BranchInst(skL, skB);
         
@@ -319,12 +388,14 @@ bool applyParallelSink(Function *func, Loop *K) {
             }
         }
     }
-    if (!pending.empty()) return false;   
+    if (!pending.empty())
+        return reject("original store slice remains live after cloning");
     
     replaceBranchTarget(kPre, kHeader, bodyEntry);
     replaceBranchTarget(kLatch, kHeader, kExit);
 
     removeUnreachableBlocks(func);
+    deleteUnusedPureInstructions(kLatch);
     return true;
 }
 
@@ -342,36 +413,53 @@ bool applyParallelSink(Function *func, Loop *K) {
 
 bool applyInterchange(Function *func, Loop *K, Loop *M) {
     Module *module = func->parent_;
+    auto reject = [&](const char *reason) {
+        if (debugEnabled())
+            std::cerr << "[LoopInterchange] full interchange rejected: "
+                      << reason << "\n";
+        return false;
+    };
 
     BasicBlock *kHeader = K->header;
     BasicBlock *kPre    = K->preheader;
     BasicBlock *kLatch  = K->singleLatch();
     BasicBlock *kExit   = K->singleExit();
-    if (!kHeader || !kPre || !kLatch || !kExit) return false;
+    if (!kHeader || !kPre || !kLatch || !kExit)
+        return reject("incomplete outer structure");
 
     BasicBlock *mHeader = M->header;
     BasicBlock *mPre    = M->preheader;
     BasicBlock *mLatch  = M->singleLatch();
-    if (!mHeader || !mPre || !mLatch) return false;
+    if (!mHeader || !mPre || !mLatch)
+        return reject("incomplete inner structure");
 
-    if (K->children.size() != 1) return false;
+    if (K->children.size() != 1)
+        return reject("outer does not have exactly one child");
 
     auto hasPhi = [](BasicBlock *bb) -> bool {
         return !bb->instr_list_.empty() && bb->instr_list_.front()->is_phi();
     };
-    if (hasPhi(kExit) || hasPhi(kLatch) || hasPhi(mLatch)) return false;
+    if (hasPhi(kExit) || hasPhi(kLatch) || hasPhi(mLatch)) {
+        if (debugEnabled())
+            std::cerr << "[LoopInterchange] phi blocks outer-exit="
+                      << kExit->name_ << ":" << hasPhi(kExit)
+                      << " outer-latch=" << kLatch->name_ << ":"
+                      << hasPhi(kLatch) << " inner-latch=" << mLatch->name_
+                      << ":" << hasPhi(mLatch) << "\n";
+        return reject("exit or latch contains phi nodes");
+    }
 
     std::vector<PhiInst *> mPhis;
     for (auto *inst : mHeader->instr_list_) {
         if (!inst->is_phi()) break;
         mPhis.push_back(static_cast<PhiInst *>(inst));
     }
-    if (mPhis.empty()) return false;
+    if (mPhis.empty()) return reject("inner header has no phi nodes");
 
     for (auto *inst : mHeader->instr_list_) {
         if (inst->is_phi()) continue;
         if (inst->isTerminator()) break;
-        if (inst->is_call()) return false;
+        if (inst->is_call()) return reject("inner header contains a call");
     }
 
     auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 3000); };
@@ -501,7 +589,9 @@ bool LoopInterchange::runOnFunction(Function *func) {
         AffineAnalysis     AA(LI);
         DependenceAnalysis DA(LI, AA);
         DA.setArgAlias(argAA_);
+        LoopAccessAnalysis LA(AA);
         CostModel          CM(AA);
+        LoopInterchangeAnalysis IA(DA, LA, CM);
 
         auto dbg = [&](Loop *K, const char *why) {
             if (debugEnabled())
@@ -513,33 +603,17 @@ bool LoopInterchange::runOnFunction(Function *func) {
         Loop *target = nullptr;
         for (auto &Lp : LI.allLoops()) {
             Loop *K = Lp.get();
-            if (K->children.empty())  continue;
-            if (!K->hasCanonicalIV()) { dbg(K, "no canonical IV"); continue; }
-            if (!K->preheader || !K->singleLatch() || !K->singleExit()) {
-                dbg(K, "not single pre/latch/exit"); continue;
+            ParallelSinkAnalysisResult analysis = IA.analyzeParallelSink(K);
+            if (!analysis.accepted) {
+                if (!K->children.empty()) dbg(K, analysis.reason);
+                continue;
             }
-            
-            bool scalarCarried = false;
-            for (auto *inst : K->header->instr_list_) {
-                if (!inst->is_phi()) break;
-                if (inst != K->canonicalIV) { scalarCarried = true; break; }
-            }
-            if (scalarCarried) { dbg(K, "carries scalar reduction"); continue; }
-            std::vector<Instruction *>       accs;
-            std::vector<GetElementPtrInst *> geps;
-            collectAccesses(K, accs, geps);
-            if (!DA.isLoopParallel(K, accs)) { dbg(K, "not parallel"); continue; }
-
-            Loop *M = deepestCanonicalDescendant(K);
-            if (!M) { dbg(K, "no canonical descendant"); continue; }
-            long before = CM.totalStride(geps, M->canonicalIV);
-            long after  = CM.totalStride(geps, K->canonicalIV);
-            if (before < 0 || after < 0) { dbg(K, "stride unknown"); continue; }
-            if (!(after < before))       { dbg(K, "not profitable"); continue; }
 
             if (debugEnabled())
                 std::cerr << "[LoopInterchange] sink candidate K=" << func->name_ << "/"
-                          << K->header->name_ << " stride " << before << "->" << after << "\n";
+                          << K->header->name_ << " stride "
+                          << analysis.cost.before << "->"
+                          << analysis.cost.after << "\n";
             target = K;
             break;
         }
@@ -572,26 +646,27 @@ bool LoopInterchange::runOnFunction(Function *func) {
                 }
                 if (scalarCarried) continue;
 
-                std::vector<Instruction *>       accs;
-                std::vector<GetElementPtrInst *> geps;
-                collectAccesses(K, accs, geps);
+                LoopAccessInfo accessInfo = LA.collect(K);
 
-                if (DA.isLoopParallel(K, accs)) continue;
+                if (DA.isLoopParallel(K, accessInfo.memory_instructions)) continue;
 
                 if (K->children.size() != 1) continue;
                 Loop *M = K->children[0];
                 if (!M->preheader || !M->singleLatch()) continue;
 
-                if (!DA.isInterchangeLegal(K, M, accs)) { dbg(K, "float: not legal"); continue; }
+                if (!IA.isInterchangeLegal(K, M, accessInfo.memory_instructions)) {
+                    dbg(K, "float: not legal");
+                    continue;
+                }
 
                 bool profitable = !M->children.empty();
                 if (!profitable) {
-                    Loop *deepest = deepestCanonicalDescendant(K);
+                    Loop *deepest = IA.deepestCanonicalDescendant(K);
                     if (deepest && deepest != K) {
-                        long before = CM.totalStride(geps, deepest->canonicalIV);
-                        long after  = CM.totalStride(geps, K->canonicalIV);
-                        if (before >= 0 && after >= 0 && after < before)
-                            profitable = true;
+                        LoopInterchangeCost cost = IA.estimateCost(
+                            accessInfo.memory_geps, deepest->canonicalIV,
+                            K->canonicalIV);
+                        profitable = cost.profitable();
                     }
                 }
                 if (!profitable) { dbg(K, "float: not profitable"); continue; }

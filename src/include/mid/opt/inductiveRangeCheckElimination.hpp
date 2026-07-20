@@ -23,5 +23,5 @@ public:
 
 private:
     bool runOnFunction(Function *func);
-    bool tryTightenLoop(Loop &loop, Module *module);
+    bool tryTightenLoop(Loop &loop, Module *module, const LoopInfo &LI);
 };

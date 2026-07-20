@@ -28,6 +28,9 @@ Value *gepRootBase(Value *ptr) {
 
 bool isAcceptedMemoryRoot(Value *root) {
     if (dynamic_cast<GlobalVariable *>(root)) return true;
+    auto *alloca = dynamic_cast<AllocaInst *>(root);
+    if (alloca && alloca->isLoopExpansionScratch())
+        return true;
     auto *arg = dynamic_cast<Argument *>(root);
     return arg && dynamic_cast<PointerType *>(arg->type_);
 }
@@ -40,9 +43,16 @@ std::string loopName(const Loop &loop) {
     return loop.header ? loop.header->name_ : "<no-header>";
 }
 
+bool isScalarExpansionScratch(Value *root) {
+    auto *alloca = dynamic_cast<AllocaInst *>(root);
+    return alloca && alloca->isLoopExpansionScratch();
+}
+
 bool rootsNoAlias(Value *a, Value *b, const ArgumentAliasAnalysis &argAA) {
     if (!a || !b || a == b) return false;
     if (dynamic_cast<GlobalVariable *>(a) && dynamic_cast<GlobalVariable *>(b))
+        return true;
+    if (isScalarExpansionScratch(a) || isScalarExpansionScratch(b))
         return true;
     return argAA.noAlias(a, b);
 }
@@ -80,29 +90,37 @@ bool definedInLoop(Value *v, const std::set<BasicBlock *> &blocks) {
     return inst && blocks.count(inst->parent_);
 }
 
-// ScalarExpandedInterchange 的 __mm_tmp_* scratch：每外层迭代先写后读的
-// 私有缓冲。若其全部使用都在本循环内，可按线程私有化（外提体内换 alloca）。
-bool isPrivatizableScratch(GlobalVariable *gv,
-                           const std::set<BasicBlock *> &blocks) {
-    if (gv->name_.rfind("__mm_tmp", 0) != 0) return false;
-    for (auto &use : gv->use_list_) {
+// ScalarExpansion scratch：每个父循环迭代先清零、后累加、再写回。
+// 若某个并行循环内完整使用该 scratch，可在 worker 内改成线程私有 alloca。
+bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
+    if (!isScalarExpansionScratch(root)) return false;
+    for (auto &use : root->use_list_) {
         auto *user = dynamic_cast<Instruction *>(use.val_);
         if (!user || !blocks.count(user->parent_)) return false;
     }
     return true;
 }
 
-// 全局数组字节大小（SysY 元素 i32/float 均 4 字节）
-long long globalArrayBytes(GlobalVariable *gv) {
-    auto *ptrTy = dynamic_cast<PointerType *>(gv->type_);
-    if (!ptrTy) return -1;
-    long long elems = 1;
-    Type *ty = ptrTy->contained_;
-    while (auto *arr = dynamic_cast<ArrayType *>(ty)) {
-        elems *= arr->num_elements_;
-        ty = arr->contained_;
+long long typeBytes(Type *ty) {
+    if (dynamic_cast<IntegerType *>(ty)) return 4;
+    if (ty && ty->tid_ == Type::FloatTyID) return 4;
+    if (auto *arr = dynamic_cast<ArrayType *>(ty)) {
+        long long elem = typeBytes(arr->contained_);
+        return elem < 0 ? -1 : elem * arr->num_elements_;
     }
-    return elems * 4;
+    if (dynamic_cast<PointerType *>(ty)) return 8;
+    return -1;
+}
+
+long long scratchBytes(Value *root) {
+    auto *alloca = dynamic_cast<AllocaInst *>(root);
+    if (!alloca) return -1;
+    return typeBytes(alloca->alloca_ty_);
+}
+
+Type *scratchAllocaType(Value *root) {
+    auto *alloca = dynamic_cast<AllocaInst *>(root);
+    return alloca ? alloca->alloca_ty_ : nullptr;
 }
 
 } // namespace
@@ -209,7 +227,7 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
 bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                     Function *func, AnalysisManager *AM,
                                     const ArgumentAliasAnalysis &argAA,
-                                    std::set<GlobalVariable *> *privatize) {
+                                    std::set<Value *> *privatize) {
     auto fail = [&](const std::string &why) {
         debugPar("reject func=" + func->name_ + " loop=" + loopName(loop) +
                  ": " + why);
@@ -289,18 +307,22 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     }
 
     // 硬规则：store 地址必须随本循环 IV 变化（某下标是本循环的 AddRec）。
-    // 否则两线程会命中同一地址（如 ScalarExpandedInterchange 的
-    // __mm_tmp_* 全局 scratch 缓冲，下标只随内层 IV 变化）——DA 对
-    // "下标不含外层 IV"的 store 会漏报跨外层迭代依赖，不能只靠 DA。
+    // 否则两线程会命中同一地址。ScalarExpansion scratch 若完整局限在
+    // 当前循环内，则可改成 worker 私有 alloca。
     ScalarEvolution &SE = AM->getScalarEvolution(func);
     long long privBytes = 0;
     for (auto *s : stores) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(s->get_operand(1));
-        auto *base = gep ? dynamic_cast<GlobalVariable *>(gepRootBase(gep))
-                         : nullptr;
-        if (base && isPrivatizableScratch(base, loop.blocks)) {
-            // 私有拷贝放 worker 栈（静态 1MB），总量限 64KB 防溢出
-            long long bytes = globalArrayBytes(base);
+        Value *base = gep ? gepRootBase(gep) : nullptr;
+        bool variesWithIV = false;
+        for (unsigned i = 1; gep && i < gep->num_ops_; i++) {
+            auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
+                SE.getSCEV(gep->get_operand(i)));
+            if (rec && rec->loop() == &loop) { variesWithIV = true; break; }
+        }
+        if (!variesWithIV && isPrivatizableScratch(base, loop.blocks)) {
+            // 私有 scratch 放 worker 栈（静态 1MB），总量限 64KB 防溢出。
+            long long bytes = scratchBytes(base);
             if (bytes < 0) return fail("unknown privatized scratch size");
             if (!privatize->count(base)) {
                 privBytes += bytes;
@@ -309,12 +331,6 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             }
             privatize->insert(base);
             continue;
-        }
-        bool variesWithIV = false;
-        for (unsigned i = 1; gep && i < gep->num_ops_; i++) {
-            auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
-                SE.getSCEV(gep->get_operand(i)));
-            if (rec && rec->loop() == &loop) { variesWithIV = true; break; }
         }
         if (!variesWithIV)
             return fail("store address does not vary with loop IV");
@@ -327,8 +343,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     DA.setArgAlias(&argAA);
     auto basePriv = [&](Instruction *acc) {
         Value *ptr = acc->is_store() ? acc->get_operand(1) : acc->get_operand(0);
-        auto *g = dynamic_cast<GlobalVariable *>(gepRootBase(ptr));
-        return g && privatize->count(g);
+        return privatize->count(gepRootBase(ptr)) != 0;
     };
     for (auto *s : stores) {
         if (basePriv(s)) continue;
@@ -358,7 +373,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
 
 void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                  Function *func, Module *module,
-                                 const std::set<GlobalVariable *> &privatize) {
+                                 const std::set<Value *> &privatize) {
     int id = (int)bodies_.size();
 
     if (!parallelForDecl_) {
@@ -394,6 +409,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                 if (definedInLoop(op, loop.blocks)) continue;
                 if (inst == shape.ivPhi && op == shape.init) continue;
                 if (inst == shape.exitCmp && op == shape.bound) continue;
+                if (privatize.count(op)) continue;
                 if (std::find(liveIns.begin(), liveIns.end(), op) ==
                     liveIns.end())
                     liveIns.push_back(op);
@@ -402,12 +418,13 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     }
     std::vector<GlobalVariable *> ctxSlots;
     builder->set_insert_point(entry);
-    // scratch 私有化：外提体内用栈拷贝替换全局缓冲（每线程一份）
-    for (auto *gv : privatize) {
-        auto *ptrTy = static_cast<PointerType *>(gv->type_);
-        auto *priv = builder->create_alloca(ptrTy->contained_);
+    // scratch 私有化：外提体内用栈分配替换原 entry alloca（每线程一份）。
+    for (auto *scratch : privatize) {
+        Type *allocTy = scratchAllocaType(scratch);
+        if (!allocTy) continue;
+        auto *priv = builder->create_alloca(allocTy);
         std::vector<std::pair<Instruction *, unsigned>> fixes;
-        for (auto &use : gv->use_list_) {
+        for (auto &use : scratch->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
             if (user && loop.blocks.count(user->parent_))
                 fixes.push_back({user, use.arg_no_});
@@ -537,7 +554,7 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                              loopName(*loop) + ": " + shapeReason);
                     continue;
                 }
-                std::set<GlobalVariable *> privatize;
+                std::set<Value *> privatize;
                 if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize))
                     continue;
                 transform(*loop, shape, func, module, privatize);

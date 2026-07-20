@@ -34,15 +34,16 @@ Value *DependenceAnalysis::gepBase(GetElementPtrInst *gep) const {
     return base;
 }
 
-bool DependenceAnalysis::sameBase(Value *a, Value *b) const {
-    if (a == b) return true;
+DependenceAnalysis::BaseRelation
+DependenceAnalysis::baseRelation(Value *a, Value *b) const {
+    if (a == b) return BaseRelation::MustAlias;
     // 不同全局变量绝对不别名
     if (dynamic_cast<GlobalVariable *>(a) && dynamic_cast<GlobalVariable *>(b))
-        return false;
+        return BaseRelation::NoAlias;
     // 过程间参数别名 oracle：可证明不别名则不别名（含参数 vs global/参数）
     if (argAA_ && argAA_->noAlias(a, b))
-        return false;
-    return true;   // 保守：可能别名
+        return BaseRelation::NoAlias;
+    return BaseRelation::MayAlias;
 }
 
 // 求两个 BB 共同最内层包围循环（沿嵌套树向上求交）
@@ -61,214 +62,298 @@ static std::vector<Loop *> commonNest(Loop *l1, Loop *l2) {
 }
 
 // ── Banerjee 不等式测试 ──────────────────────────────────────────────────
-// Banerjee 测试通过计算仿射差表达式在 IV 界约束下的 min/max，
-// 实现更精确的依赖方向和独立性判断。
-//   - 独立性：全范围 lo>0 或 hi<0 → 无解 → 独立（GCD 失败时补充）
-//   - 方向细化：约束 Δ_k≤-1 / Δ_k=0 / Δ_k≥1，判断各方向是否可行
+// 两个访问使用独立迭代实例 i/j。对每个数组维度求
+//   e1(i) - e2(j) == 0
+// 的保守值域；只有值域排除 0 时才能证明无依赖。
 
 static long long getConstantTripCount(Loop *loop) {
     auto *ci = dynamic_cast<ConstantInt *>(loop->tripCount);
     return ci ? (long long)ci->value_ : -1;
 }
 
-static bool allLoopsHaveConstantTrip(const std::vector<Loop *> &loops) {
-    for (auto *loop : loops)
-        if (getConstantTripCount(loop) < 0) return false;
+struct BanerjeeRange {
+    __int128 lo = 0;
+    __int128 hi = 0;
+    bool valid = false;
+};
+
+static void addLinearRange(__int128 coeff, long long lo, long long hi,
+                           BanerjeeRange &range) {
+    __int128 a = coeff * lo;
+    __int128 b = coeff * hi;
+    range.lo += std::min(a, b);
+    range.hi += std::max(a, b);
+}
+
+static bool hasOnlyNestIVs(const AffineExpr &expr,
+                           const std::vector<Loop *> &loops) {
+    for (const auto &term : expr.coeffs) {
+        bool found = false;
+        for (auto *loop : loops) {
+            if (loop->canonicalIV == term.first) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && term.second != 0) return false;
+    }
     return true;
 }
 
-struct BanerjeeRange { long long lo; long long hi; bool valid; };
-
-// 核心：计算 diff = c_const + Σ c_i·Δ_i 在给定 Δ 范围下的 min/max
-// loops: 共同嵌套循环（最外层在前），与 diff 中的 IV 对应
-// constrainedIdx: -1=全范围，k=约束 loops[k] 的 Δ：
-//   dirSign<0 → Δ∈[-(N-1),-1]  (方向 '<')
-//   dirSign=0 → Δ=0            (方向 '=')
-//   dirSign>0 → Δ∈[1,N-1]      (方向 '>')
-static BanerjeeRange computeBanerjee(const AffineExpr         &diff,
+// direction: 0=不约束，-1=i<j，1=i>j，2=i==j。
+static BanerjeeRange computeBanerjee(const AffineExpr &e1,
+                                     const AffineExpr &e2,
                                      const std::vector<Loop *> &loops,
-                                     int constrainedIdx, int dirSign) {
-    long long loVal = diff.constant;
-    long long hiVal = diff.constant;
+                                     int constrainedIdx,
+                                     int direction) {
+    BanerjeeRange result;
+    result.lo = result.hi = static_cast<__int128>(e1.constant) - e2.constant;
+    result.valid = hasOnlyNestIVs(e1, loops) && hasOnlyNestIVs(e2, loops);
+    if (!result.valid) return result;
 
-    for (size_t i = 0; i < loops.size(); i++) {
-        long long N = getConstantTripCount(loops[i]);
-        if (N < 0) return {0, 0, false};
-        if (N <= 1 && (int)i == constrainedIdx && dirSign != 0)
-            return {0, 0, false};
-
-        PhiInst   *iv = loops[i]->canonicalIV;
-        long long  c  = iv ? (long long)diff.coeffOf(iv) : 0;
-
-        long long dLo, dHi;
-        if ((int)i == constrainedIdx) {
-            if      (dirSign < 0) { dLo = -(N - 1); dHi = -1;    }
-            else if (dirSign > 0) { dLo = 1;        dHi = N - 1; }
-            else                  { dLo = 0;        dHi = 0;     }
-        } else {
-            dLo = -(N - 1);
-            dHi = N - 1;
+    for (size_t k = 0; k < loops.size(); ++k) {
+        auto *iv = loops[k]->canonicalIV;
+        long long trip = getConstantTripCount(loops[k]);
+        if (!iv || trip <= 0) {
+            result.valid = false;
+            return result;
         }
-        if (dLo > dHi) return {0, 0, false};
+        long long a = e1.coeffOf(iv);
+        long long b = e2.coeffOf(iv);
+        long long last = trip - 1;
 
-        if (c >= 0) { loVal += c * dLo; hiVal += c * dHi; }
-        else        { loVal += c * dHi; hiVal += c * dLo; }
+        if (static_cast<int>(k) != constrainedIdx || direction == 0) {
+            addLinearRange(a, 0, last, result);
+            addLinearRange(-b, 0, last, result);
+            continue;
+        }
+
+        if (direction == 2) {
+            addLinearRange(static_cast<__int128>(a) - b, 0, last, result);
+            continue;
+        }
+
+        if (trip < 2) {
+            result.valid = false;
+            return result;
+        }
+
+        // A linear form over i<j / i>j reaches an extremum at a vertex of
+        // the triangular iteration domain.
+        const long long vertices[3][2] = {
+            {direction < 0 ? 0 : 1, direction < 0 ? 1 : 0},
+            {direction < 0 ? 0 : last, direction < 0 ? last : 0},
+            {direction < 0 ? last - 1 : last,
+             direction < 0 ? last : last - 1},
+        };
+        __int128 termLo = static_cast<__int128>(a) * vertices[0][0] -
+                          static_cast<__int128>(b) * vertices[0][1];
+        __int128 termHi = termLo;
+        for (int v = 1; v < 3; ++v) {
+            __int128 value = static_cast<__int128>(a) * vertices[v][0] -
+                             static_cast<__int128>(b) * vertices[v][1];
+            termLo = std::min(termLo, value);
+            termHi = std::max(termHi, value);
+        }
+        result.lo += termLo;
+        result.hi += termHi;
     }
-    return {loVal, hiVal, true};
+    return result;
 }
 
-// 全范围 Banerjee 独立性测试（每维独立，任一无解即独立）
-static bool banerjeeIndependent(const AffineExpr         &diff,
-                                const std::vector<Loop *> &loops) {
-    auto r = computeBanerjee(diff, loops, -1, 0);
-    return r.valid && (r.lo > 0 || r.hi < 0);
+static bool mayContainZero(const BanerjeeRange &range) {
+    return range.valid && range.lo <= 0 && range.hi >= 0;
 }
 
 // ── 主测试 ──────────────────────────────────────────────────────────────
 
 DependenceAnalysis::Result
 DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
-    Result r;
+    Result result;
 
     auto *g1 = accessGEP(acc1);
     auto *g2 = accessGEP(acc2);
     if (!g1 || !g2) {
-        r.aliased = true;        // 保守：可能别名
-        return r;
+        result.aliased = true;
+        return result;
     }
 
-    Value *b1 = gepBase(g1);
-    Value *b2 = gepBase(g2);
-    if (!sameBase(b1, b2)) {
-        r.provably_independent = true;
-        return r;
-    }
-    r.aliased = true;
-
-    // 共同嵌套循环
     Loop *l1 = LI_->getLoopFor(acc1->parent_);
     Loop *l2 = LI_->getLoopFor(acc2->parent_);
-    r.commonLoops = commonNest(l1, l2);
-    if (r.commonLoops.empty()) return r;   // 不在任何共同循环里
+    result.commonLoops = commonNest(l1, l2);
 
-    // GEP 索引数得一致
-    if (g1->num_ops_ != g2->num_ops_) return r;
-    unsigned n_idx = g1->num_ops_ - 1;
+    BaseRelation relation = baseRelation(gepBase(g1), gepBase(g2));
+    if (relation == BaseRelation::NoAlias) {
+        result.provably_independent = true;
+        return result;
+    }
+    result.aliased = true;
+    if (result.commonLoops.empty()) return result;
 
-    // 逐维提取仿射差异；某维无法仿射化时标记为"不透明"而【不】污染其它维。
-    // 关键：一个维度不透明，只说明该维地址不可解析；它不会凭空给别的循环层
-    // 引入依赖。某层 IV 的方向只取决于它是否真的进入下标（仿射维看系数、
-    // 不透明维看 use-def 可达性）。
+    // GEP coordinates are comparable only for the same underlying object.
+    // MayAlias roots can denote the same allocation at an unknown displacement.
+    if (relation == BaseRelation::MayAlias) {
+        result.direction.assign(result.commonLoops.size(), DIR_ANY);
+        return result;
+    }
+
+    if (g1->num_ops_ != g2->num_ops_) {
+        result.direction.assign(result.commonLoops.size(), DIR_ANY);
+        return result;
+    }
+
     struct Dim {
-        bool       affine = false;
-        AffineExpr diff;            // affine=true 时有效
-        Value     *v1 = nullptr;    // affine=false 时保留两侧原始下标
-        Value     *v2 = nullptr;
+        bool affine = false;
+        AffineExpr e1;
+        AffineExpr e2;
+        Value *o1 = nullptr;
+        Value *o2 = nullptr;
     };
+
     std::vector<Dim> dims;
-    dims.reserve(n_idx);
-    for (unsigned k = 0; k < n_idx; k++) {
-        Value *o1 = g1->get_operand(k + 1);
-        Value *o2 = g2->get_operand(k + 1);
-        AffineExpr a = AA_->analyze(o1);
-        AffineExpr b = AA_->analyze(o2);
-        Dim d;
-        if (a.valid && b.valid) { d.affine = true;  d.diff = a - b; }
-        else                    { d.affine = false; d.v1 = o1; d.v2 = o2; }
-        dims.push_back(d);
+    dims.reserve(g1->num_ops_ - 1);
+    for (unsigned index = 1; index < g1->num_ops_; ++index) {
+        Dim dim;
+        dim.o1 = g1->get_operand(index);
+        dim.o2 = g2->get_operand(index);
+        dim.e1 = AA_->analyze(dim.o1);
+        dim.e2 = AA_->analyze(dim.o2);
+        dim.affine = dim.e1.valid && dim.e2.valid;
+        dims.push_back(dim);
     }
 
-    // GCD test：只能用【可仿射维】证明无解（不透明维无法贡献独立性）。
-    //   某可仿射维 gcd(c_iv) 不整除 c_const → 该维永不重合 → 整对独立。
-    bool gcd_proves_independent = false;
-    for (auto &d : dims) {
-        if (!d.affine) continue;
-        long g = 0;
-        for (auto &kv : d.diff.coeffs) g = gcdAbs(g, (long)kv.second);
-        if (g == 0) {
-            if (d.diff.constant != 0) { gcd_proves_independent = true; break; }
-        } else {
-            if (d.diff.constant % g != 0) { gcd_proves_independent = true; break; }
+    // Instance-separated GCD test. The coefficients from e1(i) and e2(j)
+    // belong to independent variables and therefore must never cancel.
+    for (const Dim &dim : dims) {
+        if (!dim.affine) continue;
+        long gcd = 0;
+        for (const auto &term : dim.e1.coeffs)
+            gcd = gcdAbs(gcd, static_cast<long>(term.second));
+        for (const auto &term : dim.e2.coeffs)
+            gcd = gcdAbs(gcd, static_cast<long>(term.second));
+        long rhs = static_cast<long>(dim.e2.constant) - dim.e1.constant;
+        if ((gcd == 0 && rhs != 0) || (gcd != 0 && rhs % gcd != 0)) {
+            result.provably_independent = true;
+            return result;
         }
     }
-    if (gcd_proves_independent) {
-        r.provably_independent = true;
-        return r;
-    }
 
-    // ── Banerjee 增强 ──────────────────────────────────────────────────────
-    // GCD 未能证明独立时，尝试 Banerjee 测试
-    // 前提：所有维度仿射化且所有循环有常量 trip count
-    bool allCanBanerjee = allLoopsHaveConstantTrip(r.commonLoops);
-    for (auto &d : dims) { if (!d.affine) allCanBanerjee = false; }
-    if (allCanBanerjee) {
-        // Banerjee 独立性测试（逐维，任一无解即独立）
-        bool banerjee_independent = false;
-        for (auto &d : dims) {
-            if (banerjeeIndependent(d.diff, r.commonLoops)) {
-                banerjee_independent = true;
-                break;
+    bool canUseBounds = true;
+    for (const Dim &dim : dims) {
+        if (!dim.affine ||
+            !hasOnlyNestIVs(dim.e1, result.commonLoops) ||
+            !hasOnlyNestIVs(dim.e2, result.commonLoops)) {
+            canUseBounds = false;
+            break;
+        }
+    }
+    for (Loop *loop : result.commonLoops)
+        if (!loop->canonicalIV || getConstantTripCount(loop) <= 0)
+            canUseBounds = false;
+
+    if (canUseBounds) {
+        for (const Dim &dim : dims) {
+            if (!mayContainZero(
+                    computeBanerjee(dim.e1, dim.e2, result.commonLoops,
+                                     /*constrainedIdx=*/-1,
+                                     /*direction=*/0))) {
+                result.provably_independent = true;
+                return result;
             }
         }
-        if (banerjee_independent) {
-            r.provably_independent = true;
-            return r;
-        }
-        // Banerjee 方向细化：逐层测试 = / < / >，逐维取交集
-        // 关键：仅对真正进入下标的 IV 做 Banerjee 方向推导；
-        //       系数全为 0 的 IV 不参与地址计算，方向恒为 EQ
-        //       （与回退粗粒度分析的语义一致）。
-        for (size_t k = 0; k < r.commonLoops.size(); k++) {
-            PhiInst *kIV = r.commonLoops[k]->canonicalIV;
-            if (!kIV) { r.direction.push_back(DIR_ANY); continue; }
 
-            bool ivInDiff = false;
-            for (auto &d : dims)
-                if (d.affine && d.diff.coeffOf(kIV) != 0) { ivInDiff = true; break; }
-            if (!ivInDiff) { r.direction.push_back(DIR_EQ); continue; }
+        for (size_t level = 0; level < result.commonLoops.size(); ++level) {
+            auto directionPossible = [&](int direction) {
+                for (const Dim &dim : dims) {
+                    BanerjeeRange range =
+                        computeBanerjee(dim.e1, dim.e2, result.commonLoops,
+                                         static_cast<int>(level), direction);
+                    if (!mayContainZero(range)) return false;
+                }
+                return true;
+            };
 
-            bool eqOk = true, ltOk = true, gtOk = true;
-            for (auto &d : dims) {
-                auto rEq = computeBanerjee(d.diff, r.commonLoops, (int)k, 0);
-                auto rLt = computeBanerjee(d.diff, r.commonLoops, (int)k, -1);
-                auto rGt = computeBanerjee(d.diff, r.commonLoops, (int)k, 1);
-                if (!rEq.valid || rEq.lo > 0 || rEq.hi < 0) eqOk = false;
-                if (!rLt.valid || rLt.lo > 0 || rLt.hi < 0) ltOk = false;
-                if (!rGt.valid || rGt.lo > 0 || rGt.hi < 0) gtOk = false;
+            bool lt = directionPossible(-1);
+            bool eq = directionPossible(2);
+            bool gt = directionPossible(1);
+            int count = static_cast<int>(lt) + static_cast<int>(eq) +
+                        static_cast<int>(gt);
+            if (count == 0) {
+                result.provably_independent = true;
+                result.direction.clear();
+                return result;
             }
-            Dir dir;
-            if (ltOk && gtOk)                              dir = DIR_ANY;
-            else if (ltOk && !gtOk)                        dir = DIR_LT;
-            else if (gtOk && !ltOk)                        dir = DIR_GT;
-            else if (eqOk && !ltOk && !gtOk)              dir = DIR_EQ;
-            else                                           dir = DIR_ANY;
-            r.direction.push_back(dir);
+            if (count != 1)
+                result.direction.push_back(DIR_ANY);
+            else if (lt)
+                result.direction.push_back(DIR_LT);
+            else if (gt)
+                result.direction.push_back(DIR_GT);
+            else
+                result.direction.push_back(DIR_EQ);
         }
-        return r;
+        return result;
     }
 
-    // ── 回退：粗粒度方向（IV 出现在下标 → ANY，否则 EQ） ─────────────────
-    for (Loop *loop : r.commonLoops) {
+    // Symbolic fallback: recognize only a strong SIV equation. Everything
+    // coupled, opaque, or absent from the address remains conservatively ANY.
+    for (Loop *loop : result.commonLoops) {
         PhiInst *iv = loop->canonicalIV;
         if (!iv) {
-            r.direction.push_back(DIR_ANY);
+            result.direction.push_back(DIR_ANY);
             continue;
         }
-        bool ivAppears = false;
-        for (auto &d : dims) {
-            if (d.affine) {
-                if (d.diff.coeffOf(iv) != 0) { ivAppears = true; break; }
-            } else {
-                if (!AffineAnalysis::provablyIndependentOfIV(d.v1, iv) ||
-                    !AffineAnalysis::provablyIndependentOfIV(d.v2, iv)) { ivAppears = true; break; }
+
+        int dimensionsWithIV = 0;
+        bool coupled = false;
+        bool opaqueUse = false;
+        bool distanceKnown = false;
+        long distance = 0;
+
+        for (const Dim &dim : dims) {
+            if (!dim.affine) {
+                if (!AffineAnalysis::provablyIndependentOfIV(dim.o1, iv) ||
+                    !AffineAnalysis::provablyIndependentOfIV(dim.o2, iv))
+                    opaqueUse = true;
+                continue;
             }
+
+            long a = dim.e1.coeffOf(iv);
+            long b = dim.e2.coeffOf(iv);
+            if (a == 0 && b == 0) continue;
+            ++dimensionsWithIV;
+
+            bool hasOtherIV = false;
+            for (const auto &term : dim.e1.coeffs)
+                if (term.first != iv && term.second != 0) hasOtherIV = true;
+            for (const auto &term : dim.e2.coeffs)
+                if (term.first != iv && term.second != 0) hasOtherIV = true;
+
+            if (a == 0 || a != b || hasOtherIV) {
+                coupled = true;
+                continue;
+            }
+            long numerator =
+                static_cast<long>(dim.e1.constant) - dim.e2.constant;
+            if (numerator % a != 0) {
+                coupled = true;
+                continue;
+            }
+            distance = numerator / a;
+            distanceKnown = true;
         }
-        r.direction.push_back(ivAppears ? DIR_ANY : DIR_EQ);
+
+        if (opaqueUse || coupled || dimensionsWithIV != 1 || !distanceKnown) {
+            result.direction.push_back(DIR_ANY);
+        } else if (distance == 0) {
+            result.direction.push_back(DIR_EQ);
+        } else {
+            result.direction.push_back(distance > 0 ? DIR_LT : DIR_GT);
+        }
     }
 
-    return r;
+    return result;
 }
-
 // ── 循环交换合法性 ─────────────────────────────────────────────────────────
 // 检查给定一组访问之间的依赖方向，看 outer/inner 互换后是否反转。
 // 简化规则：
@@ -293,26 +378,22 @@ bool DependenceAnalysis::isInterchangeLegal(
             // 找 outer/inner 在 commonLoops 里的位置
             auto it_o = std::find(r.commonLoops.begin(), r.commonLoops.end(), outer);
             auto it_i = std::find(r.commonLoops.begin(), r.commonLoops.end(), inner);
-            if (it_o == r.commonLoops.end() || it_i == r.commonLoops.end()) continue;
+            if (it_o == r.commonLoops.end() || it_i == r.commonLoops.end())
+                return false;
             int idx_o = it_o - r.commonLoops.begin();
             int idx_i = it_i - r.commonLoops.begin();
             if (idx_o >= (int)r.direction.size() || idx_i >= (int)r.direction.size())
-                continue;
+                return false;
 
             Dir d_o = r.direction[idx_o];
             Dir d_i = r.direction[idx_i];
 
-            // Banerjee 提供精确 < / = / > 时，仅 (<,>) (>,<) 反转非法。
-            // 含 DIR_ANY 时回退到旧保守规则：
-            //   仅当另一方为 EQ 时才安全（=,* 或 *,=），否则未知方向可能反转为非法。
-            if (d_o == DIR_ANY || d_i == DIR_ANY) {
-                if (d_o != DIR_EQ && d_i != DIR_EQ)
-                    return false;
-                continue;
-            }
-            bool lt_gt = (d_o == DIR_LT && d_i == DIR_GT) ||
-                         (d_o == DIR_GT && d_i == DIR_LT);
-            if (lt_gt) return false;
+            // After permutation, inner is the first inspected component.
+            // A lexicographically negative or unknown direction is illegal.
+            if (d_i == DIR_GT || d_i == DIR_ANY)
+                return false;
+            if (d_i == DIR_EQ && (d_o == DIR_GT || d_o == DIR_ANY))
+                return false;
         }
     }
     return true;
@@ -321,22 +402,12 @@ bool DependenceAnalysis::isInterchangeLegal(
 // ── 单层并行性 ─────────────────────────────────────────────────────────────
 // L 是否携带依赖（不同 L 迭代之间存在内存依赖）。
 //
-// 对每对可能别名、含 store 的访问 (a1,a2)：它们【只在相同 L 迭代】碰撞才不携带
-// 依赖。判据（kIV = L 的规范 IV）：
-//   - 逐维取仿射差 diff = idx1 - idx2；某维 GCD 不整除 → 整对独立，跳过。
-//   - 若 kIV 出现在某维 diff（系数≠0）：两访问对 k 的依赖【不同】，不同 k 迭代
-//     可能碰撞 → 携带。
-//   - 否则 kIV 在 diff 中抵消：
-//       · 若 kIV 确实出现在 a1 的下标里（两访问 k-依赖相同）→ 仅相同 k 碰撞 →
-//         不携带（loop-independent）。
-//       · 若 kIV 根本不在 a1 下标里（地址对 k 不变）→ 每个 k 迭代写同一地址 →
-//         携带（loop-invariant 碰撞，如 reduction 写回 / 计时循环里的定址写）。
-//   - 无法仿射化的维：用 use-def 保守判断 kIV 是否可能进入下标。
+// 复用 test() 的 instance-separated 结果。只有方向被证明为 EQ 时，
+// 才能断言依赖局限于同一次 L 迭代。
 bool DependenceAnalysis::loopCarriesDependence(
     Loop *L, const std::vector<Instruction *> &accesses)
 {
-    PhiInst *kIV = L->canonicalIV;
-    if (!kIV) return true;
+    if (!L) return true;
 
     int n = (int)accesses.size();
     for (int i = 0; i < n; i++) {
@@ -344,42 +415,16 @@ bool DependenceAnalysis::loopCarriesDependence(
             bool has_store = accesses[i]->is_store() || accesses[j]->is_store();
             if (!has_store) continue;   // read-read 无依赖
 
-            auto *g1 = accessGEP(accesses[i]);
-            auto *g2 = accessGEP(accesses[j]);
-            if (!g1 || !g2) return true;                 // 访问无法解析 → 保守
-            if (!sameBase(gepBase(g1), gepBase(g2))) continue;   // 不别名
-            if (g1->num_ops_ != g2->num_ops_) return true;
+            Result result = test(accesses[i], accesses[j]);
+            if (result.provably_independent) continue;
 
-            unsigned n_idx = g1->num_ops_ - 1;
-            bool kInDiff = false, kInA1 = false, indep = false;
-            for (unsigned d = 0; d < n_idx && !kInDiff; d++) {
-                Value *o1 = g1->get_operand(d + 1);
-                Value *o2 = g2->get_operand(d + 1);
-                AffineExpr e1 = AA_->analyze(o1);
-                AffineExpr e2 = AA_->analyze(o2);
-                if (e1.valid && e2.valid) {
-                    AffineExpr diff = e1 - e2;
-                    long g = 0;
-                    for (auto &kv : diff.coeffs) g = gcdAbs(g, (long)kv.second);
-                    if ((g == 0 && diff.constant != 0) ||
-                        (g != 0 && diff.constant % g != 0))
-                        indep = true;
-                    if (diff.coeffOf(kIV) != 0) kInDiff = true;
-                    if (e1.coeffOf(kIV) != 0)   kInA1   = true;
-                } else {
-                    // 不透明维：kIV 若可能进入任一侧 → 视作 diff 含 kIV（保守）
-                    if (!AffineAnalysis::provablyIndependentOfIV(o1, kIV) ||
-                        !AffineAnalysis::provablyIndependentOfIV(o2, kIV))
-                        kInDiff = true;
-                    if (!AffineAnalysis::provablyIndependentOfIV(o1, kIV))
-                        kInA1 = true;
-                }
-            }
-
-            if (indep)    continue;        // 某维永不重合 → 独立
-            if (kInDiff)  return true;      // k-依赖不同 → 跨迭代碰撞
-            if (kInA1)    continue;         // k-依赖相同 → 仅同迭代碰撞
-            return true;                    // 地址对 k 不变 → 每迭代碰撞，携带
+            auto level = std::find(result.commonLoops.begin(),
+                                   result.commonLoops.end(), L);
+            if (level == result.commonLoops.end()) return true;
+            size_t index = level - result.commonLoops.begin();
+            if (index >= result.direction.size() ||
+                result.direction[index] != DIR_EQ)
+                return true;
         }
     }
     return false;

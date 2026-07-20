@@ -4,8 +4,8 @@
 //   遇到不完美嵌套时顺带做循环分配(distribution)——这正好等价于
 //   LoopDistribution + LoopInterchange 的组合，但用单一依赖驱动的变换表达。
 //
-// 与 ScalarExpandedInterchange 的分工：
-//   - ScalarExpandedInterchange 处理"内层 reduction + 标量展开"的交换；
+// 与 ScalarExpansion 的分工：
+//   - ScalarExpansion 处理"内层 reduction + 标量展开"的交换；
 //   - LoopInterchange 处理"把无依赖的并行循环移到最内"的纯置换/分配，
 //     不需要标量展开（被移动的循环对内存无 loop-carried 依赖）。
 //   两者共用 LoopInfo / AffineAnalysis / DependenceAnalysis / CostModel 分析层。
@@ -28,6 +28,8 @@
 #include "../analysis/affineAnalysis.hpp"
 #include "../analysis/costModel.hpp"
 #include "../analysis/dependenceAnalysis.hpp"
+#include "../analysis/loopAccessAnalysis.hpp"
+#include "../analysis/loopInterchangeAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
 

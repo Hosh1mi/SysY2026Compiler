@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <vector>
 
 namespace {
@@ -465,7 +467,8 @@ bool matchBranchShape(BasicBlock *header, BasicBlock *latch, const Loop &loop,
 
 Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
                            bool workOnTrue, const Loop &loop, Module *module,
-                           BasicBlock *preheader, Instruction *insertBefore) {
+                           BasicBlock *insertionBlock, Instruction *insertBefore,
+                           const LoopInfo &LI) {
     ICmpInst::ICmpOp pred =
         workOnTrue ? guardCmp->icmp_op_ : negateCmp(guardCmp->icmp_op_);
 
@@ -478,6 +481,20 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
     } else {
         return nullptr;
     }
+
+    auto dominatesInsertion = [&](Value *value) {
+        auto *inst = dynamic_cast<Instruction *>(value);
+        if (!inst) return true;
+        if (!inst->parent_) return false;
+        return inst->parent_ == insertionBlock ||
+               LI.dominates(inst->parent_, insertionBlock);
+    };
+    // A dedicated loop preheader is after the zero-trip guard.  Loop-invariant
+    // only means "defined outside the loop"; it does not imply that a value
+    // dominates this earlier guard block.
+    if (!dominatesInsertion(limitExpr) || !dominatesInsertion(iv.bound) ||
+        !dominatesInsertion(iv.init))
+        return nullptr;
 
     AffineExpr limit;
     if (!decomposeInvariantAffine(limitExpr, loop, limit))
@@ -501,15 +518,15 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
     }
 
     Value *candidate =
-        materializeAffine(limit, delta, iv.phi->type_, preheader, insertBefore);
+        materializeAffine(limit, delta, iv.phi->type_, insertionBlock, insertBefore);
     if (!candidate || candidate == iv.bound)
         return nullptr;
 
     ICmpInst::ICmpOp choosePred =
         iv.step == 1 ? ICmpInst::ICMP_SLT : ICmpInst::ICMP_SGT;
     auto *chooseCmp =
-        new ICmpInst(choosePred, candidate, iv.bound, preheader, true);
-    if (!preheader->add_instruction_before_inst(chooseCmp, insertBefore))
+        new ICmpInst(choosePred, candidate, iv.bound, insertionBlock, true);
+    if (!insertionBlock->add_instruction_before_inst(chooseCmp, insertBefore))
         return nullptr;
 
     Value *tightened = nullptr;
@@ -517,8 +534,8 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
         tightened = new SelectInst(chooseCmp, candidate, iv.bound, iv.phi->type_);
     else
         tightened = new SelectInst(chooseCmp, candidate, iv.bound, iv.phi->type_);
-    if (!preheader->add_instruction_before_inst(static_cast<Instruction *>(tightened),
-                                                insertBefore))
+    if (!insertionBlock->add_instruction_before_inst(
+            static_cast<Instruction *>(tightened), insertBefore))
         return nullptr;
     return tightened;
 }
@@ -959,62 +976,106 @@ bool inductiveRangeCheckElimination::runOnFunction(Function *func) {
 
     bool changed = false;
     for (auto *loop : loops)
-        changed |= tryTightenLoop(*loop, func->parent_);
+        changed |= tryTightenLoop(*loop, func->parent_, LI);
 
     if (changed)
         func->set_instr_name();
     return changed;
 }
 
-bool inductiveRangeCheckElimination::tryTightenLoop(Loop &loop, Module *module) {
+bool inductiveRangeCheckElimination::tryTightenLoop(
+    Loop &loop, Module *module, const LoopInfo &LI) {
+    const bool debug = std::getenv("DEBUG_INDUCTIVE_RANGE") != nullptr;
+    auto reject = [&](const char *reason) {
+        if (debug)
+            std::cerr << "[InductiveRange] reject header="
+                      << (loop.header ? loop.header->name_ : "<null>")
+                      << " reason=" << reason << "\n";
+        return false;
+    };
+    if (debug)
+        std::cerr << "[InductiveRange] inspect header="
+                  << (loop.header ? loop.header->name_ : "<null>")
+                  << " blocks=" << loop.blocks.size() << "\n";
     BasicBlock *preheader = loop.preheader;
     BasicBlock *header = loop.header;
     BasicBlock *latch = loop.singleLatch();
     if (!preheader || !header || !latch)
-        return false;
+        return reject("missing-loop-structure");
 
-    if (tryTightenMonotoneGuardLoop(loop, module))
+    if (tryTightenMonotoneGuardLoop(loop, module)) {
+        if (debug)
+            std::cerr << "[InductiveRange] tightened-monotone header="
+                      << header->name_ << "\n";
         return true;
+    }
 
     auto *preTerm = dynamic_cast<BranchInst *>(preheader->get_terminator());
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!preTerm || !headerTerm || preTerm->num_ops_ != 3 || headerTerm->num_ops_ != 3)
-        return false;
+    if (!preTerm || !headerTerm || headerTerm->num_ops_ != 3)
+        return reject("non-conditional-entry-or-header");
 
-    auto *preTrue = dynamic_cast<BasicBlock *>(preTerm->get_operand(1));
-    auto *preFalse = dynamic_cast<BasicBlock *>(preTerm->get_operand(2));
-    if (preTrue != header || !preFalse || loop.isInLoop(preFalse))
-        return false;
+    // LoopRotate preserves a dedicated preheader and leaves the zero-trip
+    // condition in its unique outside predecessor.  Accept the old direct
+    // guard shape as well so this analysis is independent of scheduling.
+    BasicBlock *guardBlock = preheader;
+    BranchInst *guardTerm = preTerm;
+    BasicBlock *guardContinue = header;
+    if (preTerm->num_ops_ == 1 && preTerm->get_operand(0) == header) {
+        if (preheader->pre_bbs_.size() != 1)
+            return reject("entry-guard-predecessor");
+        guardBlock = preheader->pre_bbs_[0];
+        if (loop.isInLoop(guardBlock))
+            return reject("entry-guard-inside-loop");
+        guardTerm = dynamic_cast<BranchInst *>(guardBlock->get_terminator());
+        guardContinue = preheader;
+    }
+    if (!guardTerm || guardTerm->num_ops_ != 3)
+        return reject("entry-guard-terminator");
+
+    auto *guardTrue = dynamic_cast<BasicBlock *>(guardTerm->get_operand(1));
+    auto *guardFalse = dynamic_cast<BasicBlock *>(guardTerm->get_operand(2));
+    if (guardTrue != guardContinue || !guardFalse || loop.isInLoop(guardFalse))
+        return reject("entry-guard-shape");
 
     CanonicalIV iv;
     if (!matchCanonicalIV(header, preheader, latch, loop, iv))
-        return false;
+        return reject("canonical-iv");
     if (!isOnlyIVUpdateAndLatchCmp(latch, iv.next, iv.latchCmp))
-        return false;
+        return reject("nontrivial-latch");
 
     BranchShape shape;
     if (!matchBranchShape(header, latch, loop, shape))
-        return false;
+        return reject("branch-shape");
 
     auto *guardCmp = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
     if (!guardCmp || guardCmp->parent_ != header)
-        return false;
+        return reject("header-guard");
 
-    Instruction *insertBefore = preheader->get_terminator();
+    Instruction *insertBefore = guardBlock->get_terminator();
     Value *tightened = buildTightenedBound(iv, guardCmp, shape.workOnTrue, loop,
-                                           module, preheader, insertBefore);
+                                           module, guardBlock, insertBefore, LI);
     if (!tightened)
-        return false;
+        return reject("bound-construction");
 
     auto *entryCmp =
-        new ICmpInst(iv.exitPred, iv.init, tightened, preheader, true);
-    if (!preheader->add_instruction_before_inst(entryCmp, insertBefore))
-        return false;
+        new ICmpInst(iv.exitPred, iv.init, tightened, guardBlock, true);
+    if (!guardBlock->add_instruction_before_inst(entryCmp, insertBefore))
+        return reject("entry-compare-insertion");
 
-    preTerm->set_operand(0, entryCmp);
+    guardTerm->set_operand(0, entryCmp);
     if (iv.latchCmp->get_operand(0) == iv.next)
         iv.latchCmp->set_operand(1, tightened);
     else
         iv.latchCmp->set_operand(0, tightened);
+    // The tightened iteration domain is exactly the subset on which the work
+    // successor is taken.  Make that proof explicit so CFG cleanup removes
+    // the skip path and repeat scheduling cannot wrap the same bound in an
+    // unbounded chain of equivalent min/max selects.
+    headerTerm->set_operand(
+        0, new ConstantInt(module->int1_ty_, shape.workOnTrue ? 1 : 0));
+    if (debug)
+        std::cerr << "[InductiveRange] tightened-branch header="
+                  << header->name_ << "\n";
     return true;
 }

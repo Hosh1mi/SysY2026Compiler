@@ -8,6 +8,23 @@
 #include <unordered_map>
 #include <vector>
 
+namespace {
+
+Value *transparentAddressRoot(Value *value) {
+    Value *current = value;
+    while (auto *bitcast = dynamic_cast<Bitcast *>(current)) {
+        Value *source = bitcast->get_operand(0);
+        if (!bitcast->type_ || !source->type_ ||
+            bitcast->type_->tid_ != Type::PointerTyID ||
+            source->type_->tid_ != Type::PointerTyID)
+            break;
+        current = source;
+    }
+    return current;
+}
+
+} // namespace
+
 Arm64RegAlloc::Arm64RegAlloc(Function *f) : func_(f) {}
 
 const std::map<Value*, std::string> &Arm64RegAlloc::assignedRegs() const {
@@ -616,6 +633,9 @@ void Arm64RegAlloc::computeInstructionNumbers(
                 auto val = inst->get_operand(i);
                 if (canAssignRegister(val))
                     lastUse[val] = std::max(lastUse[val], idx);
+                Value *addressRoot = transparentAddressRoot(val);
+                if (addressRoot != val && canAssignRegister(addressRoot))
+                    lastUse[addressRoot] = std::max(lastUse[addressRoot], idx);
                 // Select emits its own cmp/fcmp using the compare operands, so
                 // extend those operands' live ranges to this Select's position.
                 if (inst->op_id_ == Instruction::Select) {
@@ -656,6 +676,9 @@ void Arm64RegAlloc::computeLiveness(
                 auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
                 if (canAssignRegister(val))
                     phiOut[pred].insert(val);
+                Value *addressRoot = transparentAddressRoot(val);
+                if (addressRoot != val && canAssignRegister(addressRoot))
+                    phiOut[pred].insert(addressRoot);
             }
         }
     }
@@ -673,6 +696,10 @@ void Arm64RegAlloc::computeLiveness(
                 auto val = inst->get_operand(i);
                 if (canAssignRegister(val) && !info.def.count(val))
                     info.use.insert(val);
+                Value *addressRoot = transparentAddressRoot(val);
+                if (addressRoot != val && canAssignRegister(addressRoot) &&
+                    !info.def.count(addressRoot))
+                    info.use.insert(addressRoot);
             }
         }
         bbInfo[bb] = info;
@@ -727,6 +754,9 @@ void Arm64RegAlloc::computeLiveness(
                     auto val = phi->get_operand(i);
                     if (canAssignRegister(val))
                         live.insert(val);
+                    Value *addressRoot = transparentAddressRoot(val);
+                    if (addressRoot != val && canAssignRegister(addressRoot))
+                        live.insert(addressRoot);
                 }
                 continue;
             }
@@ -735,6 +765,9 @@ void Arm64RegAlloc::computeLiveness(
                 auto val = inst->get_operand(i);
                 if (canAssignRegister(val))
                     live.insert(val);
+                Value *addressRoot = transparentAddressRoot(val);
+                if (addressRoot != val && canAssignRegister(addressRoot))
+                    live.insert(addressRoot);
             }
         }
     }

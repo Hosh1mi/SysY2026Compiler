@@ -41,6 +41,7 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::BitCast, "bitcast"},
     {Instruction::Clz, "clz"},
     {Instruction::InsertElement, "insertelement"},
+    {Instruction::ExtractElement, "extractelement"},
     {Instruction::ICmp, "icmp"},
     {Instruction::FCmp, "fcmp"},
     {Instruction::PHI, "phi"},
@@ -469,6 +470,16 @@ std::string InsertElementInst::print() {
     instr_ir += print_as_op(this->get_operand(1), true);
     instr_ir += ", ";
     instr_ir += print_as_op(this->get_operand(2), true);
+    return instr_ir;
+}
+
+std::string ExtractElementInst::print() {
+    std::string instr_ir;
+    instr_ir += "%" + name_ + " = ";
+    instr_ir += instr_id2string_[op_id_] + " ";
+    instr_ir += print_as_op(get_operand(0), true);
+    instr_ir += ", ";
+    instr_ir += print_as_op(get_operand(1), true);
     return instr_ir;
 }
 

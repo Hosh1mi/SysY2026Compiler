@@ -245,8 +245,12 @@ std::string Arm64FuncContext::allocIntReg() {
             return "w" + std::to_string(r);
         }
     }
-    usedIntRegs_.insert(16);
-    return "w16";
+    if (!usedIntRegs_.count(16)) {
+        usedIntRegs_.insert(16);
+        return "w16";
+    }
+    usedIntRegs_.insert(17);
+    return "w17";
 }
 
 std::string Arm64FuncContext::allocFloatReg() {
@@ -267,8 +271,12 @@ std::string Arm64FuncContext::allocAddrReg() {
             return "x" + std::to_string(r);
         }
     }
-    usedIntRegs_.insert(16);
-    return "x16";
+    if (!usedIntRegs_.count(16)) {
+        usedIntRegs_.insert(16);
+        return "x16";
+    }
+    usedIntRegs_.insert(17);
+    return "x17";
 }
 
 // ---- load from slot/constant/global to scratch register ----
@@ -319,6 +327,15 @@ std::string Arm64FuncContext::loadFloat(Value *v) {
 }
 
 std::string Arm64FuncContext::loadAddr(Value *v) {
+    // Pointer bitcasts are transparent to memory addressing.  Register
+    // allocation extends the source root's liveness through every bitcast
+    // use, so materializing that root is safe and avoids depending on a chain
+    // of no-op pointer copies.
+    if (auto *bitcast = dynamic_cast<Bitcast *>(v)) {
+        Value *source = bitcast->get_operand(0);
+        if (isPtr(v->type_) && isPtr(source->type_))
+            return loadAddr(source);
+    }
     if (auto *gv = dynamic_cast<GlobalVariable*>(v)) {
         std::string r = allocAddrReg();
         emitGlobalAddr(gv, r);

@@ -25,6 +25,9 @@ enum class SemFlag : uint32_t {
     NoUnsignedWrap  = 1u << 8,  // add/sub/mul/shl：无符号不溢出
     Exact           = 1u << 9,  // ashr/lshr/div：无信息丢失（如被 2^k 整除）
     Disjoint        = 1u << 10, // or：两侧置位集合互斥
+    VectorizedEpilogue = 1u << 11, // BasicBlock：该标量循环已作为向量余数循环
+    TargetPointerRecurrenceLoop = 1u << 12,
+        // BasicBlock：循环已显式构造目标化指针递推，IVSR 不应重写
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {

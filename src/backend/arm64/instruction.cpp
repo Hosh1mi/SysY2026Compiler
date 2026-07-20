@@ -31,6 +31,13 @@ struct AddvReductionExitPattern {
     BinaryInst *finalAdd = nullptr;
 };
 
+struct ExtractAddvReductionPattern {
+    Value *sourceVec = nullptr;
+    std::array<ExtractElementInst *, 4> extracts{};
+    std::array<BinaryInst *, 3> adds{};
+    BinaryInst *finalAdd = nullptr;
+};
+
 struct VectorMlaMlsPattern {
     BinaryInst *root = nullptr;
     BinaryInst *mul = nullptr;
@@ -182,6 +189,55 @@ static bool matchReductionExitAddv(StoreInst *store,
     pattern.spillBitcast = bc;
     pattern.laneGeps = {gep1, gep2, gep3};
     pattern.laneLoads = {load0, load1, load2, load3};
+    pattern.adds = {add01, add012, add0123};
+    pattern.finalAdd = add0123;
+    return true;
+}
+
+static bool matchExtractReductionAddv(
+    Instruction *candidate, ExtractAddvReductionPattern &pattern) {
+    auto *add0123 = dynamic_cast<BinaryInst *>(candidate);
+    if (!add0123 || !add0123->is_add() ||
+        add0123->type_->tid_ != Type::IntegerTyID)
+        return false;
+    BasicBlock *bb = add0123->parent_;
+    if (!bb) return false;
+
+    Value *source = nullptr;
+    auto matchExtract = [&](Value *value, int lane,
+                            ExtractElementInst *&extract) {
+        extract = dynamic_cast<ExtractElementInst *>(value);
+        if (!extract || extract->parent_ != bb ||
+            extract->type_->tid_ != Type::IntegerTyID ||
+            !isI32Vector4(extract->get_operand(0)->type_))
+            return false;
+        auto *index = getConstIntOperand(extract->get_operand(1));
+        if (!index || index->value_ != lane) return false;
+        if (!source) source = extract->get_operand(0);
+        return extract->get_operand(0) == source;
+    };
+
+    auto *add012 = dynamic_cast<BinaryInst *>(add0123->get_operand(0));
+    ExtractElementInst *extract3 = nullptr;
+    if (!add012 || !matchExtract(add0123->get_operand(1), 3, extract3))
+        return false;
+    auto *add01 = dynamic_cast<BinaryInst *>(add012->get_operand(0));
+    ExtractElementInst *extract2 = nullptr;
+    if (!add01 || !matchExtract(add012->get_operand(1), 2, extract2))
+        return false;
+    ExtractElementInst *extract0 = nullptr;
+    ExtractElementInst *extract1 = nullptr;
+    if (!matchExtract(add01->get_operand(0), 0, extract0) ||
+        !matchExtract(add01->get_operand(1), 1, extract1))
+        return false;
+    if (!add01->is_add() || !add012->is_add()) return false;
+    if (extract0->use_list_.size() != 1 || extract1->use_list_.size() != 1 ||
+        extract2->use_list_.size() != 1 || extract3->use_list_.size() != 1 ||
+        add01->use_list_.size() != 1 || add012->use_list_.size() != 1)
+        return false;
+
+    pattern.sourceVec = source;
+    pattern.extracts = {extract0, extract1, extract2, extract3};
     pattern.adds = {add01, add012, add0123};
     pattern.finalAdd = add0123;
     return true;
@@ -351,6 +407,8 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     std::set<Instruction *> laneLoadSkipped;
     std::map<Instruction *, AddvReductionExitPattern> addvReductions;
     std::set<Instruction *> addvSkipped;
+    std::map<Instruction *, ExtractAddvReductionPattern> extractAddvReductions;
+    std::set<Instruction *> extractAddvSkipped;
     std::map<Instruction *, VectorMlaMlsPattern> vectorMlaMlsRoots;
     std::set<Instruction *> vectorMlaMlsSkipped;
 
@@ -377,6 +435,16 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     }
 
     for (auto *candidate : instrs) {
+        ExtractAddvReductionPattern pattern;
+        if (!matchExtractReductionAddv(candidate, pattern)) continue;
+        extractAddvReductions[candidate] = pattern;
+        for (auto *extract : pattern.extracts)
+            extractAddvSkipped.insert(extract);
+        extractAddvSkipped.insert(pattern.adds[0]);
+        extractAddvSkipped.insert(pattern.adds[1]);
+    }
+
+    for (auto *candidate : instrs) {
         VectorMlaMlsPattern pattern;
         if (!matchVectorMlaMls(candidate, pattern)) continue;
         vectorMlaMlsRoots[candidate] = pattern;
@@ -390,6 +458,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         auto inst = *it;
         if (inst->is_phi()) continue;
         if (laneLoadSkipped.count(inst) || addvSkipped.count(inst) ||
+            extractAddvSkipped.count(inst) ||
             vectorMlaMlsSkipped.count(inst))
             continue;
 
@@ -441,6 +510,22 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                                                  : allocIntReg();
             emitMoveMachine(wDst, sTmp, "fmov");
             storeInt(pattern.finalAdd, wDst);
+            continue;
+        }
+
+        auto extractAddvIt = extractAddvReductions.find(inst);
+        if (extractAddvIt != extractAddvReductions.end()) {
+            const auto &pattern = extractAddvIt->second;
+            std::string source = loadVector(pattern.sourceVec);
+            std::string temporary = allocNEONReg();
+            std::string scalar = "s" + temporary.substr(1);
+            emitRawAluMachine("\taddv " + scalar + ", " + source + ".4s",
+                              scalar, {source}, MOpcode::Neon, 4);
+            std::string destination = hasAssignedReg(pattern.finalAdd)
+                                          ? assignedReg(pattern.finalAdd)
+                                          : allocIntReg();
+            emitMoveMachine(destination, scalar, "fmov");
+            storeInt(pattern.finalAdd, destination);
             continue;
         }
 
@@ -677,15 +762,17 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
         }
         if (auto *gv = dynamic_cast<GlobalVariable*>(ptr)) {
-            std::string base = globalPageBase(gv);
             if (isFloat(val->type_)) {
                 std::string r = loadFloat(val);
+                std::string base = globalPageBase(gv);
                 emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             } else if (isPtr(val->type_)) {
                 std::string r = loadAddr(val);
+                std::string base = globalPageBase(gv);
                 emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             } else {
                 std::string r = loadInt(val);
+                std::string base = globalPageBase(gv);
                 emitStoreMemMachine(r, "[" + base + ", :lo12:" + gv->name_ + "]", {r, base});
             }
         } else {
@@ -1015,6 +1102,31 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         emitRawAluMachine("\tmov " + rd + ".s[" + std::to_string(lane) + "], " + ws,
                           rd, {ws}, MOpcode::Neon);
         if (!hasAssignedReg(inst)) storeVector(inst, rd);
+        break;
+    }
+
+    // ---- ExtractElement ----
+    case Instruction::ExtractElement: {
+        auto *vector = inst->get_operand(0);
+        auto *index = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        auto *vectorTy = dynamic_cast<VectorType *>(vector->type_);
+        if (!index || !vectorTy || index->value_ < 0 ||
+            index->value_ >= static_cast<int>(vectorTy->num_elements_))
+            break;
+        std::string source = loadVector(vector);
+        std::string bits = allocIntReg();
+        emitRawAluMachine("\tumov " + bits + ", " + source + ".s[" +
+                              std::to_string(index->value_) + "]",
+                          bits, {source}, MOpcode::Neon);
+        if (isFloat(inst->type_)) {
+            std::string destination = hasAssignedReg(inst)
+                                          ? assignedReg(inst)
+                                          : allocFloatReg();
+            emitMoveMachine(destination, bits, "fmov");
+            if (!hasAssignedReg(inst)) storeFloat(inst, destination);
+        } else {
+            storeInt(inst, bits);
+        }
         break;
     }
 

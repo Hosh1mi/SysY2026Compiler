@@ -22,12 +22,6 @@ bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI) {
     BasicBlock *preheader = loop->preheader;
     if (!preheader) return false;
 
-    // ScalarExpandedInterchange emits se_* loops whose address shapes its later
-    // consumers assume stay intact; splitting them can expose non-equivalent
-    // pointer recurrences.
-    if (loop->header && loop->header->name_.rfind("se_", 0) == 0)
-        return false;
-
     Module *mod = preheader->parent_->parent_;
     bool changed = false;
 

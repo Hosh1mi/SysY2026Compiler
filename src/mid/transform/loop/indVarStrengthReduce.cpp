@@ -621,6 +621,12 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
+    // Some producers already materialize one target-aware address chain.
+    // Re-strength-reducing its derived part GEPs would create parallel pointer
+    // phis and destroy that chain.  Ordinary vector loops remain eligible.
+    if (loop.header->hasSemFlag(SemFlag::TargetPointerRecurrenceLoop))
+        return;
+
     int inLoopHeaderPreds = 0;
     for (auto *pred : loop.header->pre_bbs_) {
         if (loop.blocks.count(pred))
@@ -658,7 +664,10 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 if (!inst->is_gep()) continue;
                 auto *gep = static_cast<GetElementPtrInst *>(inst);
 
-                // 栈数组基址不削弱（后端取地址限制，函数级注释见 processLoop 顶部）
+                // Stack-derived pointer recurrences currently perturb address
+                // register allocation across surrounding loops.  Keep their
+                // explicit GEPs until the backend can model stack bases as
+                // stable recurrence roots without changing unrelated streams.
                 {
                     Value *root = gep->get_operand(0);
                     while (auto *g2 = dynamic_cast<GetElementPtrInst *>(root))

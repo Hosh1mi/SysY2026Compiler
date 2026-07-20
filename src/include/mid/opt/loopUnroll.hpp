@@ -18,7 +18,7 @@ public:
     std::string name() const override { return "LoopUnroll"; }
 
 private:
-    void runOnFunction(Function *func, BasicAliasAnalysis &BAA);
+    bool runOnFunction(Function *func, BasicAliasAnalysis &BAA);
     bool tryUnroll(Loop &loop, Function *func, Module *module,
                    BasicAliasAnalysis &BAA);
     bool tryUnrollStructured(Loop &loop, Function *func, Module *module);

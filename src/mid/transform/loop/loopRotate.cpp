@@ -84,6 +84,83 @@ static bool isHeaderLocalUse(Instruction *def, Instruction *user,
     return false;
 }
 
+static bool isInvariantForLoop(Value *value, const Loop &loop) {
+    if (dynamic_cast<Constant *>(value) || dynamic_cast<GlobalVariable *>(value) ||
+        dynamic_cast<Argument *>(value))
+        return true;
+    auto *inst = dynamic_cast<Instruction *>(value);
+    return inst && inst->parent_ && !loop.isInLoop(inst->parent_);
+}
+
+// Recognize an innermost monotone-domain guard before rotating a canonical
+// while loop.  One branch must be a side-effect-free skip and the other a
+// memory/call work block; both rejoin the unique latch directly.  This is the
+// source form consumed by inductiveRangeCheckElimination after rotation.
+static bool hasTightenableDomainGuard(const Loop &loop) {
+    if (!loop.canonicalIV || !loop.children.empty())
+        return false;
+    BasicBlock *latch = loop.singleLatch();
+    BasicBlock *header = loop.header;
+    if (!latch || !header)
+        return false;
+    auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
+    if (!headerTerm || headerTerm->num_ops_ != 3)
+        return false;
+    auto *body = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
+    auto *exit = dynamic_cast<BasicBlock *>(headerTerm->get_operand(2));
+    if (!body || !exit || !loop.isInLoop(body) || loop.isInLoop(exit))
+        return false;
+
+    auto *guardTerm = dynamic_cast<BranchInst *>(body->get_terminator());
+    if (!guardTerm || guardTerm->num_ops_ != 3)
+        return false;
+    auto *guardCmp = dynamic_cast<ICmpInst *>(guardTerm->get_operand(0));
+    if (!guardCmp)
+        return false;
+    switch (guardCmp->icmp_op_) {
+    case ICmpInst::ICMP_SLT:
+    case ICmpInst::ICMP_SLE:
+    case ICmpInst::ICMP_SGT:
+    case ICmpInst::ICMP_SGE:
+        break;
+    default:
+        return false;
+    }
+    Value *other = nullptr;
+    if (guardCmp->get_operand(0) == loop.canonicalIV)
+        other = guardCmp->get_operand(1);
+    else if (guardCmp->get_operand(1) == loop.canonicalIV)
+        other = guardCmp->get_operand(0);
+    else
+        return false;
+    if (!isInvariantForLoop(other, loop))
+        return false;
+
+    auto classifyPath = [&](BasicBlock *path) -> int {
+        if (path == latch)
+            return 0;
+        if (!path || !loop.isInLoop(path))
+            return -1;
+        auto *term = dynamic_cast<BranchInst *>(path->get_terminator());
+        if (!term || term->num_ops_ != 1 || term->get_operand(0) != latch)
+            return -1;
+        bool hasWork = false;
+        for (auto *inst : path->instr_list_) {
+            if (inst == term) break;
+            if (inst->is_load() || inst->is_store() || inst->is_call())
+                hasWork = true;
+        }
+        return hasWork ? 1 : 0;
+    };
+
+    int trueKind = classifyPath(
+        dynamic_cast<BasicBlock *>(guardTerm->get_operand(1)));
+    int falseKind = classifyPath(
+        dynamic_cast<BasicBlock *>(guardTerm->get_operand(2)));
+    return (trueKind == 0 && falseKind == 1) ||
+           (trueKind == 1 && falseKind == 0);
+}
+
 bool LoopRotate::runOnFunction(Function *func) {
     bool changed = false;
     bool progress = true;
@@ -143,12 +220,13 @@ BasicBlock *LoopRotate::splitExitEdge(Function *func, BasicBlock *pred,
 bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     if (!loop || !loop->header || !loop->preheader)
         return false;
-    // 规范归纳变量循环（trip count 可由 SCEV 推导）交给下游
-    // LoopVectorize/IndVarStrengthReduce/LoopUnroll 处理：它们匹配的是
-    // 未旋转的 while 形态，旋转反而使其失配（mm 类测试明显退化）。
-    // 只旋转 SCEV 算不出 trip count 的循环。
-    // EXP_ROTATE_IV=1 放开此门槛（do-while unroll 就位后的 A/B 实验）。
-    if (loop->hasCanonicalIV() && !std::getenv("EXP_ROTATE_IV"))
+    // Keep simple canonical while loops in the form consumed directly by
+    // vectorization and IV strength reduction.  A canonical IV alone is not a
+    // reason to reject rotation for a multi-block body: internal control flow
+    // already prevents those simple-loop consumers from matching, while
+    // rotation exposes a guarded do-while form to the structured unroller.
+    if (loop->hasCanonicalIV() && !hasTightenableDomainGuard(*loop) &&
+        !std::getenv("EXP_ROTATE_IV"))
         return false;
     BasicBlock *header = loop->header;
     BasicBlock *preheader = loop->preheader;
@@ -274,6 +352,13 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     BasicBlock *preExit = splitExitEdge(func, preheader, exitSucc);
     BasicBlock *latchExit = splitExitEdge(func, latch, exitSucc);
+    // Keep the rotated loop in simplify form.  The original preheader becomes
+    // the zero-trip guard, so its continue edge needs a new dedicated
+    // single-successor preheader rather than targeting the loop body directly.
+    auto *rotatedPreheader = new BasicBlock(
+        func->parent_, continueSucc->name_ + ".preheader", func);
+    placeBlockBefore(func, rotatedPreheader, continueSucc);
+    new BranchInst(continueSucc, rotatedPreheader);
 
     for (auto *inst : exitSucc->instr_list_) {
         if (!inst->is_phi()) break;
@@ -366,7 +451,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
             Value *preVal = remapValue(oldVal, preMap);
             Value *latchVal = remapValue(oldVal, latchMap);
             phi->remove_operands(i, i + 1);
-            phi->addIncoming(preVal, preheader);
+            phi->addIncoming(preVal, rotatedPreheader);
             phi->addIncoming(latchVal, latch);
             break;
         }
@@ -374,12 +459,16 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     for (auto it = headerPhis.rbegin(); it != headerPhis.rend(); ++it) {
         auto *phi = *it;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == preheader)
+                phi->set_operand(i + 1, rotatedPreheader);
+        }
         header->remove_instr(phi);
         continueSucc->add_instruction_front(phi);
     }
 
-    BasicBlock *preTrue = trueInLoop ? continueSucc : preExit;
-    BasicBlock *preFalse = falseInLoop ? continueSucc : preExit;
+    BasicBlock *preTrue = trueInLoop ? rotatedPreheader : preExit;
+    BasicBlock *preFalse = falseInLoop ? rotatedPreheader : preExit;
     BasicBlock *latchTrue = trueInLoop ? continueSucc : latchExit;
     BasicBlock *latchFalse = falseInLoop ? continueSucc : latchExit;
 

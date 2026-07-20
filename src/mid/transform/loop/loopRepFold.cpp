@@ -1,5 +1,6 @@
 #include "../../../include/mid/opt/loopRepFold.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/analysis/recurrenceAnalysis.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <limits>
 #include <set>
+#include <vector>
 
 namespace {
 
@@ -20,176 +22,6 @@ bool debugReject(const char *reason) {
     if (isLoopRepFoldDebugEnabled())
         std::cerr << "[LoopRepFold] affine reject: " << reason << "\n";
     return false;
-}
-
-bool fitsI32(long long value) {
-    return value >= std::numeric_limits<int>::min() &&
-           value <= std::numeric_limits<int>::max();
-}
-
-bool checkedAdd(long long a, long long b, long long &out) {
-    if ((b > 0 && a > std::numeric_limits<long long>::max() - b) ||
-        (b < 0 && a < std::numeric_limits<long long>::min() - b))
-        return false;
-    out = a + b;
-    return true;
-}
-
-bool checkedMul(long long a, long long b, long long &out) {
-    __int128 product = static_cast<__int128>(a) * static_cast<__int128>(b);
-    if (product > std::numeric_limits<long long>::max() ||
-        product < std::numeric_limits<long long>::min())
-        return false;
-    out = static_cast<long long>(product);
-    return true;
-}
-
-bool checkedSub(long long a, long long b, long long &out) {
-    if (b == std::numeric_limits<long long>::min()) return false;
-    return checkedAdd(a, -b, out);
-}
-
-bool scevConst(const SCEV *s, long long &value) {
-    auto *c = dynamic_cast<const SCEVConstant *>(s);
-    if (!c) return false;
-    value = c->value();
-    return true;
-}
-
-struct AffineStep {
-    bool valid = false;
-    long long coeff = 0;
-    long long constant = 0;
-};
-
-bool addAffine(AffineStep &lhs, const AffineStep &rhs) {
-    long long coeff = 0;
-    long long constant = 0;
-    if (!checkedAdd(lhs.coeff, rhs.coeff, coeff)) return false;
-    if (!checkedAdd(lhs.constant, rhs.constant, constant)) return false;
-    lhs.valid = true;
-    lhs.coeff = coeff;
-    lhs.constant = constant;
-    return true;
-}
-
-bool scaleAffine(AffineStep &expr, long long factor) {
-    long long coeff = 0;
-    long long constant = 0;
-    if (!checkedMul(expr.coeff, factor, coeff)) return false;
-    if (!checkedMul(expr.constant, factor, constant)) return false;
-    expr.coeff = coeff;
-    expr.constant = constant;
-    return true;
-}
-
-AffineStep extractAffineStep(const SCEV *s, PhiInst *iv, ::Loop *loop) {
-    AffineStep invalid;
-    if (!s || !iv || !loop) return invalid;
-
-    long long c = 0;
-    if (scevConst(s, c)) {
-        return {true, 0, c};
-    }
-
-    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s)) {
-        if (unknown->value() == iv)
-            return {true, 1, 0};
-        return invalid;
-    }
-
-    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(s)) {
-        if (addrec->loop() != loop || addrec->phi() != iv)
-            return invalid;
-        long long start = 0;
-        long long step = 0;
-        if (!scevConst(addrec->start(), start) || !scevConst(addrec->step(), step))
-            return invalid;
-        return {true, step, start};
-    }
-
-    if (auto *add = dynamic_cast<const SCEVAddExpr *>(s)) {
-        AffineStep result{true, 0, 0};
-        for (auto *op : add->operands()) {
-            AffineStep term = extractAffineStep(op, iv, loop);
-            if (!term.valid || !addAffine(result, term))
-                return invalid;
-        }
-        return result;
-    }
-
-    if (auto *mul = dynamic_cast<const SCEVMulExpr *>(s)) {
-        AffineStep result{true, 0, 1};
-        bool sawAffine = false;
-        long long factor = 1;
-        for (auto *op : mul->operands()) {
-            long long constVal = 0;
-            if (scevConst(op, constVal)) {
-                if (!checkedMul(factor, constVal, factor))
-                    return invalid;
-                continue;
-            }
-
-            if (sawAffine) return invalid;
-            result = extractAffineStep(op, iv, loop);
-            if (!result.valid) return invalid;
-            sawAffine = true;
-        }
-        if (!sawAffine)
-            return {true, 0, factor};
-        if (!scaleAffine(result, factor))
-            return invalid;
-        return result;
-    }
-
-    return invalid;
-}
-
-struct AccumulatorStep {
-    bool valid = false;
-    int totalRefs = 0;
-    AffineStep step;
-};
-
-AccumulatorStep invalidAccumulatorStep() {
-    return {false, 0, {}};
-}
-
-AccumulatorStep combineAccumulatorSteps(AccumulatorStep lhs,
-                                        AccumulatorStep rhs,
-                                        bool subtractRhs) {
-    if (!lhs.valid || !rhs.valid) return invalidAccumulatorStep();
-    if (subtractRhs && !scaleAffine(rhs.step, -1)) return invalidAccumulatorStep();
-    if (!addAffine(lhs.step, rhs.step)) return invalidAccumulatorStep();
-    lhs.totalRefs += rhs.totalRefs;
-    return lhs;
-}
-
-AccumulatorStep extractAccumulatorStep(Value *value, PhiInst *totalPhi,
-                                       PhiInst *iv, ::Loop *loop,
-                                       ScalarEvolution *SE,
-                                       const std::set<BasicBlock *> &loopBlocks,
-                                       std::set<Instruction *> &chain) {
-    if (!value || !totalPhi || !iv || !loop || !SE) return invalidAccumulatorStep();
-    if (value == totalPhi)
-        return {true, 1, {true, 0, 0}};
-
-    auto *inst = dynamic_cast<Instruction *>(value);
-    if (inst && loopBlocks.count(inst->parent_) &&
-        (inst->is_add() || inst->is_sub())) {
-        chain.insert(inst);
-        AccumulatorStep lhs = extractAccumulatorStep(inst->get_operand(0),
-                                                     totalPhi, iv, loop, SE,
-                                                     loopBlocks, chain);
-        AccumulatorStep rhs = extractAccumulatorStep(inst->get_operand(1),
-                                                     totalPhi, iv, loop, SE,
-                                                     loopBlocks, chain);
-        return combineAccumulatorSteps(lhs, rhs, inst->is_sub());
-    }
-
-    AffineStep step = extractAffineStep(SE->getSCEV(value), iv, loop);
-    if (!step.valid) return invalidAccumulatorStep();
-    return {true, 0, step};
 }
 
 } // namespace
@@ -260,8 +92,9 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
         return debugReject("iv is not matching addrec");
     long long scevInit = 0;
     long long scevStride = 0;
-    if (!scevConst(ivAddRec->start(), scevInit) ||
-        !scevConst(ivAddRec->step(), scevStride))
+    RecurrenceAnalysis RA(*SE);
+    if (!RecurrenceAnalysis::scevConstant(ivAddRec->start(), scevInit) ||
+        !RecurrenceAnalysis::scevConstant(ivAddRec->step(), scevStride))
         return debugReject("iv addrec is not constant");
     if (scevInit != ivInit || scevStride != ivStride)
         return debugReject("local iv and scev mismatch");
@@ -270,11 +103,13 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     auto *boundCI = dynamic_cast<ConstantInt *>(bound);
     if (!boundCI) return debugReject("non-constant bound");
     long long diff = 0;
-    if (!checkedSub(boundCI->value_, ivInit, diff)) return debugReject("bound/init overflow");
+    if (!RecurrenceAnalysis::checkedSub(boundCI->value_, ivInit, diff))
+        return debugReject("bound/init overflow");
     long long iterations = 0;
     if (diff > 0) {
         long long adjusted = 0;
-        if (!checkedAdd(diff, ivStride - 1, adjusted)) return debugReject("trip ceil overflow");
+        if (!RecurrenceAnalysis::checkedAdd(diff, ivStride - 1, adjusted))
+            return debugReject("trip ceil overflow");
         iterations = adjusted / ivStride;
     }
 
@@ -286,10 +121,9 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
         return debugReject("total update is not in loop");
 
     std::set<Instruction *> accumulatorChain;
-    AccumulatorStep accumulator = extractAccumulatorStep(totalLatch, totalPhi,
-                                                        ivPhi, &loop, SE,
-                                                        loop.blocks,
-                                                        accumulatorChain);
+    AccumulatorRecurrenceStep accumulator =
+        RA.analyzeAccumulatorStep(totalLatch, totalPhi, ivPhi, &loop,
+                                  loop.blocks, accumulatorChain);
     if (!accumulator.valid || accumulator.totalRefs != 1)
         return debugReject("cannot identify accumulator step");
 
@@ -305,8 +139,6 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
         return debugReject("exit has phi");
     }
 
-    AffineStep step = accumulator.step;
-
     auto *preheaderBr = loop.preheader->get_terminator();
     if (!preheaderBr || !preheaderBr->is_br()) return debugReject("bad preheader terminator");
     int headerOperand = -1;
@@ -318,20 +150,10 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     }
     if (headerOperand < 0) return debugReject("preheader does not branch to header");
 
-    long long nMinusOne = 0;
-    long long pairCount = 0;
-    long long triangular = 0;
-    long long linearTerm = 0;
-    long long constantTerm = 0;
     long long result = 0;
-    if (!checkedAdd(iterations, -1, nMinusOne)) return debugReject("n-1 overflow");
-    if (!checkedMul(iterations, nMinusOne, pairCount)) return debugReject("n*(n-1) overflow");
-    triangular = pairCount / 2;
-    if (!checkedMul(step.coeff, triangular, linearTerm)) return debugReject("linear term overflow");
-    if (!checkedMul(step.constant, iterations, constantTerm)) return debugReject("constant term overflow");
-    if (!checkedAdd(initCI->value_, linearTerm, result)) return debugReject("result add overflow");
-    if (!checkedAdd(result, constantTerm, result)) return debugReject("result add overflow");
-    if (!fitsI32(result)) return debugReject("result does not fit i32");
+    if (!RA.computeAffineSumClosedForm(initCI->value_, accumulator.step,
+                                       iterations, result))
+        return debugReject("closed form overflow or out of i32 range");
 
     auto *folded = new ConstantInt(module->int32_ty_, static_cast<int>(result));
     std::vector<std::pair<Instruction *, unsigned>> exitUses;
@@ -374,32 +196,39 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
                                            long long ivStride) {
     (void)latch;
     (void)ivPhi;
+    auto reject = [&](const char *reason) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] modular reject header="
+                      << loop.header->name_ << " reason=" << reason << "\n";
+        return false;
+    };
     // 仅规范 0/+1 IV：此时 trip count 恰为 N（当 N>=1）。
-    if (ivInit != 0 || ivStride != 1) return false;
-    if (modFolded_.count(loop.header)) return false;
+    if (ivInit != 0 || ivStride != 1) return reject("non-canonical-iv");
+    if (modFolded_.count(loop.header)) return reject("already-folded");
 
     // total_latch 必须恰为 srem(add(total_phi, c), m)，c>0, m>0 常量。
     auto *rem = dynamic_cast<BinaryInst *>(totalLatch);
-    if (!rem || !rem->is_rem()) return false;
-    if (!loop.blocks.count(rem->parent_)) return false;
+    if (!rem || !rem->is_rem()) return reject("latch-value-is-not-rem");
+    if (!loop.blocks.count(rem->parent_)) return reject("rem-outside-loop");
     auto *mCI = dynamic_cast<ConstantInt *>(rem->get_operand(1));
-    if (!mCI || mCI->value_ <= 0) return false;
+    if (!mCI || mCI->value_ <= 0) return reject("invalid-modulus");
     long long m = mCI->value_;
 
     auto *add = dynamic_cast<BinaryInst *>(rem->get_operand(0));
-    if (!add || !add->is_add() || !loop.blocks.count(add->parent_)) return false;
+    if (!add || !add->is_add() || !loop.blocks.count(add->parent_))
+        return reject("rem-input-is-not-loop-add");
     Value *addL = add->get_operand(0), *addR = add->get_operand(1);
     ConstantInt *cCI = nullptr;
     if (addL == totalPhi) cCI = dynamic_cast<ConstantInt *>(addR);
     else if (addR == totalPhi) cCI = dynamic_cast<ConstantInt *>(addL);
-    if (!cCI || cCI->value_ <= 0) return false;
+    if (!cCI || cCI->value_ <= 0) return reject("invalid-additive-step");
     long long c = cCI->value_;
 
     // total_phi 在循环内只能被那个 add 使用 → 递推确为 (total+c)%m。
     for (auto &use : totalPhi->use_list_) {
         auto *u = dynamic_cast<Instruction *>(use.val_);
         if (!u || !u->parent_ || !loop.blocks.count(u->parent_)) continue;
-        if (u != add) return false;
+        if (u != add) return reject("state-has-extra-loop-use");
     }
 
     // 除 total_phi 外，循环内任何值（含 IV）不得被循环外使用：折叠后快路径
@@ -410,26 +239,62 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
             for (auto &use : inst->use_list_) {
                 auto *u = dynamic_cast<Instruction *>(use.val_);
                 if (u && u->parent_ && !loop.blocks.count(u->parent_))
-                    return false;
+                    return reject("loop-value-escapes");
             }
         }
 
-    // 出口必须是循环专属（唯一前驱为 header）且暂不含 phi（保持简单、安全）。
+    // 出口必须是循环专属（唯一前驱为 header）。LCSSA 可以在此放置
+    // phi；先验证每个 phi 的 fast 边入值都可以精确构造，再修改 CFG。
     if (loopExit->pre_bbs_.size() != 1 || loopExit->pre_bbs_[0] != loop.header)
-        return false;
-    if (!loopExit->instr_list_.empty() &&
-        loopExit->instr_list_.front()->is_phi())
-        return false;
+        return reject("exit-is-not-dedicated");
+
+    enum class ExitIncomingKind { State, Induction, Invariant };
+    struct ExitPhiPlan {
+        PhiInst *phi;
+        Value *headerIncoming;
+        ExitIncomingKind kind;
+    };
+    std::vector<ExitPhiPlan> exitPhiPlans;
+    PhiInst *stateExitPhi = nullptr;
+    for (auto *inst : loopExit->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        Value *incoming = nullptr;
+        int headerIncomingCount = 0;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) != loop.header)
+                return reject("exit-phi-has-non-header-incoming");
+            incoming = phi->get_operand(i);
+            headerIncomingCount++;
+        }
+        if (headerIncomingCount != 1)
+            return reject("exit-phi-header-incoming-is-not-unique");
+
+        ExitIncomingKind kind;
+        if (incoming == totalPhi) {
+            kind = ExitIncomingKind::State;
+            if (!stateExitPhi) stateExitPhi = phi;
+        } else if (incoming == ivPhi) {
+            kind = ExitIncomingKind::Induction;
+        } else if (isLoopInvariant(incoming, loop.blocks)) {
+            kind = ExitIncomingKind::Invariant;
+        } else {
+            return reject("unsupported-loop-value-in-exit-phi");
+        }
+        exitPhiPlans.push_back({phi, incoming, kind});
+    }
 
     // preheader 必须以无条件 br 跳向 header。
     BasicBlock *PH = loop.preheader;
     auto *phTerm = PH->get_terminator();
-    if (!phTerm || !phTerm->is_br() || phTerm->num_ops_ != 1) return false;
-    if (phTerm->get_operand(0) != loop.header) return false;
+    if (!phTerm || !phTerm->is_br() || phTerm->num_ops_ != 1)
+        return reject("invalid-preheader-terminator");
+    if (phTerm->get_operand(0) != loop.header)
+        return reject("preheader-does-not-target-header");
 
     // 防溢出上界：c*N <= INT_MAX - m  →  N <= (INT_MAX - m)/c。
     long long BOUND = ((long long)std::numeric_limits<int>::max() - m) / c;
-    if (BOUND < 1) return false;
+    if (BOUND < 1) return reject("empty-safe-bound");
 
     Function *func = loop.header->parent_;
     auto *i32 = module->int32_ty_;
@@ -472,17 +337,37 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     fast->add_succ_basic_block(loopExit);
     loopExit->add_pre_basic_block(fast);
 
-    // ── 4. 出口合并：exit_phi = [total_phi(来自header), tot(来自fast)]，
-    //        改写 total_phi 的全部循环外使用。 ──
-    std::vector<Value *> vals = {totalPhi, tot};
-    std::vector<BasicBlock *> bbs = {loop.header, fast};
-    auto *exitPhi = new PhiInst(Instruction::PHI, vals, bbs, i32, loopExit);
-    loopExit->add_instruction_front(exitPhi);
+    // ── 4. 补齐 LCSSA phi 的 fast 入边。若已有状态 LCSSA phi 则直接复用，
+    //        否则创建出口合并 phi。 ──
+    for (const auto &plan : exitPhiPlans) {
+        Value *fastIncoming = nullptr;
+        switch (plan.kind) {
+        case ExitIncomingKind::State:
+            fastIncoming = tot;
+            break;
+        case ExitIncomingKind::Induction:
+            fastIncoming = bound;
+            break;
+        case ExitIncomingKind::Invariant:
+            fastIncoming = plan.headerIncoming;
+            break;
+        }
+        plan.phi->add_phi_pair_operand(fastIncoming, fast);
+    }
+
+    PhiInst *exitPhi = stateExitPhi;
+    if (!exitPhi) {
+        std::vector<Value *> vals = {totalPhi, tot};
+        std::vector<BasicBlock *> bbs = {loop.header, fast};
+        exitPhi = new PhiInst(Instruction::PHI, vals, bbs, i32, loopExit);
+        loopExit->add_instruction_front(exitPhi);
+    }
 
     std::vector<std::pair<Instruction *, unsigned>> toReplace;
     for (auto &use : totalPhi->use_list_) {
         auto *u = dynamic_cast<Instruction *>(use.val_);
-        if (u && u != exitPhi && u->parent_ && !loop.blocks.count(u->parent_))
+        if (u && u != exitPhi && u->parent_ && !loop.blocks.count(u->parent_) &&
+            !(u->parent_ == loopExit && u->is_phi()))
             toReplace.push_back({u, use.arg_no_});
     }
     for (auto &[u, argNo] : toReplace) u->set_operand(argNo, exitPhi);
@@ -498,6 +383,9 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
 // ── 主变换 ──────────────────────────────────────────────────────────────────
 
 bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
+    if (isLoopRepFoldDebugEnabled())
+        std::cerr << "[LoopRepFold] inspect header=" << loop.header->name_
+                  << " blocks=" << loop.blocks.size() << "\n";
     if (!loop.preheader) return false;
     // 模式要求 header phi 恰好 (preheader, latch) 两对入边 → 单 latch
     BasicBlock *latch = loop.singleLatch();
@@ -659,6 +547,20 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         }
     }
 
+    // Folding adds latch as a new predecessor of loop_exit. Existing exit phis
+    // must therefore be extendable before any CFG mutation happens.
+    for (auto *inst : loop_exit->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred != loop.header) continue;
+            Value *incoming = phi->get_operand(i);
+            if (incoming != total_phi && !isLoopInvariant(incoming, loop.blocks))
+                return false;
+        }
+    }
+
     // ────────────────────────── 变换开始 ──────────────────────────────────
     if (std::getenv("DEBUG_LOOP_REPFOLD"))
         std::cerr << "[LoopRepFold] fold func=" << loop.header->parent_->name_
@@ -701,6 +603,31 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         loop_exit->add_pre_basic_block(latch);
     }
 
+    // 7b2. loop_exit 多了 latch 前驱，已有 exit phi 必须补齐 incoming。
+    //      total_phi 在新边上的值是 total_final；循环不变量保持原值。
+    for (auto *inst : loop_exit->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        bool hasLatchIncoming = false;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred == latch) {
+                hasLatchIncoming = true;
+                break;
+            }
+        }
+        if (hasLatchIncoming) continue;
+
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred != loop.header) continue;
+            Value *incoming = phi->get_operand(i);
+            phi->add_phi_pair_operand(incoming == total_phi ? total_final : incoming,
+                                      latch);
+            break;
+        }
+    }
+
     // 7c. 删除 header 各 phi 中来自 latch 的 incoming
     auto removeIncoming = [](PhiInst *phi, BasicBlock *pred) {
         for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -740,6 +667,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
             for (auto &use : total_phi->use_list_) {
                 auto *user = dynamic_cast<Instruction *>(use.val_);
                 if (user && user->parent_ && user != exit_phi &&
+                    !(user->parent_ == loop_exit && user->is_phi()) &&
                     !loop.blocks.count(user->parent_))
                     to_replace.push_back({user, use.arg_no_});
             }

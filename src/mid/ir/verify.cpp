@@ -262,6 +262,25 @@ struct Verifier {
     }
 
     void verifyInst(Function *func, BasicBlock *bb, Instruction *inst) {
+        if (inst->op_id_ == Instruction::ExtractElement) {
+            if (inst->num_ops_ != 2) {
+                report(func, "extractelement in '" + bb->name_ +
+                       "' has wrong operand count");
+            } else {
+                auto *vectorTy = dynamic_cast<VectorType *>(
+                    inst->get_operand(0)->type_);
+                if (!vectorTy) {
+                    report(func, "extractelement in '" + bb->name_ +
+                           "' operand 0 is not a vector");
+                } else if (inst->type_ != vectorTy->contained_) {
+                    report(func, "extractelement in '" + bb->name_ +
+                           "' result type does not match the lane type");
+                }
+                if (inst->get_operand(1)->type_->tid_ != Type::IntegerTyID)
+                    report(func, "extractelement in '" + bb->name_ +
+                           "' index is not integer typed");
+            }
+        }
         for (unsigned i = 0; i < inst->num_ops_; ++i) {
             Value *op = inst->get_operand(i);
             if (!op) {

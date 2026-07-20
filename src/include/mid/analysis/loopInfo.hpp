@@ -20,7 +20,9 @@ class Loop {
 public:
     // CFG 关键块
     BasicBlock *header    = nullptr;   // 循环入口，被所有 latch 跳回
-    BasicBlock *preheader = nullptr;   // header 的唯一外部前驱（找不到则 nullptr）
+    // Dedicated preheader: header 的唯一循环外前驱，且该前驱只有一条
+    // 无条件 br 指向 header。找不到这种规范入口时为 nullptr。
+    BasicBlock *preheader = nullptr;
     std::vector<BasicBlock *> latches; // 所有指向 header 的循环内块（back-edge sources）
     std::vector<BasicBlock *> exiting; // 循环内、有后继落在循环外的块（RPO 序）
     std::vector<BasicBlock *> exits;   // 循环外、被 exiting 跳到的块（去重，RPO 序）

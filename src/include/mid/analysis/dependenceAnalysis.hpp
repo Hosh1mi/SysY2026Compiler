@@ -9,9 +9,9 @@
 //
 // 当前实现：
 //   - 索引必须可仿射化为 c0 + Σ c_iv·iv
-//   - GCD test：每维 diff = c_const + Σ c_iv·iv，若 gcd(c_iv) 不整除 c_const
-//     则整对无依赖（包含 "纯常数非零" 这条特例）
-//   - 方向判定保留为粗粒度（含 ANY 的保守模式），尚未实现 Banerjee bounds
+//   - 以两个独立迭代实例建立下标等式，并用 GCD test 排除无解情况
+//   - 常量循环界使用 Banerjee 区间与三角迭代域顶点计算方向
+//   - 缺少界、基址仅 MayAlias 或耦合关系无法求解时保守返回 ANY
 
 #include "affineAnalysis.hpp"
 #include "loopInfo.hpp"
@@ -62,9 +62,15 @@ public:
     }
 
 private:
+    enum class BaseRelation {
+        NoAlias,
+        MustAlias,
+        MayAlias,
+    };
+
     Value             *gepBase(GetElementPtrInst *gep) const;
     GetElementPtrInst *accessGEP(Instruction *acc) const;
-    bool               sameBase(Value *a, Value *b) const;
+    BaseRelation       baseRelation(Value *a, Value *b) const;
 
     const LoopInfo  *LI_;
     AffineAnalysis  *AA_;
