@@ -50,6 +50,10 @@ public:
         PhiInst *pointerPhi = nullptr;
         int pointerOffset = 0;
 
+        // Non-uniform accesses in the same group have provably identical
+        // lane-wise addresses and may share the widened pointer expression.
+        // The group is formed from the normalized address description above.
+        size_t addressGroup = 0;
         Value *underlyingObject = nullptr;
         int programOrder = 0;
     };

@@ -214,6 +214,23 @@ bool LoopVectorizationAnalysis::findPointerRecurrences(
 
 bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
                                                std::string *reason) const {
+    auto recordAccess = [&](MemoryAccess access) {
+        access.addressGroup = plan.memoryAccesses.size();
+        if (access.addressKind != AddressKind::Uniform) {
+            for (const auto &previous : plan.memoryAccesses) {
+                if (previous.addressKind == AddressKind::Uniform ||
+                    previous.scalarType != access.scalarType ||
+                    previous.underlyingObject != access.underlyingObject ||
+                    !sameAddressShape(previous, access))
+                    continue;
+                access.addressGroup = previous.addressGroup;
+                break;
+            }
+        }
+        plan.accessForInst[access.inst] = plan.memoryAccesses.size();
+        plan.memoryAccesses.push_back(access);
+    };
+
     int order = 0;
     for (auto *inst : plan.recipes) {
         if (!inst->is_load() && !inst->is_store()) {
@@ -257,8 +274,7 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
             }
 
             if (classified) {
-                plan.accessForInst[inst] = plan.memoryAccesses.size();
-                plan.memoryAccesses.push_back(access);
+                recordAccess(access);
                 continue;
             }
 
@@ -283,8 +299,7 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
                 access.gep = gep;
                 access.underlyingObject =
                     BAA_.getUnderlyingObject(gep->get_operand(0));
-                plan.accessForInst[inst] = plan.memoryAccesses.size();
-                plan.memoryAccesses.push_back(access);
+                recordAccess(access);
                 continue;
             }
             if (varyingCount != 1)
@@ -300,8 +315,7 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
             access.underlyingObject = BAA_.getUnderlyingObject(gep->get_operand(0));
         }
 
-        plan.accessForInst[inst] = plan.memoryAccesses.size();
-        plan.memoryAccesses.push_back(access);
+        recordAccess(access);
     }
     if (plan.memoryAccesses.empty())
         return reject(reason, "loop has no memory operations");

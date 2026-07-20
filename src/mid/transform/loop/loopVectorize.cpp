@@ -1019,6 +1019,10 @@ bool LoopVectorize::emitVectorizedLoop(
     BasicBlock *vecHeader = new BasicBlock(module, "vector.header", func);
     BasicBlock *vecBody = new BasicBlock(module, "vector.body", func);
     BasicBlock *scalarPH = new BasicBlock(module, "scalar.ph", func);
+    auto insertBeforePreheaderTerminator = [&](Instruction *inst) {
+        preheader->remove_instr(inst);
+        preheader->add_instruction_before_terminator(inst);
+    };
 
     auto *vecIV = PhiInst::create_phi(module->int32_ty_, vecHeader);
     vecHeader->add_instruction_front(vecIV);
@@ -1030,6 +1034,44 @@ bool LoopVectorize::emitVectorizedLoop(
         vecHeader->add_instruction_front(phi);
         phi->addIncoming(recurrence.init, preheader);
         vectorPointers[recurrence.phi] = phi;
+    }
+
+    // Materialize one scalar pointer induction per normalized address group.
+    // UF parts are fixed offsets from this recurrence, so equal load/store
+    // addresses and adjacent parts cannot turn into parallel address phis in
+    // the later strength-reduction pass.
+    std::vector<PhiInst *> vectorAddressPhis(plan.memoryAccesses.size(),
+                                              nullptr);
+    for (const auto &access : plan.memoryAccesses) {
+        if (access.addressKind != AddressKind::InductionGEP ||
+            vectorAddressPhis[access.addressGroup])
+            continue;
+
+        std::vector<Value *> indices;
+        for (unsigned i = 1; i < access.gep->num_ops_; ++i) {
+            if (i != access.varyingIndex) {
+                indices.push_back(access.gep->get_operand(i));
+                continue;
+            }
+            Value *index = plan.induction.init;
+            if (access.ivOffset != 0) {
+                auto *offset =
+                    new ConstantInt(module->int32_ty_, access.ivOffset);
+                auto *adjusted = new BinaryInst(module->int32_ty_,
+                                                Instruction::Add, index,
+                                                offset, preheader, true);
+                insertBeforePreheaderTerminator(adjusted);
+                index = adjusted;
+            }
+            indices.push_back(index);
+        }
+        auto *initialPointer = new GetElementPtrInst(
+            access.gep->get_operand(0), indices, preheader, true);
+        insertBeforePreheaderTerminator(initialPointer);
+        auto *phi = PhiInst::create_phi(initialPointer->type_, vecHeader);
+        vecHeader->add_instruction_front(phi);
+        phi->addIncoming(initialPointer, preheader);
+        vectorAddressPhis[access.addressGroup] = phi;
     }
 
     // Test the last lane of all unrolled vector parts directly.  The add is
@@ -1058,11 +1100,6 @@ bool LoopVectorize::emitVectorizedLoop(
     std::unordered_map<Value *, Value *> splats;
     std::unordered_map<Instruction *, Value *> uniformVectors;
 
-    auto insertBeforePreheaderTerminator = [&](Instruction *inst) {
-        preheader->remove_instr(inst);
-        preheader->add_instruction_before_terminator(inst);
-    };
-
     auto emitSplat = [&](Value *scalar) -> Value * {
         auto found = splats.find(scalar);
         if (found != splats.end()) return found->second;
@@ -1089,6 +1126,7 @@ bool LoopVectorize::emitVectorizedLoop(
         }
 
         std::unordered_map<Value *, Value *> vectorValues;
+        std::unordered_map<size_t, Value *> vectorAddresses;
         Value *vectorIV = nullptr;
         auto getVectorIV = [&]() -> Value * {
             if (vectorIV) return vectorIV;
@@ -1150,24 +1188,14 @@ bool LoopVectorize::emitVectorizedLoop(
                         scalarPointer, {constant}, vecBody);
                 }
             } else {
-                std::vector<Value *> indices;
-                for (unsigned i = 1; i < access.gep->num_ops_; ++i) {
-                    if (i != access.varyingIndex) {
-                        indices.push_back(access.gep->get_operand(i));
-                        continue;
-                    }
-                    Value *index = partIV;
-                    if (access.ivOffset != 0) {
-                        auto *offset = new ConstantInt(module->int32_ty_,
-                                                       access.ivOffset);
-                        index = new BinaryInst(module->int32_ty_,
-                                               Instruction::Add, partIV,
-                                               offset, vecBody);
-                    }
-                    indices.push_back(index);
+                scalarPointer = vectorAddressPhis[access.addressGroup];
+                if (!scalarPointer) return nullptr;
+                if (part != 0) {
+                    auto *offset =
+                        new ConstantInt(module->int32_ty_, part * VF);
+                    scalarPointer = new GetElementPtrInst(
+                        scalarPointer, {offset}, vecBody);
                 }
-                scalarPointer = new GetElementPtrInst(
-                    access.gep->get_operand(0), indices, vecBody);
             }
             return new Bitcast(Instruction::BitCast, scalarPointer,
                                vectorPointerType(access.scalarType), vecBody);
@@ -1209,8 +1237,15 @@ bool LoopVectorize::emitVectorizedLoop(
                     vectorValues[inst] = found->second;
                     continue;
                 }
-                Value *pointer = buildVectorPointer(access);
-                if (!pointer) return false;
+                Value *pointer = nullptr;
+                auto pointerIt = vectorAddresses.find(access.addressGroup);
+                if (pointerIt != vectorAddresses.end()) {
+                    pointer = pointerIt->second;
+                } else {
+                    pointer = buildVectorPointer(access);
+                    if (!pointer) return false;
+                    vectorAddresses.emplace(access.addressGroup, pointer);
+                }
                 if (inst->is_load()) {
                     vectorValues[inst] = new LoadInst(pointer, vecBody);
                 } else {
@@ -1243,6 +1278,12 @@ bool LoopVectorize::emitVectorizedLoop(
         auto *next = new GetElementPtrInst(phi, {step}, vecBody);
         phi->addIncoming(next, vecBody);
     }
+    for (auto *phi : vectorAddressPhis) {
+        if (!phi) continue;
+        auto *step = new ConstantInt(module->int32_ty_, vectorTrip);
+        auto *next = new GetElementPtrInst(phi, {step}, vecBody);
+        phi->addIncoming(next, vecBody);
+    }
     new BranchInst(vecHeader, vecBody);
 
     // The original scalar loop is the epilogue.  Only its outside incoming
@@ -1257,6 +1298,7 @@ bool LoopVectorize::emitVectorizedLoop(
     preheader->remove_succ_basic_block(origHeader);
     origHeader->remove_pre_basic_block(preheader);
     new BranchInst(vecHeader, preheader);
+    vecHeader->setSemFlag(SemFlag::TargetPointerRecurrenceLoop);
     origHeader->setSemFlag(SemFlag::VectorizedEpilogue);
 
     func->invalidateDominatorInfo();
