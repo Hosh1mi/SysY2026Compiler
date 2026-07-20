@@ -26,6 +26,21 @@ static bool parseHashImmediate(const std::string &operand, int &value) {
 	return true;
 }
 
+static bool hasEarlierLoadFromBase(const MachineBasicBlock &block, size_t idx,
+                                   const std::string &base) {
+	for (size_t i = idx; i-- > 0;) {
+		const MachineInstr &line = block.instrs[i];
+		if (line.isLabelLike || line.isCall || line.isBarrier) return false;
+		if (peephLineWritesReg(line, base)) return false;
+		if (!line.mayLoad) continue;
+		for (const std::string &operand : line.asmOperands) {
+			MemOperand addr = peephParseMemOp(operand);
+			if (addr.valid && peephSamePhysicalReg(addr.base, base)) return true;
+		}
+	}
+	return false;
+}
+
 bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 	const MachineInstr &mem = block.instrs[idx];
 	if (mem.isLabelLike) return false;
@@ -36,10 +51,16 @@ bool tryMachinePostIndexScalar(MachineBasicBlock &block, size_t idx) {
 	if (valueClass != 'w' && valueClass != 'x' && valueClass != 's' &&
 	    valueClass != 'd' && valueClass != 'q')
 		return false;
-
 	MemOperand addr = peephParseMemOp(mem.asmOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
 	if (peephRegClass(addr.base) != 'x' || addr.base == "sp") return false;
+	// Cortex-A53 executes in order.  For a read-modify-write stream, updating
+	// the loop-carried address from the vector store makes the following
+	// iteration's load wait for store writeback.  Keep the explicit integer
+	// add independent of the store; loads still benefit from post-indexing.
+	if (mem.opcodeText == "str" && valueClass == 'q' &&
+	    hasEarlierLoadFromBase(block, idx, addr.base))
+		return false;
 	// Base/data overlap with writeback is constrained-unpredictable for some
 	// load/store encodings, so keep those cases in their original form.
 	if (peephSamePhysicalReg(mem.asmOperands[0], addr.base)) return false;
@@ -86,7 +107,6 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 	if (mem.isLabelLike)
 		return false;
 	if (!isSimpleNeonMemOp(mem)) return false;
-
 	MemOperand addr = peephParseMemOp(mem.asmOperands[1]);
 	if (!addr.valid || addr.offset != 0) return false;
 	if (addr.base.empty() || addr.base == "sp") return false;
@@ -120,6 +140,13 @@ bool tryMachinePostIndexNeon(MachineBasicBlock &block, size_t idx) {
 		}
 	}
 	if (postBase.empty() || postBase == "sp") return false;
+	// Apply the same read-modify-write policy before ld1/st1 are printed as
+	// their ldr/str vector aliases.
+	if (mem.opcodeText == "st1" &&
+	    (hasEarlierLoadFromBase(block, idx, addr.base) ||
+	     (postBase != addr.base &&
+	      hasEarlierLoadFromBase(block, idx, postBase))))
+		return false;
 
 	size_t addIdx = idx + 1;
 	bool foundAdd = false;
