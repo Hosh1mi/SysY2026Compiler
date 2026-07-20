@@ -423,7 +423,7 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
     // parts hide load/use latency and halve branch overhead for small bodies,
     // while larger bodies are kept at UF=1 to avoid vector register pressure.
     // This is a target cost decision based only on the planned operations.
-    if (work <= 8 && plan.memoryAccesses.size() <= 4)
+    if (work <= 8 && plan.memoryAccesses.size() <= 2)
         plan.unrollFactor = 2;
 
     int lanesPerIteration = plan.vectorWidth * plan.unrollFactor;

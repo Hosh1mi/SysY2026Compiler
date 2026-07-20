@@ -850,19 +850,98 @@ void LoopVectorize::emitReductionVectorizedLoop(
         return nullptr;
     };
 
+    std::unordered_map<LoadInst *, PackedOperand> expressionLoadMap;
+    for (const auto &entry : group.expressionLoads)
+        expressionLoadMap.emplace(entry.first, entry.second);
+
     auto emitReductionPart = [&](Value *accumulator, int part) -> Value * {
-        Value *lhsVec = emitPackedOperand(group.lhs, part);
-        if (!lhsVec) return nullptr;
-        Value *perLaneVec = lhsVec;
-        if (!group.noMul) {
-            Value *rhsVec = emitPackedOperand(group.rhs, part);
-            if (!rhsVec) return nullptr;
-            perLaneVec = new BinaryInst(vecTy, Instruction::Mul, lhsVec,
-                                        rhsVec, vecBody);
+        if (!group.expressionReduction) {
+            Value *lhsVec = emitPackedOperand(group.lhs, part);
+            if (!lhsVec) return nullptr;
+            Value *perLaneVec = lhsVec;
+            if (!group.noMul) {
+                Value *rhsVec = emitPackedOperand(group.rhs, part);
+                if (!rhsVec) return nullptr;
+                perLaneVec = new BinaryInst(vecTy, Instruction::Mul, lhsVec,
+                                            rhsVec, vecBody);
+            }
+            return new BinaryInst(
+                vecTy, group.isAdd ? Instruction::Add : Instruction::Sub,
+                accumulator, perLaneVec, vecBody);
         }
-        return new BinaryInst(
-            vecTy, group.isAdd ? Instruction::Add : Instruction::Sub,
-            accumulator, perLaneVec, vecBody);
+
+        std::unordered_map<Value *, Value *> expressionCache;
+        std::function<Value *(Value *)> emitExpression = [&](Value *value)
+            -> Value * {
+            auto cached = expressionCache.find(value);
+            if (cached != expressionCache.end()) return cached->second;
+
+            Value *result = nullptr;
+            if (isLoopInvariant(value, loop.blocks)) {
+                auto &entry = splatCache[value];
+                if (!entry) entry = emitSplat(value, preheader);
+                result = entry;
+            } else if (value == iv.phi) {
+                Value *base = nullptr;
+                for (int lane = 0; lane < vecWidth; ++lane) {
+                    auto *index = new ConstantInt(module->int32_ty_, lane);
+                    Value *insertBase = base ? base : vecIVPhi;
+                    auto *insert = new InsertElementInst(
+                        insertBase, vecIVPhi, index, vecBody);
+                    if (lane == 0) insert->type_ = vecTy;
+                    base = insert;
+                }
+                std::vector<Constant *> offsets;
+                for (int lane = 0; lane < vecWidth; ++lane)
+                    offsets.push_back(new ConstantInt(module->int32_ty_,
+                                                       part * vecWidth + lane));
+                auto *offsetVector = new ConstantVector(vecTyCast, offsets);
+                result = new BinaryInst(vecTy, Instruction::Add, base,
+                                        offsetVector, vecBody);
+            } else if (auto *load = dynamic_cast<LoadInst *>(value)) {
+                auto descriptor = expressionLoadMap.find(load);
+                if (descriptor == expressionLoadMap.end()) return nullptr;
+                result = emitPackedOperand(descriptor->second, part);
+            } else if (auto *binary = dynamic_cast<BinaryInst *>(value)) {
+                Value *lhs = emitExpression(binary->get_operand(0));
+                Value *rhs = emitExpression(binary->get_operand(1));
+                if (!lhs || !rhs) return nullptr;
+                if (binary->op_id_ == Instruction::SDiv ||
+                    binary->op_id_ == Instruction::SRem) {
+                    Value *lanes[4] = {nullptr, nullptr, nullptr, nullptr};
+                    for (int lane = 0; lane < vecWidth; ++lane) {
+                        auto *index = new ConstantInt(module->int32_ty_, lane);
+                        auto *scalarLHS = new ExtractElementInst(lhs, index,
+                                                                 vecBody);
+                        auto *scalarRHS = new ExtractElementInst(rhs, index,
+                                                                 vecBody);
+                        lanes[lane] = new BinaryInst(
+                            module->int32_ty_, binary->op_id_, scalarLHS,
+                            scalarRHS, vecBody);
+                    }
+                    result = emitPack4(lanes, vecBody);
+                } else {
+                    result = new BinaryInst(vecTy, binary->op_id_, lhs, rhs,
+                                            vecBody);
+                }
+            }
+            if (result) expressionCache[value] = result;
+            return result;
+        };
+
+        Value *contribution = nullptr;
+        for (auto *term : group.expressionTerms) {
+            Value *termVector = emitExpression(term);
+            if (!termVector) return nullptr;
+            contribution = contribution
+                               ? static_cast<Value *>(new BinaryInst(
+                                     vecTy, Instruction::Add, contribution,
+                                     termVector, vecBody))
+                               : termVector;
+        }
+        if (!contribution) return nullptr;
+        return new BinaryInst(vecTy, Instruction::Add, accumulator,
+                              contribution, vecBody);
     };
 
     Value *vecAccNext = emitReductionPart(vecAccPhi, 0);
@@ -1074,20 +1153,62 @@ bool LoopVectorize::emitVectorizedLoop(
         vectorAddressPhis[access.addressGroup] = phi;
     }
 
-    // Test the last lane of all unrolled vector parts directly.  The add is
-    // wrapping IR arithmetic, and the explicit INT_MAX guard prevents a
-    // wrapped value from making a full vector iteration legal.
-    auto *maxStart =
-        new ConstantInt(module->int32_ty_, INT_MAX - (vectorTrip - 1));
-    auto *addSafe = new ICmpInst(ICmpInst::ICMP_SLE, vecIV, maxStart,
-                                 vecHeader);
-    auto *lastOffset = new ConstantInt(module->int32_ty_, vectorTrip - 1);
-    auto *lastLane = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                    vecIV, lastOffset, vecHeader);
-    auto *lastInRange = new ICmpInst(ICmpInst::ICMP_SLT, lastLane,
-                                     plan.induction.bound, vecHeader);
-    auto *hasFullVector = new BinaryInst(module->int1_ty_, Instruction::And,
-                                         addSafe, lastInRange, vecHeader);
+    // Hoist the signed-overflow proof and first full-vector test out of the
+    // vector loop.  Proving `init + vectorTrip - 1 < bound` also proves that
+    // `bound - vectorTrip` is representable.  Once entered, therefore,
+    // `iv <= bound - vectorTrip` is exactly the scalar `iv < bound` condition
+    // for every lane.  Constant initial values make the entry test a single
+    // comparison, which is the common canonical-loop form.
+    Value *canEnterVector = nullptr;
+    if (auto *constantInit =
+            dynamic_cast<ConstantInt *>(plan.induction.init)) {
+        if (constantInit->value_ <= INT_MAX - (vectorTrip - 1)) {
+            auto *lastInitialLane = new ConstantInt(
+                module->int32_ty_,
+                constantInit->value_ + vectorTrip - 1);
+            auto *initialFull = new ICmpInst(ICmpInst::ICMP_SLT,
+                                             lastInitialLane,
+                                             plan.induction.bound, preheader);
+            insertBeforePreheaderTerminator(initialFull);
+            canEnterVector = initialFull;
+        } else {
+            canEnterVector = new ConstantInt(module->int1_ty_, 0);
+        }
+    } else {
+        auto *maxStart = new ConstantInt(
+            module->int32_ty_, INT_MAX - (vectorTrip - 1));
+        auto *initAddSafe = new ICmpInst(ICmpInst::ICMP_SLE,
+                                         plan.induction.init, maxStart,
+                                         preheader);
+        insertBeforePreheaderTerminator(initAddSafe);
+        auto *lastOffset = new ConstantInt(module->int32_ty_,
+                                           vectorTrip - 1);
+        auto *lastInitialLane = new BinaryInst(
+            module->int32_ty_, Instruction::Add, plan.induction.init,
+            lastOffset, preheader, true);
+        insertBeforePreheaderTerminator(lastInitialLane);
+        auto *initialFull = new ICmpInst(ICmpInst::ICMP_SLT,
+                                         lastInitialLane,
+                                         plan.induction.bound, preheader);
+        insertBeforePreheaderTerminator(initialFull);
+        auto *entry = new BinaryInst(module->int1_ty_, Instruction::And,
+                                     initAddSafe, initialFull, preheader,
+                                     true);
+        insertBeforePreheaderTerminator(entry);
+        canEnterVector = entry;
+    }
+
+    // Wrapping subtraction is defined even on the bypassed path.  The entry
+    // proof above guarantees a mathematical (non-wrapping) value whenever
+    // vecHeader is reached.
+    auto *trip = new ConstantInt(module->int32_ty_, vectorTrip);
+    auto *vectorEnd = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                     plan.induction.bound, trip, preheader,
+                                     true);
+    insertBeforePreheaderTerminator(vectorEnd);
+
+    auto *hasFullVector = new ICmpInst(ICmpInst::ICMP_SLE, vecIV,
+                                       vectorEnd, vecHeader);
     new BranchInst(hasFullVector, vecBody, scalarPH, vecHeader);
 
     auto vectorType = [&](Type *scalar) -> Type * {
@@ -1298,18 +1419,28 @@ bool LoopVectorize::emitVectorizedLoop(
     }
     new BranchInst(vecHeader, vecBody);
 
-    // The original scalar loop is the epilogue.  Only its outside incoming
-    // edges change; its control flow, exits and LCSSA users remain intact.
-    replacePhiIncoming(plan.induction.phi, preheader, vecIV, scalarPH);
-    for (const auto &recurrence : plan.pointerRecurrences)
-        replacePhiIncoming(recurrence.phi, preheader,
-                           vectorPointers[recurrence.phi], scalarPH);
+    // The original scalar loop is the epilogue.  The preheader can bypass the
+    // vector loop when the subtraction is unsafe or fewer than vectorTrip
+    // iterations remain, so merge both entry states explicitly in scalarPH.
+    auto *scalarIV = PhiInst::create_phi(module->int32_ty_, scalarPH);
+    scalarPH->add_instruction_front(scalarIV);
+    scalarIV->addIncoming(plan.induction.init, preheader);
+    scalarIV->addIncoming(vecIV, vecHeader);
+    replacePhiIncoming(plan.induction.phi, preheader, scalarIV, scalarPH);
+    for (const auto &recurrence : plan.pointerRecurrences) {
+        auto *scalarPointer = PhiInst::create_phi(recurrence.phi->type_,
+                                                  scalarPH);
+        scalarPH->add_instruction_front(scalarPointer);
+        scalarPointer->addIncoming(recurrence.init, preheader);
+        scalarPointer->addIncoming(vectorPointers[recurrence.phi], vecHeader);
+        replacePhiIncoming(recurrence.phi, preheader, scalarPointer, scalarPH);
+    }
     new BranchInst(origHeader, scalarPH);
 
     preheader->delete_instr(preheaderBr);
     preheader->remove_succ_basic_block(origHeader);
     origHeader->remove_pre_basic_block(preheader);
-    new BranchInst(vecHeader, preheader);
+    new BranchInst(canEnterVector, vecHeader, scalarPH, preheader);
     vecHeader->setSemFlag(SemFlag::TargetPointerRecurrenceLoop);
     origHeader->setSemFlag(SemFlag::VectorizedEpilogue);
 

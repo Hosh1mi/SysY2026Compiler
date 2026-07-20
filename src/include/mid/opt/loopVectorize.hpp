@@ -5,6 +5,7 @@
 
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class LoopVectorize : public Pass {
@@ -36,6 +37,11 @@ private:
         Value *latchValue;
         PackedOperand lhs;
         PackedOperand rhs;
+        // Optional expression-form reduction description.  The legacy
+        // two-operand form leaves this empty and uses lhs/rhs directly.
+        std::vector<std::pair<LoadInst *, PackedOperand>> expressionLoads;
+        std::vector<Value *> expressionTerms;
+        bool expressionReduction = false;
         int scalarStep;
         bool isAdd = false;
         bool noMul = false;
