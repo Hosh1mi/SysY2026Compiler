@@ -105,7 +105,6 @@ struct MachineBasicBlock {
 struct MachineFunction {
     std::string name;
     std::vector<MachineBasicBlock> blocks;
-    std::set<std::string> loopAlignedLabels;
     int nextIndex = 0;
 };
 
@@ -128,7 +127,6 @@ public:
 
     void emit(MachineInstr inst);
     void emitLine(const std::string &line);
-    void markLoopAlignment(const std::string &label);
 
 private:
     MachineFunction &func_;

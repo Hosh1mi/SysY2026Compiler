@@ -450,14 +450,8 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     // Emit block label only if this block is a branch target or not the entry block.
     // The entry block is reached via the function name, not its label.
     bool isEntry = (bb == func_->basic_blocks_[0]);
-    if (!isEntry || branchTargets_.count(bb)) {
-        // Record the natural-loop header here.  Final machine layout applies
-        // eight-byte alignment only when the padding cannot be reached by
-        // fallthrough.
-        if (loopHeaders_.count(bb))
-            machineEmitter_.markLoopAlignment(bbLabel(func_, bb));
+    if (!isEntry || branchTargets_.count(bb))
         emitMachineLine(bbLabel(func_, bb) + ":");
-    }
 
     resetRegs();
 
