@@ -58,6 +58,14 @@ public:
         int programOrder = 0;
     };
 
+    // A pair of contiguous memory ranges whose independence could not be
+    // proved statically.  The transformation may version the loop with a
+    // range-overlap check and enter the vector loop only on the disjoint path.
+    struct RuntimeMemoryCheck {
+        size_t firstAccess = 0;
+        size_t secondAccess = 0;
+    };
+
     struct Plan {
         Loop *loop = nullptr;
         BasicBlock *preheader = nullptr;
@@ -69,6 +77,7 @@ public:
         std::vector<PointerRecurrence> pointerRecurrences;
         std::vector<Instruction *> recipes;
         std::vector<MemoryAccess> memoryAccesses;
+        std::vector<RuntimeMemoryCheck> runtimeMemoryChecks;
         std::unordered_map<Instruction *, size_t> accessForInst;
         int vectorWidth = DefaultVF;
         int unrollFactor = 1;
@@ -89,7 +98,7 @@ private:
     bool findPointerRecurrences(Plan &plan, std::string *reason) const;
     bool classifyMemory(Plan &plan, std::string *reason) const;
     bool checkInstructions(Plan &plan, std::string *reason) const;
-    bool checkMemoryDependences(const Plan &plan, std::string *reason) const;
+    bool checkMemoryDependences(Plan &plan, std::string *reason) const;
     bool checkProfitability(Plan &plan, std::string *reason) const;
 
     const BasicAliasAnalysis &BAA_;

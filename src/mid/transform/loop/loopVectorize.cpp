@@ -1122,9 +1122,11 @@ bool LoopVectorize::emitVectorizedLoop(
     // the later strength-reduction pass.
     std::vector<PhiInst *> vectorAddressPhis(plan.memoryAccesses.size(),
                                               nullptr);
+    std::vector<Value *> initialAddressForGroup(plan.memoryAccesses.size(),
+                                                nullptr);
     for (const auto &access : plan.memoryAccesses) {
         if (access.addressKind != AddressKind::InductionGEP ||
-            vectorAddressPhis[access.addressGroup])
+            initialAddressForGroup[access.addressGroup])
             continue;
 
         std::vector<Value *> indices;
@@ -1148,10 +1150,36 @@ bool LoopVectorize::emitVectorizedLoop(
         auto *initialPointer = new GetElementPtrInst(
             access.gep->get_operand(0), indices, preheader, true);
         insertBeforePreheaderTerminator(initialPointer);
+        initialAddressForGroup[access.addressGroup] = initialPointer;
         auto *phi = PhiInst::create_phi(initialPointer->type_, vecHeader);
         vecHeader->add_instruction_front(phi);
         phi->addIncoming(initialPointer, preheader);
         vectorAddressPhis[access.addressGroup] = phi;
+    }
+
+    // Pointer recurrences already carry their scalar-loop entry pointer.
+    // Materialize normalized offsets here so runtime range checks use the
+    // exact first address touched by each access group.
+    for (const auto &access : plan.memoryAccesses) {
+        if (access.addressKind != AddressKind::PointerRecurrence ||
+            initialAddressForGroup[access.addressGroup])
+            continue;
+        Value *initialPointer = nullptr;
+        for (const auto &recurrence : plan.pointerRecurrences) {
+            if (recurrence.phi != access.pointerPhi) continue;
+            initialPointer = recurrence.init;
+            break;
+        }
+        if (!initialPointer) return false;
+        if (access.pointerOffset != 0) {
+            auto *offset = new ConstantInt(module->int32_ty_,
+                                           access.pointerOffset);
+            auto *adjusted = new GetElementPtrInst(
+                initialPointer, {offset}, preheader, true);
+            insertBeforePreheaderTerminator(adjusted);
+            initialPointer = adjusted;
+        }
+        initialAddressForGroup[access.addressGroup] = initialPointer;
     }
 
     // Hoist the signed-overflow proof and first full-vector test out of the
@@ -1207,6 +1235,75 @@ bool LoopVectorize::emitVectorizedLoop(
                                      plan.induction.bound, trip, preheader,
                                      true);
     insertBeforePreheaderTerminator(vectorEnd);
+
+    if (!plan.runtimeMemoryChecks.empty()) {
+        // The access range is [start, start + (bound - init)).  Comparing
+        // half-open ranges with unsigned pointer order is sufficient for the
+        // target's flat address space.  These GEPs are deliberately not
+        // inbounds: on the vector-bypass path a wrapped trip value must remain
+        // defined, while canEnterVector prevents that path reaching vecHeader.
+        auto *span = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                    plan.induction.bound,
+                                    plan.induction.init, preheader, true);
+        insertBeforePreheaderTerminator(span);
+        Type *checkPointerType =
+            module->get_pointer_type(module->int32_ty_);
+
+        Value *allDisjoint = nullptr;
+        for (const auto &check : plan.runtimeMemoryChecks) {
+            const auto &first = plan.memoryAccesses[check.firstAccess];
+            const auto &second = plan.memoryAccesses[check.secondAccess];
+            Value *firstStart = initialAddressForGroup[first.addressGroup];
+            Value *secondStart = initialAddressForGroup[second.addressGroup];
+            if (!firstStart || !secondStart) return false;
+
+            auto *firstEnd = new GetElementPtrInst(
+                firstStart, {span}, preheader, true);
+            auto *secondEnd = new GetElementPtrInst(
+                secondStart, {span}, preheader, true);
+            insertBeforePreheaderTerminator(firstEnd);
+            insertBeforePreheaderTerminator(secondEnd);
+
+            auto castForCheck = [&](Value *pointer) -> Value * {
+                if (pointer->type_ == checkPointerType) return pointer;
+                auto *cast = new Bitcast(Instruction::BitCast, pointer,
+                                         checkPointerType, preheader);
+                insertBeforePreheaderTerminator(cast);
+                return cast;
+            };
+            Value *firstStartCast = castForCheck(firstStart);
+            Value *firstEndCast = castForCheck(firstEnd);
+            Value *secondStartCast = castForCheck(secondStart);
+            Value *secondEndCast = castForCheck(secondEnd);
+
+            auto *firstBeforeSecond = new ICmpInst(
+                ICmpInst::ICMP_ULE, firstEndCast, secondStartCast,
+                preheader, true);
+            auto *secondBeforeFirst = new ICmpInst(
+                ICmpInst::ICMP_ULE, secondEndCast, firstStartCast,
+                preheader, true);
+            insertBeforePreheaderTerminator(firstBeforeSecond);
+            insertBeforePreheaderTerminator(secondBeforeFirst);
+            auto *disjoint = new BinaryInst(
+                module->int1_ty_, Instruction::Or, firstBeforeSecond,
+                secondBeforeFirst, preheader, true);
+            insertBeforePreheaderTerminator(disjoint);
+            if (!allDisjoint) {
+                allDisjoint = disjoint;
+            } else {
+                auto *combined = new BinaryInst(
+                    module->int1_ty_, Instruction::And, allDisjoint,
+                    disjoint, preheader, true);
+                insertBeforePreheaderTerminator(combined);
+                allDisjoint = combined;
+            }
+        }
+        auto *safeEntry = new BinaryInst(
+            module->int1_ty_, Instruction::And, canEnterVector,
+            allDisjoint, preheader, true);
+        insertBeforePreheaderTerminator(safeEntry);
+        canEnterVector = safeEntry;
+    }
 
     auto *hasFullVector = new ICmpInst(ICmpInst::ICMP_SLE, vecIV,
                                        vectorEnd, vecHeader);

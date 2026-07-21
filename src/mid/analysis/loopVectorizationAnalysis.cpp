@@ -388,7 +388,8 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
 }
 
 bool LoopVectorizationAnalysis::checkMemoryDependences(
-    const Plan &plan, std::string *reason) const {
+    Plan &plan, std::string *reason) const {
+    std::set<std::pair<size_t, size_t>> checkedGroups;
     for (size_t i = 0; i < plan.memoryAccesses.size(); ++i) {
         const auto &a = plan.memoryAccesses[i];
         for (size_t j = i + 1; j < plan.memoryAccesses.size(); ++j) {
@@ -405,6 +406,21 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
             if (a.underlyingObject == b.underlyingObject &&
                 sameAddressShape(a, b))
                 continue;
+
+            // Unit-stride non-uniform accesses describe contiguous ranges.
+            // When static alias analysis cannot separate two such ranges, a
+            // loop-versioning check can do so without weakening legality: the
+            // original scalar loop remains the fallback for overlapping
+            // ranges.  Record one check per normalized address-group pair.
+            if (a.addressKind != AddressKind::Uniform &&
+                b.addressKind != AddressKind::Uniform) {
+                size_t firstGroup = std::min(a.addressGroup, b.addressGroup);
+                size_t secondGroup = std::max(a.addressGroup, b.addressGroup);
+                if (firstGroup != secondGroup &&
+                    checkedGroups.emplace(firstGroup, secondGroup).second)
+                    plan.runtimeMemoryChecks.push_back({i, j});
+                continue;
+            }
             return reject(reason, "possible loop-carried or cross-lane memory dependence");
         }
     }

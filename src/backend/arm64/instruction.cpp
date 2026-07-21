@@ -68,6 +68,59 @@ static bool isMlaMlsVector4(Type *ty) {
     return isI32Vector4(ty) || isF32Vector4(ty);
 }
 
+static bool hasOnlyVectorMemoryUsers(Value *pointer,
+                                     std::set<Value *> &visited) {
+    if (!pointer || !visited.insert(pointer).second ||
+        pointer->use_list_.empty())
+        return false;
+    for (const auto &use : pointer->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user) return false;
+        if (auto *cast = dynamic_cast<Bitcast *>(user)) {
+            if (cast->get_operand(0) != pointer ||
+                !hasOnlyVectorMemoryUsers(cast, visited))
+                return false;
+            continue;
+        }
+        if (user->is_load() && user->get_operand(0) == pointer &&
+            dynamic_cast<VectorType *>(user->type_))
+            continue;
+        if (user->is_store() && user->get_operand(1) == pointer &&
+            dynamic_cast<VectorType *>(user->get_operand(0)->type_))
+            continue;
+        return false;
+    }
+    return true;
+}
+
+static bool foldableVectorMemoryGep(Value *pointer, Value *&base,
+                                    int &byteOffset) {
+    while (auto *cast = dynamic_cast<Bitcast *>(pointer))
+        pointer = cast->get_operand(0);
+    auto *gep = dynamic_cast<GetElementPtrInst *>(pointer);
+    if (!gep || gep->num_ops_ != 2) return false;
+    auto *index = dynamic_cast<ConstantInt *>(gep->get_operand(1));
+    auto *pointerType = dynamic_cast<PointerType *>(
+        gep->get_operand(0)->type_);
+    if (!index || !pointerType) return false;
+    Type *elementType = pointerType->contained_;
+    if (elementType->tid_ == Type::IntegerTyID) {
+        auto *integerType = static_cast<IntegerType *>(elementType);
+        if (integerType->num_bits_ != 32) return false;
+    } else if (elementType->tid_ != Type::FloatTyID) {
+        return false;
+    }
+    long long offset = static_cast<long long>(index->value_) * 4;
+    // LDR/STR Q use an unsigned 12-bit immediate scaled by 16 bytes.
+    if (offset < 0 || offset > 65520 || offset % 16 != 0)
+        return false;
+    std::set<Value *> visited;
+    if (!hasOnlyVectorMemoryUsers(gep, visited)) return false;
+    base = gep->get_operand(0);
+    byteOffset = static_cast<int>(offset);
+    return true;
+}
+
 static bool enableFusedFloatVectorMlaMls() {
     return std::getenv("SYSY_ENABLE_FP_CONTRACT") != nullptr; //默认禁用，需要fast-math或FP contraction以避免浮点精度差异
 }
@@ -733,10 +786,22 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto val = inst->get_operand(0);
         auto ptr = inst->get_operand(1);
         if (isVector(val->type_)) {
-            std::string addr = loadAddr(ptr);
+            Value *foldedBase = nullptr;
+            int foldedOffset = 0;
+            std::string addr;
+            if (foldableVectorMemoryGep(ptr, foldedBase, foldedOffset)) {
+                addr = loadAddr(foldedBase);
+            } else {
+                addr = loadAddr(ptr);
+            }
             std::string vs = loadVector(val);
-            MachineInstr st = MachineInstr::make("\tst1 {" + vs + ".4s}, [" + addr + "]",
-                                                 MOpcode::Store, {}, {vs, addr});
+            std::string mem = "[" + addr;
+            if (foldedOffset != 0)
+                mem += ", #" + std::to_string(foldedOffset);
+            mem += "]";
+            MachineInstr st = MachineInstr::make(
+                "\tstr q" + vs.substr(1) + ", " + mem,
+                MOpcode::Store, {}, {vs, addr});
             st.mayStore = true;
             emitMachineInstr(std::move(st));
             break;
@@ -775,10 +840,22 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Load: {
         auto ptr = inst->get_operand(0);
         if (isVector(inst->type_)) {
-            std::string addr = loadAddr(ptr);
+            Value *foldedBase = nullptr;
+            int foldedOffset = 0;
+            std::string addr;
+            if (foldableVectorMemoryGep(ptr, foldedBase, foldedOffset)) {
+                addr = loadAddr(foldedBase);
+            } else {
+                addr = loadAddr(ptr);
+            }
             std::string vd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
-            MachineInstr ld = MachineInstr::make("\tld1 {" + vd + ".4s}, [" + addr + "]",
-                                                MOpcode::Load, {vd}, {addr}, 4);
+            std::string mem = "[" + addr;
+            if (foldedOffset != 0)
+                mem += ", #" + std::to_string(foldedOffset);
+            mem += "]";
+            MachineInstr ld = MachineInstr::make(
+                "\tldr q" + vd.substr(1) + ", " + mem,
+                MOpcode::Load, {vd}, {addr}, 4);
             ld.mayLoad = true;
             emitMachineInstr(std::move(ld));
             if (!hasAssignedReg(inst)) storeVector(inst, vd);
@@ -1229,6 +1306,10 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     // ---- GEP ----
     case Instruction::GetElementPtr: {
         auto *gep = static_cast<GetElementPtrInst*>(inst);
+        Value *foldedBase = nullptr;
+        int foldedOffset = 0;
+        if (foldableVectorMemoryGep(gep, foldedBase, foldedOffset))
+            break;
         auto ptr = gep->get_operand(0);
 
         std::string addr;
@@ -1359,6 +1440,11 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     // ---- BitCast ----
     case Instruction::BitCast: {
         auto val = inst->get_operand(0);
+        if (isPtr(inst->type_) && isPtr(val->type_)) {
+            std::set<Value *> visited;
+            if (hasOnlyVectorMemoryUsers(inst, visited))
+                break;
+        }
         if (isFloat(inst->type_) && isInt(val->type_)) {
             std::string r = loadInt(val);
             std::string rd = allocFloatReg();
