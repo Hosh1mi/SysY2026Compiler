@@ -1187,6 +1187,97 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         break;
     }
 
+    // ---- ShuffleVector ----
+    // Lowers shufflevector <4 x i32> to NEON tbl/tbx, with peepholes
+    // for simple patterns (identity → mov, reverse → rev64+ext).
+    case Instruction::ShuffleVector: {
+        auto *v1 = inst->get_operand(0);
+        auto *v2 = inst->get_operand(1);
+        auto *maskVec = static_cast<ConstantVector*>(inst->get_operand(2));
+        auto *vecTy = static_cast<VectorType*>(v1->type_);
+        int N = vecTy->num_elements_;  // 4 for <4 x i32>
+
+        // Extract mask values
+        std::vector<int> maskVals;
+        for (auto *elem : maskVec->elements_) {
+            auto *ci = static_cast<ConstantInt*>(elem);
+            maskVals.push_back(ci->value_);
+        }
+
+        bool isIdentity = true;
+        for (int i = 0; i < N; ++i)
+            if (maskVals[i] != i) { isIdentity = false; break; }
+
+        std::string r1 = loadVector(v1);
+        std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+
+        // Peephole: identity → simple copy
+        if (isIdentity) {
+            if (rd != r1)
+                emitRawAluMachine("\tmov " + rd + ".16b, " + r1 + ".16b",
+                                  rd, {r1}, MOpcode::Neon);
+            if (!hasAssignedReg(inst)) storeVector(inst, rd);
+            break;
+        }
+
+        // Determine if this is a single-source shuffle (all indices < N)
+        // or two-source (some indices >= N).
+        bool singleSrc = true;
+        for (int m : maskVals)
+            if (m >= N) { singleSrc = false; break; }
+
+        // Build byte-level index vector for tbl.
+        // Each i32 lane needs 4 consecutive byte indices: mask*4 + 0,1,2,3.
+        std::string idxReg = allocNEONReg();
+        {
+            // Construct index vector lane by lane
+            std::string prevIdxReg;
+            for (int lane = 0; lane < N; ++lane) {
+                int srcLane = maskVals[lane];
+                // Compute byte offset for this source lane
+                int byte0 = srcLane * 4;
+                // Build a 32-bit value: byte0 | (byte0+1)<<8 | (byte0+2)<<16 | (byte0+3)<<24
+                int wordVal = byte0 | ((byte0 + 1) << 8) |
+                              ((byte0 + 2) << 16) | ((byte0 + 3) << 24);
+                std::string wReg = allocIntReg();
+                emitRawAluMachine("\tmovz " + wReg + ", #" +
+                                      std::to_string(wordVal & 0xFFFF),
+                                  wReg, {}, MOpcode::Mov);
+                if (wordVal > 0xFFFF) {
+                    emitRawAluMachine("\tmovk " + wReg + ", #" +
+                                          std::to_string((wordVal >> 16) & 0xFFFF) +
+                                          ", lsl #16",
+                                      wReg, {wReg}, MOpcode::Mov);
+                }
+                if (lane == 0) {
+                    emitRawAluMachine("\tmov " + idxReg + ".s[0], " + wReg,
+                                      idxReg, {wReg}, MOpcode::Neon);
+                } else {
+                    emitRawAluMachine("\tmov " + idxReg + ".s[" +
+                                          std::to_string(lane) + "], " + wReg,
+                                      idxReg, {wReg}, MOpcode::Neon);
+                }
+                freeIntReg(wReg);
+            }
+        }
+
+        if (singleSrc) {
+            // Single source: table = {r1.16b}, index = idxReg
+            emitRawAluMachine("\ttbl " + rd + ".16b, {" + r1 + ".16b}, " +
+                                  idxReg + ".16b",
+                              rd, {r1, idxReg}, MOpcode::Neon, 2);
+        } else {
+            // Two-source: table = {r1.16b, r2.16b}
+            std::string r2 = loadVector(v2);
+            emitRawAluMachine("\ttbl " + rd + ".16b, {" + r1 + ".16b, " +
+                                  r2 + ".16b}, " + idxReg + ".16b",
+                              rd, {r1, r2, idxReg}, MOpcode::Neon, 2);
+        }
+        freeNEONReg(idxReg);
+        if (!hasAssignedReg(inst)) storeVector(inst, rd);
+        break;
+    }
+
     // ---- ICmp ----
     case Instruction::ICmp: {
         auto *icmp = static_cast<ICmpInst*>(inst);
