@@ -343,7 +343,7 @@ void LoopInfo::analyzeIV(Loop *loop) {
     //    零初值形式另记为 canonicalIV，供依赖分析中 tripCount 的旧语义使用。
     PhiInst *iv = nullptr;
     Value *ivInit = nullptr;
-    Value *ivLatchValue = nullptr;
+    Value *bound = nullptr;
     for (auto *inst : loop->header->instr_list_) {
         if (!inst->is_phi()) break;
         if (inst->type_->tid_ != Type::IntegerTyID) continue;
@@ -366,18 +366,22 @@ void LoopInfo::analyzeIV(Loop *loop) {
         if (!singleLatch || !isStepFromLatch(latch_val, phi, singleLatch))
             continue;
 
+        // A loop may carry several +1 recurrences.  Only the recurrence used
+        // by the loop guard is the control induction variable; an earlier
+        // header phi may instead be an unrelated counter or reduction.  Do
+        // not stop at such a recurrence, or canonicalIV would depend on phi
+        // order and downstream loop transforms could see the wrong shape.
+        Value *candidateBound = nullptr;
+        if (!headerGuardTripCount(loop, phi, candidateBound) &&
+            !latchGuardTripCount(loop, latch_val, candidateBound))
+            continue;
+
         iv = phi;
         ivInit = pre_val;
-        ivLatchValue = latch_val;
+        bound = candidateBound;
         break;
     }
     if (!iv) return;
-
-    // 2. 支持 while-form header guard，也支持 LoopRotate 后的 latch guard。
-    Value *bound = nullptr;
-    if (!headerGuardTripCount(loop, iv, bound) &&
-        !latchGuardTripCount(loop, ivLatchValue, bound))
-        return;
 
     loop->inductionIV   = iv;
     loop->inductionInit = ivInit;
