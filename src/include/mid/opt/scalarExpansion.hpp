@@ -8,11 +8,12 @@
 //   - inner_loop L 是最内层（children 为空），有 parent P
 //   - L 与 P 都有规范 IV（init=0, step=+1, slt bound）
 //   - L.header 有 N+1 个 phi：L.IV + N 个 reduction phi（N ≥ 1）
-//   - 每个 reduction phi 的 init 在 P 外可见，latch 在 L 内
+//   - 每个 reduction phi 的 init 在 L 外可见（可位于 P 的当前迭代），
+//     latch 在 L 内
 //   - L body 不含 store/call；GEP 仿射、base loop-invariant；索引中出现的
 //     IV 只能来自 L 的祖先链（含 L 自身）
 //   - L.singleExit 恰好 N 条 store，与 N 个 reduction phi 一一对应：
-//     每条 store sum_phi_i → gep[base_i, 0, ..., P.IV]，最后一维必为 P.IV
+//     每条 store 的最后一维是 P.IV，前置维度在 P/L 交换范围内保持不变
 //   - P 之外、P 之上的循环以及它们的 IV 全部保留原样
 //
 // 合法性：DependenceAnalysis 在 P↔L 互换下不反转依赖（每个 reduction 通过

@@ -15,6 +15,62 @@ bool availableOutsideLoop(Value *value, Loop *loop) {
     return !loop->blocks.count(inst->parent_);
 }
 
+bool provablyNonNegative(Value *value, Loop *scope) {
+    if (auto *constant = dynamic_cast<ConstantInt *>(value))
+        return constant->value_ >= 0;
+    for (Loop *loop = scope ? scope->parent : nullptr; loop;
+         loop = loop->parent) {
+        if (loop->canonicalIV == value) return true;
+    }
+    return false;
+}
+
+// A reduction store indexed by the parent IV may be delayed when an
+// otherwise parent-invariant load uses the child IV in the same dimension,
+// provided the child range ends at the parent's initial value.  This proves
+// the two accesses address disjoint slices in triangular nests such as
+// [0, parent_init) versus [parent_init, parent_bound).
+bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
+                             GetElementPtrInst *storeGEP,
+                             Loop *inner, Loop *parent,
+                             AffineAnalysis *AA) {
+    if (!bodyGEP || !storeGEP || !inner || !parent || !AA ||
+        !inner->tripCount || !parent->inductionInit ||
+        inner->tripCount != parent->inductionInit ||
+        bodyGEP->num_ops_ != storeGEP->num_ops_)
+        return false;
+
+    PhiInst *innerIV = inner->getInductionIV();
+    PhiInst *parentIV = parent->getInductionIV();
+    if (!innerIV || !parentIV) return false;
+    AffineExpr innerIVExpr = AA->analyze(innerIV);
+    AffineExpr parentIVExpr = AA->analyze(parentIV);
+    if (!innerIVExpr.valid || !parentIVExpr.valid) return false;
+
+    bool separatedDimension = false;
+    auto sameAffine = [](const AffineExpr &a, const AffineExpr &b) {
+        return a.valid && b.valid && a.constant == b.constant &&
+               a.coeffs == b.coeffs;
+    };
+    for (unsigned i = 1; i < bodyGEP->num_ops_; ++i) {
+        AffineExpr body = AA->analyze(bodyGEP->get_operand(i));
+        AffineExpr store = AA->analyze(storeGEP->get_operand(i));
+        if (!body.valid || !store.valid) return false;
+
+        if (sameAffine(body, store)) continue;
+        if (body.coeffOf(innerIV) != 1 || body.coeffOf(parentIV) != 0 ||
+            store.coeffOf(parentIV) != 1 || store.coeffOf(innerIV) != 0)
+            return false;
+
+        AffineExpr bodyOffset = body - innerIVExpr;
+        AffineExpr storeOffset = store - parentIVExpr;
+        if (!sameAffine(bodyOffset, storeOffset)) return false;
+        if (separatedDimension) return false;
+        separatedDimension = true;
+    }
+    return separatedDimension;
+}
+
 } // namespace
 
 bool ReductionAnalysis::detectScalarExpandableNest(
@@ -23,10 +79,11 @@ bool ReductionAnalysis::detectScalarExpandableNest(
 
     Loop *parent = inner->parent;
     if (!parent) return false;
-    if (!inner->hasCanonicalIV() || !parent->hasCanonicalIV()) return false;
+    if (!inner->hasInductionIV() || !parent->hasInductionIV()) return false;
+    if (!provablyNonNegative(parent->inductionInit, parent)) return false;
 
-    PhiInst *innerIV = inner->canonicalIV;
-    PhiInst *parentIV = parent->canonicalIV;
+    PhiInst *innerIV = inner->getInductionIV();
+    PhiInst *parentIV = parent->getInductionIV();
     Value *innerBound = inner->tripCount;
     Value *parentBound = parent->tripCount;
 
@@ -40,8 +97,12 @@ bool ReductionAnalysis::detectScalarExpandableNest(
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         if (phi == innerIV) continue;
-        if (phi->type_->tid_ != Type::IntegerTyID) return false;
-        if (phi->num_ops_ != 4) return false;
+        if (phi->type_->tid_ != Type::IntegerTyID) {
+            return false;
+        }
+        if (phi->num_ops_ != 4) {
+            return false;
+        }
 
         ScalarReductionInfo reduction{};
         reduction.sum_phi = phi;
@@ -53,18 +114,30 @@ bool ReductionAnalysis::detectScalarExpandableNest(
                 reduction.sum_latch = phi->get_operand(i);
             }
         }
-        if (!reduction.sum_init || !reduction.sum_latch) return false;
-        if (!availableOutsideLoop(reduction.sum_init, parent)) return false;
+        if (!reduction.sum_init || !reduction.sum_latch) {
+            return false;
+        }
+        // The initializer may be computed in the parent body (one value per
+        // parent iteration); it only needs to be outside the reduced inner
+        // loop so it dominates the inner preheader.
+        if (!availableOutsideLoop(reduction.sum_init, inner)) {
+            return false;
+        }
         reductions.push_back(reduction);
     }
     if (reductions.empty()) return false;
 
     LoopAccessInfo bodyAccess = loopAccess.collect(inner);
-    if (bodyAccess.has_store || bodyAccess.has_call) return false;
+    if (bodyAccess.has_store || bodyAccess.has_call) {
+        return false;
+    }
     for (auto *gep : bodyAccess.all_geps) {
-        if (!loopAccess.isAffineOverAncestorIVs(gep, inner)) return false;
-        if (!LoopAccessAnalysis::isGlobalOrArgument(gep->get_operand(0)))
+        if (!loopAccess.isAffineOverAncestorIVs(gep, inner)) {
             return false;
+        }
+        if (!LoopAccessAnalysis::isGlobalOrArgument(gep->get_operand(0))) {
+            return false;
+        }
     }
 
     BasicBlock *innerExit = inner->singleExit();
@@ -73,7 +146,9 @@ bool ReductionAnalysis::detectScalarExpandableNest(
         if (inst->is_store()) exitStores.push_back(static_cast<StoreInst *>(inst));
         if (inst->is_call()) return false;
     }
-    if (exitStores.size() != reductions.size()) return false;
+    if (exitStores.size() != reductions.size()) {
+        return false;
+    }
 
     std::vector<bool> matched(reductions.size(), false);
     for (auto *store : exitStores) {
@@ -95,13 +170,22 @@ bool ReductionAnalysis::detectScalarExpandableNest(
         if (!storeGEP || storeGEP->num_ops_ < 2) return false;
 
         AffineExpr firstIndex = AA_->analyze(storeGEP->get_operand(1));
-        if (!firstIndex.isZero()) return false;
+        // A global array GEP has a leading zero, while a pointer-to-row
+        // argument uses its first index as the row coordinate.  In either
+        // form the leading coordinate must be invariant in both exchanged
+        // loops; the final coordinate carries the parent IV below.
+        if (!firstIndex.valid || firstIndex.coeffOf(parentIV) != 0 ||
+            firstIndex.coeffOf(innerIV) != 0)
+            return false;
 
         unsigned last = storeGEP->num_ops_ - 1;
         AffineExpr lastIndex = AA_->analyze(storeGEP->get_operand(last));
-        if (!lastIndex.valid || lastIndex.constant != 0 ||
-            lastIndex.coeffs.size() != 1 || lastIndex.coeffOf(parentIV) != 1)
+        AffineExpr parentExpr = AA_->analyze(parentIV);
+        if (!lastIndex.valid || !parentExpr.valid ||
+            lastIndex.coeffOf(parentIV) != 1 ||
+            !(lastIndex - parentExpr).isZero()) {
             return false;
+        }
 
         for (unsigned m = 2; m < last; m++) {
             AffineExpr midIndex = AA_->analyze(storeGEP->get_operand(m));
@@ -148,21 +232,26 @@ bool ReductionAnalysis::detectScalarExpandableNest(
 
 bool ReductionAnalysis::isScalarExpansionMemoryLegal(
     const ScalarReductionNestInfo &info) const {
-    if (!info.parent_loop || !info.parent_loop->canonicalIV) return false;
-    PhiInst *parentIV = info.parent_loop->canonicalIV;
+    if (!info.parent_loop || !info.parent_loop->getInductionIV()) return false;
+    PhiInst *parentIV = info.parent_loop->getInductionIV();
 
     auto exactParentCoordinate = [&](Value *index) {
         AffineExpr expr = AA_->analyze(index);
-        return expr.valid && expr.constant == 0 && expr.coeffs.size() == 1 &&
-               expr.coeffOf(parentIV) == 1;
+        AffineExpr parentExpr = AA_->analyze(parentIV);
+        if (!expr.valid || !parentExpr.valid || expr.coeffOf(parentIV) != 1)
+            return false;
+        return (expr - parentExpr).isZero();
     };
 
     for (const auto &reduction : info.reductions) {
-        if (!reduction.gep_store || !reduction.base_store) return false;
+        if (!reduction.gep_store || !reduction.base_store) {
+            return false;
+        }
         unsigned storeLast = reduction.gep_store->num_ops_ - 1;
         if (!exactParentCoordinate(
-                reduction.gep_store->get_operand(storeLast)))
+                reduction.gep_store->get_operand(storeLast))) {
             return false;
+        }
 
         for (auto *bodyGEP : info.body_geps) {
             Value *bodyBase = bodyGEP->get_operand(0);
@@ -188,7 +277,11 @@ bool ReductionAnalysis::isScalarExpansionMemoryLegal(
                     break;
                 }
             }
-            if (!sameParentSlice) return false;
+            bool nestedSeparated = separatedByNestedBounds(
+                bodyGEP, reduction.gep_store, info.inner_loop,
+                info.parent_loop, AA_);
+            if (!sameParentSlice && !nestedSeparated)
+                return false;
         }
     }
     return true;

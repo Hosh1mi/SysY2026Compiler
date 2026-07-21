@@ -229,6 +229,34 @@ Instruction *cloneBodyInstruction(Instruction *orig, BasicBlock *dest,
     return clone;
 }
 
+Value *clonePureValue(Value *value, BasicBlock *dest, ValueMap &map,
+                      std::set<Value *> &visiting, Loop *scope) {
+    if (!value) return nullptr;
+    auto mapped = map.find(value);
+    if (mapped != map.end()) return mapped->second;
+    if (dynamic_cast<Constant *>(value) ||
+        dynamic_cast<GlobalVariable *>(value) ||
+        dynamic_cast<Argument *>(value))
+        return value;
+
+    auto *inst = dynamic_cast<Instruction *>(value);
+    if (inst && scope && !scope->blocks.count(inst->parent_)) return value;
+    if (!inst || !isCloneableBodyInstruction(inst) ||
+        !visiting.insert(value).second)
+        return nullptr;
+
+    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        if (dynamic_cast<BasicBlock *>(inst->get_operand(i))) continue;
+        if (!clonePureValue(inst->get_operand(i), dest, map, visiting, scope))
+            return nullptr;
+    }
+    auto *clone = cloneBodyInstruction(inst, dest, map);
+    if (!clone) return nullptr;
+    map[value] = clone;
+    visiting.erase(value);
+    return clone;
+}
+
 } // namespace
 
 void LoopDistribution::execute(Module *module) {
@@ -269,8 +297,8 @@ void LoopDistribution::runOnFunction(Function *func) {
 
 bool LoopDistribution::isLegalAndProfitable(const ScalarReductionNestInfo &info,
                                             LoopInterchangeAnalysis &IA) {
-    PhiInst *L_iv = info.inner_loop->canonicalIV;
-    PhiInst *P_iv = info.parent_loop->canonicalIV;
+    PhiInst *L_iv = info.inner_loop->getInductionIV();
+    PhiInst *P_iv = info.parent_loop->getInductionIV();
     std::vector<GetElementPtrInst *> geps = info.body_geps;
     for (auto &r : info.reductions) geps.push_back(r.gep_store);
     return IA.estimateCost(geps, L_iv, P_iv).profitable();
@@ -285,8 +313,8 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     BasicBlock *P_exit = P->singleExit();
     BasicBlock *L_header = L->header;
     BasicBlock *L_latch = L->singleLatch();
-    PhiInst *P_iv = P->canonicalIV;
-    PhiInst *L_iv = L->canonicalIV;
+    PhiInst *P_iv = P->getInductionIV();
+    PhiInst *L_iv = L->getInductionIV();
     if (!P_preheader || !P_exit || !L_header || !L_latch ||
         !P_iv || !L_iv || !info.parent_bound || !info.inner_bound)
         return false;
@@ -351,6 +379,8 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
 
     auto *zero = new ConstantInt(i32, 0);
     auto *one = new ConstantInt(i32, 1);
+    Value *parentInit = P->inductionInit;
+    if (!parentInit) return false;
 
     auto *clearIV = PhiInst::create_phi(i32, clearHeader);
     clearIV->add_phi_pair_operand(zero, P_preheader);
@@ -358,10 +388,21 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     auto *clearCmp = new ICmpInst(ICmpInst::ICMP_SLT, clearIV,
                                   info.parent_bound, clearHeader);
     new BranchInst(clearCmp, clearBody, outerHeader, clearHeader);
+    std::vector<std::pair<AllocaInst *, Value *>> initialValues;
+    for (const auto &entry : reductions) {
+        ValueMap initMap;
+        initMap[P_iv] = clearIV;
+        std::set<Value *> visiting;
+        Value *initialValue = clonePureValue(entry.reduction.sum_init,
+                                             clearBody, initMap, visiting, P);
+        if (!initialValue) return false;
+        initialValues.push_back({entry.scratch, initialValue});
+    }
     new BranchInst(clearLatch, clearBody);
-    for (const auto &entry : reductions)
-        insertScratchStore(entry.scratch, zero, clearIV,
-                           entry.reduction.sum_init, clearBody);
+    for (const auto &[scratch, initialValue] : initialValues) {
+        insertScratchStore(scratch, zero, clearIV, initialValue,
+                           clearBody);
+    }
     auto *clearNext = new BinaryInst(i32, Instruction::Add, clearIV, one,
                                      clearLatch);
     clearIV->add_phi_pair_operand(clearNext, clearLatch);
@@ -379,7 +420,7 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     new BranchInst(innerHeader, outerBody);
 
     auto *innerIV = PhiInst::create_phi(i32, innerHeader);
-    innerIV->add_phi_pair_operand(zero, outerBody);
+    innerIV->add_phi_pair_operand(parentInit, outerBody);
     innerHeader->add_instruction_front(innerIV);
 
     std::unordered_map<BasicBlock *, BasicBlock *> blockMap;
@@ -490,7 +531,7 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     new BranchInst(outerHeader, outerLatch);
 
     auto *storeIV = PhiInst::create_phi(i32, storeHeader);
-    storeIV->add_phi_pair_operand(zero, outerHeader);
+    storeIV->add_phi_pair_operand(parentInit, outerHeader);
     storeHeader->add_instruction_front(storeIV);
     auto *storeCmp = new ICmpInst(ICmpInst::ICMP_SLT, storeIV,
                                   info.parent_bound, storeHeader);

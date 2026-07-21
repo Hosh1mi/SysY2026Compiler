@@ -339,8 +339,10 @@ Loop *LoopInfo::getLoopFor(BasicBlock *bb) const {
 void LoopInfo::analyzeIV(Loop *loop) {
     if (!loop->preheader) return;
 
-    // 1. 找 header 中所有规范 phi（init=0 from preheader, step=+1 from some latch）
+    // 1. 找 header 中步长为 +1 的归纳 phi。初值只需在本循环外可用；
+    //    零初值形式另记为 canonicalIV，供依赖分析中 tripCount 的旧语义使用。
     PhiInst *iv = nullptr;
+    Value *ivInit = nullptr;
     Value *ivLatchValue = nullptr;
     for (auto *inst : loop->header->instr_list_) {
         if (!inst->is_phi()) break;
@@ -360,14 +362,12 @@ void LoopInfo::analyzeIV(Loop *loop) {
         }
         if (!pre_val || !latch_val) continue;
 
-        auto *ci_init = dynamic_cast<ConstantInt *>(pre_val);
-        if (!ci_init || ci_init->value_ != 0) continue;
-
         BasicBlock *singleLatch = loop->singleLatch();
         if (!singleLatch || !isStepFromLatch(latch_val, phi, singleLatch))
             continue;
 
         iv = phi;
+        ivInit = pre_val;
         ivLatchValue = latch_val;
         break;
     }
@@ -379,7 +379,11 @@ void LoopInfo::analyzeIV(Loop *loop) {
         !latchGuardTripCount(loop, ivLatchValue, bound))
         return;
 
-    loop->canonicalIV = iv;
+    loop->inductionIV   = iv;
+    loop->inductionInit = ivInit;
+    if (auto *ci_init = dynamic_cast<ConstantInt *>(ivInit);
+        ci_init && ci_init->value_ == 0)
+        loop->canonicalIV = iv;
     loop->tripCount   = bound;
     loop->predicate   = ICmpInst::ICMP_SLT;
 }

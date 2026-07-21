@@ -131,16 +131,15 @@ AffineExpr AffineAnalysis::fromSCEV(const SCEV *s) {
     }
     case SCEVKind::AddRecExpr: {
         auto *addrec = static_cast<const SCEVAddRecExpr*>(s);
-        Loop *loop = addrec->loop();
-        if (!loop || !loop->canonicalIV) return AffineExpr::makeInvalid();
-        if (addrec->phi() != loop->canonicalIV) return AffineExpr::makeInvalid();
+        if (!addrec->loop() || !addrec->phi())
+            return AffineExpr::makeInvalid();
 
         AffineExpr start = fromSCEV(addrec->start());
         AffineExpr step = fromSCEV(addrec->step());
         if (!start.valid || !step.valid || !step.isConstant())
             return AffineExpr::makeInvalid();
 
-        return start + (AffineExpr::makeIV(loop->canonicalIV) * step.constant);
+        return start + (AffineExpr::makeIV(addrec->phi()) * step.constant);
     }
     case SCEVKind::Unknown:
     case SCEVKind::CouldNotCompute:

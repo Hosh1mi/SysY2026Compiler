@@ -37,9 +37,15 @@ public:
     std::vector<Loop *> children;
     int depth = 0;                     // 顶层=0, 子循环递增
 
-    // 规范归纳变量（如果是 for(i=0; i<bound; i+=1)）
+    // 规范归纳变量（从零开始的 +1 归纳变量）。
     PhiInst *canonicalIV = nullptr;
     Value   *tripCount   = nullptr;    // icmp 的上界
+    // 更一般的循环归纳变量：允许循环不变的非零初值。
+    // canonicalIV 仍仅表示零初值形式，避免改变依赖分析中
+    // tripCount 的既有含义；需要处理一般 +1 归纳变量的变换应使用
+    // inductionIV / inductionInit。
+    PhiInst *inductionIV = nullptr;
+    Value   *inductionInit = nullptr;
     ICmpInst::ICmpOp predicate = ICmpInst::ICMP_SLT;  // <, <=（暂只识别 SLT）
 
     // 查询
@@ -48,6 +54,10 @@ public:
     BasicBlock *singleLatch() const { return latches.size() == 1 ? latches[0] : nullptr; }
     BasicBlock *singleExit()  const { return exits.size()   == 1 ? exits[0]   : nullptr; }
     bool hasCanonicalIV() const { return canonicalIV != nullptr; }
+    bool hasInductionIV() const { return inductionIV != nullptr; }
+    PhiInst *getInductionIV() const {
+        return inductionIV ? inductionIV : canonicalIV;
+    }
 
     std::string print() const;
 };

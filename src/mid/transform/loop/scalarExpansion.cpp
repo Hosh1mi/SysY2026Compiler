@@ -67,8 +67,8 @@ AllocaInst *ScalarExpansion::createTempBuffer(Function *func, int size) {
 
 bool ScalarExpansion::isLegalAndProfitable(const ScalarReductionNestInfo &info,
                                            LoopInterchangeAnalysis &IA) {
-    PhiInst *L_iv = info.inner_loop->canonicalIV;
-    PhiInst *P_iv = info.parent_loop->canonicalIV;
+    PhiInst *L_iv = info.inner_loop->getInductionIV();
+    PhiInst *P_iv = info.parent_loop->getInductionIV();
     std::vector<GetElementPtrInst *> geps = info.body_geps;
     for (auto &r : info.reductions) geps.push_back(r.gep_store);
 

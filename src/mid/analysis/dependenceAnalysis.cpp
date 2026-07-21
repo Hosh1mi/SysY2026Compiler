@@ -90,7 +90,7 @@ static bool hasOnlyNestIVs(const AffineExpr &expr,
     for (const auto &term : expr.coeffs) {
         bool found = false;
         for (auto *loop : loops) {
-            if (loop->canonicalIV == term.first) {
+            if (loop->getInductionIV() == term.first) {
                 found = true;
                 break;
             }
@@ -298,7 +298,7 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
     // Symbolic fallback: recognize only a strong SIV equation. Everything
     // coupled, opaque, or absent from the address remains conservatively ANY.
     for (Loop *loop : result.commonLoops) {
-        PhiInst *iv = loop->canonicalIV;
+        PhiInst *iv = loop->getInductionIV();
         if (!iv) {
             result.direction.push_back(DIR_ANY);
             continue;
