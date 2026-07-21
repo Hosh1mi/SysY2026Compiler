@@ -2,6 +2,7 @@
 #include "../../include/backend/arm64/helpers.hpp"
 #include "../../include/backend/arm64/magicNumber.hpp"
 #include "../../include/backend/arm64/regalloc.hpp"
+#include "../../include/mid/analysis/loopInfo.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -260,6 +261,13 @@ void Arm64FuncContext::generate() {
     blockSkipped_.clear();
     cselHandled_.clear();
     fixedValueRegs_.clear();
+    loopHeaders_.clear();
+    if (enableRegAlloc_) {
+        LoopInfo loopInfo;
+        loopInfo.analyze(func_);
+        for (const auto &loop : loopInfo.allLoops())
+            loopHeaders_.insert(loop->header);
+    }
 
     emitPrologue();
     if (!func_->basic_blocks_.empty())
@@ -424,7 +432,10 @@ static void mergePromotedConstRegs(std::vector<int> &regs,
 
 void Arm64FuncContext::emitPrologue() {
     emitMachineLine("\t.global " + func_->name_);
-    emitMachineLine("\t.p2align 2");
+    // Cortex-A53 is an in-order dual-issue core.  Use the same bounded
+    // function alignment policy as the target-tuned runtime: align to 16
+    // bytes unless doing so would require more than 11 bytes of padding.
+    emitMachineLine(enableRegAlloc_ ? "\t.p2align 4,,11" : "\t.p2align 2");
     emitMachineLine(func_->name_ + ":");
 
     // Allocate slots only for arguments that remain memory-resident or arrive

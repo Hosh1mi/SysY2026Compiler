@@ -589,8 +589,16 @@ void appendMachineInstr(MachineFunction &func, MachineInstr inst) {
 std::string printMachineFunction(const MachineFunction &func) {
     std::ostringstream out;
     for (const auto &block : func.blocks) {
-        for (const auto &inst : block.instrs)
+        for (const auto &inst : block.instrs) {
+            if (inst.opcode == MOpcode::Label) {
+                std::string label = trim(inst.text);
+                if (!label.empty() && label.back() == ':')
+                    label.pop_back();
+                if (func.loopAlignedLabels.count(label))
+                    out << "\t.p2align 3,,7\n";
+            }
             out << inst.text << "\n";
+        }
     }
     return out.str();
 }
@@ -694,4 +702,8 @@ void MachineEmitter::emit(MachineInstr inst) {
 
 void MachineEmitter::emitLine(const std::string &line) {
     emit(MachineInstr::raw(line));
+}
+
+void MachineEmitter::markLoopAlignment(const std::string &label) {
+    func_.loopAlignedLabels.insert(label);
 }
