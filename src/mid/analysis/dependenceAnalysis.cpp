@@ -388,11 +388,15 @@ bool DependenceAnalysis::isInterchangeLegal(
             Dir d_o = r.direction[idx_o];
             Dir d_i = r.direction[idx_i];
 
-            // After permutation, inner is the first inspected component.
-            // A lexicographically negative or unknown direction is illegal.
-            if (d_i == DIR_GT || d_i == DIR_ANY)
-                return false;
-            if (d_i == DIR_EQ && (d_o == DIR_GT || d_o == DIR_ANY))
+            // Swapping an equality component with any other component leaves
+            // the first non-equality direction unchanged.  This is important
+            // for recurrences whose address is invariant in the outer loop:
+            // the outer direction can be unknown while the inner dimension is
+            // still proven equal.  Otherwise, unknown or opposing components
+            // may reverse the dependence and must be rejected.
+            if (d_o == DIR_EQ || d_i == DIR_EQ)
+                continue;
+            if (d_o == DIR_ANY || d_i == DIR_ANY || d_o != d_i)
                 return false;
         }
     }

@@ -405,11 +405,9 @@ bool applyParallelSink(Function *func, Loop *K) {
 // Before: for K { for M { body } }
 // After:  for M { for K { body } }
 //
-// M's header may contain non-phi instructions that depend on K's IV
-// (e.g., a guard like A[i][k]==1).  We split M_header: phi(s) move to
-// a new outer header (mOuter); the rest stays as the inner loop body.
-// M's loop condition may be in the latch (non-canonical form) — that's
-// fine, the condition stays in the latch.
+// M must have a canonical header guard.  Its phi nodes and guard move to a
+// new outer header (mOuter), while the old header becomes the entry to the
+// interchanged body.  Guards that depend on K remain in their body blocks.
 
 bool applyInterchange(Function *func, Loop *K, Loop *M) {
     Module *module = func->parent_;
@@ -456,10 +454,29 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
     }
     if (mPhis.empty()) return reject("inner header has no phi nodes");
 
+    auto *mBranch = dynamic_cast<BranchInst *>(mHeader->get_terminator());
+    auto *mGuard = mBranch && mBranch->num_ops_ == 3
+                       ? dynamic_cast<ICmpInst *>(mBranch->get_operand(0))
+                       : nullptr;
+    BasicBlock *mBodySucc = nullptr;
+    BasicBlock *mExitSucc = nullptr;
+    if (mBranch && mBranch->num_ops_ == 3) {
+        for (unsigned i = 1; i < mBranch->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock *>(mBranch->get_operand(i));
+            if (!succ) continue;
+            if (M->isInLoop(succ)) mBodySucc = succ;
+            else                   mExitSucc = succ;
+        }
+    }
+    if (!M->canonicalIV || !mGuard ||
+        mGuard->icmp_op_ != ICmpInst::ICMP_SLT ||
+        mGuard->get_operand(0) != M->canonicalIV ||
+        !mBodySucc || !mExitSucc)
+        return reject("inner loop is not guarded by its canonical induction");
+
     for (auto *inst : mHeader->instr_list_) {
-        if (inst->is_phi()) continue;
-        if (inst->isTerminator()) break;
-        if (inst->is_call()) return reject("inner header contains a call");
+        if (inst->is_phi() || inst == mGuard || inst == mBranch) continue;
+        return reject("inner header contains instructions outside its guard");
     }
 
     auto bbNum = [&]() { return std::to_string((int)func->basic_blocks_.size() + 3000); };
@@ -471,9 +488,18 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
         mOuter->add_instruction(phi);
     }
 
-    new BranchInst(mPre, mOuter);
-    mOuter->add_succ_basic_block(mPre);
-    mPre->add_pre_basic_block(mOuter);
+    // The inner loop guard becomes the guard of the new outer loop.  Keeping
+    // it in the old header would merely skip the body once the inner IV is out
+    // of range; the old outer loop would continue to advance forever.
+    mHeader->remove_instr(mGuard);
+    mOuter->add_instruction(mGuard);
+    for (auto *succ : std::vector<BasicBlock *>(mHeader->succ_bbs_)) {
+        mHeader->remove_succ_basic_block(succ);
+        succ->remove_pre_basic_block(mHeader);
+    }
+    mHeader->delete_instr(mBranch);
+    new BranchInst(mBodySucc, mHeader);
+    new BranchInst(mGuard, mPre, kExit, mOuter);
 
     for (auto *phi : mPhis) {
         for (unsigned i = 0; i < phi->num_ops_; i += 2)
