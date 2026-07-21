@@ -35,6 +35,7 @@
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
 #include "include/mid/opt/loopVectorize.hpp"
+#include "include/mid/opt/slpVectorize.hpp"
 #include "include/mid/opt/ifConversion.hpp"
 #include "include/mid/opt/loopInterchange.hpp"
 #include "include/mid/opt/splitGEP.hpp"
@@ -295,6 +296,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopVectorize>());
+    pm.addPass(std::make_unique<SLPVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
     addLateTargetIndependentPasses(pm, m);
