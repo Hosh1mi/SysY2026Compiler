@@ -451,9 +451,9 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
     // The entry block is reached via the function name, not its label.
     bool isEntry = (bb == func_->basic_blocks_[0]);
     if (!isEntry || branchTargets_.count(bb)) {
-        // A64 instructions are four bytes wide.  Eight-byte loop alignment
-        // keeps a loop entry on an instruction-pair boundary while adding at
-        // most one nop, which bounds both code-size and I-cache cost.
+        // Record the natural-loop header here.  Final machine layout applies
+        // eight-byte alignment only when the padding cannot be reached by
+        // fallthrough.
         if (loopHeaders_.count(bb))
             machineEmitter_.markLoopAlignment(bbLabel(func_, bb));
         emitMachineLine(bbLabel(func_, bb) + ":");

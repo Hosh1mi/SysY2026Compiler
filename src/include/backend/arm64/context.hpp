@@ -166,8 +166,9 @@ private:
     std::set<int> reservedNEONRegs_;
     std::set<BasicBlock*> blockSkipped_;  // blocks handled by csel, don't emit
     std::set<std::pair<BasicBlock*, Value*>> cselHandled_; // (pred, phi) pairs already handled by csel
-    // Natural-loop headers are aligned during emission.  Keep the decision on
-    // CFG structure rather than block names or final layout direction.
+    // Natural-loop headers are alignment candidates.  Final machine layout
+    // decides whether padding can be inserted without entering a fallthrough
+    // path.
     std::set<BasicBlock*> loopHeaders_;
 
     std::map<Value*, std::string> assignedRegs_; // Value* → physical reg name (graph coloring)

@@ -588,14 +588,28 @@ void appendMachineInstr(MachineFunction &func, MachineInstr inst) {
 
 std::string printMachineFunction(const MachineFunction &func) {
     std::ostringstream out;
+    bool canFallThrough = true;
     for (const auto &block : func.blocks) {
         for (const auto &inst : block.instrs) {
             if (inst.opcode == MOpcode::Label) {
                 std::string label = trim(inst.text);
                 if (!label.empty() && label.back() == ':')
                     label.pop_back();
-                if (func.loopAlignedLabels.count(label))
+                // Padding on a fallthrough edge is executed every time that
+                // edge is taken.  Only align loop entries after an explicit
+                // control-flow barrier, so the padding is unreachable code.
+                if (func.loopAlignedLabels.count(label) && !canFallThrough)
                     out << "\t.p2align 3,,7\n";
+
+                // A label is itself an entry point.  A following label must
+                // therefore be treated as reachable by fallthrough even when
+                // the instruction before this label was a terminator.
+                canFallThrough = true;
+            } else if (inst.opcode != MOpcode::Directive &&
+                       inst.opcode != MOpcode::Comment) {
+                canFallThrough = inst.opcodeText != "b" &&
+                                 inst.opcodeText != "br" &&
+                                 inst.opcodeText != "ret";
             }
             out << inst.text << "\n";
         }
