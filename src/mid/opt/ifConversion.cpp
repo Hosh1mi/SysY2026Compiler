@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
+#include <set>
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,6 +38,40 @@ static bool isSafeToSpeculate(Instruction *inst) {
     default:
         return false; // Store, Call, SRem, Alloca, Ret, Br …
     }
+}
+
+// A canonical `phi(init, phi + 1)` induction variable guarded by
+// `phi < bound` is non-negative in its loop body when init is non-negative.
+// The increment cannot overflow before the next guard because the current
+// value is strictly below a signed i32 bound.
+static bool isNonNegativeUnitInduction(Value *value, BasicBlock *body) {
+    auto *phi = dynamic_cast<PhiInst *>(value);
+    if (!phi || phi->num_ops_ != 4 || !phi->parent_ || !body)
+        return false;
+
+    bool hasNonNegativeInit = false;
+    bool hasUnitUpdate = false;
+    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        Value *incoming = phi->get_operand(i);
+        if (auto *init = dynamic_cast<ConstantInt *>(incoming)) {
+            if (init->value_ >= 0) hasNonNegativeInit = true;
+            continue;
+        }
+        auto *update = dynamic_cast<BinaryInst *>(incoming);
+        if (!update || !update->is_add()) continue;
+        auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
+        if (update->get_operand(0) == phi && step && step->value_ == 1)
+            hasUnitUpdate = true;
+    }
+    if (!hasNonNegativeInit || !hasUnitUpdate) return false;
+
+    auto *headerTerm = dynamic_cast<BranchInst *>(phi->parent_->get_terminator());
+    if (!headerTerm || headerTerm->num_ops_ != 3 ||
+        headerTerm->get_operand(1) != body)
+        return false;
+    auto *compare = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
+    return compare && compare->icmp_op_ == ICmpInst::ICMP_SLT &&
+           compare->get_operand(0) == phi;
 }
 
 // Convert a store-only diamond by selecting its destination address.  Both
@@ -99,6 +134,11 @@ static bool tryConvertStoreDiamond(Function *func) {
                          fInsts.end());
         }
 
+        std::set<Instruction *> exactInstructions;
+        for (auto *inst : tInsts)
+            if (inst->hasSemFlag(SemFlag::Exact))
+                exactInstructions.insert(inst);
+
         // Moving an operation out of its guarded arm makes its wrapping and
         // exactness promises invalid on the formerly unexecuted path.  The
         // plain operation has the same result on the selected path.
@@ -141,11 +181,66 @@ static bool tryConvertStoreDiamond(Function *func) {
                 differingIndex = i;
             }
             if (differingIndex != 0) {
-                auto *selectedIndex = new SelectInst(
-                    br->get_operand(0), tGep->get_operand(differingIndex),
-                    fGep->get_operand(differingIndex),
-                    tGep->get_operand(differingIndex)->type_);
-                B->add_instruction_before_inst(selectedIndex, br);
+                Value *trueIndex = tGep->get_operand(differingIndex);
+                Value *falseIndex = fGep->get_operand(differingIndex);
+                Value *selectedIndex = nullptr;
+
+                // `ashr exact x, 1` is equal to `sdiv x, 2` on its defined
+                // path.  When the other path is `offset + sdiv x, 2`, compute
+                // that quotient once and select only the offset.  This is a
+                // general conditional-index identity, not a source-pattern
+                // special case.
+                auto *exactShift = dynamic_cast<BinaryInst *>(trueIndex);
+                auto *offsetAdd = dynamic_cast<BinaryInst *>(falseIndex);
+                Value *offset = nullptr;
+                if (exactShift && exactShift->op_id_ == Instruction::AShr &&
+                    exactInstructions.count(exactShift) && offsetAdd &&
+                    offsetAdd->is_add()) {
+                    auto *shiftAmount = dynamic_cast<ConstantInt *>(
+                        exactShift->get_operand(1));
+                    for (unsigned i = 0; i < 2; ++i) {
+                        auto *division = dynamic_cast<BinaryInst *>(
+                            offsetAdd->get_operand(i));
+                        auto *divisor = division ? dynamic_cast<ConstantInt *>(
+                            division->get_operand(1)) : nullptr;
+                        if (!division || division->op_id_ != Instruction::SDiv ||
+                            !divisor || divisor->value_ != 2 ||
+                            division->get_operand(0) != exactShift->get_operand(0))
+                            continue;
+                        offset = offsetAdd->get_operand(1 - i);
+                        break;
+                    }
+                    if (shiftAmount && shiftAmount->value_ == 1 && offset) {
+                        Type *indexType = trueIndex->type_;
+                        Instruction::OpID quotientOp =
+                            isNonNegativeUnitInduction(
+                                exactShift->get_operand(0), B)
+                                ? Instruction::LShr
+                                : Instruction::SDiv;
+                        int quotientAmount = quotientOp == Instruction::LShr ? 1 : 2;
+                        auto *quotient = new BinaryInst(
+                            indexType, quotientOp,
+                            exactShift->get_operand(0),
+                            new ConstantInt(indexType, quotientAmount), B, true);
+                        B->add_instruction_before_inst(quotient, br);
+                        auto *selectedOffset = new SelectInst(
+                            br->get_operand(0), new ConstantInt(indexType, 0),
+                            offset, indexType);
+                        B->add_instruction_before_inst(selectedOffset, br);
+                        auto *indexAdd = new BinaryInst(
+                            indexType, Instruction::Add, quotient,
+                            selectedOffset, B, true);
+                        B->add_instruction_before_inst(indexAdd, br);
+                        selectedIndex = indexAdd;
+                    }
+                }
+                if (!selectedIndex) {
+                    auto *indexSelect = new SelectInst(
+                        br->get_operand(0), trueIndex, falseIndex,
+                        trueIndex->type_);
+                    B->add_instruction_before_inst(indexSelect, br);
+                    selectedIndex = indexSelect;
+                }
                 std::vector<Value *> indices;
                 for (unsigned i = 1; i < tGep->num_ops_; ++i)
                     indices.push_back(i == differingIndex ? selectedIndex
