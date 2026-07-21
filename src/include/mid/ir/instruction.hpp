@@ -5,6 +5,7 @@
 #include "basicBlock.hpp"
 #include "function.hpp"
 #include "module.hpp"
+#include "constant.hpp"
 
 #include <cassert>
 #include <list>
@@ -26,6 +27,7 @@ public:
         ZExt, FPtoSI, SItoFP, BitCast, Clz,       // 类型转换 + 内建
         InsertElement,                            // insertelement <4 x i32> %vec, i32 %val, i32 %idx
         ExtractElement,                           // extractelement <4 x i32> %vec, i32 %idx
+        ShuffleVector,                            // shufflevector <4 x i32> %v1, <4 x i32> %v2, <4 x i32> <mask>
         ICmp, FCmp, PHI, Call                    // 比较、phi、调用
     };
 
@@ -445,6 +447,30 @@ public:
         parent_ = bb;
     }
     virtual std::string print() override;
+};
+
+// shufflevector <4 x i32> %v1, <4 x i32> %v2, <4 x i32> <mask0, mask1, ...>
+// mask[i] 取值：0~N-1 选 v1 的 lane i，N~2N-1 选 v2 的 lane (i-N)
+class ShuffleVectorInst : public Instruction {
+public:
+    ShuffleVectorInst(Value *v1, Value *v2, std::vector<int> mask, BasicBlock *bb)
+        : Instruction(v1->type_, Instruction::ShuffleVector, 3, bb), mask_(std::move(mask)) {
+        set_operand(0, v1);
+        set_operand(1, v2);
+        // mask as ConstantVector operand
+        std::vector<Constant*> maskConsts;
+        for (int m : mask_)
+            maskConsts.push_back(new ConstantInt(
+                bb->parent_->parent_->int32_ty_, m));
+        auto *vecTy = static_cast<VectorType*>(v1->type_);
+        auto *maskTy = bb->parent_->parent_->get_vector_type(
+            bb->parent_->parent_->int32_ty_, vecTy->num_elements_);
+        set_operand(2, new ConstantVector(maskTy, maskConsts));
+    }
+    const std::vector<int> &mask() const { return mask_; }
+    virtual std::string print() override;
+private:
+    std::vector<int> mask_;
 };
 
 // phi 节点：%4 = phi i32 [ 1, %bb1 ], [ %6, %bb2 ]

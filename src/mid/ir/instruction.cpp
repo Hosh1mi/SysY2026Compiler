@@ -42,6 +42,7 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::Clz, "clz"},
     {Instruction::InsertElement, "insertelement"},
     {Instruction::ExtractElement, "extractelement"},
+    {Instruction::ShuffleVector, "shufflevector"},
     {Instruction::ICmp, "icmp"},
     {Instruction::FCmp, "fcmp"},
     {Instruction::PHI, "phi"},
@@ -480,6 +481,25 @@ std::string ExtractElementInst::print() {
     instr_ir += print_as_op(get_operand(0), true);
     instr_ir += ", ";
     instr_ir += print_as_op(get_operand(1), true);
+    return instr_ir;
+}
+
+std::string ShuffleVectorInst::print() {
+    std::string instr_ir;
+    instr_ir += "%" + name_ + " = ";
+    instr_ir += instr_id2string_[op_id_] + " ";
+    instr_ir += print_as_op(get_operand(0), true);
+    instr_ir += ", ";
+    instr_ir += print_as_op(get_operand(1), true);
+    instr_ir += ", ";
+    auto *maskVec = static_cast<ConstantVector*>(get_operand(2));
+    instr_ir += "<";
+    for (size_t i = 0; i < maskVec->elements_.size(); ++i) {
+        if (i) instr_ir += ", ";
+        auto *ci = static_cast<ConstantInt*>(maskVec->elements_[i]);
+        instr_ir += "i32 " + std::to_string(ci->value_);
+    }
+    instr_ir += ">";
     return instr_ir;
 }
 

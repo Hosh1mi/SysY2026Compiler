@@ -73,6 +73,8 @@ int latencyFor(Instruction *inst) {
         case Instruction::FPtoSI:
         case Instruction::SItoFP:
             return 4;
+        case Instruction::ShuffleVector:
+            return 2;  // tbl on A53
         default:
             return 1;
     }
@@ -95,6 +97,7 @@ MOpcode opcodeFor(Instruction *inst) {
             return MOpcode::Div;
         case Instruction::InsertElement:
         case Instruction::ExtractElement:
+        case Instruction::ShuffleVector:
             return MOpcode::Neon;
         default:
             return MOpcode::Alu;
@@ -133,6 +136,7 @@ bool supportedMovable(Instruction *inst) {
         case Instruction::Clz:
         case Instruction::InsertElement:
         case Instruction::ExtractElement:
+        case Instruction::ShuffleVector:
             return true;
         default:
             return false;
