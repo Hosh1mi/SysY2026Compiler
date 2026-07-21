@@ -1,5 +1,8 @@
 #include "../../../include/backend/arm64/machineTransforms/transforms.hpp"
 #include "../../../include/backend/arm64/machineTransforms/utils.hpp"
+#include <algorithm>
+#include <climits>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <string>
@@ -264,6 +267,271 @@ static int branchTargetOperandIndex(const MachineInstr &line) {
 	if ((m == "cbz" || m == "cbnz") && line.asmOperands.size() == 2) return 1;
 	if ((m == "tbz" || m == "tbnz") && line.asmOperands.size() == 3) return 2;
 	return -1;
+}
+
+static std::vector<size_t> executableInstructions(const MachineBasicBlock &block) {
+	std::vector<size_t> result;
+	for (size_t i = 0; i < block.instrs.size(); ++i) {
+		const MachineInstr &inst = block.instrs[i];
+		if (!inst.isLabelLike)
+			result.push_back(i);
+	}
+	return result;
+}
+
+static int nextExecutableBlock(const MachineFunction &func, size_t blockIdx) {
+	for (size_t i = blockIdx + 1; i < func.blocks.size(); ++i)
+		if (!executableInstructions(func.blocks[i]).empty())
+			return static_cast<int>(i);
+	return -1;
+}
+
+static int previousExecutableBlock(const MachineFunction &func, size_t blockIdx) {
+	for (size_t i = blockIdx; i-- > 0;)
+		if (!executableInstructions(func.blocks[i]).empty())
+			return static_cast<int>(i);
+	return -1;
+}
+
+static bool blockFallsThrough(const MachineBasicBlock &block) {
+	auto exec = executableInstructions(block);
+	if (exec.empty())
+		return true;
+	const MachineInstr &last = block.instrs[exec.back()];
+	return !(last.opcodeText == "b" || last.opcodeText == "ret" ||
+	         last.opcodeText == "br");
+}
+
+static std::string normalizedIntegerReg(const std::string &reg) {
+	char cls = 0;
+	std::string number;
+	if (!peephParsePhysicalReg(reg, cls, number) ||
+	    (cls != 'w' && cls != 'x'))
+		return "";
+	return "r" + number;
+}
+
+static bool parseImmediate(const std::string &text, int &value) {
+	if (text.size() < 2 || text[0] != '#')
+		return false;
+	char *end = nullptr;
+	long parsed = std::strtol(text.c_str() + 1, &end, 0);
+	if (!end || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX)
+		return false;
+	value = static_cast<int>(parsed);
+	return true;
+}
+
+// Collapse a side-effect-free exact-halving control cycle:
+//
+//   tbz state,#0,even       even: asr state,state,#1
+//   ...                     latch: cmp state,#odd_sentinel
+//                                      add count,count,#1
+//                                      b.eq exit
+//
+// into one AArch64 variable shift.  rbit+clz computes the number of trailing
+// zero bits, so a run of N consecutive even iterations executes the loop
+// control only once.  Other predecessors keep the unit-count latch cloned on
+// their edge.  Requiring the sentinel to be odd proves that no intermediate
+// exact shift can have taken the exit before the final shifted value.
+static bool tryMachineBatchExactHalvingLoop(
+	MachineFunction &func, const MachineLivenessResult &liveness) {
+	for (size_t parityIdx = 0; parityIdx < func.blocks.size(); ++parityIdx) {
+		auto parityExec = executableInstructions(func.blocks[parityIdx]);
+		if (parityExec.size() != 1)
+			continue;
+		const MachineInstr &bitBranch =
+			func.blocks[parityIdx].instrs[parityExec[0]];
+		if (bitBranch.opcodeText != "tbz" || bitBranch.asmOperands.size() != 3 ||
+		    bitBranch.asmOperands[1] != "#0")
+			continue;
+		const std::string stateReg = bitBranch.asmOperands[0];
+		if (peephRegClass(stateReg) != 'w')
+			continue;
+
+		int evenIdx = findBlockByLabel(func, bitBranch.asmOperands[2]);
+		if (evenIdx < 0)
+			continue;
+		bool evenHasOtherEntry = false;
+		for (size_t b = 0; b < func.blocks.size(); ++b) {
+			for (size_t pos : executableInstructions(func.blocks[b])) {
+				const MachineInstr &inst = func.blocks[b].instrs[pos];
+				int targetOperand = branchTargetOperandIndex(inst);
+				if (targetOperand >= 0 &&
+				    inst.asmOperands[targetOperand] == bitBranch.asmOperands[2] &&
+				    &inst != &bitBranch) {
+					evenHasOtherEntry = true;
+					break;
+				}
+			}
+			if (evenHasOtherEntry)
+				break;
+		}
+		int beforeEven = previousExecutableBlock(func, static_cast<size_t>(evenIdx));
+		if (beforeEven >= 0 && blockFallsThrough(func.blocks[beforeEven]))
+			evenHasOtherEntry = true;
+		if (evenHasOtherEntry)
+			continue;
+		auto evenExec = executableInstructions(func.blocks[evenIdx]);
+		if (evenExec.size() != 1)
+			continue;
+		const MachineInstr &shift = func.blocks[evenIdx].instrs[evenExec[0]];
+		if (shift.opcodeText != "asr" || shift.asmOperands.size() != 3 ||
+		    !peephSamePhysicalReg(shift.asmOperands[0], stateReg) ||
+		    !peephSamePhysicalReg(shift.asmOperands[1], stateReg) ||
+		    shift.asmOperands[2] != "#1")
+			continue;
+
+		int latchIdx = nextExecutableBlock(func, static_cast<size_t>(evenIdx));
+		if (latchIdx < 0)
+			continue;
+		auto latchExec = executableInstructions(func.blocks[latchIdx]);
+		if (latchExec.size() != 3 && latchExec.size() != 4)
+			continue;
+		size_t comparePos = latchExec[0];
+		size_t incrementPos = latchExec[1];
+		if (func.blocks[latchIdx].instrs[comparePos].opcodeText == "add" &&
+		    func.blocks[latchIdx].instrs[incrementPos].opcodeText == "cmp")
+			std::swap(comparePos, incrementPos);
+		const MachineInstr &compare =
+			func.blocks[latchIdx].instrs[comparePos];
+		const MachineInstr &increment =
+			func.blocks[latchIdx].instrs[incrementPos];
+		const MachineInstr &exitBranch =
+			func.blocks[latchIdx].instrs[latchExec[2]];
+		int sentinel = 0;
+		if (compare.opcodeText != "cmp" || compare.asmOperands.size() != 2 ||
+		    !peephSamePhysicalReg(compare.asmOperands[0], stateReg) ||
+		    !parseImmediate(compare.asmOperands[1], sentinel) ||
+		    (sentinel & 1) == 0 ||
+		    increment.opcodeText != "add" || increment.asmOperands.size() != 3 ||
+		    !peephSamePhysicalReg(increment.asmOperands[0], increment.asmOperands[1]) ||
+		    increment.asmOperands[2] != "#1" ||
+		    exitBranch.opcodeText != "b.eq" || exitBranch.asmOperands.size() != 1)
+			continue;
+		const std::string countReg = increment.asmOperands[0];
+		if (peephRegClass(countReg) != 'w' ||
+		    peephSamePhysicalReg(countReg, stateReg))
+			continue;
+
+		std::string parityLabel;
+		if (latchExec.size() == 4) {
+			const MachineInstr &continueBranch =
+				func.blocks[latchIdx].instrs[latchExec[3]];
+			if (continueBranch.opcodeText != "b" ||
+			    continueBranch.asmOperands.size() != 1 ||
+			    findBlockByLabel(func, continueBranch.asmOperands[0]) !=
+			        static_cast<int>(parityIdx))
+				continue;
+			parityLabel = continueBranch.asmOperands[0];
+		} else {
+			int continueIdx =
+				nextExecutableBlock(func, static_cast<size_t>(latchIdx));
+			if (continueIdx != static_cast<int>(parityIdx))
+				continue;
+		}
+		std::string latchLabel;
+		for (const auto &inst : func.blocks[latchIdx].instrs) {
+			if (inst.opcode == MOpcode::Label) {
+				latchLabel = labelName(inst);
+				break;
+			}
+		}
+		if (parityLabel.empty()) {
+			for (const auto &inst : func.blocks[parityIdx].instrs) {
+				if (inst.opcode == MOpcode::Label) {
+					parityLabel = labelName(inst);
+					break;
+				}
+			}
+		}
+		if (latchLabel.empty() || parityLabel.empty())
+			continue;
+
+		std::vector<std::pair<size_t, size_t>> explicitPreds;
+		bool unsupportedPred = false;
+		for (size_t b = 0; b < func.blocks.size(); ++b) {
+			auto exec = executableInstructions(func.blocks[b]);
+			for (size_t pos : exec) {
+				const MachineInstr &inst = func.blocks[b].instrs[pos];
+				int targetOperand = branchTargetOperandIndex(inst);
+				if (targetOperand < 0 ||
+				    inst.asmOperands[targetOperand] != latchLabel)
+					continue;
+				if (inst.opcodeText != "b" || pos != exec.back() ||
+				    static_cast<int>(b) == evenIdx) {
+					unsupportedPred = true;
+					break;
+				}
+				explicitPreds.push_back({b, pos});
+			}
+			if (unsupportedPred)
+				break;
+		}
+		if (unsupportedPred)
+			continue;
+
+		std::set<std::string> unavailable;
+		unavailable.insert(normalizedIntegerReg(stateReg));
+		unavailable.insert(normalizedIntegerReg(countReg));
+		auto collectLive = [&](size_t b) {
+			if (b < liveness.blockLiveIn.size())
+				unavailable.insert(liveness.blockLiveIn[b].begin(),
+				                   liveness.blockLiveIn[b].end());
+			if (b < liveness.blockLiveOut.size())
+				unavailable.insert(liveness.blockLiveOut[b].begin(),
+				                   liveness.blockLiveOut[b].end());
+		};
+		collectLive(static_cast<size_t>(evenIdx));
+		collectLive(static_cast<size_t>(latchIdx));
+		std::string scratchReg;
+		for (int reg = 9; reg <= 17; ++reg) {
+			if (!unavailable.count("r" + std::to_string(reg))) {
+				scratchReg = "w" + std::to_string(reg);
+				break;
+			}
+		}
+		if (scratchReg.empty())
+			continue;
+
+		// Clone the original unit-count latch onto every non-even edge before
+		// specializing the shared fallthrough latch for the batched even edge.
+		for (auto [predIdx, branchPos] : explicitPreds) {
+			auto &instructions = func.blocks[predIdx].instrs;
+			int originalIndex = instructions[branchPos].originalIndex;
+			std::vector<MachineInstr> replacement;
+			replacement.push_back(compare);
+			replacement.push_back(increment);
+			replacement.push_back(exitBranch);
+			replacement.push_back(parseMachineInstr(
+				"\tb " + parityLabel, originalIndex));
+			for (auto &inst : replacement)
+				inst.originalIndex = originalIndex;
+			instructions.erase(instructions.begin() + branchPos);
+			instructions.insert(instructions.begin() + branchPos,
+			                    replacement.begin(), replacement.end());
+		}
+
+		auto &evenInstructions = func.blocks[evenIdx].instrs;
+		size_t shiftPos = evenExec[0];
+		int originalIndex = evenInstructions[shiftPos].originalIndex;
+		MachineInstr reverse = parseMachineInstr(
+			peephMakeInsn("rbit", {scratchReg, stateReg}), originalIndex);
+		MachineInstr leadingZeros = parseMachineInstr(
+			peephMakeInsn("clz", {scratchReg, scratchReg}), originalIndex);
+		evenInstructions.insert(evenInstructions.begin() + shiftPos,
+		                        std::move(reverse));
+		evenInstructions.insert(evenInstructions.begin() + shiftPos + 1,
+		                        std::move(leadingZeros));
+		peephReplaceInstr(evenInstructions[shiftPos + 2],
+		                    peephMakeInsn("asr", {stateReg, stateReg, scratchReg}));
+
+		auto &latchInstructions = func.blocks[latchIdx].instrs;
+		peephReplaceInstr(latchInstructions[incrementPos],
+		                    peephMakeInsn("add", {countReg, countReg, scratchReg}));
+		return true;
+	}
+	return false;
 }
 
 // 找到函数内名为 target 的 label 后第一条会被执行的指令
@@ -562,6 +830,8 @@ bool runMachineCFGOptimization(MachineFunction &func) {
 
 bool runMachineBitBranchOptimization(
     MachineFunction &func, const MachineLivenessResult &liveness) {
+	if (tryMachineBatchExactHalvingLoop(func, liveness))
+		return true;
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineAndTBZ(func.blocks[b], i, liveness))

@@ -66,7 +66,7 @@ static bool isRetargetablePureDef(const MachineInstr &line) {
 
 	static const std::set<std::string> mnemonics = {
 		"add", "sub", "and", "orr", "eor", "bic",
-		"asr", "lsl", "lsr", "neg", "clz",
+		"asr", "lsl", "lsr", "neg", "clz", "rbit",
 		"mul", "madd", "msub", "mneg",
 		"sdiv", "udiv",
 		"fadd", "fsub", "fmul", "fdiv", "fneg",

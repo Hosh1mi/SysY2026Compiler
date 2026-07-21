@@ -544,7 +544,8 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
     } else if (op == "add" || op == "sub" || op == "and" || op == "orr" ||
                op == "eor" || op == "bic" || op == "asr" || op == "lsl" ||
                op == "lsr" || op == "neg" || op == "fadd" || op == "fsub" ||
-               op == "fneg" || op == "scvtf" || op == "fcvtzs" || op == "clz") {
+               op == "fneg" || op == "scvtf" || op == "fcvtzs" || op == "clz" ||
+               op == "rbit") {
         mi.opcode = MOpcode::Alu;
         bool isVector = rest.find(".4s") != std::string::npos ||
                         rest.find(".2d") != std::string::npos;
@@ -552,6 +553,8 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
             mi.latency = isVector ? 1 : 4;
         else if (op == "fneg" || op == "scvtf" || op == "fcvtzs")
             mi.latency = 4;
+        else if (op == "clz" || op == "rbit")
+            mi.latency = 3;
         else
             mi.latency = 1;
         defFirstUseRest();
