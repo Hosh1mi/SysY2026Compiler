@@ -288,6 +288,10 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    // IVSR can expose identical pointer recurrences from the two arms of a
+    // conditional store.  Re-run if-conversion so they can share one load and
+    // select only the destination address.
+    pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
     // 重新规范化循环形：Unroll/IVSR/RepFold 可能产生非 simplify 形

@@ -778,6 +778,31 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             }
         }
 
+        // Several control-flow paths can compute the same affine address for
+        // the same IV.  They must share one recurrence: independent pointer
+        // phis obscure the equality from later CSE and keep duplicated address
+        // updates alive.  Equality here includes every linearized index term,
+        // so only GEPs denoting the same address on every iteration are merged.
+        auto sameRecurrence = [](const GEPCandidate &a,
+                                 const GEPCandidate &b) {
+            if (a.gep->type_ != b.gep->type_ ||
+                a.gep->get_operand(0) != b.gep->get_operand(0) ||
+                a.ivOpIdx != b.ivOpIdx || a.coeff != b.coeff ||
+                a.coeffVal != b.coeffVal ||
+                a.useLinearizedGEP != b.useLinearizedGEP ||
+                a.indexExprs.size() != b.indexExprs.size())
+                return false;
+            for (size_t i = 0; i < a.indexExprs.size(); ++i) {
+                const auto &lhs = a.indexExprs[i];
+                const auto &rhs = b.indexExprs[i];
+                if (lhs.coeff != rhs.coeff ||
+                    lhs.constOffset != rhs.constOffset ||
+                    lhs.offset != rhs.offset || lhs.coeffVal != rhs.coeffVal)
+                    return false;
+            }
+            return true;
+        };
+
         // 对每个候选 GEP 执行强度削弱替换
         for (auto &c : candidates) {
             auto *gep = c.gep;
@@ -805,10 +830,13 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
             if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
             int effectiveStride = static_cast<int>(effectiveStride64);
-            // The magnitude heuristic only applies to compile-time strides. A
-            // variable stride trades a per-iteration multiply for a pointer
-            // step, which is profitable regardless of its (unknown) magnitude.
-            if (!c.coeffVal && std::abs(effectiveStride) > 16)
+            // A large constant stride benefits innermost loops by replacing a
+            // full affine address reconstruction.  In an outer loop it keeps
+            // a pointer live across nested loops and can increase register
+            // pressure throughout the nest, so retain the existing small-step
+            // policy there.
+            if (!c.coeffVal && std::abs(effectiveStride) > 16 &&
+                !loop.children.empty())
                 continue;
 
             if (std::getenv("DEBUG_IVSR"))
@@ -938,6 +966,14 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
             gep->replace_all_use_with(addrPhi);
             gep->parent_->delete_instr(gep);
+
+            for (auto &other : candidates) {
+                if (&other == &c || !other.gep->parent_ ||
+                    !sameRecurrence(c, other))
+                    continue;
+                other.gep->replace_all_use_with(addrPhi);
+                other.gep->parent_->delete_instr(other.gep);
+            }
         }
 
     }
