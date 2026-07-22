@@ -442,6 +442,189 @@ static bool parseImmediate(const std::string &text, int &value) {
 	return true;
 }
 
+enum class LowBitParity { Even, Odd };
+using ParityFacts = std::map<std::string, LowBitParity>;
+
+static bool mergeParityFacts(ParityFacts &dst, unsigned char &initialized,
+	                         const ParityFacts &src) {
+	if (!initialized) {
+		dst = src;
+		initialized = true;
+		return true;
+	}
+	bool changed = false;
+	for (auto it = dst.begin(); it != dst.end();) {
+		auto incoming = src.find(it->first);
+		if (incoming == src.end() || incoming->second != it->second) {
+			it = dst.erase(it);
+			changed = true;
+		} else {
+			++it;
+		}
+	}
+	return changed;
+}
+
+static bool operandParity(const std::string &operand,
+	                      const ParityFacts &facts,
+	                      LowBitParity &parity) {
+	int immediate = 0;
+	if (parseImmediate(operand, immediate)) {
+		parity = (immediate & 1) ? LowBitParity::Odd : LowBitParity::Even;
+		return true;
+	}
+	std::string reg = normalizedIntegerReg(operand);
+	if (reg.empty()) return false;
+	auto it = facts.find(reg);
+	if (it == facts.end()) return false;
+	parity = it->second;
+	return true;
+}
+
+static void transferParity(const MachineInstr &inst, ParityFacts &facts) {
+	if (inst.isCall) {
+		// Calls clobber the caller-saved integer bank.  Clearing all facts is
+		// conservative and still leaves loop-local induction proofs available.
+		facts.clear();
+		return;
+	}
+	if (inst.asmOperands.empty()) return;
+	const std::string dst = normalizedIntegerReg(inst.asmOperands[0]);
+	if (dst.empty() || !peephLineWritesReg(inst, inst.asmOperands[0]))
+		return;
+
+	bool known = false;
+	LowBitParity result = LowBitParity::Even;
+	if ((inst.opcodeText == "mov" || inst.opcodeText == "movz") &&
+	    inst.asmOperands.size() >= 2) {
+		known = operandParity(inst.asmOperands[1], facts, result);
+	} else if (inst.opcodeText == "movk") {
+		// movk with a non-zero shift preserves bit zero; without a shift it
+		// replaces bit zero from the immediate.
+		if (inst.asmOperands.size() >= 3 && inst.asmOperands[2] != "lsl #0") {
+			auto old = facts.find(dst);
+			if (old != facts.end()) { result = old->second; known = true; }
+		} else if (inst.asmOperands.size() >= 2) {
+			known = operandParity(inst.asmOperands[1], facts, result);
+		}
+	} else if ((inst.opcodeText == "add" || inst.opcodeText == "sub") &&
+	           inst.asmOperands.size() >= 3) {
+		LowBitParity lhs, rhs;
+		bool lhsKnown = operandParity(inst.asmOperands[1], facts, lhs);
+		bool shiftedEven = inst.asmOperands.size() >= 4 &&
+		                   inst.asmOperands[3].rfind("lsl #", 0) == 0 &&
+		                   inst.asmOperands[3] != "lsl #0";
+		bool rhsKnown = shiftedEven ||
+		                operandParity(inst.asmOperands[2], facts, rhs);
+		if (shiftedEven) rhs = LowBitParity::Even;
+		if (lhsKnown && rhsKnown) {
+			result = lhs == rhs ? LowBitParity::Even : LowBitParity::Odd;
+			known = true;
+		}
+	} else if (inst.opcodeText == "mul" && inst.asmOperands.size() >= 3) {
+		LowBitParity lhs, rhs;
+		if (operandParity(inst.asmOperands[1], facts, lhs) &&
+		    operandParity(inst.asmOperands[2], facts, rhs)) {
+			result = (lhs == LowBitParity::Odd && rhs == LowBitParity::Odd)
+			             ? LowBitParity::Odd : LowBitParity::Even;
+			known = true;
+		}
+	} else if (inst.opcodeText == "and" && inst.asmOperands.size() >= 3) {
+		int mask = 0;
+		if (parseImmediate(inst.asmOperands[2], mask)) {
+			if ((mask & 1) == 0) {
+				result = LowBitParity::Even;
+				known = true;
+			} else {
+				known = operandParity(inst.asmOperands[1], facts, result);
+			}
+		}
+	} else if (inst.opcodeText == "lsl" && inst.asmOperands.size() >= 3) {
+		int shift = 0;
+		if (parseImmediate(inst.asmOperands[2], shift) && shift > 0) {
+			result = LowBitParity::Even;
+			known = true;
+		}
+	}
+
+	if (known) facts[dst] = result;
+	else facts.erase(dst);
+}
+
+struct MachineParityResult {
+	std::vector<ParityFacts> atTerminator;
+};
+
+static MachineParityResult analyzeMachineParity(const MachineFunction &func) {
+	const size_t count = func.blocks.size();
+	std::vector<ParityFacts> in(count);
+	std::vector<unsigned char> initialized(count, false);
+	std::vector<bool> queued(count, false);
+	std::vector<size_t> worklist;
+	MachineParityResult result;
+	result.atTerminator.resize(count);
+	if (count == 0) return result;
+	initialized[0] = true;
+	queued[0] = true;
+	worklist.push_back(0);
+
+	auto enqueue = [&](int target, const ParityFacts &facts) {
+		if (target < 0 || static_cast<size_t>(target) >= count) return;
+		if (mergeParityFacts(in[target], initialized[target], facts) &&
+		    !queued[target]) {
+			queued[target] = true;
+			worklist.push_back(static_cast<size_t>(target));
+		}
+	};
+
+	while (!worklist.empty()) {
+		size_t blockIdx = worklist.back();
+		worklist.pop_back();
+		queued[blockIdx] = false;
+		ParityFacts facts = in[blockIdx];
+		bool terminated = false;
+		auto exec = executableInstructions(func.blocks[blockIdx]);
+		for (size_t pos : exec) {
+			const MachineInstr &inst = func.blocks[blockIdx].instrs[pos];
+			int targetOperand = branchTargetOperandIndex(inst);
+			if (targetOperand >= 0 &&
+			    static_cast<size_t>(targetOperand) < inst.asmOperands.size()) {
+				int target = findBlockByLabel(func, inst.asmOperands[targetOperand]);
+				ParityFacts taken = facts;
+				ParityFacts fallthrough = facts;
+				if ((inst.opcodeText == "tbz" || inst.opcodeText == "tbnz") &&
+				    inst.asmOperands.size() == 3 && inst.asmOperands[1] == "#0") {
+					std::string reg = normalizedIntegerReg(inst.asmOperands[0]);
+					if (!reg.empty()) {
+						bool takenEven = inst.opcodeText == "tbz";
+						taken[reg] = takenEven ? LowBitParity::Even : LowBitParity::Odd;
+						fallthrough[reg] = takenEven ? LowBitParity::Odd : LowBitParity::Even;
+					}
+				}
+				enqueue(target, taken);
+				if (inst.opcodeText == "b") {
+					result.atTerminator[blockIdx] = facts;
+					terminated = true;
+					break;
+				}
+				facts = std::move(fallthrough);
+				continue;
+			}
+			if (inst.opcodeText == "ret" || inst.opcodeText == "br") {
+				result.atTerminator[blockIdx] = facts;
+				terminated = true;
+				break;
+			}
+			transferParity(inst, facts);
+		}
+		if (!terminated) {
+			result.atTerminator[blockIdx] = facts;
+			enqueue(nextExecutableBlock(func, blockIdx), facts);
+		}
+	}
+	return result;
+}
+
 // Collapse a side-effect-free exact-halving control cycle:
 //
 //   tbz state,#0,even       even: asr state,state,#1
@@ -456,6 +639,9 @@ static bool parseImmediate(const std::string &text, int &value) {
 // exact shift can have taken the exit before the final shifted value.
 static bool tryMachineBatchExactHalvingLoop(
 	MachineFunction &func, const MachineLivenessResult &liveness) {
+	MachineParityResult parity = analyzeMachineParity(func);
+	const bool enableParityEdgeThreading =
+		std::getenv("DISABLE_PARITY_EDGE_THREAD") == nullptr;
 	for (size_t parityIdx = 0; parityIdx < func.blocks.size(); ++parityIdx) {
 		auto parityExec = executableInstructions(func.blocks[parityIdx]);
 		if (parityExec.size() != 1)
@@ -620,9 +806,22 @@ static bool tryMachineBatchExactHalvingLoop(
 			auto &instructions = func.blocks[predIdx].instrs;
 			int originalIndex = instructions[branchPos].originalIndex;
 			std::vector<MachineInstr> replacement;
-			replacement.push_back(compare);
+			bool cannotEqualSentinel = false;
+			if (enableParityEdgeThreading &&
+			    predIdx < parity.atTerminator.size()) {
+				auto fact = parity.atTerminator[predIdx].find(
+					normalizedIntegerReg(stateReg));
+				if (fact != parity.atTerminator[predIdx].end()) {
+					LowBitParity sentinelParity = (sentinel & 1)
+						? LowBitParity::Odd : LowBitParity::Even;
+					cannotEqualSentinel = fact->second != sentinelParity;
+				}
+			}
+			if (!cannotEqualSentinel)
+				replacement.push_back(compare);
 			replacement.push_back(increment);
-			replacement.push_back(exitBranch);
+			if (!cannotEqualSentinel)
+				replacement.push_back(exitBranch);
 			replacement.push_back(parseMachineInstr(
 				"\tb " + parityLabel, originalIndex));
 			for (auto &inst : replacement)
