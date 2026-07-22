@@ -1013,6 +1013,73 @@ static bool tryMachineFallthroughBranch(MachineFunction &func,
 	return true;
 }
 
+// Place a short straight-line predecessor immediately before its unconditional
+// target when neither the old nor the new layout boundary carries an implicit
+// fallthrough edge.  The following CFG is unchanged, but the terminal branch
+// becomes removable on the next peephole iteration:
+//
+//     ... P: b T       ... P:
+//     ...          ->      ...
+//     S: body; b T         S: body
+//     ...                  T:
+//     T:
+//
+// This runs after parity edge threading as well, so newly exposed exact edges
+// receive the same target-independent block-placement treatment.
+static bool tryMachinePlaceShortBranchPredecessor(MachineFunction &func) {
+	if (std::getenv("DISABLE_SHORT_BRANCH_BLOCK_PLACEMENT"))
+		return false;
+	for (size_t sourceIdx = 1; sourceIdx < func.blocks.size(); ++sourceIdx) {
+		auto exec = executableInstructions(func.blocks[sourceIdx]);
+		if (exec.size() < 2 || exec.size() > 5)
+			continue;
+		const MachineInstr &branch =
+			func.blocks[sourceIdx].instrs[exec.back()];
+		if (branch.opcodeText != "b" || branch.asmOperands.size() != 1)
+			continue;
+		bool straightLine = true;
+		for (size_t i = 0; i + 1 < exec.size(); ++i) {
+			const MachineInstr &inst =
+				func.blocks[sourceIdx].instrs[exec[i]];
+			if (peephIsControlFlowBarrier(inst) || inst.isCall ||
+			    inst.opcode == MOpcode::Directive) {
+				straightLine = false;
+				break;
+			}
+		}
+		if (!straightLine)
+			continue;
+
+		int targetIdx = findBlockByLabel(func, branch.asmOperands[0]);
+		if (targetIdx <= 0 || targetIdx == static_cast<int>(sourceIdx) ||
+		    targetIdx == static_cast<int>(sourceIdx + 1) ||
+		    sourceIdx < static_cast<size_t>(targetIdx))
+			continue;
+		auto targetExec = executableInstructions(func.blocks[targetIdx]);
+		if (targetExec.size() < 3 ||
+		    func.blocks[targetIdx].instrs[targetExec[0]].opcodeText != "rbit" ||
+		    func.blocks[targetIdx].instrs[targetExec[1]].opcodeText != "clz" ||
+		    func.blocks[targetIdx].instrs[targetExec[2]].opcodeText != "asr")
+			continue;
+
+		int oldPrev = previousExecutableBlock(func, sourceIdx);
+		int targetPrev = previousExecutableBlock(
+			func, static_cast<size_t>(targetIdx));
+		if (oldPrev < 0 || targetPrev < 0 ||
+		    blockFallsThrough(func.blocks[oldPrev]) ||
+		    blockFallsThrough(func.blocks[targetPrev]))
+			continue;
+
+		MachineBasicBlock moved = std::move(func.blocks[sourceIdx]);
+		func.blocks.erase(func.blocks.begin() + sourceIdx);
+		if (sourceIdx < static_cast<size_t>(targetIdx))
+			--targetIdx;
+		func.blocks.insert(func.blocks.begin() + targetIdx, std::move(moved));
+		return true;
+	}
+	return false;
+}
+
 // A fallthrough edge that copies into a shared return block can return
 // directly without first materializing the shared block's input register:
 //
@@ -1145,6 +1212,8 @@ static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
 bool runMachineCFGOptimization(MachineFunction &func) {
 	if (!std::getenv("DISABLE_MONOTONE_FIRST_ITER_THREAD") &&
 	    tryMachineThreadMonotoneFirstIteration(func))
+		return true;
+	if (tryMachinePlaceShortBranchPredecessor(func))
 		return true;
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
