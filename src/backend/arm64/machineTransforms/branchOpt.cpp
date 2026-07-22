@@ -302,6 +302,126 @@ static bool blockFallsThrough(const MachineBasicBlock &block) {
 	         last.opcodeText == "br");
 }
 
+static bool parseImmediate(const std::string &text, int &value);
+
+// Specialize the fallthrough edge of a monotone counted loop around a shared
+// first-iteration test.  After register allocation this commonly looks like:
+//
+//   latch:   cmp  wi, bound
+//            b.ge exit
+//            add  wi, wi, #1
+//   header:  cmp  wi, #init
+//            b.eq first_only
+//            ... steady path ...
+//
+// If wi has exactly one constant initialization and one guarded unit update,
+// the latch edge can never take the equality branch.  Clone the short steady
+// path onto that fallthrough edge.  This is edge specialization (jump
+// threading), not a branch-probability guess: the signed guard proves the add
+// cannot overflow and the induction proof holds for every input.
+static bool tryMachineThreadMonotoneFirstIteration(MachineFunction &func) {
+	for (size_t headerIdx = 0; headerIdx < func.blocks.size(); ++headerIdx) {
+		auto headerExec = executableInstructions(func.blocks[headerIdx]);
+		if (headerExec.size() < 3)
+			continue;
+		const MachineInstr &headerCmp =
+			func.blocks[headerIdx].instrs[headerExec[0]];
+		const MachineInstr &firstBranch =
+			func.blocks[headerIdx].instrs[headerExec[1]];
+		if (headerCmp.opcodeText != "cmp" || headerCmp.asmOperands.size() != 2 ||
+		    firstBranch.opcodeText != "b.eq" ||
+		    firstBranch.asmOperands.size() != 1)
+			continue;
+
+		const std::string ivReg = headerCmp.asmOperands[0];
+		int init = 0;
+		if (peephRegClass(ivReg) != 'w' ||
+		    !parseImmediate(headerCmp.asmOperands[1], init))
+			continue;
+
+		int predIdx = previousExecutableBlock(func, headerIdx);
+		if (predIdx < 0 || !blockFallsThrough(func.blocks[predIdx]))
+			continue;
+		auto predExec = executableInstructions(func.blocks[predIdx]);
+		if (predExec.size() < 3)
+			continue;
+		const MachineInstr &update =
+			func.blocks[predIdx].instrs[predExec.back()];
+		if (update.opcodeText != "add" || update.asmOperands.size() != 3 ||
+		    !peephSamePhysicalReg(update.asmOperands[0], ivReg) ||
+		    !peephSamePhysicalReg(update.asmOperands[1], ivReg) ||
+		    update.asmOperands[2] != "#1")
+			continue;
+
+		// The update must be control-dependent on a signed upper-bound test of
+		// the old IV.  No intervening flag definition may separate cmp/b.ge.
+		bool guarded = false;
+		for (size_t p = predExec.size() - 1; p-- > 0;) {
+			const MachineInstr &candidate =
+				func.blocks[predIdx].instrs[predExec[p]];
+			if (candidate.opcodeText != "b.ge")
+				continue;
+			for (size_t q = p; q-- > 0;) {
+				const MachineInstr &cmp =
+					func.blocks[predIdx].instrs[predExec[q]];
+				if (!cmp.setsFlags)
+					continue;
+				guarded = cmp.opcodeText == "cmp" &&
+				          cmp.asmOperands.size() == 2 &&
+				          peephSamePhysicalReg(cmp.asmOperands[0], ivReg);
+				break;
+			}
+			break;
+		}
+		if (!guarded)
+			continue;
+
+		// Whole-function def audit establishes the induction recurrence.  Be
+		// deliberately strict: copies, calls defining the register, or another
+		// update make the proof inapplicable.
+		int initializations = 0;
+		int updates = 0;
+		bool unsupportedDef = false;
+		for (const auto &block : func.blocks) {
+			for (const auto &inst : block.instrs) {
+				if (!peephLineWritesReg(inst, ivReg))
+					continue;
+				int imm = 0;
+				bool isInit = inst.opcodeText == "mov" &&
+				              inst.asmOperands.size() == 2 &&
+				              peephSamePhysicalReg(inst.asmOperands[0], ivReg) &&
+				              parseImmediate(inst.asmOperands[1], imm) && imm == init;
+				bool isUpdate = &inst == &update;
+				if (isInit) ++initializations;
+				else if (isUpdate) ++updates;
+				else unsupportedDef = true;
+			}
+		}
+		if (unsupportedDef || initializations != 1 || updates != 1)
+			continue;
+
+		// The false path must be a small, closed straight-line tail.  Requiring
+		// its last instruction to transfer control prevents the clone from
+		// falling back into the original header.
+		std::vector<MachineInstr> steadyTail;
+		for (size_t i = 2; i < headerExec.size(); ++i)
+			steadyTail.push_back(func.blocks[headerIdx].instrs[headerExec[i]]);
+		if (steadyTail.empty() ||
+		    !peephIsControlFlowBarrier(steadyTail.back()) ||
+		    steadyTail.size() > 6)
+			continue;
+
+		auto &predInstrs = func.blocks[predIdx].instrs;
+		int originalIndex = update.originalIndex;
+		for (auto &inst : steadyTail) {
+			inst.originalIndex = originalIndex;
+			predInstrs.push_back(std::move(inst));
+		}
+		return true;
+	}
+	return false;
+}
+
 static std::string normalizedIntegerReg(const std::string &reg) {
 	char cls = 0;
 	std::string number;
@@ -814,6 +934,9 @@ static bool tryMachineSiblingTailCall(MachineFunction &func, size_t blockIdx,
 }
 
 bool runMachineCFGOptimization(MachineFunction &func) {
+	if (!std::getenv("DISABLE_MONOTONE_FIRST_ITER_THREAD") &&
+	    tryMachineThreadMonotoneFirstIteration(func))
+		return true;
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
 		for (size_t i = 0; i < func.blocks[b].instrs.size(); ++i) {
 			if (tryMachineFoldCopyIntoReturn(func, b, i) ||
