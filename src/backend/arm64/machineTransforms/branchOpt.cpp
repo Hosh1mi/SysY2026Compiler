@@ -642,6 +642,8 @@ static bool tryMachineBatchExactHalvingLoop(
 	MachineParityResult parity = analyzeMachineParity(func);
 	const bool enableParityEdgeThreading =
 		std::getenv("DISABLE_PARITY_EDGE_THREAD") == nullptr;
+	const bool enableParityBranchBypass =
+		std::getenv("DISABLE_PARITY_BRANCH_BYPASS") == nullptr;
 	for (size_t parityIdx = 0; parityIdx < func.blocks.size(); ++parityIdx) {
 		auto parityExec = executableInstructions(func.blocks[parityIdx]);
 		if (parityExec.size() != 1)
@@ -807,6 +809,7 @@ static bool tryMachineBatchExactHalvingLoop(
 			int originalIndex = instructions[branchPos].originalIndex;
 			std::vector<MachineInstr> replacement;
 			bool cannotEqualSentinel = false;
+			bool takesParityBranch = false;
 			if (enableParityEdgeThreading &&
 			    predIdx < parity.atTerminator.size()) {
 				auto fact = parity.atTerminator[predIdx].find(
@@ -815,6 +818,11 @@ static bool tryMachineBatchExactHalvingLoop(
 					LowBitParity sentinelParity = (sentinel & 1)
 						? LowBitParity::Odd : LowBitParity::Even;
 					cannotEqualSentinel = fact->second != sentinelParity;
+					if (enableParityBranchBypass) {
+						LowBitParity takenParity = bitBranch.opcodeText == "tbz"
+							? LowBitParity::Even : LowBitParity::Odd;
+						takesParityBranch = fact->second == takenParity;
+					}
 				}
 			}
 			if (!cannotEqualSentinel)
@@ -822,8 +830,10 @@ static bool tryMachineBatchExactHalvingLoop(
 			replacement.push_back(increment);
 			if (!cannotEqualSentinel)
 				replacement.push_back(exitBranch);
+			const std::string &continueTarget = takesParityBranch
+				? bitBranch.asmOperands[2] : parityLabel;
 			replacement.push_back(parseMachineInstr(
-				"\tb " + parityLabel, originalIndex));
+				"\tb " + continueTarget, originalIndex));
 			for (auto &inst : replacement)
 				inst.originalIndex = originalIndex;
 			instructions.erase(instructions.begin() + branchPos);
