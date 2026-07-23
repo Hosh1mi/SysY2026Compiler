@@ -99,6 +99,25 @@ Arm64MachineOptimizationPipeline::Arm64MachineOptimizationPipeline(
 
 void Arm64MachineOptimizationPipeline::run(MachineFunction &function) {
     MachineAnalysisManager analyses;
+    // Most machine transforms deliberately perform one rewrite per run so
+    // that the liveness result is never reused after a mutation.  Reaching a
+    // fixed point is therefore roughly O(number of rewrites * liveness cost).
+    // On very large generated functions this can dominate compilation by
+    // minutes for marginal code-quality benefit.  Keep lowering and register
+    // allocation, but omit the optional post-RA optimization/scheduling stage
+    // once the machine function exceeds the compile-time budget.
+    constexpr size_t kMachineOptimizationInstructionLimit = 4096;
+    const size_t initialInstrs = countMachineInstructions(function);
+    if (initialInstrs > kMachineOptimizationInstructionLimit) {
+        if (std::getenv("PROFILE_PASSES"))
+            std::cerr << "[MachinePipeline] " << function.name
+                      << " skipped_large_function=1"
+                      << " instrs=" << initialInstrs
+                      << " limit=" << kMachineOptimizationInstructionLimit
+                      << "\n";
+        return;
+    }
+
     if (enableOptimizations_) {
         const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
         cleanup_.runEachToFixedPoint(function, analyses);
