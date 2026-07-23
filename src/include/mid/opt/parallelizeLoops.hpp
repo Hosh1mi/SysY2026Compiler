@@ -32,14 +32,23 @@ private:
         BasicBlock *exitingBlock = nullptr; // 出口比较所在块（header 或 latch）
     };
 
+    // 归约操作：store 将累加值写回同一内存位置（如 ans[i] = ans[i] + x）
+    struct Reduction {
+        Instruction *store;
+        Instruction *load;
+        Value *accRoot;          // 累加器根（GEP 基址）
+    };
+
     bool matchShape(Loop &loop, LoopShape &shape, std::string *reason = nullptr);
     bool isLegalDoall(Loop &loop, const LoopShape &shape, Function *func,
                       AnalysisManager *AM,
                       const ArgumentAliasAnalysis &argAA,
-                      std::set<Value *> *privatize);
+                      std::set<Value *> *privatize,
+                      std::vector<Reduction> *reductions = nullptr);
     void transform(Loop &loop, const LoopShape &shape, Function *func,
                    Module *module,
-                   const std::set<Value *> &privatize);
+                   const std::set<Value *> &privatize,
+                   const std::vector<Reduction> &reductions = {});
 
     // 已外提的 (id, body 函数)；execute 末尾生成 dispatch
     std::vector<Function *> bodies_;

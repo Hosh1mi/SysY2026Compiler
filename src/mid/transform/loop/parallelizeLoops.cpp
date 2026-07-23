@@ -227,7 +227,8 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
 bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                     Function *func, AnalysisManager *AM,
                                     const ArgumentAliasAnalysis &argAA,
-                                    std::set<Value *> *privatize) {
+                                    std::set<Value *> *privatize,
+                                    std::vector<Reduction> *reductions) {
     auto fail = [&](const std::string &why) {
         debugPar("reject func=" + func->name_ + " loop=" + loopName(loop) +
                  ": " + why);
@@ -306,6 +307,51 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         }
     }
 
+    // 归约检测：在 store 必须随 IV 变化的硬规则之前，找出归约 store，
+    // 以便为其豁免 DIR_EQ 依赖检查。仅当 store 地址至少有一个索引
+    // 是当前循环的 AddRec（即地址随当前 IV 变化）时才视为本循环归约；
+    // 内层循环的归约在外层不应豁免。
+    std::vector<Reduction> localReductions;
+    {
+        ScalarEvolution &SE2 = AM->getScalarEvolution(func);
+        for (auto *s : stores) {
+            auto *sVal = s->get_operand(0);
+            auto *bin = dynamic_cast<BinaryInst *>(sVal);
+            if (!bin || !(bin->is_add() || bin->is_sub() || bin->is_mul()))
+                continue;
+            Value *sPtr = s->get_operand(1);
+            auto *sGep = dynamic_cast<GetElementPtrInst *>(sPtr);
+            if (!sGep) continue;
+            // 确认 store 地址随本循环 IV 变化（非内层循环归约）
+            bool variesWithThisIV = false;
+            bool variesWithInnerIV = false;
+            for (unsigned i = 1; i < sGep->num_ops_; i++) {
+                auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
+                    SE2.getSCEV(sGep->get_operand(i)));
+                if (rec && rec->loop() == &loop) { variesWithThisIV = true; }
+                else if (rec && rec->loop() != &loop) { variesWithInnerIV = true; }
+            }
+            if (!variesWithThisIV || variesWithInnerIV) continue;
+            Value *sRoot = gepRootBase(sGep);
+            for (auto *a : accesses) {
+                if (!a->is_load()) continue;
+                Value *aPtr = a->get_operand(0);
+                auto *aGep = dynamic_cast<GetElementPtrInst *>(aPtr);
+                if (!aGep || gepRootBase(aGep) != sRoot) continue;
+                bool usesLoad = false;
+                for (unsigned i = 0; i < bin->num_ops_; i++)
+                    if (bin->get_operand(i) == a) { usesLoad = true; break; }
+                if (!usesLoad) continue;
+                localReductions.push_back({s, a, sRoot});
+                debugPar("reduction detected: store=" + valueName(s) + " load=" +
+                         valueName(a));
+                break;
+            }
+        }
+        debugPar("found " + std::to_string(localReductions.size()) +
+                 " reductions in loop " + loopName(loop));
+    }
+
     // 硬规则：store 地址必须随本循环 IV 变化（某下标是本循环的 AddRec）。
     // 否则两线程会命中同一地址。ScalarExpansion scratch 若完整局限在
     // 当前循环内，则可改成 worker 私有 alloca。
@@ -314,6 +360,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     for (auto *s : stores) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(s->get_operand(1));
         Value *base = gep ? gepRootBase(gep) : nullptr;
+
         bool variesWithIV = false;
         for (unsigned i = 1; gep && i < gep->num_ops_; i++) {
             auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
@@ -337,6 +384,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     }
 
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
+
     LoopInfo &LI = AM->getLoopInfo(func);
     AffineAnalysis AA(LI);
     DependenceAnalysis DA(LI, AA);
@@ -357,8 +405,17 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             }
             if (idx < 0 || idx >= (int)r.direction.size())
                 return fail("dependence direction missing for loop");
-            if (r.direction[idx] != DependenceAnalysis::DIR_EQ)
-                return fail("loop carries memory dependence");
+            if (r.direction[idx] != DependenceAnalysis::DIR_EQ) {
+                // 归约：store→load 跨迭代依赖（DIR_LT）是可结合的
+                bool isReduction = false;
+                for (auto &red : localReductions) {
+                    if ((red.store == s && red.load == a) ||
+                        (red.load == s && red.store == a))
+                        { isReduction = true; break; }
+                }
+                if (!isReduction)
+                    return fail("loop carries memory dependence");
+            }
         }
     }
 
@@ -368,12 +425,17 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     if (ci && cb && cb->value_ - ci->value_ < 64)
         return fail("constant trip count below parallel threshold");
 
+    if (reductions)
+        *reductions = std::move(localReductions);
+
     return true;
 }
 
 void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                  Function *func, Module *module,
-                                 const std::set<Value *> &privatize) {
+                                 const std::set<Value *> &privatize,
+                                 const std::vector<Reduction> &reductions) {
+    (void)reductions;  // IV-varying reductions need no privatization
     int id = (int)bodies_.size();
 
     if (!parallelForDecl_) {
@@ -555,9 +617,10 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                     continue;
                 }
                 std::set<Value *> privatize;
-                if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize))
+                std::vector<Reduction> reductions;
+                if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize, &reductions))
                     continue;
-                transform(*loop, shape, func, module, privatize);
+                transform(*loop, shape, func, module, privatize, reductions);
                 AM.clear(func);
                 changed = true;
                 localChanged = true;
