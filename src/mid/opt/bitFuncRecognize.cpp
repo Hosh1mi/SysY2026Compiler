@@ -1755,10 +1755,17 @@ void BitFuncRecognize::execute(Module *module) {
     std::unordered_map<Function *, bitfunc::FuncEquiv> equiv;
     for (auto *f : module->function_list_) {
         if (f->is_declaration()) continue;
-        if (f->name_ == "main") continue;
         auto *ft = dynamic_cast<FunctionType *>(f->type_);
         if (!ft || ft->result_->tid_ != Type::IntegerTyID) continue;
         if (f->arguments_.empty() || f->arguments_.size() > 3) continue;
+        // The symbolic recognizer is intended for compact bit-operation
+        // helpers.  Its post-dominator construction is quadratic and its
+        // path-state exploration copies symbolic maps, so reject functions
+        // outside the documented structural scope before constructing the
+        // analyzer.  This is a general complexity bound, independent of
+        // function identity or call-site values.
+        constexpr size_t kMaxCandidateBlocks = 200;
+        if (f->basic_blocks_.size() > kMaxCandidateBlocks) continue;
         bool allInt = true;
         for (auto *a : f->arguments_)
             if (a->type_->tid_ != Type::IntegerTyID) { allInt = false; break; }

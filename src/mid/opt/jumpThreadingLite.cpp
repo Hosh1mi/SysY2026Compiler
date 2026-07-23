@@ -331,6 +331,14 @@ bool JumpThreadingLite::runOnModule(Module *module) {
 }
 
 bool JumpThreadingLite::runOnFunction(Function *func, AnalysisManager *AM) {
+    // Each successful edge rewrite invalidates LoopInfo and restarts the
+    // whole-CFG search.  Keep this fixed-point algorithm within a predictable
+    // compile-time budget; earlier SCCP and CFGSimplify still process larger
+    // functions.
+    constexpr size_t kMaxThreadedBlocks = 512;
+    if (func->basic_blocks_.size() > kMaxThreadedBlocks)
+        return false;
+
     bool changedAny = false;
     bool changedThisRound = false;
 
