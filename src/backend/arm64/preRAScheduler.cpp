@@ -57,22 +57,42 @@ int latencyFor(Instruction *inst) {
     switch (inst->op_id_) {
         case Instruction::Load:
             return 4;
-        case Instruction::Mul:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
+            return 2;
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+            return 2;
+        case Instruction::Add:
+        case Instruction::Sub:
+        case Instruction::ICmp:
             return 3;
-        case Instruction::FMul:
-            return 5;
+        case Instruction::Mul:
+            return 4;
         case Instruction::SDiv:
+            return 4;
+        case Instruction::FAdd:
+        case Instruction::FSub:
+        case Instruction::FCmp:
+            return 6;
+        case Instruction::FMul:
+            return 8;
         case Instruction::UDiv:
         case Instruction::SRem:
         case Instruction::URem:
         case Instruction::FDiv:
             return 12;
-        case Instruction::FAdd:
-        case Instruction::FSub:
         case Instruction::FNeg:
+            return 2;
         case Instruction::FPtoSI:
         case Instruction::SItoFP:
-            return 4;
+            return 6;
+        case Instruction::Select:
+            return 2;
+        case Instruction::InsertElement:
+        case Instruction::ExtractElement:
         case Instruction::ShuffleVector:
             return 2;  // tbl on A53
         default:
