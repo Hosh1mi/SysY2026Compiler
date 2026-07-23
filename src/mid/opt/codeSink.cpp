@@ -176,30 +176,27 @@ PreservedAnalyses CodeSink::execute(Module *module, AnalysisManager &AM) {
 
 bool CodeSink::runOnFunction(Function *func) {
     bool changed = false;
-    bool localChanged = true;
 
-    while (localChanged) {
-        localChanged = false;
+    // Sinking the accepted instructions changes neither CFG nor loop
+    // membership, so LoopInfo and dominators remain valid for the whole
+    // sweep.  Reverse order visits users before their operands: after a user
+    // is sunk, an operand considered later sees the user's final block and
+    // can be placed directly at its own final destination.  Restarting from
+    // scratch after every successful move only turns the pass quadratic.
+    LoopInfo LI;
+    LI.analyze(func);
 
-        LoopInfo LI;
-        LI.analyze(func);
+    std::vector<Instruction *> worklist;
+    for (auto *bb : func->basic_blocks_) {
+        for (auto *inst : bb->instr_list_)
+            worklist.push_back(inst);
+    }
 
-        std::vector<Instruction *> worklist;
-        for (auto *bb : func->basic_blocks_) {
-            for (auto *inst : bb->instr_list_)
-                worklist.push_back(inst);
-        }
-
-        for (auto it = worklist.rbegin(); it != worklist.rend(); ++it) {
-            auto *inst = *it;
-            if (!inst->parent_)
-                continue;
-            if (trySinkInstruction(inst, func, LI)) {
-                changed = true;
-                localChanged = true;
-                break;
-            }
-        }
+    for (auto it = worklist.rbegin(); it != worklist.rend(); ++it) {
+        auto *inst = *it;
+        if (!inst->parent_)
+            continue;
+        changed |= trySinkInstruction(inst, func, LI);
     }
 
     if (changed)
