@@ -308,13 +308,15 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     }
 
     // 归约检测：在 store 必须随 IV 变化的硬规则之前，找出归约 store，
-    // 以便为其豁免 DIR_EQ 依赖检查。仅当 store 地址至少有一个索引
-    // 是当前循环的 AddRec（即地址随当前 IV 变化）时才视为本循环归约；
-    // 内层循环的归约在外层不应豁免。
+    // 以便为其豁免 DIR_EQ 依赖检查。仅当 store/load 所在块的最内层
+    // 循环恰为当前循环时才视为本循环归约（避免内层循环的归约误判给外层）。
     std::vector<Reduction> localReductions;
     {
+        LoopInfo &LI2 = AM->getLoopInfo(func);
         ScalarEvolution &SE2 = AM->getScalarEvolution(func);
         for (auto *s : stores) {
+            // store 所在块的最内层循环必须是当前循环
+            if (LI2.getLoopFor(s->parent_) != &loop) continue;
             auto *sVal = s->get_operand(0);
             auto *bin = dynamic_cast<BinaryInst *>(sVal);
             if (!bin || !(bin->is_add() || bin->is_sub() || bin->is_mul()))
@@ -322,19 +324,19 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             Value *sPtr = s->get_operand(1);
             auto *sGep = dynamic_cast<GetElementPtrInst *>(sPtr);
             if (!sGep) continue;
-            // 确认 store 地址随本循环 IV 变化（非内层循环归约）
+            // 确认 store 地址随本循环 IV 变化
             bool variesWithThisIV = false;
-            bool variesWithInnerIV = false;
             for (unsigned i = 1; i < sGep->num_ops_; i++) {
                 auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
                     SE2.getSCEV(sGep->get_operand(i)));
-                if (rec && rec->loop() == &loop) { variesWithThisIV = true; }
-                else if (rec && rec->loop() != &loop) { variesWithInnerIV = true; }
+                if (rec && rec->loop() == &loop) { variesWithThisIV = true; break; }
             }
-            if (!variesWithThisIV || variesWithInnerIV) continue;
+            if (!variesWithThisIV) continue;
             Value *sRoot = gepRootBase(sGep);
             for (auto *a : accesses) {
                 if (!a->is_load()) continue;
+                // load 所在块的最内层循环也必须匹配
+                if (LI2.getLoopFor(a->parent_) != &loop) continue;
                 Value *aPtr = a->get_operand(0);
                 auto *aGep = dynamic_cast<GetElementPtrInst *>(aPtr);
                 if (!aGep || gepRootBase(aGep) != sRoot) continue;
@@ -604,11 +606,6 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
             LoopInfo &LI = AM.getLoopInfo(func);
             for (auto &lptr : LI.allLoops()) {
                 Loop *loop = lptr.get();
-                if (loop->depth != 0) {
-                    debugPar("skip func=" + func->name_ + " loop=" +
-                             loopName(*loop) + ": nested loop");
-                    continue; // 仅顶层
-                }
                 LoopShape shape;
                 std::string shapeReason;
                 if (!matchShape(*loop, shape, &shapeReason)) {
@@ -616,10 +613,17 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                              loopName(*loop) + ": " + shapeReason);
                     continue;
                 }
+                bool isNested = (loop->depth != 0);
                 std::set<Value *> privatize;
                 std::vector<Reduction> reductions;
                 if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize, &reductions))
                     continue;
+                // 仅含归约的嵌套循环才允许并行化（避免递归 worker 产生）
+                if (isNested && reductions.empty()) {
+                    debugPar("skip func=" + func->name_ + " loop=" +
+                             loopName(*loop) + ": nested loop without reduction");
+                    continue;
+                }
                 transform(*loop, shape, func, module, privatize, reductions);
                 AM.clear(func);
                 changed = true;
