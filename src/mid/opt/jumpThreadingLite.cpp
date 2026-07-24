@@ -250,8 +250,17 @@ bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
 }
 
 void applySuccessorPhiRepairs(const std::vector<PhiRepairEdit> &edits,
-                              BasicBlock *pred) {
+                              BasicBlock *pred, bool midStillPredecessor) {
     for (const auto &edit : edits) {
+        if (midStillPredecessor) {
+            // Threading one of several incoming edges does not remove mid's
+            // edge to the successor.  Preserve its original phi incoming and
+            // add the newly direct predecessor (or do nothing when that
+            // predecessor already had the same incoming value).
+            if (!edit.removeMidIncoming)
+                edit.phi->addIncoming(edit.replacement, pred);
+            continue;
+        }
         if (edit.removeMidIncoming) {
             edit.phi->remove_operands(edit.incomingIdx - 1, edit.incomingIdx);
             continue;
@@ -289,15 +298,39 @@ bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid, const LoopInfo &LI,
     if (isUnsafeLoopThread(pred, mid, chosenSucc, LI, loopHeaders))
         return false;
 
+    // Bypassing mid substitutes its phis only in the selected successor's
+    // phis.  A phi with any other external use would no longer dominate the
+    // new direct edge, so leave such CFGs untouched.
+    for (auto *inst : mid->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) break;
+        for (const auto &use : phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user == optionalCmp)
+                continue;
+            if (user && user->is_phi() && user->parent_ == chosenSucc)
+                continue;
+            return false;
+        }
+    }
+
     std::vector<PhiRepairEdit> phiEdits;
     if (!planSuccessorPhiRepairs(chosenSucc, mid, pred, LI, phiEdits))
         return false;
 
+    const bool midStillPredecessor = mid->pre_bbs_.size() > 1;
     if (!redirectPredEdge(pred, mid, chosenSucc))
         return false;
 
-    applySuccessorPhiRepairs(phiEdits, pred);
+    applySuccessorPhiRepairs(phiEdits, pred, midStillPredecessor);
     removeIncomingFromPred(mid, pred);
+    if (!midStillPredecessor) {
+        std::vector<BasicBlock *> oldSuccs(mid->succ_bbs_.begin(),
+                                           mid->succ_bbs_.end());
+        for (auto *succ : oldSuccs)
+            removeIncomingFromPred(succ, mid);
+        mid->parent_->remove_bb(mid);
+    }
     return true;
 }
 
