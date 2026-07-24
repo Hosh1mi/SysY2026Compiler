@@ -48,6 +48,7 @@
 #include "include/mid/opt/codeSink.hpp"
 #include "include/mid/opt/tailDuplication.hpp"
 #include "include/mid/opt/analysisDump.hpp"
+#include "include/mid/hira/hiraPass.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -83,6 +84,7 @@ struct DriverOptions {
     bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
     bool dumpPreMachineInstr = false;
+    bool enableHira = false;
 };
 
 static bool parseOptLevel(const std::string &arg, int argc, char **argv,
@@ -138,6 +140,8 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.dumpMachineInstr = true;
         } else if (arg == "--dump-pre-machine-instr") {
             options.dumpPreMachineInstr = true;
+        } else if (arg == "--enable-hira") {
+            options.enableHira = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -218,6 +222,16 @@ static void addScalarNormalization(PassManager &pm) {
     pm.addPass(std::make_unique<CodeSink>());
 }
 
+// Hira owns loop-region optimization when enabled.  Keep the scalar part of
+// the normalization pipeline, but do not run the old loop distribution pair.
+static void addHiraScalarNormalization(PassManager &pm) {
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LocalCopyPropagation>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CodeSink>());
+}
+
 static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<BitFuncRecognize>());
     pm.addPass(std::make_unique<InlineExpand>());
@@ -238,7 +252,8 @@ static void addAnalysisDumpIfRequested(PassManager &pm) {
         pm.addPass(std::make_unique<AnalysisDump>());
 }
 
-static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
+static void addLateTargetIndependentPasses(PassManager &pm, Module *m,
+                                           bool enableOldLoopPasses = true) {
     pm.addPass(std::make_unique<GVN>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CodeSink>());
@@ -249,7 +264,8 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
     pm.addPass(std::make_unique<LateValueCleanup>());
     // 位于 Unroll 之后、所有 CFG cleanup 之后：保留条件写的冷路径，
     // 避免 value phi 被折成无条件计算的 select。
-    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    if (enableOldLoopPasses)
+        pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
     // AutoMemoization 放在所有中端 pass 之后、codegen 之前。
     // 仅在模块确实存在候选时才加，避免对其他用例的非确定性副作用。
     if (AutoMemoization::moduleHasAnyCandidate(m)) {
@@ -259,11 +275,31 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
 
 // ARM64 后端中端管线。目标相关 pass 在这里显式列出，避免目标能力通过
 // 布尔参数间接拼装而导致 ARM/RISC-V 管线错配。
-static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
+static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
+                               bool enableHira) {
     if (optLevel < 1)
         return;
 
     addSsaPreparation(pm);
+    if (enableHira) {
+        addHiraScalarNormalization(pm);
+        addInterproceduralAndGlobals(pm);
+        addCorrelatedCleanup(pm);
+        pm.addPass(std::make_unique<SemanticMarkerStamp>());
+        pm.addPass(std::make_unique<CFGSimplify>());
+
+        pm.addPass(std::make_unique<hira::HiraPass>());
+        addAnalysisDumpIfRequested(pm);
+
+        // SLP is a basic-block vectorizer and remains independent of Hira's
+        // loop-region ownership.
+        pm.addPass(std::make_unique<SLPVectorize>());
+        addDeepCleanup(pm);
+        addLateTargetIndependentPasses(pm, m,
+                                       /*enableOldLoopPasses=*/false);
+        return;
+    }
+
     addScalarNormalization(pm);
     addInterproceduralAndGlobals(pm);
     addCorrelatedCleanup(pm);
@@ -354,11 +390,12 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
     }
 }
 
-static void buildOptimizationPipeline(PassManager &pm, int optLevel, Module *m) {
+static void buildOptimizationPipeline(PassManager &pm, int optLevel, Module *m,
+                                      bool enableHira) {
     if (kTargetArch == TargetArch::Riscv)
         buildRiscvPipeline(pm, optLevel, m);
     else
-        buildArm64Pipeline(pm, optLevel, m);
+        buildArm64Pipeline(pm, optLevel, m, enableHira);
 }
 
 template <class CodeGen>
@@ -449,7 +486,8 @@ int main(int argc, char **argv) {
     PassManager pm;
     pm.setDumpIR(options.dumpIR);
     pm.setVerifyIR(options.verifyIR);
-    buildOptimizationPipeline(pm, options.optLevel, m.get());
+    buildOptimizationPipeline(pm, options.optLevel, m.get(),
+                              options.enableHira);
     pm.run(m.get());
 
     std::ofstream fout;
