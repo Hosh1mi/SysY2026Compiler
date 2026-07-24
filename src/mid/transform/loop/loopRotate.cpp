@@ -162,6 +162,15 @@ static bool hasTightenableDomainGuard(const Loop &loop) {
 }
 
 bool LoopRotate::runOnFunction(Function *func) {
+    for (auto *bb : func->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            auto *call = dynamic_cast<CallInst *>(inst);
+            if (!call || call->num_ops_ == 0)
+                continue;
+            if (call->get_operand(call->num_ops_ - 1) == func)
+                return false;
+        }
+    }
     bool changed = false;
     bool progress = true;
     while (progress) {
@@ -220,6 +229,14 @@ BasicBlock *LoopRotate::splitExitEdge(Function *func, BasicBlock *pred,
 bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     if (!loop || !loop->header || !loop->preheader)
         return false;
+    // Calls are control and memory barriers whose continuation can carry
+    // values through exit phis.  The current cloning/remapping logic handles
+    // only the header's scalar expressions, so do not rotate a loop that
+    // contains a call.
+    for (auto *bb : loop->blocks)
+        for (auto *inst : bb->instr_list_)
+            if (inst->is_call())
+                return false;
     // Keep simple canonical while loops in the form consumed directly by
     // vectorization and IV strength reduction.  A canonical IV alone is not a
     // reason to reject rotation for a multi-block body: internal control flow
@@ -315,6 +332,13 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
             if (!user) continue;
             if (!isHeaderLocalUse(def, user, header, exitSucc))
                 return false;
+            if (user->parent_ == exitSucc && user->is_phi()) {
+                auto *exitPhi = static_cast<PhiInst *>(user);
+                unsigned valueIndex = use.arg_no_;
+                if (valueIndex + 1 >= exitPhi->num_ops_ ||
+                    exitPhi->get_operand(valueIndex + 1) != header)
+                    return false;
+            }
         }
     }
 

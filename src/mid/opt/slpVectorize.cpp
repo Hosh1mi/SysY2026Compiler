@@ -457,6 +457,24 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
     if ((int)pack.instrs.size() != VF) return;
 
+    if (!pack.vecValue) {
+        std::map<Instruction *, size_t> order;
+        size_t position = 0;
+        for (auto *inst : bb->instr_list_)
+            order[inst] = position++;
+        auto firstIt = order.find(pack.instrs[0]);
+        if (firstIt == order.end())
+            return;
+        for (auto *store : pack.instrs) {
+            auto *def = dynamic_cast<Instruction *>(store->get_operand(0));
+            if (!def || def->parent_ != bb)
+                continue;
+            auto defIt = order.find(def);
+            if (defIt == order.end() || defIt->second >= firstIt->second)
+                return;
+        }
+    }
+
     // Verify contiguous stores with same base
     Value *basePtr = nullptr;
     int baseOffset = -1;
@@ -545,6 +563,32 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
 
     auto *firstBin = dynamic_cast<BinaryInst*>(pack.instrs[0]);
     if (!firstBin) return;
+
+    // New vector instructions are inserted before the first scalar lane.
+    // Require that point to dominate every scalar operand and every other
+    // lane; otherwise packing interleaved definitions would create same-block
+    // uses before their definitions.
+    std::map<Instruction *, size_t> order;
+    size_t position = 0;
+    for (auto *inst : bb->instr_list_)
+        order[inst] = position++;
+    auto firstIt = order.find(firstBin);
+    if (firstIt == order.end())
+        return;
+    std::set<Instruction *> laneSet(pack.instrs.begin(), pack.instrs.end());
+    for (auto *lane : pack.instrs) {
+        auto laneIt = order.find(lane);
+        if (laneIt == order.end() || laneIt->second < firstIt->second)
+            return;
+        for (unsigned op = 0; op < lane->num_ops_; ++op) {
+            auto *def = dynamic_cast<Instruction *>(lane->get_operand(op));
+            if (!def || def->parent_ != bb || laneSet.count(def))
+                continue;
+            auto defIt = order.find(def);
+            if (defIt == order.end() || defIt->second >= firstIt->second)
+                return;
+        }
+    }
 
     // Gather operands per lane
     int numOps = firstBin->num_ops_;
