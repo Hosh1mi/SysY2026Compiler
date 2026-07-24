@@ -2,6 +2,8 @@
 
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/hira/analysis/candidateAnalysis.hpp"
+#include "../../include/mid/hira/conversion/importer.hpp"
+#include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
 
@@ -16,23 +18,6 @@ std::string blockName(const BasicBlock *block) {
     if (!block)
         return "<null>";
     return block->name_.empty() ? "<anon>" : block->name_;
-}
-
-bool allChildrenSupported(const Loop &loop, const LoopInfo &loopInfo,
-                          CandidateResult &failure) {
-    for (Loop *child : loop.children) {
-        CandidateResult childResult =
-            analyzeHiraCandidate(*child, loopInfo);
-        if (!childResult.accepted()) {
-            failure = CandidateResult::reject(
-                CandidateRejectReason::UnsupportedChildLoop,
-                candidateRejectReasonName(childResult.reason));
-            return false;
-        }
-        if (!allChildrenSupported(*child, loopInfo, failure))
-            return false;
-    }
-    return true;
 }
 
 void dumpResult(const Function &function, const Loop &loop,
@@ -51,14 +36,32 @@ void dumpResult(const Function &function, const Loop &loop,
 void selectRegions(const Function &function, Loop &loop,
                    const LoopInfo &loopInfo, bool debug) {
     CandidateResult result = analyzeHiraCandidate(loop, loopInfo);
-    if (result.accepted())
-        allChildrenSupported(loop, loopInfo, result);
-
-    if (debug)
-        dumpResult(function, loop, result);
-    if (result.accepted())
+    if (!result.accepted()) {
+        if (debug)
+            dumpResult(function, loop, result);
+        for (Loop *child : loop.children)
+            selectRegions(function, *child, loopInfo, debug);
         return;
+    }
 
+    ImportResult imported = importHiraRegion(loop, loopInfo);
+    if (imported.succeeded()) {
+        if (debug) {
+            std::cerr << "[Hira] region function=" << function.name_
+                      << " header=" << blockName(loop.header) << "\n";
+            std::cerr << printHiraRegion(*imported.region, function.name_);
+        }
+        return;
+    }
+
+    if (debug) {
+        std::cerr << "[Hira] conversion-reject function=" << function.name_
+                  << " header=" << blockName(loop.header)
+                  << " reason=" << importRejectReasonName(imported.reason);
+        if (!imported.detail.empty())
+            std::cerr << " detail=" << imported.detail;
+        std::cerr << "\n";
+    }
     for (Loop *child : loop.children)
         selectRegions(function, *child, loopInfo, debug);
 }

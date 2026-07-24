@@ -48,10 +48,21 @@ std::unique_ptr<HiraNode> HiraSequence::remove(HiraNode *node) {
     return result;
 }
 
-void HiraLoop::addCarriedValue(HiraValue *value) {
-    assert(value && "loop-carried values must be explicit");
-    carriedValues_.push_back(value);
-    addOperand(value);
+std::size_t HiraLoop::addCarriedValue(HiraValue *initial,
+                                      HiraValue *iteration,
+                                      HiraValue *result) {
+    assert(initial && iteration && result &&
+           "loop-carried bindings must be explicit");
+    carriedValues_.push_back({initial, iteration, nullptr, result});
+    addOperand(initial);
+    addResult(iteration);
+    addResult(result);
+    return carriedValues_.size() - 1;
+}
+
+void HiraLoop::setCarriedYield(std::size_t index, HiraValue *value) {
+    assert(index < carriedValues_.size() && value);
+    carriedValues_[index].yielded = value;
 }
 
 void HiraLoop::addYieldValue(HiraValue *value) {
@@ -62,7 +73,10 @@ void HiraLoop::addYieldValue(HiraValue *value) {
 void SourceMapping::mapValue(HiraValue *hiraValue, ::Value *llvmValue) {
     assert(hiraValue && llvmValue);
     valueToSource_[hiraValue] = llvmValue;
-    sourceToValue_[llvmValue] = hiraValue;
+    auto &mappedValues = sourceToValues_[llvmValue];
+    if (std::find(mappedValues.begin(), mappedValues.end(), hiraValue) ==
+        mappedValues.end())
+        mappedValues.push_back(hiraValue);
 }
 
 void SourceMapping::mapNode(HiraNode *hiraNode,
@@ -84,8 +98,10 @@ void SourceMapping::mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop) {
 }
 
 HiraValue *SourceMapping::hiraValue(const ::Value *value) const {
-    auto it = sourceToValue_.find(value);
-    return it == sourceToValue_.end() ? nullptr : it->second;
+    auto it = sourceToValues_.find(value);
+    return it == sourceToValues_.end() || it->second.empty()
+               ? nullptr
+               : it->second.front();
 }
 
 Instruction *SourceMapping::sourceInstruction(const HiraNode *node) const {
@@ -120,14 +136,42 @@ HiraValue *HiraRegion::createValue(Type *type) {
     return values_.back().get();
 }
 
+HiraValue *HiraRegion::createParameter(Type *type) {
+    values_.push_back(std::make_unique<HiraValue>(
+        nextValueId_++, type, ValueKind::Parameter));
+    HiraValue *value = values_.back().get();
+    addParameter(value);
+    return value;
+}
+
+HiraValue *HiraRegion::createIntegerConstant(Type *type,
+                                             std::int64_t integerValue) {
+    values_.push_back(std::make_unique<HiraValue>(
+        nextValueId_++, type, ValueKind::IntegerConstant));
+    HiraValue *value = values_.back().get();
+    value->integerValue_ = integerValue;
+    return value;
+}
+
+HiraValue *HiraRegion::createFloatConstant(Type *type, float floatValue) {
+    values_.push_back(std::make_unique<HiraValue>(
+        nextValueId_++, type, ValueKind::FloatConstant));
+    HiraValue *value = values_.back().get();
+    value->floatValue_ = floatValue;
+    return value;
+}
+
 void HiraRegion::addParameter(HiraValue *value) {
     assert(value && "region parameters must be explicit");
-    parameters_.push_back(value);
+    if (std::find(parameters_.begin(), parameters_.end(), value) ==
+        parameters_.end())
+        parameters_.push_back(value);
 }
 
 void HiraRegion::addResult(HiraValue *value) {
     assert(value && "region results must be explicit");
-    results_.push_back(value);
+    if (std::find(results_.begin(), results_.end(), value) == results_.end())
+        results_.push_back(value);
 }
 
 } // namespace hira

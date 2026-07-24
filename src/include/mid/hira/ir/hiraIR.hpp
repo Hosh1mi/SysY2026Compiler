@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 class BasicBlock;
@@ -21,19 +22,34 @@ class HiraSequence;
 
 using ValueId = std::uint32_t;
 
+enum class ValueKind {
+    Temporary,
+    Parameter,
+    IntegerConstant,
+    FloatConstant,
+};
+
 class HiraValue {
 public:
-    HiraValue(ValueId id, Type *type) : id_(id), type_(type) {}
+    HiraValue(ValueId id, Type *type, ValueKind kind = ValueKind::Temporary)
+        : id_(id), type_(type), kind_(kind) {}
 
     ValueId id() const { return id_; }
     Type *type() const { return type_; }
+    ValueKind kind() const { return kind_; }
+    std::int64_t integerValue() const { return integerValue_; }
+    float floatValue() const { return floatValue_; }
     HiraNode *definingNode() const { return definingNode_; }
 
 private:
+    friend class HiraRegion;
     friend class HiraNode;
 
     ValueId id_;
     Type *type_;
+    ValueKind kind_;
+    std::int64_t integerValue_ = 0;
+    float floatValue_ = 0.0f;
     HiraNode *definingNode_ = nullptr;
 };
 
@@ -102,17 +118,22 @@ enum class ComputeKind {
     AShr,
     ICmp,
     Select,
+    GetElementPtr,
+    ZExt,
 };
 
 class HiraComputeOp final : public HiraNode {
 public:
-    explicit HiraComputeOp(ComputeKind computeKind)
-        : HiraNode(NodeKind::Compute), computeKind_(computeKind) {}
+    explicit HiraComputeOp(ComputeKind computeKind, int predicate = 0)
+        : HiraNode(NodeKind::Compute), computeKind_(computeKind),
+          predicate_(predicate) {}
 
     ComputeKind computeKind() const { return computeKind_; }
+    int predicate() const { return predicate_; }
 
 private:
     ComputeKind computeKind_;
+    int predicate_;
 };
 
 class HiraLoad final : public HiraNode {
@@ -160,6 +181,13 @@ private:
 
 class HiraLoop final : public HiraNode {
 public:
+    struct CarriedBinding {
+        HiraValue *initial = nullptr;
+        HiraValue *iteration = nullptr;
+        HiraValue *yielded = nullptr;
+        HiraValue *result = nullptr;
+    };
+
     HiraLoop(HiraValue *induction, HiraValue *lowerBound,
              HiraValue *upperBound, HiraValue *step)
         : HiraNode(NodeKind::Loop), induction_(induction),
@@ -177,13 +205,15 @@ public:
     HiraSequence &body() { return body_; }
     const HiraSequence &body() const { return body_; }
 
-    const std::vector<HiraValue *> &carriedValues() const {
+    const std::vector<CarriedBinding> &carriedValues() const {
         return carriedValues_;
     }
     const std::vector<HiraValue *> &yieldValues() const {
         return yieldValues_;
     }
-    void addCarriedValue(HiraValue *value);
+    std::size_t addCarriedValue(HiraValue *initial, HiraValue *iteration,
+                                HiraValue *result);
+    void setCarriedYield(std::size_t index, HiraValue *value);
     void addYieldValue(HiraValue *value);
 
 private:
@@ -192,7 +222,7 @@ private:
     HiraValue *upperBound_;
     HiraValue *step_;
     HiraSequence body_;
-    std::vector<HiraValue *> carriedValues_;
+    std::vector<CarriedBinding> carriedValues_;
     std::vector<HiraValue *> yieldValues_;
 };
 
@@ -211,7 +241,7 @@ public:
 
 private:
     std::map<const HiraValue *, ::Value *> valueToSource_;
-    std::map<const ::Value *, HiraValue *> sourceToValue_;
+    std::map<const ::Value *, std::vector<HiraValue *>> sourceToValues_;
     std::map<const HiraNode *, Instruction *> nodeToSource_;
     std::map<const Instruction *, HiraNode *> sourceToNode_;
     std::map<const HiraLoop *, Loop *> loopToSource_;
@@ -226,6 +256,9 @@ public:
     HiraRegion &operator=(const HiraRegion &) = delete;
 
     HiraValue *createValue(Type *type);
+    HiraValue *createParameter(Type *type);
+    HiraValue *createIntegerConstant(Type *type, std::int64_t value);
+    HiraValue *createFloatConstant(Type *type, float value);
     void addParameter(HiraValue *value);
     void addResult(HiraValue *value);
 
