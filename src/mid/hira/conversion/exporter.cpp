@@ -102,8 +102,25 @@ private:
     bool validateNode(const HiraNode &node) {
         if (auto *loop = dynamic_cast<const HiraLoop *>(&node))
             return validateLoop(*loop);
-        if (dynamic_cast<const HiraYield *>(&node))
+        if (auto *condition = dynamic_cast<const HiraIf *>(&node)) {
+            if (condition->operands().size() != 1 ||
+                !condition->results().empty() ||
+                condition->condition()->type() != module_->int1_ty_)
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-if-interface");
+            for (const auto &branchNode :
+                 condition->thenSequence().nodes())
+                if (!validateNode(*branchNode))
+                    return false;
+            for (const auto &branchNode :
+                 condition->elseSequence().nodes())
+                if (!validateNode(*branchNode))
+                    return false;
             return true;
+        }
+        if (dynamic_cast<const HiraYield *>(&node))
+            return fail(ExportRejectReason::InvalidRegion,
+                        "misplaced-yield");
         if (dynamic_cast<const HiraLoad *>(&node))
             return node.results().size() == 1 ||
                    fail(ExportRejectReason::InvalidRegion,
@@ -129,16 +146,30 @@ private:
     }
 
     bool validateLoop(const HiraLoop &loop) {
-        if (loop.yieldValues().empty())
+        const auto &nodes = loop.body().nodes();
+        if (loop.yieldValues().size() !=
+                loop.carriedValues().size() + 1 ||
+            nodes.empty())
             return fail(ExportRejectReason::InvalidRegion,
-                        "missing-induction-yield");
+                        "invalid-loop-yields");
+        auto *yield =
+            dynamic_cast<const HiraYield *>(nodes.back().get());
+        if (!yield ||
+            yield->operands().size() != loop.yieldValues().size())
+            return fail(ExportRejectReason::InvalidRegion,
+                        "invalid-loop-yield-node");
+        for (std::size_t index = 0;
+             index < loop.yieldValues().size(); ++index)
+            if (yield->operands()[index] != loop.yieldValues()[index])
+                return fail(ExportRejectReason::InvalidRegion,
+                            "mismatched-loop-yield");
         for (const auto &binding : loop.carriedValues())
             if (!binding.initial || !binding.iteration ||
                 !binding.yielded || !binding.result)
                 return fail(ExportRejectReason::InvalidRegion,
                             "invalid-carried-binding");
-        for (const auto &node : loop.body().nodes())
-            if (!validateNode(*node))
+        for (std::size_t index = 0; index + 1 < nodes.size(); ++index)
+            if (!validateNode(*nodes[index]))
                 return false;
         return true;
     }
@@ -274,21 +305,9 @@ private:
         if (connectEntry)
             new BranchInst(header, entry);
 
-        BasicBlock *continuation = body;
-        for (const auto &node : loop.body().nodes()) {
-            if (dynamic_cast<HiraYield *>(node.get()))
-                continue;
-            if (auto *nested = dynamic_cast<HiraLoop *>(node.get())) {
-                LoopEmission nestedEmission;
-                if (!emitLoop(*nested, continuation, true,
-                              nestedEmission))
-                    return false;
-                continuation = nestedEmission.exit;
-                continue;
-            }
-            if (!emitNode(*node, continuation))
-                return false;
-        }
+        BasicBlock *continuation = nullptr;
+        if (!emitSequence(loop.body(), body, continuation))
+            return false;
 
         new BranchInst(latch, continuation);
         new BranchInst(header, latch);
@@ -312,6 +331,59 @@ private:
             exitPhi->addIncoming(entryPhi.phi, header);
             bind(entryPhi.binding->result, exitPhi);
         }
+        return true;
+    }
+
+    bool emitSequence(HiraSequence &sequence, BasicBlock *entry,
+                      BasicBlock *&continuation) {
+        continuation = entry;
+        for (const auto &node : sequence.nodes()) {
+            if (dynamic_cast<HiraYield *>(node.get()))
+                break;
+            if (auto *nested = dynamic_cast<HiraLoop *>(node.get())) {
+                LoopEmission nestedEmission;
+                if (!emitLoop(*nested, continuation, true,
+                              nestedEmission))
+                    return false;
+                continuation = nestedEmission.exit;
+                continue;
+            }
+            if (auto *condition = dynamic_cast<HiraIf *>(node.get())) {
+                if (!emitIf(*condition, continuation))
+                    return false;
+                continue;
+            }
+            if (!emitNode(*node, continuation))
+                return false;
+        }
+        return true;
+    }
+
+    bool emitIf(HiraIf &condition, BasicBlock *&continuation) {
+        Value *guard = value(condition.condition());
+        if (!guard)
+            return fail(ExportRejectReason::MissingValue,
+                        "if-condition");
+
+        const unsigned id = nextBlockId_++;
+        BasicBlock *thenBlock = createBlock("if_then", id);
+        BasicBlock *elseBlock = createBlock("if_else", id);
+        BasicBlock *joinBlock = createBlock("if_end", id);
+        new BranchInst(guard, thenBlock, elseBlock, continuation);
+
+        BasicBlock *thenContinuation = nullptr;
+        if (!emitSequence(condition.thenSequence(), thenBlock,
+                          thenContinuation))
+            return false;
+        new BranchInst(joinBlock, thenContinuation);
+
+        BasicBlock *elseContinuation = nullptr;
+        if (!emitSequence(condition.elseSequence(), elseBlock,
+                          elseContinuation))
+            return false;
+        new BranchInst(joinBlock, elseContinuation);
+
+        continuation = joinBlock;
         return true;
     }
 

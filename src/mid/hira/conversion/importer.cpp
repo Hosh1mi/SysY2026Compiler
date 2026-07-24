@@ -322,25 +322,137 @@ private:
                     current ? current->name_ : "<null>");
 
             Instruction *terminator = current->get_terminator();
-            if (!terminator || !terminator->is_br() ||
-                terminator->num_ops_ != 1)
+            if (!terminator || !terminator->is_br())
                 return fail(
                     ImportRejectReason::NonStraightLineControlFlow,
                     current->name_);
 
-            for (Instruction *instruction : current->instr_list_) {
-                if (instruction == terminator)
-                    continue;
-                if (instruction->is_phi())
-                    return fail(ImportRejectReason::UnsupportedPhi,
-                                current->name_);
-                if (!importInstruction(instruction, hiraLoop.body()))
-                    return false;
+            if (!importBlockContents(current, terminator,
+                                     hiraLoop.body()))
+                return false;
+
+            if (terminator->num_ops_ == 1) {
+                current = dynamic_cast<BasicBlock *>(
+                    terminator->get_operand(0));
+                continue;
             }
-            current =
-                dynamic_cast<BasicBlock *>(terminator->get_operand(0));
+            if (terminator->num_ops_ != 3 ||
+                !importIfDiamond(loop, current, terminator,
+                                 hiraLoop.body(), visited, current))
+                return false;
         }
         return visited.count(control.latch) != 0;
+    }
+
+    bool importBlockContents(BasicBlock *block,
+                             Instruction *terminator,
+                             HiraSequence &target) {
+        for (Instruction *instruction : block->instr_list_) {
+            if (instruction == terminator)
+                continue;
+            if (instruction->is_phi())
+                return fail(ImportRejectReason::UnsupportedPhi,
+                            block->name_);
+            if (!importInstruction(instruction, target))
+                return false;
+        }
+        return true;
+    }
+
+    BasicBlock *unconditionalTarget(BasicBlock *block) const {
+        if (!block)
+            return nullptr;
+        Instruction *terminator = block->get_terminator();
+        if (!terminator || !terminator->is_br() ||
+            terminator->num_ops_ != 1)
+            return nullptr;
+        return dynamic_cast<BasicBlock *>(terminator->get_operand(0));
+    }
+
+    bool importIfArm(Loop &loop, BasicBlock *arm,
+                     BasicBlock *join, HiraSequence &target,
+                     std::set<BasicBlock *> &visited) {
+        if (!arm)
+            return true;
+        if (!loop.isInLoop(arm) ||
+            !visited.insert(arm).second ||
+            arm->pre_bbs_.size() != 1)
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                arm->name_);
+
+        Instruction *terminator = arm->get_terminator();
+        if (!terminator || !terminator->is_br() ||
+            terminator->num_ops_ != 1 ||
+            terminator->get_operand(0) != join)
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                arm->name_);
+        return importBlockContents(arm, terminator, target);
+    }
+
+    bool importIfDiamond(Loop &loop, BasicBlock *branchBlock,
+                         Instruction *terminator,
+                         HiraSequence &target,
+                         std::set<BasicBlock *> &visited,
+                         BasicBlock *&join) {
+        HiraValue *condition = getValue(terminator->get_operand(0));
+        auto *thenTarget =
+            dynamic_cast<BasicBlock *>(terminator->get_operand(1));
+        auto *elseTarget =
+            dynamic_cast<BasicBlock *>(terminator->get_operand(2));
+        if (!condition || !thenTarget || !elseTarget ||
+            thenTarget == elseTarget)
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                branchBlock->name_);
+
+        BasicBlock *thenArm = thenTarget;
+        BasicBlock *elseArm = elseTarget;
+        BasicBlock *thenNext = unconditionalTarget(thenTarget);
+        BasicBlock *elseNext = unconditionalTarget(elseTarget);
+        if (thenNext == elseTarget) {
+            join = elseTarget;
+            elseArm = nullptr;
+        } else if (elseNext == thenTarget) {
+            join = thenTarget;
+            thenArm = nullptr;
+        } else if (thenNext && thenNext == elseNext) {
+            join = thenNext;
+        } else {
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                branchBlock->name_);
+        }
+
+        if (!join || !loop.isInLoop(join) || join == loop.header)
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                branchBlock->name_);
+
+        std::set<BasicBlock *> expectedPredecessors;
+        expectedPredecessors.insert(thenArm ? thenArm : branchBlock);
+        expectedPredecessors.insert(elseArm ? elseArm : branchBlock);
+        if (join->pre_bbs_.size() != expectedPredecessors.size())
+            return fail(
+                ImportRejectReason::NonStraightLineControlFlow,
+                join->name_);
+        for (BasicBlock *predecessor : join->pre_bbs_)
+            if (!expectedPredecessors.count(predecessor))
+                return fail(
+                    ImportRejectReason::NonStraightLineControlFlow,
+                    join->name_);
+
+        auto hiraIf = std::make_unique<HiraIf>(condition);
+        HiraIf *inserted = hiraIf.get();
+        if (!importIfArm(loop, thenArm, join,
+                         hiraIf->thenSequence(), visited) ||
+            !importIfArm(loop, elseArm, join,
+                         hiraIf->elseSequence(), visited))
+            return false;
+        target.append(std::move(hiraIf));
+        region_->sourceMapping().mapNode(inserted, terminator);
+        return true;
     }
 
     bool importInstruction(Instruction *instruction,
