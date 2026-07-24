@@ -6,7 +6,6 @@
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/hira/ir/hiraVerifier.hpp"
-#include "../../include/mid/hira/transform/canonicalize.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -75,15 +74,6 @@ bool selectRegions(Function &function, Loop &loop,
             return false;
         if (debug) {
             std::cerr << "[Hira] region function=" << function.name_
-                      << " header=" << blockName(loop.header) << "\n";
-            std::cerr << printHiraRegion(*imported.region, function.name_);
-        }
-        bool canonicalized = canonicalizeHiraRegion(*imported.region);
-        if (!verifyRegion("canonicalize"))
-            return false;
-        if (debug && canonicalized) {
-            std::cerr << "[Hira] canonicalized function="
-                      << function.name_
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }

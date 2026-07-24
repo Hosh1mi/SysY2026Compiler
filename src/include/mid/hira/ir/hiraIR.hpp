@@ -65,7 +65,7 @@ enum class NodeKind {
 class HiraNode {
 public:
     explicit HiraNode(NodeKind kind) : kind_(kind) {}
-    virtual ~HiraNode();
+    virtual ~HiraNode() = default;
 
     HiraNode(const HiraNode &) = delete;
     HiraNode &operator=(const HiraNode &) = delete;
@@ -77,8 +77,6 @@ public:
 
     void addOperand(HiraValue *value);
     void addResult(HiraValue *value);
-    virtual void replaceUse(HiraValue *oldValue, HiraValue *newValue);
-    void swapOperands(std::size_t left, std::size_t right);
 
 private:
     friend class HiraSequence;
@@ -132,7 +130,6 @@ public:
 
     ComputeKind computeKind() const { return computeKind_; }
     int predicate() const { return predicate_; }
-    void setPredicate(int predicate) { predicate_ = predicate; }
 
 private:
     ComputeKind computeKind_;
@@ -218,7 +215,6 @@ public:
                                 HiraValue *result);
     void setCarriedYield(std::size_t index, HiraValue *value);
     void addYieldValue(HiraValue *value);
-    void replaceUse(HiraValue *oldValue, HiraValue *newValue) override;
 
 private:
     HiraValue *induction_;
@@ -235,8 +231,6 @@ public:
     void mapValue(HiraValue *hiraValue, ::Value *llvmValue);
     void mapNode(HiraNode *hiraNode, Instruction *llvmInstruction);
     void mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop);
-    void unmapValue(HiraValue *hiraValue);
-    void unmapNode(HiraNode *hiraNode);
 
     ::Value *sourceValue(const HiraValue *value) const;
     HiraValue *hiraValue(const ::Value *value) const;
@@ -267,7 +261,6 @@ public:
     HiraValue *createFloatConstant(Type *type, float value);
     void addParameter(HiraValue *value);
     void addResult(HiraValue *value);
-    void replaceAllUses(HiraValue *oldValue, HiraValue *newValue);
 
     const std::vector<HiraValue *> &parameters() const { return parameters_; }
     const std::vector<HiraValue *> &results() const { return results_; }
