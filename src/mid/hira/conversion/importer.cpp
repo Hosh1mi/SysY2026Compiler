@@ -247,7 +247,7 @@ private:
         }
 
         target.append(std::move(loopNode));
-        if (!importLoopBody(loop, control, *hiraLoop))
+        if (!importLoopBody(loop, *hiraLoop))
             return false;
 
         Value *inductionUpdate =
@@ -281,8 +281,7 @@ private:
         return true;
     }
 
-    bool importLoopBody(Loop &loop, const LoopControl &control,
-                        HiraLoop &hiraLoop) {
+    bool importLoopBody(Loop &loop, HiraLoop &hiraLoop) {
         BasicBlock *current = nullptr;
         for (BasicBlock *successor : loop.header->succ_bbs_) {
             if (!loop.isInLoop(successor))
@@ -341,7 +340,7 @@ private:
                                  hiraLoop.body(), visited, current))
                 return false;
         }
-        return visited.count(control.latch) != 0;
+        return true;
     }
 
     bool importBlockContents(BasicBlock *block,

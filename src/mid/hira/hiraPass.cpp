@@ -6,6 +6,8 @@
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/hira/ir/hiraVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
+#include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -80,6 +82,41 @@ bool selectRegions(Function &function, Loop &loop,
         bool optimized = hoistLoopInvariants(*imported.region);
         if (!verifyRegion("transform"))
             return false;
+        polyhedral::PolyhedralBuildResult polyhedralModel =
+            polyhedral::buildPolyhedralModel(*imported.region);
+        polyhedral::PolyhedralVerificationResult polyhedralVerification;
+        if (polyhedralModel.succeeded())
+            polyhedralVerification =
+                polyhedral::verifyPolyhedralModel(
+                    *polyhedralModel.model);
+        if (debug) {
+            if (polyhedralModel.succeeded() &&
+                polyhedralVerification.succeeded()) {
+                std::cerr << polyhedral::printPolyhedralModel(
+                    *polyhedralModel.model);
+            } else if (polyhedralModel.succeeded()) {
+                std::cerr << "[Hira] polyhedral-verify-reject function="
+                          << function.name_
+                          << " header=" << blockName(loop.header)
+                          << " reason="
+                          << polyhedral::polyhedralVerifyErrorName(
+                                 polyhedralVerification.error);
+                if (!polyhedralVerification.detail.empty())
+                    std::cerr << " detail="
+                              << polyhedralVerification.detail;
+                std::cerr << "\n";
+            } else {
+                std::cerr << "[Hira] polyhedral-reject function="
+                          << function.name_
+                          << " header=" << blockName(loop.header)
+                          << " reason="
+                          << polyhedral::polyhedralBuildErrorName(
+                                 polyhedralModel.error);
+                if (!polyhedralModel.detail.empty())
+                    std::cerr << " detail=" << polyhedralModel.detail;
+                std::cerr << "\n";
+            }
+        }
         if (debug && optimized) {
             std::cerr << "[Hira] transformed function=" << function.name_
                       << " header=" << blockName(loop.header)
