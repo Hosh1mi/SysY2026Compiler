@@ -6,6 +6,32 @@
 #include <cassert>
 
 namespace hira {
+namespace {
+
+void replaceUsesInSequence(HiraSequence &sequence, HiraValue *oldValue,
+                           HiraValue *newValue) {
+    for (const auto &node : sequence.nodes()) {
+        node->replaceUse(oldValue, newValue);
+        if (auto *loop = dynamic_cast<HiraLoop *>(node.get())) {
+            replaceUsesInSequence(loop->body(), oldValue, newValue);
+            continue;
+        }
+        if (auto *condition = dynamic_cast<HiraIf *>(node.get())) {
+            replaceUsesInSequence(condition->thenSequence(), oldValue,
+                                  newValue);
+            replaceUsesInSequence(condition->elseSequence(), oldValue,
+                                  newValue);
+        }
+    }
+}
+
+} // namespace
+
+HiraNode::~HiraNode() {
+    for (HiraValue *result : results_)
+        if (result && result->definingNode_ == this)
+            result->definingNode_ = nullptr;
+}
 
 void HiraNode::addOperand(HiraValue *value) {
     assert(value && "Hira operands must be explicit values");
@@ -17,6 +43,17 @@ void HiraNode::addResult(HiraValue *value) {
     assert(!value->definingNode_ && "Hira value already has a definition");
     value->definingNode_ = this;
     results_.push_back(value);
+}
+
+void HiraNode::replaceUse(HiraValue *oldValue, HiraValue *newValue) {
+    assert(oldValue && newValue && "Hira use replacement requires values");
+    std::replace(operands_.begin(), operands_.end(), oldValue, newValue);
+}
+
+void HiraNode::swapOperands(std::size_t left, std::size_t right) {
+    assert(left < operands_.size() && right < operands_.size() &&
+           "Hira operand swap is out of range");
+    std::swap(operands_[left], operands_[right]);
 }
 
 HiraNode *HiraSequence::append(std::unique_ptr<HiraNode> node) {
@@ -70,6 +107,24 @@ void HiraLoop::addYieldValue(HiraValue *value) {
     yieldValues_.push_back(value);
 }
 
+void HiraLoop::replaceUse(HiraValue *oldValue, HiraValue *newValue) {
+    HiraNode::replaceUse(oldValue, newValue);
+    if (lowerBound_ == oldValue)
+        lowerBound_ = newValue;
+    if (upperBound_ == oldValue)
+        upperBound_ = newValue;
+    if (step_ == oldValue)
+        step_ = newValue;
+    for (CarriedBinding &binding : carriedValues_) {
+        if (binding.initial == oldValue)
+            binding.initial = newValue;
+        if (binding.yielded == oldValue)
+            binding.yielded = newValue;
+    }
+    std::replace(yieldValues_.begin(), yieldValues_.end(), oldValue,
+                 newValue);
+}
+
 void SourceMapping::mapValue(HiraValue *hiraValue, ::Value *llvmValue) {
     assert(hiraValue && llvmValue);
     valueToSource_[hiraValue] = llvmValue;
@@ -90,6 +145,34 @@ void SourceMapping::mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop) {
     assert(hiraLoop && llvmLoop);
     loopToSource_[hiraLoop] = llvmLoop;
     sourceToLoop_[llvmLoop] = hiraLoop;
+}
+
+void SourceMapping::unmapValue(HiraValue *hiraValue) {
+    auto value = valueToSource_.find(hiraValue);
+    if (value == valueToSource_.end())
+        return;
+    ::Value *sourceValue = value->second;
+    valueToSource_.erase(value);
+    auto source = sourceToValues_.find(sourceValue);
+    if (source == sourceToValues_.end())
+        return;
+    auto &mappedValues = source->second;
+    mappedValues.erase(
+        std::remove(mappedValues.begin(), mappedValues.end(), hiraValue),
+        mappedValues.end());
+    if (mappedValues.empty())
+        sourceToValues_.erase(source);
+}
+
+void SourceMapping::unmapNode(HiraNode *hiraNode) {
+    auto node = nodeToSource_.find(hiraNode);
+    if (node == nodeToSource_.end())
+        return;
+    Instruction *instruction = node->second;
+    nodeToSource_.erase(node);
+    auto source = sourceToNode_.find(instruction);
+    if (source != sourceToNode_.end() && source->second == hiraNode)
+        sourceToNode_.erase(source);
 }
 
 ::Value *SourceMapping::sourceValue(const HiraValue *value) const {
@@ -172,6 +255,16 @@ void HiraRegion::addResult(HiraValue *value) {
     assert(value && "region results must be explicit");
     if (std::find(results_.begin(), results_.end(), value) == results_.end())
         results_.push_back(value);
+}
+
+void HiraRegion::replaceAllUses(HiraValue *oldValue,
+                                HiraValue *newValue) {
+    assert(oldValue && newValue && oldValue != newValue &&
+           "Hira use replacement requires distinct values");
+    assert(std::find(results_.begin(), results_.end(), oldValue) ==
+               results_.end() &&
+           "region result replacement requires explicit boundary mapping");
+    replaceUsesInSequence(rootSequence_, oldValue, newValue);
 }
 
 } // namespace hira

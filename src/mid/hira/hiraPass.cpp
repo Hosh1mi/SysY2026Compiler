@@ -5,6 +5,8 @@
 #include "../../include/mid/hira/conversion/exporter.hpp"
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
+#include "../../include/mid/hira/ir/hiraVerifier.hpp"
+#include "../../include/mid/hira/transform/canonicalize.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -52,12 +54,42 @@ bool selectRegions(Function &function, Loop &loop,
 
     ImportResult imported = importHiraRegion(loop, loopInfo);
     if (imported.succeeded()) {
+        auto verifyRegion = [&](const char *stage) {
+            HiraVerificationResult verification =
+                verifyHiraRegion(*imported.region);
+            if (!verification.succeeded() && debug) {
+                std::cerr << "[Hira] verify-reject function="
+                          << function.name_
+                          << " header=" << blockName(loop.header)
+                          << " stage=" << stage
+                          << " reason="
+                          << hiraVerifyErrorName(verification.error);
+                if (!verification.detail.empty())
+                    std::cerr << " detail=" << verification.detail;
+                std::cerr << "\n";
+            }
+            return verification.succeeded();
+        };
+
+        if (!verifyRegion("import"))
+            return false;
         if (debug) {
             std::cerr << "[Hira] region function=" << function.name_
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }
+        bool canonicalized = canonicalizeHiraRegion(*imported.region);
+        if (!verifyRegion("canonicalize"))
+            return false;
+        if (debug && canonicalized) {
+            std::cerr << "[Hira] canonicalized function="
+                      << function.name_
+                      << " header=" << blockName(loop.header) << "\n";
+            std::cerr << printHiraRegion(*imported.region, function.name_);
+        }
         bool optimized = hoistLoopInvariants(*imported.region);
+        if (!verifyRegion("transform"))
+            return false;
         if (debug && optimized) {
             std::cerr << "[Hira] transformed function=" << function.name_
                       << " header=" << blockName(loop.header)
