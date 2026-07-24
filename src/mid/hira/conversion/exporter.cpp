@@ -72,13 +72,39 @@ public:
         if (!validate())
             return failure_;
 
+        BasicBlock *loopEntry = preheader_;
+        if (rootLoopIndex_ != 0) {
+            const unsigned id = nextBlockId_++;
+            entryTarget_ = createBlock("preheader", id);
+            loopEntry = entryTarget_;
+            for (std::size_t index = 0; index < rootLoopIndex_; ++index)
+                if (!emitStructuredNode(
+                        *region_.rootSequence().nodes()[index],
+                        loopEntry)) {
+                    rollbackNewBlocks();
+                    return failure_;
+                }
+        }
+
         LoopEmission rootEmission;
-        if (!emitLoop(*rootLoop_, preheader_, false, rootEmission)) {
+        if (!emitLoop(*rootLoop_, loopEntry, rootLoopIndex_ != 0,
+                      rootEmission)) {
             rollbackNewBlocks();
             return failure_;
         }
         rootHeader_ = rootEmission.header;
-        new BranchInst(oldExit_, rootEmission.exit);
+        if (!entryTarget_)
+            entryTarget_ = rootHeader_;
+
+        BasicBlock *regionExit = rootEmission.exit;
+        const auto &rootNodes = region_.rootSequence().nodes();
+        for (std::size_t index = rootLoopIndex_ + 1;
+             index < rootNodes.size(); ++index)
+            if (!emitStructuredNode(*rootNodes[index], regionExit)) {
+                rollbackNewBlocks();
+                return failure_;
+            }
+        new BranchInst(oldExit_, regionExit);
         commit();
         return ExportResult::success();
     }
@@ -194,12 +220,29 @@ private:
             break;
         }
 
-        if (region_.rootSequence().nodes().size() != 1)
+        const auto &rootNodes = region_.rootSequence().nodes();
+        if (rootNodes.empty())
             return fail(ExportRejectReason::InvalidRegion);
-        rootLoop_ = dynamic_cast<HiraLoop *>(
-            region_.rootSequence().nodes().front().get());
-        if (!rootLoop_ || !validateLoop(*rootLoop_))
+        for (std::size_t index = 0; index < rootNodes.size(); ++index) {
+            if (auto *loop =
+                    dynamic_cast<HiraLoop *>(rootNodes[index].get())) {
+                if (rootLoop_)
+                    return fail(ExportRejectReason::InvalidRegion,
+                                "multiple-root-loops");
+                rootLoop_ = loop;
+                rootLoopIndex_ = index;
+            } else if (!validateNode(*rootNodes[index])) {
+                return false;
+            }
+        }
+        if (!rootLoop_)
+            return fail(ExportRejectReason::InvalidRegion,
+                        "missing-root-loop");
+        if (!validateLoop(*rootLoop_))
             return false;
+        if (region_.sourceMapping().sourceLoop(rootLoop_) != sourceLoop_)
+            return fail(ExportRejectReason::InvalidRegion,
+                        "invalid-root-loop");
 
         for (HiraValue *parameter : region_.parameters())
             if (!region_.sourceMapping().sourceValue(parameter))
@@ -340,23 +383,25 @@ private:
         for (const auto &node : sequence.nodes()) {
             if (dynamic_cast<HiraYield *>(node.get()))
                 break;
-            if (auto *nested = dynamic_cast<HiraLoop *>(node.get())) {
-                LoopEmission nestedEmission;
-                if (!emitLoop(*nested, continuation, true,
-                              nestedEmission))
-                    return false;
-                continuation = nestedEmission.exit;
-                continue;
-            }
-            if (auto *condition = dynamic_cast<HiraIf *>(node.get())) {
-                if (!emitIf(*condition, continuation))
-                    return false;
-                continue;
-            }
-            if (!emitNode(*node, continuation))
+            if (!emitStructuredNode(*node, continuation))
                 return false;
         }
         return true;
+    }
+
+    bool emitStructuredNode(HiraNode &node,
+                            BasicBlock *&continuation) {
+        if (auto *nested = dynamic_cast<HiraLoop *>(&node)) {
+            LoopEmission nestedEmission;
+            if (!emitLoop(*nested, continuation, true,
+                          nestedEmission))
+                return false;
+            continuation = nestedEmission.exit;
+            return true;
+        }
+        if (auto *condition = dynamic_cast<HiraIf *>(&node))
+            return emitIf(*condition, continuation);
+        return emitNode(node, continuation);
     }
 
     bool emitIf(HiraIf &condition, BasicBlock *&continuation) {
@@ -474,7 +519,7 @@ private:
         preheader_->delete_instr(oldBranch);
         preheader_->remove_succ_basic_block(oldHeader_);
         oldHeader_->remove_pre_basic_block(preheader_);
-        new BranchInst(rootHeader_, preheader_);
+        new BranchInst(entryTarget_, preheader_);
 
         std::vector<BasicBlock *> oldBlocks =
             sourceLoop_->blocksOrdered;
@@ -511,6 +556,8 @@ private:
     BasicBlock *oldHeader_ = nullptr;
     BasicBlock *oldExit_ = nullptr;
     BasicBlock *rootHeader_ = nullptr;
+    BasicBlock *entryTarget_ = nullptr;
+    std::size_t rootLoopIndex_ = 0;
     std::vector<BasicBlock *> newBlocks_;
     std::map<HiraValue *, Value *> values_;
     ExportResult failure_;

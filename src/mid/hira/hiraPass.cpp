@@ -5,6 +5,7 @@
 #include "../../include/mid/hira/conversion/exporter.hpp"
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
+#include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
 
@@ -56,7 +57,14 @@ bool selectRegions(Function &function, Loop &loop,
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }
-        if (!forceRoundtrip)
+        bool optimized = hoistLoopInvariants(*imported.region);
+        if (debug && optimized) {
+            std::cerr << "[Hira] transformed function=" << function.name_
+                      << " header=" << blockName(loop.header)
+                      << " pass=loop-invariant-code-motion\n";
+            std::cerr << printHiraRegion(*imported.region, function.name_);
+        }
+        if (!forceRoundtrip && !imported.region->modified())
             return false;
 
         ExportResult exported = exportHiraRegion(*imported.region);
