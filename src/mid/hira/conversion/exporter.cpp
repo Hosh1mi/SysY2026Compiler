@@ -8,9 +8,7 @@
 #include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/module.hpp"
 
-#include <algorithm>
 #include <map>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,25 +71,81 @@ public:
     ExportResult run() {
         if (!validate())
             return failure_;
-        createBlocks();
-        if (!emitLoop()) {
+
+        LoopEmission rootEmission;
+        if (!emitLoop(*rootLoop_, preheader_, false, rootEmission)) {
             rollbackNewBlocks();
             return failure_;
         }
+        rootHeader_ = rootEmission.header;
+        new BranchInst(oldExit_, rootEmission.exit);
         commit();
         return ExportResult::success();
     }
 
 private:
+    struct LoopEmission {
+        BasicBlock *header = nullptr;
+        BasicBlock *exit = nullptr;
+    };
+
+    struct CarriedPhi {
+        const HiraLoop::CarriedBinding *binding = nullptr;
+        PhiInst *phi = nullptr;
+    };
+
     bool fail(ExportRejectReason reason, std::string detail = {}) {
         failure_ = ExportResult::reject(reason, std::move(detail));
         return false;
     }
 
+    bool validateNode(const HiraNode &node) {
+        if (auto *loop = dynamic_cast<const HiraLoop *>(&node))
+            return validateLoop(*loop);
+        if (dynamic_cast<const HiraYield *>(&node))
+            return true;
+        if (dynamic_cast<const HiraLoad *>(&node))
+            return node.results().size() == 1 ||
+                   fail(ExportRejectReason::InvalidRegion,
+                        "invalid-load-result");
+        if (dynamic_cast<const HiraStore *>(&node))
+            return node.results().empty() ||
+                   fail(ExportRejectReason::InvalidRegion,
+                        "invalid-store-result");
+
+        auto *compute = dynamic_cast<const HiraComputeOp *>(&node);
+        if (!compute)
+            return fail(ExportRejectReason::UnsupportedNode);
+        if (compute->results().size() != 1)
+            return fail(ExportRejectReason::InvalidRegion,
+                        "invalid-compute-result");
+        ComputeKind kind = compute->computeKind();
+        if (!isBinaryCompute(kind) && kind != ComputeKind::ICmp &&
+            kind != ComputeKind::Select &&
+            kind != ComputeKind::GetElementPtr &&
+            kind != ComputeKind::ZExt)
+            return fail(ExportRejectReason::UnsupportedNode);
+        return true;
+    }
+
+    bool validateLoop(const HiraLoop &loop) {
+        if (loop.yieldValues().empty())
+            return fail(ExportRejectReason::InvalidRegion,
+                        "missing-induction-yield");
+        for (const auto &binding : loop.carriedValues())
+            if (!binding.initial || !binding.iteration ||
+                !binding.yielded || !binding.result)
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-carried-binding");
+        for (const auto &node : loop.body().nodes())
+            if (!validateNode(*node))
+                return false;
+        return true;
+    }
+
     bool validate() {
         if (!sourceLoop_ || !function_ || !module_ ||
-            !sourceLoop_->preheader || !sourceLoop_->singleExit() ||
-            sourceLoop_->children.size() != 0)
+            !sourceLoop_->preheader || !sourceLoop_->singleExit())
             return fail(ExportRejectReason::InvalidRegion);
 
         preheader_ = sourceLoop_->preheader;
@@ -103,62 +157,30 @@ private:
             preheaderTerminator->get_operand(0) != oldHeader_)
             return fail(ExportRejectReason::InvalidSourceCFG);
 
-        for (Instruction *instruction : oldExit_->instr_list_)
+        for (Instruction *instruction : oldExit_->instr_list_) {
             if (instruction->is_phi())
                 return fail(ExportRejectReason::UnsupportedExitPhi);
-            else
-                break;
+            break;
+        }
 
         if (region_.rootSequence().nodes().size() != 1)
             return fail(ExportRejectReason::InvalidRegion);
-        loop_ = dynamic_cast<HiraLoop *>(
+        rootLoop_ = dynamic_cast<HiraLoop *>(
             region_.rootSequence().nodes().front().get());
-        if (!loop_)
-            return fail(ExportRejectReason::InvalidRegion);
-        if (loop_->yieldValues().empty())
-            return fail(ExportRejectReason::InvalidRegion,
-                        "missing-induction-yield");
+        if (!rootLoop_ || !validateLoop(*rootLoop_))
+            return false;
 
         for (HiraValue *parameter : region_.parameters())
             if (!region_.sourceMapping().sourceValue(parameter))
                 return fail(ExportRejectReason::InvalidRegion,
                             "unmapped-parameter");
 
-        for (const auto &node : loop_->body().nodes()) {
-            if (dynamic_cast<HiraYield *>(node.get()))
-                continue;
-            if (dynamic_cast<HiraLoad *>(node.get())) {
-                if (node->results().size() != 1)
-                    return fail(ExportRejectReason::InvalidRegion,
-                                "invalid-load-result");
-                continue;
-            }
-            if (dynamic_cast<HiraStore *>(node.get())) {
-                if (!node->results().empty())
-                    return fail(ExportRejectReason::InvalidRegion,
-                                "invalid-store-result");
-                continue;
-            }
-            auto *compute = dynamic_cast<HiraComputeOp *>(node.get());
-            if (!compute)
-                return fail(ExportRejectReason::UnsupportedNode);
-            if (compute->results().size() != 1)
-                return fail(ExportRejectReason::InvalidRegion,
-                            "invalid-compute-result");
-            ComputeKind kind = compute->computeKind();
-            if (!isBinaryCompute(kind) && kind != ComputeKind::ICmp &&
-                kind != ComputeKind::Select &&
-                kind != ComputeKind::GetElementPtr &&
-                kind != ComputeKind::ZExt)
-                return fail(ExportRejectReason::UnsupportedNode);
-        }
-
         for (HiraValue *result : region_.results()) {
             if (!region_.sourceMapping().sourceValue(result))
                 return fail(ExportRejectReason::InvalidRegion,
                             "unmapped-result");
             bool found = false;
-            for (const auto &binding : loop_->carriedValues())
+            for (const auto &binding : rootLoop_->carriedValues())
                 found |= binding.result == result;
             if (!found)
                 return fail(ExportRejectReason::UnsupportedResult);
@@ -166,17 +188,12 @@ private:
         return true;
     }
 
-    void createBlocks() {
-        const std::string suffix = std::to_string(nextRegionId_++);
-        newHeader_ =
-            new BasicBlock(module_, "label_hira_header_" + suffix, function_);
-        newBody_ =
-            new BasicBlock(module_, "label_hira_body_" + suffix, function_);
-        newLatch_ =
-            new BasicBlock(module_, "label_hira_latch_" + suffix, function_);
-        newExit_ =
-            new BasicBlock(module_, "label_hira_exit_" + suffix, function_);
-        newBlocks_ = {newHeader_, newBody_, newLatch_, newExit_};
+    BasicBlock *createBlock(const std::string &role, unsigned id) {
+        auto *block = new BasicBlock(
+            module_, "label_hira_" + role + "_" + std::to_string(id),
+            function_);
+        newBlocks_.push_back(block);
+        return block;
     }
 
     Value *value(HiraValue *hiraValue) {
@@ -192,13 +209,14 @@ private:
             result = region_.sourceMapping().sourceValue(hiraValue);
             break;
         case ValueKind::IntegerConstant:
-            result = new ConstantInt(hiraValue->type(),
-                                     static_cast<int>(
-                                         hiraValue->integerValue()));
+            result = new ConstantInt(
+                hiraValue->type(),
+                static_cast<int>(hiraValue->integerValue()));
             break;
         case ValueKind::FloatConstant:
             result =
-                new ConstantFloat(hiraValue->type(), hiraValue->floatValue());
+                new ConstantFloat(hiraValue->type(),
+                                  hiraValue->floatValue());
             break;
         case ValueKind::Temporary:
             break;
@@ -215,85 +233,102 @@ private:
         return true;
     }
 
-    bool emitLoop() {
-        Value *lower = value(loop_->lowerBound());
-        Value *upper = value(loop_->upperBound());
+    bool emitLoop(HiraLoop &loop, BasicBlock *entry,
+                  bool connectEntry, LoopEmission &emission) {
+        const unsigned id = nextBlockId_++;
+        BasicBlock *header = createBlock("header", id);
+        BasicBlock *body = createBlock("body", id);
+        BasicBlock *latch = createBlock("latch", id);
+        BasicBlock *exit = createBlock("exit", id);
+        emission = {header, exit};
+
+        Value *lower = value(loop.lowerBound());
+        Value *upper = value(loop.upperBound());
         if (!lower || !upper)
-            return fail(ExportRejectReason::MissingValue, "loop-bound");
+            return fail(ExportRejectReason::MissingValue,
+                        "loop-bound");
 
         auto *inductionPhi =
-            PhiInst::create_phi(loop_->induction()->type(), newHeader_);
-        newHeader_->add_instruction(inductionPhi);
-        inductionPhi->addIncoming(lower, preheader_);
-        bind(loop_->induction(), inductionPhi);
+            PhiInst::create_phi(loop.induction()->type(), header);
+        header->add_instruction(inductionPhi);
+        inductionPhi->addIncoming(lower, entry);
+        bind(loop.induction(), inductionPhi);
 
-        for (const auto &binding : loop_->carriedValues()) {
+        std::vector<CarriedPhi> carriedPhis;
+        for (const auto &binding : loop.carriedValues()) {
             Value *initial = value(binding.initial);
             if (!initial)
                 return fail(ExportRejectReason::MissingValue,
                             "carried-initial");
             auto *phi =
-                PhiInst::create_phi(binding.iteration->type(), newHeader_);
-            newHeader_->add_instruction(phi);
-            phi->addIncoming(initial, preheader_);
+                PhiInst::create_phi(binding.iteration->type(), header);
+            header->add_instruction(phi);
+            phi->addIncoming(initial, entry);
             bind(binding.iteration, phi);
-            carriedPhis_.push_back({&binding, phi});
+            carriedPhis.push_back({&binding, phi});
         }
 
-        auto *comparison = new ICmpInst(ICmpInst::ICMP_SLT, inductionPhi,
-                                        upper, newHeader_);
-        new BranchInst(comparison, newBody_, newExit_, newHeader_);
+        auto *comparison = new ICmpInst(ICmpInst::ICMP_SLT,
+                                        inductionPhi, upper, header);
+        new BranchInst(comparison, body, exit, header);
+        if (connectEntry)
+            new BranchInst(header, entry);
 
-        for (const auto &node : loop_->body().nodes()) {
+        BasicBlock *continuation = body;
+        for (const auto &node : loop.body().nodes()) {
             if (dynamic_cast<HiraYield *>(node.get()))
                 continue;
-            if (!emitNode(*node))
+            if (auto *nested = dynamic_cast<HiraLoop *>(node.get())) {
+                LoopEmission nestedEmission;
+                if (!emitLoop(*nested, continuation, true,
+                              nestedEmission))
+                    return false;
+                continuation = nestedEmission.exit;
+                continue;
+            }
+            if (!emitNode(*node, continuation))
                 return false;
         }
 
-        new BranchInst(newLatch_, newBody_);
-        new BranchInst(newHeader_, newLatch_);
+        new BranchInst(latch, continuation);
+        new BranchInst(header, latch);
 
-        if (loop_->yieldValues().empty())
-            return fail(ExportRejectReason::MissingValue,
-                        "induction-yield");
-        Value *inductionYield = value(loop_->yieldValues().front());
+        Value *inductionYield = value(loop.yieldValues().front());
         if (!inductionYield)
             return fail(ExportRejectReason::MissingValue,
                         "induction-yield");
-        inductionPhi->addIncoming(inductionYield, newLatch_);
+        inductionPhi->addIncoming(inductionYield, latch);
 
-        for (const auto &entry : carriedPhis_) {
-            Value *yielded = value(entry.binding->yielded);
+        for (const CarriedPhi &entryPhi : carriedPhis) {
+            Value *yielded = value(entryPhi.binding->yielded);
             if (!yielded)
                 return fail(ExportRejectReason::MissingValue,
                             "carried-yield");
-            entry.phi->addIncoming(yielded, newLatch_);
+            entryPhi.phi->addIncoming(yielded, latch);
 
-            auto *exitPhi =
-                PhiInst::create_phi(entry.binding->result->type(), newExit_);
-            newExit_->add_instruction(exitPhi);
-            exitPhi->addIncoming(entry.phi, newHeader_);
-            bind(entry.binding->result, exitPhi);
+            auto *exitPhi = PhiInst::create_phi(
+                entryPhi.binding->result->type(), exit);
+            exit->add_instruction(exitPhi);
+            exitPhi->addIncoming(entryPhi.phi, header);
+            bind(entryPhi.binding->result, exitPhi);
         }
-        new BranchInst(oldExit_, newExit_);
         return true;
     }
 
-    bool emitNode(HiraNode &node) {
+    bool emitNode(HiraNode &node, BasicBlock *destination) {
         Instruction *instruction = nullptr;
 
         if (auto *load = dynamic_cast<HiraLoad *>(&node)) {
             Value *address = value(load->address());
             if (!address)
                 return fail(ExportRejectReason::MissingValue, "load");
-            instruction = new LoadInst(address, newBody_);
+            instruction = new LoadInst(address, destination);
         } else if (auto *store = dynamic_cast<HiraStore *>(&node)) {
             Value *stored = value(store->value());
             Value *address = value(store->address());
             if (!stored || !address)
                 return fail(ExportRejectReason::MissingValue, "store");
-            instruction = new StoreInst(stored, address, newBody_);
+            instruction = new StoreInst(stored, address, destination);
         } else if (auto *compute = dynamic_cast<HiraComputeOp *>(&node)) {
             std::vector<Value *> operands;
             for (HiraValue *operand : compute->operands()) {
@@ -308,28 +343,29 @@ private:
             if (isBinaryCompute(kind) && operands.size() == 2) {
                 instruction = new BinaryInst(
                     node.results().front()->type(), binaryOpcode(kind),
-                    operands[0], operands[1], newBody_);
+                    operands[0], operands[1], destination);
             } else if (kind == ComputeKind::ICmp &&
                        operands.size() == 2) {
                 instruction = new ICmpInst(
-                    static_cast<ICmpInst::ICmpOp>(compute->predicate()),
-                    operands[0], operands[1], newBody_);
+                    static_cast<ICmpInst::ICmpOp>(
+                        compute->predicate()),
+                    operands[0], operands[1], destination);
             } else if (kind == ComputeKind::Select &&
                        operands.size() == 3) {
-                instruction =
-                    new SelectInst(operands[0], operands[1], operands[2],
-                                   newBody_);
+                instruction = new SelectInst(
+                    operands[0], operands[1], operands[2],
+                    destination);
             } else if (kind == ComputeKind::GetElementPtr &&
                        operands.size() >= 2) {
                 std::vector<Value *> indices(operands.begin() + 1,
                                              operands.end());
-                instruction =
-                    new GetElementPtrInst(operands[0], indices, newBody_);
+                instruction = new GetElementPtrInst(
+                    operands[0], indices, destination);
             } else if (kind == ComputeKind::ZExt &&
                        operands.size() == 1) {
-                instruction =
-                    new ZextInst(Instruction::ZExt, operands[0],
-                                 node.results().front()->type(), newBody_);
+                instruction = new ZextInst(
+                    Instruction::ZExt, operands[0],
+                    node.results().front()->type(), destination);
             } else {
                 return fail(ExportRejectReason::UnsupportedNode);
             }
@@ -356,7 +392,8 @@ private:
 
     void commit() {
         for (HiraValue *result : region_.results()) {
-            Value *oldValue = region_.sourceMapping().sourceValue(result);
+            Value *oldValue =
+                region_.sourceMapping().sourceValue(result);
             Value *newValue = value(result);
             replaceExternalUses(oldValue, newValue);
         }
@@ -365,9 +402,10 @@ private:
         preheader_->delete_instr(oldBranch);
         preheader_->remove_succ_basic_block(oldHeader_);
         oldHeader_->remove_pre_basic_block(preheader_);
-        new BranchInst(newHeader_, preheader_);
+        new BranchInst(rootHeader_, preheader_);
 
-        std::vector<BasicBlock *> oldBlocks = sourceLoop_->blocksOrdered;
+        std::vector<BasicBlock *> oldBlocks =
+            sourceLoop_->blocksOrdered;
         for (BasicBlock *block : oldBlocks) {
             std::vector<Instruction *> instructions(
                 block->instr_list_.begin(), block->instr_list_.end());
@@ -392,32 +430,23 @@ private:
             function_->remove_bb(block);
     }
 
-    struct CarriedPhi {
-        const HiraLoop::CarriedBinding *binding;
-        PhiInst *phi;
-    };
-
     HiraRegion &region_;
     Loop *sourceLoop_ = nullptr;
-    HiraLoop *loop_ = nullptr;
+    HiraLoop *rootLoop_ = nullptr;
     Function *function_ = nullptr;
     Module *module_ = nullptr;
     BasicBlock *preheader_ = nullptr;
     BasicBlock *oldHeader_ = nullptr;
     BasicBlock *oldExit_ = nullptr;
-    BasicBlock *newHeader_ = nullptr;
-    BasicBlock *newBody_ = nullptr;
-    BasicBlock *newLatch_ = nullptr;
-    BasicBlock *newExit_ = nullptr;
+    BasicBlock *rootHeader_ = nullptr;
     std::vector<BasicBlock *> newBlocks_;
     std::map<HiraValue *, Value *> values_;
-    std::vector<CarriedPhi> carriedPhis_;
     ExportResult failure_;
 
-    static unsigned nextRegionId_;
+    static unsigned nextBlockId_;
 };
 
-unsigned RegionExporter::nextRegionId_ = 0;
+unsigned RegionExporter::nextBlockId_ = 0;
 
 } // namespace
 

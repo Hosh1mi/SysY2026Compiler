@@ -6,10 +6,10 @@
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
-#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -31,6 +31,20 @@ bool isUsedOutsideLoop(Value *value, const Loop &loop) {
             return true;
     }
     return false;
+}
+
+bool isAddOne(Value *value, PhiInst *phi) {
+    auto *add = dynamic_cast<BinaryInst *>(value);
+    if (!add || !add->is_add())
+        return false;
+    auto *leftConstant =
+        dynamic_cast<ConstantInt *>(add->get_operand(0));
+    auto *rightConstant =
+        dynamic_cast<ConstantInt *>(add->get_operand(1));
+    return (add->get_operand(0) == phi && rightConstant &&
+            rightConstant->value_ == 1) ||
+           (add->get_operand(1) == phi && leftConstant &&
+            leftConstant->value_ == 1);
 }
 
 std::optional<ComputeKind> computeKindFor(Instruction *instruction) {
@@ -69,66 +83,54 @@ std::optional<ComputeKind> computeKindFor(Instruction *instruction) {
 class RegionImporter {
 public:
     RegionImporter(Loop &loop, const LoopInfo &loopInfo)
-        : loop_(loop), loopInfo_(loopInfo),
+        : rootLoop_(loop), loopInfo_(loopInfo),
           region_(std::make_unique<HiraRegion>(&loop)) {}
 
     ImportResult run() {
         (void)loopInfo_;
-        if (!loop_.children.empty())
-            return fail(ImportRejectReason::NestedLoop);
-        if (!checkControlFlow())
-            return fail(ImportRejectReason::NonStraightLineControlFlow);
-        if (!checkHeader())
-            return fail(ImportRejectReason::UnsupportedHeader);
-        if (!buildLoop())
-            return std::move(failure_);
-        if (!importBody())
-            return std::move(failure_);
-        if (!finishYieldsAndResults())
+        if (!importLoop(rootLoop_, region_->rootSequence(), true))
             return std::move(failure_);
         return ImportResult::success(std::move(region_));
     }
 
 private:
+    struct LoopControl {
+        BasicBlock *entryPredecessor = nullptr;
+        BasicBlock *latch = nullptr;
+        BasicBlock *exit = nullptr;
+        PhiInst *induction = nullptr;
+        Value *initial = nullptr;
+        Value *bound = nullptr;
+    };
+
     struct CarriedPhi {
         PhiInst *phi = nullptr;
         std::size_t bindingIndex = 0;
         HiraValue *result = nullptr;
     };
 
-    ImportResult fail(ImportRejectReason reason, std::string detail = {}) {
-        return ImportResult::reject(reason, std::move(detail));
-    }
-
-    bool setFailure(ImportRejectReason reason, std::string detail = {}) {
-        failure_ = fail(reason, std::move(detail));
+    bool fail(ImportRejectReason reason, std::string detail = {}) {
+        failure_ = ImportResult::reject(reason, std::move(detail));
         return false;
     }
 
-    bool checkControlFlow() {
-        bodyBlocks_.clear();
-        for (BasicBlock *block : loop_.blocksOrdered)
-            if (block != loop_.header)
-                bodyBlocks_.push_back(block);
-        if (bodyBlocks_.empty())
+    bool deriveControl(Loop &loop, LoopControl &control) {
+        if (!loop.header || !loop.singleLatch() || !loop.singleExit())
+            return false;
+        control.latch = loop.singleLatch();
+        control.exit = loop.singleExit();
+
+        for (BasicBlock *predecessor : loop.header->pre_bbs_) {
+            if (loop.isInLoop(predecessor))
+                continue;
+            if (control.entryPredecessor)
+                return false;
+            control.entryPredecessor = predecessor;
+        }
+        if (!control.entryPredecessor)
             return false;
 
-        for (std::size_t i = 0; i < bodyBlocks_.size(); ++i) {
-            BasicBlock *block = bodyBlocks_[i];
-            Instruction *terminator = block->get_terminator();
-            if (!terminator || !terminator->is_br() ||
-                terminator->num_ops_ != 1)
-                return false;
-            BasicBlock *expected =
-                i + 1 < bodyBlocks_.size() ? bodyBlocks_[i + 1] : loop_.header;
-            if (terminator->get_operand(0) != expected)
-                return false;
-        }
-        return bodyBlocks_.back() == loop_.singleLatch();
-    }
-
-    bool checkHeader() {
-        Instruction *terminator = loop_.header->get_terminator();
+        Instruction *terminator = loop.header->get_terminator();
         if (!terminator || !terminator->is_br() ||
             terminator->num_ops_ != 3)
             return false;
@@ -136,7 +138,28 @@ private:
         if (!guard || guard->icmp_op_ != ICmpInst::ICMP_SLT)
             return false;
 
-        for (Instruction *instruction : loop_.header->instr_list_) {
+        for (Instruction *instruction : loop.header->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(instruction);
+            if (!phi)
+                break;
+            if (phi->num_ops_ != 4)
+                continue;
+            Value *initial =
+                incomingFrom(phi, control.entryPredecessor);
+            Value *update = incomingFrom(phi, control.latch);
+            if (!initial || !update || !isAddOne(update, phi))
+                continue;
+            if (guard->get_operand(0) != phi)
+                continue;
+            control.induction = phi;
+            control.initial = initial;
+            control.bound = guard->get_operand(1);
+            break;
+        }
+        if (!control.induction)
+            return false;
+
+        for (Instruction *instruction : loop.header->instr_list_) {
             if (instruction->is_phi() || instruction == guard ||
                 instruction == terminator)
                 continue;
@@ -148,8 +171,9 @@ private:
     HiraValue *getValue(Value *value) {
         if (!value)
             return nullptr;
-        if (HiraValue *mapped = region_->sourceMapping().hiraValue(value))
-            return mapped;
+        auto visible = visibleValues_.find(value);
+        if (visible != visibleValues_.end())
+            return visible->second;
 
         HiraValue *result = nullptr;
         if (auto *integer = dynamic_cast<ConstantInt *>(value)) {
@@ -160,180 +184,224 @@ private:
                 floating->type_, floating->value_);
         } else {
             auto *instruction = dynamic_cast<Instruction *>(value);
-            if (instruction && loop_.isInLoop(instruction))
+            if (instruction && rootLoop_.isInLoop(instruction))
                 return nullptr;
             if (dynamic_cast<BasicBlock *>(value))
                 return nullptr;
             result = region_->createParameter(value->type_);
         }
+        visibleValues_[value] = result;
         region_->sourceMapping().mapValue(result, value);
         return result;
     }
 
-    bool buildLoop() {
-        PhiInst *inductionPhi = loop_.getInductionIV();
-        HiraValue *lower = getValue(loop_.inductionInit);
-        HiraValue *upper = getValue(loop_.tripCount);
-        if (!inductionPhi || !lower || !upper)
-            return setFailure(ImportRejectReason::MissingValue,
-                              "loop-bound");
+    bool importLoop(Loop &loop, HiraSequence &target, bool isRoot) {
+        LoopControl control;
+        if (!deriveControl(loop, control))
+            return fail(ImportRejectReason::UnsupportedHeader,
+                        loop.header ? loop.header->name_ : "<null>");
+
+        HiraValue *lower = getValue(control.initial);
+        HiraValue *upper = getValue(control.bound);
+        if (!lower || !upper)
+            return fail(ImportRejectReason::MissingValue, "loop-bound");
 
         HiraValue *step =
-            region_->createIntegerConstant(inductionPhi->type_, 1);
-        HiraValue *induction = region_->createValue(inductionPhi->type_);
-        region_->sourceMapping().mapValue(induction, inductionPhi);
+            region_->createIntegerConstant(control.induction->type_, 1);
+        HiraValue *induction =
+            region_->createValue(control.induction->type_);
+        visibleValues_[control.induction] = induction;
+        region_->sourceMapping().mapValue(induction, control.induction);
 
         auto loopNode =
             std::make_unique<HiraLoop>(induction, lower, upper, step);
-        loopNode_ = loopNode.get();
-        region_->sourceMapping().mapLoop(loopNode_, &loop_);
+        HiraLoop *hiraLoop = loopNode.get();
+        region_->sourceMapping().mapLoop(hiraLoop, &loop);
 
-        for (Instruction *instruction : loop_.header->instr_list_) {
+        std::vector<CarriedPhi> carriedPhis;
+        for (Instruction *instruction : loop.header->instr_list_) {
             auto *phi = dynamic_cast<PhiInst *>(instruction);
             if (!phi)
                 break;
-            if (phi == inductionPhi)
+            if (phi == control.induction)
                 continue;
             if (phi->num_ops_ != 4)
-                return setFailure(ImportRejectReason::UnsupportedPhi);
+                return fail(ImportRejectReason::UnsupportedPhi,
+                            loop.header->name_);
 
-            Value *initialSource = incomingFrom(phi, loop_.preheader);
-            if (!initialSource)
-                return setFailure(ImportRejectReason::UnsupportedPhi,
-                                  "missing-initial");
+            Value *initialSource =
+                incomingFrom(phi, control.entryPredecessor);
             HiraValue *initial = getValue(initialSource);
             if (!initial)
-                return setFailure(ImportRejectReason::MissingValue,
-                                  "carried-initial");
+                return fail(ImportRejectReason::MissingValue,
+                            "carried-initial");
 
             HiraValue *iteration = region_->createValue(phi->type_);
             HiraValue *result = region_->createValue(phi->type_);
+            visibleValues_[phi] = iteration;
             region_->sourceMapping().mapValue(iteration, phi);
             region_->sourceMapping().mapValue(result, phi);
             std::size_t binding =
-                loopNode_->addCarriedValue(initial, iteration, result);
-            carriedPhis_.push_back({phi, binding, result});
+                hiraLoop->addCarriedValue(initial, iteration, result);
+            carriedPhis.push_back({phi, binding, result});
         }
 
-        region_->rootSequence().append(std::move(loopNode));
+        target.append(std::move(loopNode));
+        if (!importLoopBody(loop, control, *hiraLoop))
+            return false;
+
+        Value *inductionUpdate =
+            incomingFrom(control.induction, control.latch);
+        HiraValue *inductionYield = getValue(inductionUpdate);
+        if (!inductionYield)
+            return fail(ImportRejectReason::MissingYield, "induction");
+        if (isUsedOutsideLoop(control.induction, loop))
+            return fail(ImportRejectReason::LiveOutInduction);
+
+        auto yield = std::make_unique<HiraYield>();
+        yield->addOperand(inductionYield);
+        hiraLoop->addYieldValue(inductionYield);
+
+        for (const CarriedPhi &carried : carriedPhis) {
+            Value *yieldSource =
+                incomingFrom(carried.phi, control.latch);
+            HiraValue *yieldValue = getValue(yieldSource);
+            if (!yieldValue)
+                return fail(ImportRejectReason::MissingYield,
+                            carried.phi->name_);
+            hiraLoop->setCarriedYield(carried.bindingIndex, yieldValue);
+            hiraLoop->addYieldValue(yieldValue);
+            yield->addOperand(yieldValue);
+
+            visibleValues_[carried.phi] = carried.result;
+            if (isRoot && isUsedOutsideLoop(carried.phi, loop))
+                region_->addResult(carried.result);
+        }
+        hiraLoop->body().append(std::move(yield));
         return true;
     }
 
-    bool importBody() {
-        for (BasicBlock *block : bodyBlocks_) {
-            for (Instruction *instruction : block->instr_list_) {
-                if (instruction->is_br())
+    bool importLoopBody(Loop &loop, const LoopControl &control,
+                        HiraLoop &hiraLoop) {
+        BasicBlock *current = nullptr;
+        for (BasicBlock *successor : loop.header->succ_bbs_) {
+            if (!loop.isInLoop(successor))
+                continue;
+            if (current)
+                return fail(
+                    ImportRejectReason::NonStraightLineControlFlow,
+                    loop.header->name_);
+            current = successor;
+        }
+        if (!current)
+            return fail(ImportRejectReason::NonStraightLineControlFlow,
+                        loop.header->name_);
+
+        std::map<BasicBlock *, Loop *> childHeaders;
+        for (Loop *child : loop.children)
+            childHeaders[child->header] = child;
+
+        std::set<BasicBlock *> visited;
+        while (current != loop.header) {
+            auto child = childHeaders.find(current);
+            if (child != childHeaders.end()) {
+                if (!importLoop(*child->second, hiraLoop.body(), false))
+                    return false;
+                current = child->second->singleExit();
+                if (!current)
+                    return fail(
+                        ImportRejectReason::NonStraightLineControlFlow,
+                        "child-exit");
+                continue;
+            }
+
+            if (!loop.isInLoop(current) ||
+                !visited.insert(current).second)
+                return fail(
+                    ImportRejectReason::NonStraightLineControlFlow,
+                    current ? current->name_ : "<null>");
+
+            Instruction *terminator = current->get_terminator();
+            if (!terminator || !terminator->is_br() ||
+                terminator->num_ops_ != 1)
+                return fail(
+                    ImportRejectReason::NonStraightLineControlFlow,
+                    current->name_);
+
+            for (Instruction *instruction : current->instr_list_) {
+                if (instruction == terminator)
                     continue;
                 if (instruction->is_phi())
-                    return setFailure(ImportRejectReason::UnsupportedPhi,
-                                      block->name_);
-                if (!importInstruction(instruction))
+                    return fail(ImportRejectReason::UnsupportedPhi,
+                                current->name_);
+                if (!importInstruction(instruction, hiraLoop.body()))
                     return false;
             }
+            current =
+                dynamic_cast<BasicBlock *>(terminator->get_operand(0));
         }
-        return true;
+        return visited.count(control.latch) != 0;
     }
 
-    bool importInstruction(Instruction *instruction) {
+    bool importInstruction(Instruction *instruction,
+                           HiraSequence &target) {
         std::unique_ptr<HiraNode> node;
 
         if (instruction->is_load()) {
             HiraValue *address = getValue(instruction->get_operand(0));
             if (!address)
-                return setFailure(ImportRejectReason::MissingValue,
-                                  instruction->name_);
+                return fail(ImportRejectReason::MissingValue,
+                            instruction->name_);
             node = std::make_unique<HiraLoad>(address);
         } else if (instruction->is_store()) {
-            HiraValue *value = getValue(instruction->get_operand(0));
+            HiraValue *stored = getValue(instruction->get_operand(0));
             HiraValue *address = getValue(instruction->get_operand(1));
-            if (!value || !address)
-                return setFailure(ImportRejectReason::MissingValue,
-                                  "store-operand");
-            node = std::make_unique<HiraStore>(value, address);
+            if (!stored || !address)
+                return fail(ImportRejectReason::MissingValue,
+                            "store-operand");
+            node = std::make_unique<HiraStore>(stored, address);
         } else {
             std::optional<ComputeKind> kind = computeKindFor(instruction);
             if (!kind) {
                 std::ostringstream detail;
-                detail << "opcode-" << static_cast<int>(instruction->op_id_);
-                return setFailure(ImportRejectReason::UnsupportedInstruction,
-                                  detail.str());
+                detail << "opcode-"
+                       << static_cast<int>(instruction->op_id_);
+                return fail(ImportRejectReason::UnsupportedInstruction,
+                            detail.str());
             }
             int predicate = 0;
-            if (auto *comparison = dynamic_cast<ICmpInst *>(instruction))
+            if (auto *comparison =
+                    dynamic_cast<ICmpInst *>(instruction))
                 predicate = static_cast<int>(comparison->icmp_op_);
             auto compute =
                 std::make_unique<HiraComputeOp>(*kind, predicate);
             for (unsigned i = 0; i < instruction->num_ops_; ++i) {
-                HiraValue *operand = getValue(instruction->get_operand(i));
+                HiraValue *operand =
+                    getValue(instruction->get_operand(i));
                 if (!operand)
-                    return setFailure(ImportRejectReason::MissingValue,
-                                      instruction->name_);
+                    return fail(ImportRejectReason::MissingValue,
+                                instruction->name_);
                 compute->addOperand(operand);
             }
             node = std::move(compute);
         }
 
         if (!instruction->is_store()) {
-            HiraValue *result = region_->createValue(instruction->type_);
+            HiraValue *result =
+                region_->createValue(instruction->type_);
             node->addResult(result);
+            visibleValues_[instruction] = result;
             region_->sourceMapping().mapValue(result, instruction);
         }
-        HiraNode *inserted = loopNode_->body().append(std::move(node));
+        HiraNode *inserted = target.append(std::move(node));
         region_->sourceMapping().mapNode(inserted, instruction);
         return true;
     }
 
-    bool finishYieldsAndResults() {
-        BasicBlock *latch = loop_.singleLatch();
-        PhiInst *inductionPhi = loop_.getInductionIV();
-        Value *inductionUpdate = incomingFrom(inductionPhi, latch);
-        HiraValue *inductionYield = getValue(inductionUpdate);
-        if (!inductionYield)
-            return setFailure(ImportRejectReason::MissingYield,
-                              "induction");
-        if (isUsedOutsideLoop(inductionPhi, loop_))
-            return setFailure(ImportRejectReason::LiveOutInduction);
-
-        auto yield = std::make_unique<HiraYield>();
-        yield->addOperand(inductionYield);
-        loopNode_->addYieldValue(inductionYield);
-
-        for (const CarriedPhi &carried : carriedPhis_) {
-            Value *yieldSource = incomingFrom(carried.phi, latch);
-            HiraValue *yieldValue = getValue(yieldSource);
-            if (!yieldValue)
-                return setFailure(ImportRejectReason::MissingYield,
-                                  carried.phi->name_);
-            loopNode_->setCarriedYield(carried.bindingIndex, yieldValue);
-            loopNode_->addYieldValue(yieldValue);
-            yield->addOperand(yieldValue);
-            if (isUsedOutsideLoop(carried.phi, loop_))
-                region_->addResult(carried.result);
-        }
-
-        loopNode_->body().append(std::move(yield));
-
-        for (BasicBlock *block : loop_.blocksOrdered) {
-            for (Instruction *instruction : block->instr_list_) {
-                if (instruction->is_phi() ||
-                    !isUsedOutsideLoop(instruction, loop_))
-                    continue;
-                HiraValue *value = getValue(instruction);
-                if (!value)
-                    return setFailure(ImportRejectReason::MissingValue,
-                                      "region-result");
-                region_->addResult(value);
-            }
-        }
-        return true;
-    }
-
-    Loop &loop_;
+    Loop &rootLoop_;
     const LoopInfo &loopInfo_;
     std::unique_ptr<HiraRegion> region_;
-    HiraLoop *loopNode_ = nullptr;
-    std::vector<BasicBlock *> bodyBlocks_;
-    std::vector<CarriedPhi> carriedPhis_;
+    std::map<Value *, HiraValue *> visibleValues_;
     ImportResult failure_;
 };
 
