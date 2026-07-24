@@ -118,7 +118,7 @@ bool Arm64FuncContext::instructionUsesPromotedConst(Instruction *inst, int val) 
         if (ci) {
             Magic::SignedDivisorInfo info = Magic::analyzeDivisor(ci->value_);
             if (info.usesMagic()) {
-                Magic::MagicNumber mag = Magic::getMagic(info.magnitude);
+                Magic::MagicNumber mag = Magic::getMagic(ci->value_);
                 if (val == mag.multiplier || val == static_cast<int>(info.magnitude))
                     return true;
             }
@@ -128,7 +128,7 @@ bool Arm64FuncContext::instructionUsesPromotedConst(Instruction *inst, int val) 
         if (ci) {
             Magic::SignedDivisorInfo info = Magic::analyzeDivisor(ci->value_);
             if (info.usesMagic()) {
-                Magic::MagicNumber mag = Magic::getMagic(ci->value_);
+                Magic::MagicNumber mag = Magic::getMagic(info.magnitude);
                 if (val == mag.multiplier)
                     return true;
             }
@@ -235,18 +235,6 @@ void Arm64FuncContext::generate() {
     if (enableRegAlloc_ &&
         func_->basic_blocks_.size() > kRegAllocBlockLimit)
         enableRegAlloc_ = false;
-    if (enableRegAlloc_ && func_->basic_blocks_.size() > 60) {
-        size_t phiCount = 0;
-        for (auto *bb : func_->basic_blocks_)
-            for (auto *inst : bb->instr_list_)
-                phiCount += inst->is_phi() ? 1 : 0;
-        // Sparse-phi large CFGs create highly non-convex live ranges.  The
-        // current interval approximation is deliberately conservative there:
-        // use stack-slot lowering until segmented intervals are available.
-        if (phiCount < 60)
-            enableRegAlloc_ = false;
-    }
-
     if (enableRegAlloc_) {
         Arm64RegAlloc regAlloc(func_);
         regAlloc.allocate();
