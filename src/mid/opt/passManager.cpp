@@ -50,6 +50,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "IndVarStrengthReduce",
         "LoopRepFold",
         "LoopUnroll",
+        "Hira",
     };
     return loopPasses.count(name) != 0;
 }
