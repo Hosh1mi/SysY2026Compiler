@@ -13,6 +13,7 @@
 #include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleApplicability.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleLegality.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
@@ -126,6 +127,10 @@ bool selectRegions(Function &function, Loop &loop,
         polyhedral::ScheduleCandidateSet schedules;
         std::string scheduleDetail;
         bool schedulesValid = false;
+        polyhedral::ScheduleApplicabilityResult
+            scheduleApplicability;
+        std::string scheduleApplicabilityDetail;
+        bool scheduleApplicabilityValid = false;
         polyhedral::ScheduleLegalityResult scheduleLegality;
         std::string scheduleLegalityDetail;
         bool scheduleLegalityValid = false;
@@ -158,6 +163,17 @@ bool selectRegions(Function &function, Loop &loop,
                                 scheduleDetail);
                     }
                     if (schedulesValid) {
+                        scheduleApplicability =
+                            polyhedral::
+                                analyzeScheduleApplicability(
+                                    *polyhedralModel.model,
+                                    schedules);
+                        scheduleApplicabilityValid =
+                            polyhedral::
+                                verifyScheduleApplicability(
+                                    schedules,
+                                    scheduleApplicability,
+                                    scheduleApplicabilityDetail);
                         scheduleLegality =
                             polyhedral::analyzeScheduleLegality(
                                 *polyhedralModel.model,
@@ -196,6 +212,23 @@ bool selectRegions(Function &function, Loop &loop,
                                 << polyhedral::
                                        printScheduleCandidates(
                                            schedules);
+                            if (scheduleApplicabilityValid) {
+                                std::cerr
+                                    << polyhedral::
+                                           printScheduleApplicability(
+                                               scheduleApplicability);
+                            } else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "schedule_applicability "
+                                       "rejected";
+                                if (!scheduleApplicabilityDetail
+                                         .empty())
+                                    std::cerr
+                                        << " detail="
+                                        << scheduleApplicabilityDetail;
+                                std::cerr << "\n";
+                            }
                             if (scheduleLegalityValid) {
                                 std::cerr
                                     << polyhedral::
