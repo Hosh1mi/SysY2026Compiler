@@ -897,8 +897,17 @@ Arm64RegAlloc::RegPalette Arm64RegAlloc::buildRegPalette(bool isLeaf) const {
         for (int r = 8; r <= 15; ++r)
             pal.floatColorToReg.push_back(r);
     }
-    // NEON palette: v8-v15 are all callee-saved on AArch64, so callerSavedNEON stays empty.
-    for (int r = 8; r <= 15; ++r) pal.neonColorToReg.push_back(r);
+    // Keep the callee-saved bank first, then use the otherwise idle
+    // caller-saved high NEON bank for values that do not cross calls.
+    // v16-v17 remain reserved for instruction-selection / argument-shuffle
+    // scratch use.  colorPool checks crossesCall against callerSavedNEON, so a
+    // non-leaf function never keeps a live vector in v18-v31 across a call.
+    for (int r = 8; r <= 15; ++r)
+        pal.neonColorToReg.push_back(r);
+    for (int r = 18; r <= 31; ++r) {
+        pal.neonColorToReg.push_back(r);
+        pal.callerSavedNEON.insert(r);
+    }
     return pal;
 }
 
