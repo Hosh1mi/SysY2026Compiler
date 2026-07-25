@@ -12,6 +12,9 @@
 #include "../../include/mid/hira/polyhedral/dependenceVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleLegality.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -120,6 +123,12 @@ bool selectRegions(Function &function, Loop &loop,
             dependenceFeasibility;
         std::string dependenceFeasibilityDetail;
         bool dependenceFeasibilityValid = false;
+        polyhedral::ScheduleCandidateSet schedules;
+        std::string scheduleDetail;
+        bool schedulesValid = false;
+        polyhedral::ScheduleLegalityResult scheduleLegality;
+        std::string scheduleLegalityDetail;
+        bool scheduleLegalityValid = false;
         if (polyhedralModel.succeeded() &&
             polyhedralVerification.succeeded()) {
             dependences = polyhedral::buildDependenceRelations(
@@ -139,6 +148,27 @@ bool selectRegions(Function &function, Loop &loop,
                             *dependences.dependences,
                             dependenceFeasibility,
                             dependenceFeasibilityDetail);
+                    if (dependenceFeasibilityValid) {
+                        schedules =
+                            polyhedral::buildScheduleCandidates(
+                                *polyhedralModel.model);
+                        schedulesValid =
+                            polyhedral::verifyScheduleCandidates(
+                                *polyhedralModel.model, schedules,
+                                scheduleDetail);
+                    }
+                    if (schedulesValid) {
+                        scheduleLegality =
+                            polyhedral::analyzeScheduleLegality(
+                                *polyhedralModel.model,
+                                *dependences.dependences,
+                                dependenceFeasibility, schedules);
+                        scheduleLegalityValid =
+                            polyhedral::verifyScheduleLegality(
+                                *dependences.dependences, schedules,
+                                scheduleLegality,
+                                scheduleLegalityDetail);
+                    }
                 }
             }
         }
@@ -161,6 +191,34 @@ bool selectRegions(Function &function, Loop &loop,
                             << polyhedral::
                                    printDependenceFeasibility(
                                        dependenceFeasibility);
+                        if (schedulesValid) {
+                            std::cerr
+                                << polyhedral::
+                                       printScheduleCandidates(
+                                           schedules);
+                            if (scheduleLegalityValid) {
+                                std::cerr
+                                    << polyhedral::
+                                           printScheduleLegality(
+                                               scheduleLegality);
+                            } else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "schedule_legality rejected";
+                                if (!scheduleLegalityDetail.empty())
+                                    std::cerr
+                                        << " detail="
+                                        << scheduleLegalityDetail;
+                                std::cerr << "\n";
+                            }
+                        } else {
+                            std::cerr
+                                << "// polyhedral.schedules rejected";
+                            if (!scheduleDetail.empty())
+                                std::cerr << " detail="
+                                          << scheduleDetail;
+                            std::cerr << "\n";
+                        }
                     } else {
                         std::cerr
                             << "// polyhedral.feasibility rejected";
