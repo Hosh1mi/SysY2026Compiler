@@ -74,6 +74,73 @@ static bool isNonNegativeUnitInduction(Value *value, BasicBlock *body) {
            compare->get_operand(0) == phi;
 }
 
+static bool isKnownOneBitValue(Value *value, unsigned depth = 0) {
+    if (!value || depth > 8) return false;
+    if (auto *constant = dynamic_cast<ConstantInt *>(value))
+        return constant->value_ == 0 || constant->value_ == 1;
+    auto *andInst = dynamic_cast<BinaryInst *>(value);
+    if (!andInst || andInst->op_id_ != Instruction::And) return false;
+    for (unsigned i = 0; i < 2; ++i) {
+        auto *constant =
+            dynamic_cast<ConstantInt *>(andInst->get_operand(i));
+        if (constant && constant->value_ == 1) return true;
+    }
+    return isKnownOneBitValue(andInst->get_operand(0), depth + 1) &&
+           isKnownOneBitValue(andInst->get_operand(1), depth + 1);
+}
+
+// Turn a select introduced by if-conversion into lane-wise integer arithmetic
+// when its exact one-bit predicate proves an all-zero/all-one mask:
+//
+//   select (bit == 0), (base + delta), base
+//     -> base + (delta & (bit - 1))
+//
+// Returns null when the proof or value shape is not exact.
+static Value *tryCreateMaskedConditionalAdd(Value *condition, Value *trueValue,
+                                            Value *falseValue, BasicBlock *bb,
+                                            Instruction *before,
+                                            Instruction *&deadSum) {
+    deadSum = nullptr;
+    auto *type = dynamic_cast<IntegerType *>(trueValue->type_);
+    auto *compare = dynamic_cast<ICmpInst *>(condition);
+    if (!type || type->num_bits_ != 32 || !compare ||
+        compare->icmp_op_ != ICmpInst::ICMP_EQ)
+        return nullptr;
+
+    Value *bit = nullptr;
+    for (unsigned i = 0; i < 2; ++i) {
+        auto *zero =
+            dynamic_cast<ConstantInt *>(compare->get_operand(1 - i));
+        if (zero && zero->value_ == 0) {
+            bit = compare->get_operand(i);
+            break;
+        }
+    }
+    if (!bit || bit->type_ != type || !isKnownOneBitValue(bit))
+        return nullptr;
+
+    auto *sum = dynamic_cast<BinaryInst *>(trueValue);
+    if (!sum || !sum->is_add()) return nullptr;
+    Value *delta = nullptr;
+    if (sum->get_operand(0) == falseValue)
+        delta = sum->get_operand(1);
+    else if (sum->get_operand(1) == falseValue)
+        delta = sum->get_operand(0);
+    if (!delta) return nullptr;
+
+    auto *mask = new BinaryInst(type, Instruction::Sub, bit,
+                                new ConstantInt(type, 1), bb, true);
+    bb->add_instruction_before_inst(mask, before);
+    auto *masked = new BinaryInst(type, Instruction::And, delta, mask,
+                                  bb, true);
+    bb->add_instruction_before_inst(masked, before);
+    auto *result = new BinaryInst(type, Instruction::Add, falseValue, masked,
+                                  bb, true);
+    bb->add_instruction_before_inst(result, before);
+    deadSum = sum;
+    return result;
+}
+
 // Convert a store-only diamond by selecting its destination address.  Both
 // arms are evaluated before the select, so all non-store instructions must be
 // safe to speculate.  A shared load value is accepted as well: it is moved to
@@ -370,6 +437,7 @@ static bool tryConvert(Loop &loop, Function *func) {
 
     // 2. 用 select 替换 L 中的每个 phi，插入到 B 的分支之前
     Value *B_cond = B_br->get_operand(0);
+    std::vector<Instruction *> maybeDead;
     for (auto *phi : latch_phis) {
         Value *val_B = nullptr, *val_T = nullptr;
         for (unsigned i = 0; i < phi->num_ops_; i += 2) {
@@ -380,9 +448,17 @@ static bool tryConvert(Loop &loop, Function *func) {
         // select(cond, tv, fv): cond==true 时取 tv
         Value *tv = true_is_T ? val_T : val_B;
         Value *fv = true_is_T ? val_B : val_T;
-        auto *sel = new SelectInst(B_cond, tv, fv, phi->type_);
-        B->add_instruction_before_inst(sel, B_br);
-        phi->replace_all_use_with(sel);
+        Instruction *deadSum = nullptr;
+        Value *replacement = tryCreateMaskedConditionalAdd(
+            B_cond, tv, fv, B, B_br, deadSum);
+        if (!replacement) {
+            auto *sel = new SelectInst(B_cond, tv, fv, phi->type_);
+            B->add_instruction_before_inst(sel, B_br);
+            replacement = sel;
+        } else if (deadSum) {
+            maybeDead.push_back(deadSum);
+        }
+        phi->replace_all_use_with(replacement);
         L->delete_instr(phi);
     }
 
@@ -393,6 +469,13 @@ static bool tryConvert(Loop &loop, Function *func) {
     // BranchInst(L, B) 内部会调用 L->add_pre(B) 和 B->add_succ(L)，
     // 两者均有去重检查（L 已是 B 的 succ），所以不会产生重复边。
     new BranchInst(L, B);
+
+    maybeDead.push_back(dynamic_cast<Instruction *>(B_cond));
+    for (auto *candidate : maybeDead) {
+        if (candidate && candidate->parent_ == B &&
+            candidate->use_list_.empty())
+            B->delete_instr(candidate);
+    }
 
     // 4. 清理 T 并从函数中移除
     T->delete_instr(T_br); // 清除 T_br 对 L 的 use_list_ 引用

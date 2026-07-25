@@ -359,6 +359,9 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         case Instruction::Add:
         case Instruction::Sub:
         case Instruction::Mul:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
         case Instruction::FAdd:
         case Instruction::FSub:
         case Instruction::FMul:
@@ -366,7 +369,8 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         default:
             return reject(reason, "arithmetic operation has no A53 vector lowering");
         }
-        if (bin->type_->tid_ != Type::IntegerTyID &&
+        auto *integerType = dynamic_cast<IntegerType *>(bin->type_);
+        if ((!integerType || integerType->num_bits_ != 32) &&
             bin->type_->tid_ != Type::FloatTyID)
             return reject(reason, "arithmetic result is not i32 or float");
     }
