@@ -12,8 +12,12 @@ enum class PolyhedralVerifyError {
     InvalidDomain,
     InvalidConstraint,
     InvalidStatement,
+    InvalidSchedule,
     InvalidMemoryObject,
     InvalidAccess,
+    InvalidScalarFlow,
+    InvalidRecurrence,
+    InvalidAlias,
     MissingProofObligation,
 };
 

@@ -1,5 +1,6 @@
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/type.hpp"
@@ -35,6 +36,18 @@ const char *statementKindName(StatementKind kind) {
         return "store";
     case StatementKind::Yield:
         return "yield";
+    }
+    return "unknown";
+}
+
+const char *aliasKindName(MemoryAliasKind kind) {
+    switch (kind) {
+    case MemoryAliasKind::MustAlias:
+        return "must_alias";
+    case MemoryAliasKind::MayAlias:
+        return "may_alias";
+    case MemoryAliasKind::NoAlias:
+        return "no_alias";
     }
     return "unknown";
 }
@@ -80,19 +93,68 @@ std::string printExpression(const AffineExpr &expression) {
     return out.str();
 }
 
+void printSchedule(std::ostringstream &out,
+                   const std::vector<ScheduleComponent> &schedule) {
+    out << "[";
+    for (std::size_t index = 0; index < schedule.size(); ++index) {
+        if (index)
+            out << ", ";
+        const ScheduleComponent &component = schedule[index];
+        switch (component.kind) {
+        case ScheduleComponentKind::SequencePosition:
+            out << "seq" << component.position;
+            break;
+        case ScheduleComponentKind::Iteration:
+            out << variableName(component.dimension);
+            break;
+        case ScheduleComponentKind::Branch:
+            out << (component.position == 0 ? "then" : "else");
+            break;
+        }
+    }
+    out << "]";
+}
+
+void printScalarSource(std::ostringstream &out,
+                       const ScalarValueSource &source) {
+    switch (source.kind) {
+    case ScalarSourceKind::External:
+        out << "external";
+        break;
+    case ScalarSourceKind::Statement:
+        out << "S" << source.source;
+        break;
+    case ScalarSourceKind::RecurrenceIteration:
+        out << "R" << source.source << ".iter";
+        break;
+    case ScalarSourceKind::RecurrenceResult:
+        out << "R" << source.source << ".result";
+        break;
+    case ScalarSourceKind::Dimension:
+        out << "d" << source.source;
+        break;
+    }
+}
+
 } // namespace
 
 class PolyhedralModelBuilder {
 public:
-    explicit PolyhedralModelBuilder(const HiraRegion &region)
-        : region_(region), model_(std::make_unique<PolyhedralModel>()) {}
+    PolyhedralModelBuilder(
+        const HiraRegion &region,
+        const ArgumentAliasAnalysis *aliasAnalysis)
+        : region_(region), aliasAnalysis_(aliasAnalysis),
+          model_(std::make_unique<PolyhedralModel>()) {}
 
     PolyhedralBuildResult run() {
         std::vector<AffineVariable> dimensions;
         std::vector<AffineConstraint> constraints;
+        std::vector<ScheduleComponent> schedule;
         if (!visitSequence(region_.rootSequence(), dimensions,
-                           constraints))
+                           constraints, schedule) ||
+            !buildScalarRelations())
             return std::move(failure_);
+        classifyMemoryAliases();
 
         PolyhedralBuildResult result;
         result.model = std::move(model_);
@@ -100,6 +162,12 @@ public:
     }
 
 private:
+    struct RecurrenceValue {
+        ScalarRecurrenceId recurrence = 0;
+        RecurrenceValueKind kind =
+            RecurrenceValueKind::Iteration;
+    };
+
     bool reject(PolyhedralBuildError error, std::string detail) {
         failure_.error = error;
         failure_.detail = std::move(detail);
@@ -337,7 +405,8 @@ private:
     bool addStatement(
         const HiraNode &node,
         const std::vector<AffineVariable> &dimensions,
-        const std::vector<AffineConstraint> &constraints) {
+        const std::vector<AffineConstraint> &constraints,
+        const std::vector<ScheduleComponent> &identitySchedule) {
         StatementKind kind = StatementKind::Compute;
         if (dynamic_cast<const HiraLoad *>(&node))
             kind = StatementKind::Load;
@@ -354,7 +423,9 @@ private:
         StatementId id =
             static_cast<StatementId>(model_->statements_.size());
         model_->statements_.push_back(
-            {id, kind, &node, dimensions, constraints});
+            {id, kind, &node, dimensions, constraints,
+             identitySchedule});
+        nodeStatements_[&node] = id;
         if (auto *load = dynamic_cast<const HiraLoad *>(&node))
             return addAccess(id, MemoryAccessKind::Read,
                              load->address());
@@ -364,10 +435,205 @@ private:
         return true;
     }
 
+    std::vector<AffineVariable> commonDimensions(
+        const std::vector<AffineVariable> &first,
+        const std::vector<AffineVariable> &second) const {
+        std::vector<AffineVariable> common;
+        for (AffineVariable variable : first)
+            for (AffineVariable candidate : second)
+                if (variable == candidate) {
+                    common.push_back(variable);
+                    break;
+                }
+        return common;
+    }
+
+    bool buildScalarRecurrences() {
+        for (const IterationDomain &domain : model_->domains_) {
+            const HiraLoop &loop = *domain.loop;
+            if (loop.carriedValues().empty())
+                continue;
+            if (loop.body().nodes().empty())
+                return reject(
+                    PolyhedralBuildError::InvalidScalarRecurrence,
+                    "missing-yield");
+            auto *yield = dynamic_cast<const HiraYield *>(
+                loop.body().nodes().back().get());
+            auto yieldStatement =
+                yield ? nodeStatements_.find(yield)
+                      : nodeStatements_.end();
+            if (!yield ||
+                yieldStatement == nodeStatements_.end())
+                return reject(
+                    PolyhedralBuildError::InvalidScalarRecurrence,
+                    "unmapped-yield");
+
+            for (const HiraLoop::CarriedBinding &binding :
+                 loop.carriedValues()) {
+                if (!binding.initial || !binding.iteration ||
+                    !binding.yielded || !binding.result)
+                    return reject(
+                        PolyhedralBuildError::
+                            InvalidScalarRecurrence,
+                        "incomplete-carried-binding");
+                ScalarRecurrenceId id =
+                    static_cast<ScalarRecurrenceId>(
+                        model_->scalarRecurrences_.size());
+                model_->scalarRecurrences_.push_back(
+                    {id, &loop, domain.dimension,
+                     domain.dimensions, binding.initial,
+                     binding.iteration, binding.yielded,
+                     binding.result, yieldStatement->second});
+                recurrenceValues_[binding.iteration] = {
+                    id, RecurrenceValueKind::Iteration};
+                recurrenceValues_[binding.result] = {
+                    id, RecurrenceValueKind::Result};
+            }
+        }
+        return true;
+    }
+
+    bool buildRecurrenceInitialSources() {
+        for (ScalarRecurrence &recurrence :
+             model_->scalarRecurrences_) {
+            const HiraValue *initial = recurrence.initial;
+            const HiraNode *definition =
+                initial ? initial->definingNode() : nullptr;
+            auto statement = nodeStatements_.find(definition);
+            if (statement != nodeStatements_.end()) {
+                recurrence.initialSource = {
+                    ScalarSourceKind::Statement,
+                    statement->second,
+                    commonDimensions(
+                        model_->statements_[statement->second]
+                            .dimensions,
+                        recurrence.dimensions)};
+                continue;
+            }
+
+            auto carried = recurrenceValues_.find(initial);
+            if (carried != recurrenceValues_.end()) {
+                const ScalarRecurrence &source =
+                    model_->scalarRecurrences_[
+                        carried->second.recurrence];
+                recurrence.initialSource = {
+                    carried->second.kind ==
+                            RecurrenceValueKind::Iteration
+                        ? ScalarSourceKind::RecurrenceIteration
+                        : ScalarSourceKind::RecurrenceResult,
+                    carried->second.recurrence,
+                    commonDimensions(source.dimensions,
+                                     recurrence.dimensions)};
+                continue;
+            }
+
+            auto variable =
+                model_->space_.variableFor(initial);
+            if (variable &&
+                variable->kind ==
+                    AffineVariableKind::Dimension) {
+                recurrence.initialSource = {
+                    ScalarSourceKind::Dimension,
+                    variable->position, {*variable}};
+                continue;
+            }
+
+            if (initial &&
+                (initial->kind() == ValueKind::Parameter ||
+                 initial->kind() ==
+                     ValueKind::IntegerConstant ||
+                 initial->kind() == ValueKind::FloatConstant)) {
+                recurrence.initialSource = {};
+                continue;
+            }
+            return reject(
+                PolyhedralBuildError::InvalidScalarRecurrence,
+                "unresolved-initial-source");
+        }
+        return true;
+    }
+
+    bool buildScalarRelations() {
+        if (!buildScalarRecurrences() ||
+            !buildRecurrenceInitialSources())
+            return false;
+
+        for (const PolyhedralStatement &consumer :
+             model_->statements_) {
+            const auto &operands = consumer.node->operands();
+            for (std::size_t operandIndex = 0;
+                 operandIndex < operands.size(); ++operandIndex) {
+                const HiraValue *value = operands[operandIndex];
+                const HiraNode *definition =
+                    value ? value->definingNode() : nullptr;
+                auto producer = nodeStatements_.find(definition);
+                if (producer != nodeStatements_.end()) {
+                    const PolyhedralStatement &producerStatement =
+                        model_->statements_[producer->second];
+                    model_->scalarFlows_.push_back(
+                        {producer->second, consumer.id,
+                         static_cast<std::uint32_t>(operandIndex),
+                         value,
+                         commonDimensions(
+                             producerStatement.dimensions,
+                             consumer.dimensions)});
+                    continue;
+                }
+
+                auto recurrence = recurrenceValues_.find(value);
+                if (recurrence == recurrenceValues_.end())
+                    continue;
+                const ScalarRecurrence &source =
+                    model_->scalarRecurrences_[
+                        recurrence->second.recurrence];
+                model_->recurrenceUses_.push_back(
+                    {recurrence->second.recurrence,
+                     recurrence->second.kind, consumer.id,
+                     static_cast<std::uint32_t>(operandIndex),
+                     commonDimensions(source.dimensions,
+                                      consumer.dimensions)});
+            }
+        }
+        return true;
+    }
+
+    void classifyMemoryAliases() {
+        for (MemoryObjectId first = 0;
+             first < model_->memoryObjects_.size(); ++first) {
+            for (MemoryObjectId second = first;
+                 second < model_->memoryObjects_.size(); ++second) {
+                MemoryAliasKind kind =
+                    first == second
+                        ? MemoryAliasKind::MustAlias
+                        : MemoryAliasKind::MayAlias;
+                if (first != second && aliasAnalysis_) {
+                    ::Value *firstSource =
+                        region_.sourceMapping().sourceValue(
+                            model_->memoryObjects_[first].base);
+                    ::Value *secondSource =
+                        region_.sourceMapping().sourceValue(
+                            model_->memoryObjects_[second].base);
+                    firstSource =
+                        ArgumentAliasAnalysis::underlyingObject(
+                            firstSource);
+                    secondSource =
+                        ArgumentAliasAnalysis::underlyingObject(
+                            secondSource);
+                    if (aliasAnalysis_->noAlias(firstSource,
+                                                secondSource))
+                        kind = MemoryAliasKind::NoAlias;
+                }
+                model_->aliasRelations_.push_back(
+                    {first, second, kind});
+            }
+        }
+    }
+
     bool visitLoop(
         const HiraLoop &loop,
         const std::vector<AffineVariable> &outerDimensions,
-        const std::vector<AffineConstraint> &outerConstraints) {
+        const std::vector<AffineConstraint> &outerConstraints,
+        const std::vector<ScheduleComponent> &outerSchedule) {
         AffineExpr lower = analyze(loop.lowerBound());
         if (!lower.valid())
             return reject(PolyhedralBuildError::NonAffineLowerBound,
@@ -406,18 +672,31 @@ private:
         model_->proofObligations_.push_back(
             {ProofObligationKind::NoSignedWrap, &loop, dimension});
 
+        std::vector<ScheduleComponent> loopSchedule = outerSchedule;
+        loopSchedule.push_back(
+            {ScheduleComponentKind::Iteration, 0, dimension});
         return visitSequence(loop.body(), domain.dimensions,
-                             domain.constraints);
+                             domain.constraints, loopSchedule);
     }
 
     bool visitSequence(
         const HiraSequence &sequence,
         const std::vector<AffineVariable> &dimensions,
-        const std::vector<AffineConstraint> &constraints) {
-        for (const auto &node : sequence.nodes()) {
+        const std::vector<AffineConstraint> &constraints,
+        const std::vector<ScheduleComponent> &schedulePrefix) {
+        const auto &nodes = sequence.nodes();
+        for (std::size_t nodeIndex = 0;
+             nodeIndex < nodes.size(); ++nodeIndex) {
+            const auto &node = nodes[nodeIndex];
+            std::vector<ScheduleComponent> nodeSchedule =
+                schedulePrefix;
+            nodeSchedule.push_back(
+                {ScheduleComponentKind::SequencePosition,
+                 static_cast<std::uint32_t>(nodeIndex), {}});
             if (auto *loop =
                     dynamic_cast<const HiraLoop *>(node.get())) {
-                if (!visitLoop(*loop, dimensions, constraints))
+                if (!visitLoop(*loop, dimensions, constraints,
+                               nodeSchedule))
                     return false;
                 continue;
             }
@@ -433,9 +712,14 @@ private:
                         return false;
                     thenConstraints.push_back(
                         std::move(branchConstraint));
+                    std::vector<ScheduleComponent> branchSchedule =
+                        nodeSchedule;
+                    branchSchedule.push_back(
+                        {ScheduleComponentKind::Branch, 0, {}});
                     if (!visitSequence(condition->thenSequence(),
                                        dimensions,
-                                       thenConstraints))
+                                       thenConstraints,
+                                       branchSchedule))
                         return false;
                 }
                 if (!condition->elseSequence().nodes().empty()) {
@@ -448,23 +732,33 @@ private:
                         return false;
                     elseConstraints.push_back(
                         std::move(branchConstraint));
+                    std::vector<ScheduleComponent> branchSchedule =
+                        nodeSchedule;
+                    branchSchedule.push_back(
+                        {ScheduleComponentKind::Branch, 1, {}});
                     if (!visitSequence(condition->elseSequence(),
                                        dimensions,
-                                       elseConstraints))
+                                       elseConstraints,
+                                       branchSchedule))
                         return false;
                 }
                 continue;
             }
-            if (!addStatement(*node, dimensions, constraints))
+            if (!addStatement(*node, dimensions, constraints,
+                              nodeSchedule))
                 return false;
         }
         return true;
     }
 
     const HiraRegion &region_;
+    const ArgumentAliasAnalysis *aliasAnalysis_;
     std::unique_ptr<PolyhedralModel> model_;
     std::map<const HiraValue *, AffineExpr> expressions_;
     std::map<const HiraValue *, MemoryObjectId> memoryObjects_;
+    std::map<const HiraNode *, StatementId> nodeStatements_;
+    std::map<const HiraValue *, RecurrenceValue>
+        recurrenceValues_;
     std::set<const HiraValue *> activeExpressions_;
     PolyhedralBuildResult failure_;
 };
@@ -544,6 +838,8 @@ const char *polyhedralBuildErrorName(PolyhedralBuildError error) {
         return "unsupported-address";
     case PolyhedralBuildError::UnsupportedStatement:
         return "unsupported-statement";
+    case PolyhedralBuildError::InvalidScalarRecurrence:
+        return "invalid-scalar-recurrence";
     case PolyhedralBuildError::ConstraintOverflow:
         return "constraint-overflow";
     }
@@ -553,16 +849,25 @@ const char *polyhedralBuildErrorName(PolyhedralBuildError error) {
 MemoryAliasKind
 PolyhedralModel::aliasRelation(MemoryObjectId first,
                                MemoryObjectId second) const {
-    if (first >= memoryObjects_.size() ||
-        second >= memoryObjects_.size())
-        return MemoryAliasKind::MayAlias;
-    return first == second ? MemoryAliasKind::MustAlias
-                           : MemoryAliasKind::MayAlias;
+    if (first > second)
+        std::swap(first, second);
+    for (const MemoryAliasRelation &relation : aliasRelations_)
+        if (relation.first == first &&
+            relation.second == second)
+            return relation.kind;
+    return MemoryAliasKind::MayAlias;
 }
 
 PolyhedralBuildResult
 buildPolyhedralModel(const HiraRegion &region) {
-    return PolyhedralModelBuilder(region).run();
+    return buildPolyhedralModel(region, nullptr);
+}
+
+PolyhedralBuildResult
+buildPolyhedralModel(
+    const HiraRegion &region,
+    const ArgumentAliasAnalysis *aliasAnalysis) {
+    return PolyhedralModelBuilder(region, aliasAnalysis).run();
 }
 
 std::string printPolyhedralModel(const PolyhedralModel &model) {
@@ -581,7 +886,12 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
         out << "M" << index << " = %h"
             << model.memoryObjects()[index].base->id();
     }
-    out << "; alias=conservative)\n";
+    out << ")\n";
+    for (const MemoryAliasRelation &relation :
+         model.aliasRelations())
+        out << "  alias M" << relation.first << ", M"
+            << relation.second << " = "
+            << aliasKindName(relation.kind) << "\n";
 
     for (const IterationDomain &domain : model.domains()) {
         out << "  domain " << variableName(domain.dimension) << "[";
@@ -613,7 +923,10 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
                 out << ", ";
             out << variableName(statement.dimensions[index]);
         }
-        out << "] " << statementKindName(statement.kind) << " {\n";
+        out << "] " << statementKindName(statement.kind)
+            << " schedule=";
+        printSchedule(out, statement.identitySchedule);
+        out << " {\n";
         for (const AffineConstraint &constraint :
              statement.constraints)
             out << "    " << printExpression(constraint.expression)
@@ -636,6 +949,50 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
             if (index)
                 out << ", ";
             out << printExpression(access.subscripts[index]);
+        }
+        out << "]\n";
+    }
+
+    for (const ScalarFlowRelation &flow : model.scalarFlows()) {
+        out << "  scalar_flow S" << flow.producer << " -> S"
+            << flow.consumer << " operand=" << flow.operand
+            << " value=%h" << flow.value->id() << " common=[";
+        for (std::size_t index = 0;
+             index < flow.commonDimensions.size(); ++index) {
+            if (index)
+                out << ", ";
+            out << variableName(flow.commonDimensions[index]);
+        }
+        out << "]\n";
+    }
+
+    for (const ScalarRecurrence &recurrence :
+         model.scalarRecurrences()) {
+        out << "  recurrence R" << recurrence.id << " "
+            << variableName(recurrence.dimension)
+            << " init=%h" << recurrence.initial->id()
+            << " iter=%h" << recurrence.iteration->id()
+            << " yield=%h" << recurrence.yielded->id()
+            << " result=%h" << recurrence.result->id()
+            << " latch=S" << recurrence.yieldStatement
+            << " init_source=";
+        printScalarSource(out, recurrence.initialSource);
+        out << "\n";
+    }
+
+    for (const RecurrenceUseRelation &use :
+         model.recurrenceUses()) {
+        out << "  recurrence_use R" << use.recurrence
+            << (use.kind == RecurrenceValueKind::Iteration
+                    ? ".iter"
+                    : ".result")
+            << " -> S" << use.consumer
+            << " operand=" << use.operand << " common=[";
+        for (std::size_t index = 0;
+             index < use.commonDimensions.size(); ++index) {
+            if (index)
+                out << ", ";
+            out << variableName(use.commonDimensions[index]);
         }
         out << "]\n";
     }

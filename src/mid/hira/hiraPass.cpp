@@ -1,6 +1,7 @@
 #include "../../include/mid/hira/hiraPass.hpp"
 
 #include "../../include/mid/analysis/analysisManager.hpp"
+#include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../include/mid/hira/analysis/candidateAnalysis.hpp"
 #include "../../include/mid/hira/conversion/exporter.hpp"
 #include "../../include/mid/hira/conversion/importer.hpp"
@@ -40,14 +41,15 @@ void dumpResult(const Function &function, const Loop &loop,
 
 bool selectRegions(Function &function, Loop &loop,
                    const LoopInfo &loopInfo, bool debug,
-                   bool forceRoundtrip) {
+                   bool forceRoundtrip,
+                   const ArgumentAliasAnalysis &aliasAnalysis) {
     CandidateResult result = analyzeHiraCandidate(loop, loopInfo);
     if (!result.accepted()) {
         if (debug)
             dumpResult(function, loop, result);
         for (Loop *child : loop.children) {
             if (selectRegions(function, *child, loopInfo, debug,
-                              forceRoundtrip))
+                              forceRoundtrip, aliasAnalysis))
                 return true;
         }
         return false;
@@ -83,7 +85,8 @@ bool selectRegions(Function &function, Loop &loop,
         if (!verifyRegion("transform"))
             return false;
         polyhedral::PolyhedralBuildResult polyhedralModel =
-            polyhedral::buildPolyhedralModel(*imported.region);
+            polyhedral::buildPolyhedralModel(*imported.region,
+                                             &aliasAnalysis);
         polyhedral::PolyhedralVerificationResult polyhedralVerification;
         if (polyhedralModel.succeeded())
             polyhedralVerification =
@@ -153,7 +156,7 @@ bool selectRegions(Function &function, Loop &loop,
     }
     for (Loop *child : loop.children) {
         if (selectRegions(function, *child, loopInfo, debug,
-                          forceRoundtrip))
+                          forceRoundtrip, aliasAnalysis))
             return true;
     }
     return false;
@@ -162,6 +165,8 @@ bool selectRegions(Function &function, Loop &loop,
 bool run(Module *module, AnalysisManager &analysisManager,
          bool forceRoundtrip) {
     const bool debug = std::getenv("DEBUG_HIRA") != nullptr;
+    ArgumentAliasAnalysis aliasAnalysis;
+    aliasAnalysis.analyze(module);
     bool changed = false;
     for (Function *function : module->function_list_) {
         if (function->is_declaration())
@@ -169,7 +174,7 @@ bool run(Module *module, AnalysisManager &analysisManager,
         LoopInfo &loopInfo = analysisManager.getLoopInfo(function);
         for (Loop *loop : loopInfo.topLevelLoops()) {
             if (selectRegions(*function, *loop, loopInfo, debug,
-                              forceRoundtrip)) {
+                              forceRoundtrip, aliasAnalysis)) {
                 changed = true;
                 break;
             }
