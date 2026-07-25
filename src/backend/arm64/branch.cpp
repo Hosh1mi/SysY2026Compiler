@@ -17,6 +17,14 @@ void Arm64FuncContext::preparePhi() {
             for (int i = 0; i < phi->num_ops_ / 2; i++) {
                 auto val = phi->get_operand(2 * i);
                 auto *predBB = static_cast<BasicBlock*>(phi->get_operand(2 * i + 1));
+                // Phi copies are emitted after the prologue frame layout has
+                // been frozen.  Reserve every memory-resident incoming value
+                // now; otherwise a late getSlot() can introduce x29-relative
+                // loads into a function whose prologue omitted x29 entirely.
+                if (!hasAssignedReg(val) &&
+                    !dynamic_cast<Constant *>(val) &&
+                    !dynamic_cast<GlobalVariable *>(val))
+                    getSlot(val);
                 phiCopies_.push_back({predBB, bb, val, phiSlot, phi});
             }
         }

@@ -294,6 +294,14 @@ bool CorrelatedValuePropagation::runOnModule(Module *module, AnalysisManager &AM
 
 bool CorrelatedValuePropagation::runOnFunction(Function *func,
                                                AnalysisManager &AM) {
+    // LazyValueInfo is a whole-CFG dataflow analysis and this pass rebuilds it
+    // after every successful rewrite.  Bound that fixed-point strategy to
+    // functions where repeated global analysis is affordable.  Large CFGs
+    // still receive the preceding SCCP/InstCombine/CFG simplifications.
+    constexpr size_t kMaxAnalyzedBlocks = 512;
+    if (func->basic_blocks_.size() > kMaxAnalyzedBlocks)
+        return false;
+
     bool changedAny = false;
     bool changed = false;
     do {
