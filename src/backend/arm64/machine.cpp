@@ -380,6 +380,7 @@ MachineInstr MachineInstr::make(const std::string &line, MOpcode opcode,
     }
 
     annotateMemoryInfo(mi);
+    mi.pipe = defaultPipe(mi.opcode);
     return mi;
 }
 
@@ -516,13 +517,11 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
                op == "smull" || op == "umull" || op == "smaddl" || op == "umaddl" ||
                op == "smsubl" || op == "umsubl" || op == "fmul") {
         mi.opcode = MOpcode::Mul;
-        bool isVector = rest.find(".4s") != std::string::npos ||
-                        rest.find(".2d") != std::string::npos;
-        mi.latency = (op == "fmul") ? (isVector ? 4 : 5) : 3;
+        mi.latency = (op == "fmul") ? 6 : 4;
         defFirstUseRest();
     } else if (op == "mla" || op == "mls" || op == "fmla" || op == "fmls") {
         mi.opcode = MOpcode::Neon;
-        mi.latency = (op == "fmla" || op == "fmls") ? 4 : 3;
+        mi.latency = (op == "fmla" || op == "fmls") ? 6 : 4;
         if (!operands.empty()) {
             addDef(mi, operands[0]);
             addUses(mi, operands[0]);
@@ -539,7 +538,12 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
         defFirstUseRest();
     } else if (op == "sdiv" || op == "udiv" || op == "fdiv") {
         mi.opcode = MOpcode::Div;
-        mi.latency = 12;
+        if (op == "fdiv") {
+            bool isDouble = rest.find('d') != std::string::npos;
+            mi.latency = isDouble ? 33 : 18;
+        } else {
+            mi.latency = 4;
+        }
         defFirstUseRest();
     } else if (op == "add" || op == "sub" || op == "and" || op == "orr" ||
                op == "eor" || op == "bic" || op == "asr" || op == "lsl" ||
@@ -547,16 +551,12 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
                op == "fneg" || op == "scvtf" || op == "fcvtzs" || op == "clz" ||
                op == "rbit") {
         mi.opcode = MOpcode::Alu;
-        bool isVector = rest.find(".4s") != std::string::npos ||
-                        rest.find(".2d") != std::string::npos;
-        if (op == "fadd" || op == "fsub")
-            mi.latency = isVector ? 1 : 4;
-        else if (op == "fneg" || op == "scvtf" || op == "fcvtzs")
-            mi.latency = 4;
-        else if (op == "clz" || op == "rbit")
-            mi.latency = 3;
+        bool isFP = (op == "fadd" || op == "fsub" || op == "fneg" ||
+                     op == "scvtf" || op == "fcvtzs");
+        if (isFP)
+            mi.latency = 6;
         else
-            mi.latency = 1;
+            mi.latency = 3;
         defFirstUseRest();
     } else {
         mi.opcode = MOpcode::Unknown;
@@ -570,6 +570,7 @@ MachineInstr parseMachineInstr(const std::string &line, int originalIndex) {
     if (touchesStackPointer(mi) || touchesLinkOrFrameCritical(mi))
         mi.isBarrier = true;
 
+    mi.pipe = defaultPipe(mi.opcode);
     return mi;
 }
 
@@ -694,4 +695,42 @@ void MachineEmitter::emit(MachineInstr inst) {
 
 void MachineEmitter::emitLine(const std::string &line) {
     emit(MachineInstr::raw(line));
+}
+
+PipeResource defaultPipe(MOpcode opcode) {
+    switch (opcode) {
+        case MOpcode::Mov: case MOpcode::Alu:
+        case MOpcode::Cmp: case MOpcode::Adr:
+            return PipeResource::ALU;
+        case MOpcode::Mul:
+            return PipeResource::MAC;
+        case MOpcode::Div:
+            return PipeResource::Div;
+        case MOpcode::Load: case MOpcode::Store:
+        case MOpcode::PairLoad: case MOpcode::PairStore:
+            return PipeResource::LdSt;
+        case MOpcode::Branch: case MOpcode::Call:
+        case MOpcode::Ret: case MOpcode::FlagUse:
+            return PipeResource::Branch;
+        case MOpcode::Neon:
+            return PipeResource::FPALU;
+        default:
+            return PipeResource::None;
+    }
+}
+
+int readAdvance(MOpcode opcode) {
+    switch (opcode) {
+        case MOpcode::Mov: case MOpcode::Alu:
+        case MOpcode::Cmp: case MOpcode::Adr:
+            return 2;   // ALU: non-shifted operands available 2cy early
+        case MOpcode::Mul:
+            return 1;   // MAC: non-accumulator operand 1cy early
+        case MOpcode::Div:
+            return 1;   // Div: operand 1cy early
+        case MOpcode::Neon:
+            return 1;   // NEON/FP: conservative
+        default:
+            return 0;   // Load/Store/Branch: no bypass
+    }
 }
