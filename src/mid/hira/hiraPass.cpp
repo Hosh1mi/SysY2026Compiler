@@ -8,6 +8,7 @@
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/hira/ir/hiraVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/dependenceFeasibility.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
@@ -115,15 +116,31 @@ bool selectRegions(Function &function, Loop &loop,
         polyhedral::DependenceBuildResult dependences;
         polyhedral::DependenceVerificationResult
             dependenceVerification;
+        polyhedral::DependenceFeasibilityResult
+            dependenceFeasibility;
+        std::string dependenceFeasibilityDetail;
+        bool dependenceFeasibilityValid = false;
         if (polyhedralModel.succeeded() &&
             polyhedralVerification.succeeded()) {
             dependences = polyhedral::buildDependenceRelations(
                 *polyhedralModel.model);
-            if (dependences.succeeded())
+            if (dependences.succeeded()) {
                 dependenceVerification =
                     polyhedral::verifyDependenceRelations(
                         *polyhedralModel.model,
                         *dependences.dependences);
+                if (dependenceVerification.succeeded()) {
+                    dependenceFeasibility =
+                        polyhedral::analyzeDependenceFeasibility(
+                            *polyhedralModel.model,
+                            *dependences.dependences);
+                    dependenceFeasibilityValid =
+                        polyhedral::verifyDependenceFeasibility(
+                            *dependences.dependences,
+                            dependenceFeasibility,
+                            dependenceFeasibilityDetail);
+                }
+            }
         }
         if (dumpPolyhedral) {
             if (polyhedralModel.succeeded() &&
@@ -139,6 +156,20 @@ bool selectRegions(Function &function, Loop &loop,
                     std::cerr
                         << polyhedral::printDependenceRelations(
                                *dependences.dependences);
+                    if (dependenceFeasibilityValid) {
+                        std::cerr
+                            << polyhedral::
+                                   printDependenceFeasibility(
+                                       dependenceFeasibility);
+                    } else {
+                        std::cerr
+                            << "// polyhedral.feasibility rejected";
+                        if (!dependenceFeasibilityDetail.empty())
+                            std::cerr
+                                << " detail="
+                                << dependenceFeasibilityDetail;
+                        std::cerr << "\n";
+                    }
                 } else if (dependences.succeeded()) {
                     std::cerr
                         << "// polyhedral.dependences rejected reason="
