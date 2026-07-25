@@ -22,6 +22,7 @@ enum class CandidateRejectReason {
     UnsupportedControlFlow,
     UnsupportedChildLoop,
     StripMinedPointLoop,
+    AlreadyVectorized,
 };
 
 struct CandidateResult {

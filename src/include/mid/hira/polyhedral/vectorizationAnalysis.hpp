@@ -24,6 +24,7 @@ enum class VectorizationReason {
     LoopCarriedDependence,
     OpaqueControl,
     UnsupportedElementType,
+    UnsupportedOperation,
 };
 
 struct ScheduleVectorization {

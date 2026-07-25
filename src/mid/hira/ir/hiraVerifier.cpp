@@ -129,7 +129,9 @@ private:
         std::size_t expectedOperands = 2;
         if (compute.computeKind() == ComputeKind::Select)
             expectedOperands = 3;
-        else if (compute.computeKind() == ComputeKind::ZExt)
+        else if (compute.computeKind() == ComputeKind::ZExt ||
+                 compute.computeKind() == ComputeKind::BitCast ||
+                 compute.computeKind() == ComputeKind::Splat)
             expectedOperands = 1;
         else if (compute.computeKind() == ComputeKind::GetElementPtr)
             expectedOperands = compute.operands().size();
@@ -167,6 +169,22 @@ private:
                 source->num_bits_ >= destination->num_bits_)
                 return reject(HiraVerifyError::InvalidNode,
                               "invalid-zext-types");
+        } else if (compute.computeKind() ==
+                   ComputeKind::BitCast) {
+            if (!dynamic_cast<PointerType *>(
+                    compute.operands()[0]->type()) ||
+                !dynamic_cast<PointerType *>(result->type()))
+                return reject(HiraVerifyError::InvalidNode,
+                              "invalid-bitcast-types");
+        } else if (compute.computeKind() ==
+                   ComputeKind::Splat) {
+            auto *vector =
+                dynamic_cast<VectorType *>(result->type());
+            if (!vector || vector->num_elements_ <= 1 ||
+                vector->contained_ !=
+                    compute.operands()[0]->type())
+                return reject(HiraVerifyError::InvalidNode,
+                              "invalid-splat-types");
         }
         return defineResult(compute, result, available);
     }

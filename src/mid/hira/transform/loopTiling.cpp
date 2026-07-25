@@ -1,5 +1,6 @@
 #include "../../../include/mid/hira/transform/loopTiling.hpp"
 
+#include "../../../include/mid/hira/analysis/loopInterchangeAnalysis.hpp"
 #include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
@@ -8,11 +9,13 @@
 #include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/module.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <initializer_list>
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace hira::polyhedral {
 namespace {
@@ -57,36 +60,25 @@ HiraComputeOp *appendCompute(
         sequence.append(std::move(compute)));
 }
 
-bool interchangeAdjacent(HiraLoop &outer,
-                         HiraLoop &inner) {
-    if (!outer.parent() ||
-        inner.parent() != &outer.body() ||
-        !analyzeCanonicalLoopControl(outer) ||
-        !analyzeCanonicalLoopControl(inner) ||
-        inner.body().nodes().size() < 2)
+bool interchangeAdjacent(
+    const PolyhedralModel &model, HiraLoop &outer,
+    HiraLoop &inner) {
+    auto nest =
+        analyzeAdjacentLoopInterchange(
+            model, outer, inner);
+    if (!nest)
         return false;
     HiraSequence *parent = outer.parent();
     auto outerPosition = nodePosition(*parent, &outer);
-    auto innerPosition =
-        nodePosition(outer.body(), &inner);
-    if (!outerPosition || !innerPosition ||
-        *innerPosition + 2 >=
-            outer.body().nodes().size())
+    if (!outerPosition)
         return false;
-    for (std::size_t index = 0;
-         index + 2 < outer.body().nodes().size();
-         ++index)
-        if (index != *innerPosition &&
-            dynamic_cast<HiraLoop *>(
-                outer.body().nodes()[index].get()))
-            return false;
 
     const std::size_t payloadCount =
         inner.body().nodes().size() - 2;
     std::unique_ptr<HiraNode> outerOwner =
         parent->remove(&outer);
     std::unique_ptr<HiraNode> innerOwner =
-        outer.body().remove(&inner);
+        nest->innerSequence->remove(&inner);
     std::vector<std::unique_ptr<HiraNode>> payload;
     payload.reserve(payloadCount);
     for (std::size_t index = 0;
@@ -95,8 +87,9 @@ bool interchangeAdjacent(HiraLoop &outer,
             inner.body().nodes().front().get()));
     for (std::size_t index = 0;
          index < payload.size(); ++index)
-        outer.body().insert(*innerPosition + index,
-                            std::move(payload[index]));
+        nest->innerSequence->insert(
+            nest->innerPosition + index,
+            std::move(payload[index]));
     inner.body().insert(0, std::move(outerOwner));
     parent->insert(*outerPosition, std::move(innerOwner));
     return true;
@@ -242,11 +235,12 @@ LoopTilingResult tileLoopBand(
                       "band-needs-multiple-tiled-dimensions");
     for (std::size_t index = firstTiled + 1;
          index < pointLoops.size(); ++index)
-        if (pointLoops[index]->parent() !=
-            &pointLoops[index - 1]->body())
+        if (!analyzeAdjacentLoopInterchange(
+                model, *pointLoops[index - 1],
+                *pointLoops[index]))
             return reject(
                 LoopTilingError::InvalidNest,
-                "guarded-or-imperfect-band");
+                "unsafe-imperfect-band");
 
     std::vector<HiraLoop *> tileLoops(
         dimensions.size(), nullptr);
@@ -306,6 +300,7 @@ LoopTilingResult tileLoopBand(
                 position - current.begin());
         while (currentPosition > target) {
             if (!interchangeAdjacent(
+                    model,
                     *current[currentPosition - 1],
                     *current[currentPosition]))
                 return reject(

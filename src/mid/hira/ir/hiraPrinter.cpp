@@ -105,6 +105,10 @@ const char *computeName(ComputeKind kind) {
         return "gep";
     case ComputeKind::ZExt:
         return "zext";
+    case ComputeKind::BitCast:
+        return "bitcast";
+    case ComputeKind::Splat:
+        return "splat";
     }
     return "unknown";
 }
@@ -156,6 +160,11 @@ void printNode(std::ostringstream &out, const HiraRegion &region,
             << " = " << valueRef(loop->lowerBound())
             << " to " << valueRef(loop->upperBound())
             << " step " << valueRef(loop->step());
+        if (loop->role() == HiraLoop::Role::VectorMain)
+            out << " vector_main";
+        else if (loop->role() ==
+                 HiraLoop::Role::ScalarRemainder)
+            out << " scalar_remainder";
         if (Loop *source = region.sourceMapping().sourceLoop(loop))
             out << "  // llvm-loop="
                 << (source->header ? source->header->name_ : "<null>");

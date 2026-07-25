@@ -173,6 +173,14 @@ static bool matchLaneLoadPack(Instruction *inst, LaneLoadPackPattern &pattern) {
     if (!idx0 || idx0->value_ != 0) return false;
     if (!isLoadI32InBlock(ins0->get_operand(1), bb, pattern.loads[0])) return false;
 
+    // Reusing one scalar load in every lane is a splat, not a gather.  Let
+    // the insertelement splat matcher lower it to one scalar load plus DUP.
+    for (std::size_t first = 0; first < pattern.loads.size(); ++first)
+        for (std::size_t second = first + 1;
+             second < pattern.loads.size(); ++second)
+            if (pattern.loads[first] == pattern.loads[second])
+                return false;
+
     return true;
 }
 
@@ -323,6 +331,18 @@ static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
         if (mul->use_list_.size() != 1) return false;
         if (acc->type_ != root->type_) return false;
 
+        // Instruction selection emits a matched multiply only when visiting
+        // the later add/sub.  If another instruction lies between them, the
+        // allocator is allowed to reuse a multiply operand's register after
+        // its original use, so delaying that use would be incorrect.
+        auto mulPosition =
+            std::find(bb->instr_list_.begin(),
+                      bb->instr_list_.end(), mul);
+        if (mulPosition == bb->instr_list_.end() ||
+            ++mulPosition == bb->instr_list_.end() ||
+            *mulPosition != root)
+            return false;
+
         LoadInst *accLoad = nullptr;
         LoadInst *lhsLoad = nullptr;
         LoadInst *rhsLoad = nullptr;
@@ -370,13 +390,14 @@ InsertElementInst *singleInsertElementUser(Instruction *inst) {
     return dynamic_cast<InsertElementInst*>(inst->use_list_.front().val_);
 }
 
-bool isCompleteIntSplatInsertChain(Instruction *inst, Value *&value) {
+bool isCompleteSplatInsertChain(Instruction *inst, Value *&value) {
     auto *insert = dynamic_cast<InsertElementInst*>(inst);
     if (!insert) return false;
 
     auto *vecTy = dynamic_cast<VectorType*>(insert->type_);
     if (!vecTy || vecTy->num_elements_ != 4 ||
-        vecTy->contained_->tid_ != Type::IntegerTyID) {
+        (vecTy->contained_->tid_ != Type::IntegerTyID &&
+         vecTy->contained_->tid_ != Type::FloatTyID)) {
         return false;
     }
 
@@ -386,7 +407,7 @@ bool isCompleteIntSplatInsertChain(Instruction *inst, Value *&value) {
     while (insert) {
         auto *idx = dynamic_cast<ConstantInt*>(insert->get_operand(2));
         Value *elem = insert->get_operand(1);
-        if (!idx || !elem || elem->type_->tid_ != Type::IntegerTyID ||
+        if (!idx || !elem || elem->type_ != vecTy->contained_ ||
             idx->value_ < 0 || idx->value_ >= 4)
             return false;
         if (seen[idx->value_])
@@ -427,7 +448,7 @@ bool isSplatInsertChainIntermediate(Instruction *inst) {
         terminal = next;
 
     Value *value = nullptr;
-    return isCompleteIntSplatInsertChain(terminal, value);
+    return isCompleteSplatInsertChain(terminal, value);
 }
 
 } // namespace
@@ -1116,7 +1137,7 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
             break;
 
         Value *splatValue = nullptr;
-        if (isCompleteIntSplatInsertChain(inst, splatValue)) {
+        if (isCompleteSplatInsertChain(inst, splatValue)) {
             std::string rd = hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
             auto *constant = dynamic_cast<ConstantInt*>(splatValue);
             if (constant && canUseMoviSplat(constant->value_)) {
@@ -1124,7 +1145,14 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                                       std::to_string(constant->value_),
                                   rd, {}, MOpcode::Neon);
             } else {
-                std::string ws = loadInt(splatValue);
+                std::string ws;
+                if (isFloat(splatValue->type_)) {
+                    std::string scalar = loadFloat(splatValue);
+                    ws = allocIntReg();
+                    emitMoveMachine(ws, scalar, "fmov");
+                } else {
+                    ws = loadInt(splatValue);
+                }
                 emitRawAluMachine("\tdup " + rd + ".4s, " + ws,
                                   rd, {ws}, MOpcode::Neon);
             }

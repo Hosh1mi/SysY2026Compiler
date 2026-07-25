@@ -148,6 +148,8 @@ const char *candidateRejectReasonName(CandidateRejectReason reason) {
         return "unsupported-child-loop";
     case CandidateRejectReason::StripMinedPointLoop:
         return "strip-mined-point-loop";
+    case CandidateRejectReason::AlreadyVectorized:
+        return "already-vectorized";
     }
     return "unknown";
 }
@@ -155,6 +157,13 @@ const char *candidateRejectReasonName(CandidateRejectReason reason) {
 CandidateResult analyzeHiraCandidate(const Loop &loop,
                                      const LoopInfo &loopInfo) {
     (void)loopInfo;
+    if (loop.header &&
+        (loop.header->hasSemFlag(
+             SemFlag::VectorizedEpilogue) ||
+         loop.header->hasSemFlag(
+             SemFlag::TargetPointerRecurrenceLoop)))
+        return reject(
+            CandidateRejectReason::AlreadyVectorized);
     if (isStripMinedPointLoop(loop))
         return reject(
             CandidateRejectReason::StripMinedPointLoop);

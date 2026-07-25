@@ -28,6 +28,7 @@
 #include "../../include/mid/hira/polyhedral/statementPartitionAnalysis.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/hira/transform/loopDistribution.hpp"
+#include "../../include/mid/hira/transform/loopVectorization.hpp"
 #include "../../include/mid/hira/transform/scheduleRealization.hpp"
 #include "../../include/mid/hira/transform/loopTiling.hpp"
 #include "../../include/mid/ir/function.hpp"
@@ -646,6 +647,7 @@ bool selectRegions(Function &function, Loop &loop,
             realizedScheduleModel;
         const polyhedral::PolyhedralModel *
             transformModel = polyhedralModel.model.get();
+        bool distributedRegion = false;
         if (scheduleSelectionValid &&
             scheduleSelection.selected() != 0) {
             const polyhedral::ScheduleCandidate &selectedSchedule =
@@ -752,6 +754,7 @@ bool selectRegions(Function &function, Loop &loop,
                     statementPartitions);
             if (distribution.succeeded() &&
                 distribution.changed) {
+                distributedRegion = true;
                 if (!verifyRegion("loop-distribution"))
                     return false;
                 if (debug || dumpPolyhedral)
@@ -851,6 +854,71 @@ bool selectRegions(Function &function, Loop &loop,
                         std::cerr << printHiraRegion(
                             *imported.region,
                             function.name_);
+                }
+            }
+        }
+
+        if (!distributedRegion &&
+            vectorizationValid &&
+            scheduleSelectionValid &&
+            transformModel) {
+            const polyhedral::ScheduleVectorization
+                &selectedVectorization =
+                    vectorization.schedules()[
+                        scheduleSelection.selected()];
+            if (selectedVectorization.kind ==
+                    polyhedral::
+                        VectorizationKind::Vectorizable &&
+                selectedVectorization.dimension) {
+                const HiraValue *source =
+                    polyhedralModel.model->space().source(
+                        *selectedVectorization.dimension);
+                auto transformedDimension =
+                    source
+                        ? transformModel->space()
+                              .variableFor(source)
+                        : std::nullopt;
+                if (transformedDimension) {
+                    polyhedral::LoopVectorizationResult
+                        vectorized =
+                            polyhedral::vectorizeLoop(
+                                *imported.region,
+                                *transformModel,
+                                *transformedDimension,
+                                selectedVectorization.lanes);
+                    if (!vectorized.succeeded()) {
+                        if (debug || dumpPolyhedral) {
+                            std::cerr
+                                << "// polyhedral."
+                                   "loop_vectorization"
+                                << " = rejected reason="
+                                << polyhedral::
+                                       loopVectorizationErrorName(
+                                           vectorized.error);
+                            if (!vectorized.detail.empty())
+                                std::cerr
+                                    << " detail="
+                                    << vectorized.detail;
+                            std::cerr << "\n";
+                        }
+                    } else if (!verifyRegion(
+                                   "loop-vectorization")) {
+                        return false;
+                    } else {
+                        if (debug || dumpPolyhedral)
+                            std::cerr
+                                << "// polyhedral."
+                                   "loop_vectorization"
+                                << " dimension=d"
+                                << transformedDimension->position
+                                << " lanes="
+                                << selectedVectorization.lanes
+                                << " = realized\n";
+                        if (dumpHira)
+                            std::cerr << printHiraRegion(
+                                *imported.region,
+                                function.name_);
+                    }
                 }
             }
         }

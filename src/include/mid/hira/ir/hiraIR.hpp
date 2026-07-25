@@ -125,6 +125,8 @@ enum class ComputeKind {
     Select,
     GetElementPtr,
     ZExt,
+    BitCast,
+    Splat,
 };
 
 class HiraComputeOp final : public HiraNode {
@@ -186,6 +188,12 @@ private:
 
 class HiraLoop final : public HiraNode {
 public:
+    enum class Role {
+        Ordinary,
+        VectorMain,
+        ScalarRemainder,
+    };
+
     struct CarriedBinding {
         HiraValue *initial = nullptr;
         HiraValue *iteration = nullptr;
@@ -228,6 +236,8 @@ public:
                                 HiraValue *result);
     void setCarriedYield(std::size_t index, HiraValue *value);
     void addYieldValue(HiraValue *value);
+    Role role() const { return role_; }
+    void setRole(Role role) { role_ = role; }
 
 private:
     HiraValue *induction_;
@@ -237,6 +247,7 @@ private:
     HiraSequence body_;
     std::vector<CarriedBinding> carriedValues_;
     std::vector<HiraValue *> yieldValues_;
+    Role role_ = Role::Ordinary;
 };
 
 class SourceMapping {

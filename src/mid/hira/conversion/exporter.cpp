@@ -178,7 +178,9 @@ private:
         if (!isBinaryCompute(kind) && kind != ComputeKind::ICmp &&
             kind != ComputeKind::Select &&
             kind != ComputeKind::GetElementPtr &&
-            kind != ComputeKind::ZExt)
+            kind != ComputeKind::ZExt &&
+            kind != ComputeKind::BitCast &&
+            kind != ComputeKind::Splat)
             return fail(ExportRejectReason::UnsupportedNode);
         return true;
     }
@@ -329,6 +331,13 @@ private:
         BasicBlock *latch = createBlock("latch", id);
         BasicBlock *exit = createBlock("exit", id);
         emission = {header, exit};
+        if (loop.role() == HiraLoop::Role::VectorMain)
+            header->setSemFlag(
+                SemFlag::TargetPointerRecurrenceLoop);
+        else if (loop.role() ==
+                 HiraLoop::Role::ScalarRemainder)
+            header->setSemFlag(
+                SemFlag::VectorizedEpilogue);
 
         Value *lower = value(loop.lowerBound());
         Value *upper = value(loop.upperBound());
@@ -497,6 +506,33 @@ private:
                 instruction = new ZextInst(
                     Instruction::ZExt, operands[0],
                     node.results().front()->type(), destination);
+            } else if (kind == ComputeKind::BitCast &&
+                       operands.size() == 1) {
+                instruction = new Bitcast(
+                    Instruction::BitCast, operands[0],
+                    node.results().front()->type(), destination);
+            } else if (kind == ComputeKind::Splat &&
+                       operands.size() == 1) {
+                auto *vectorType =
+                    dynamic_cast<VectorType *>(
+                        node.results().front()->type());
+                if (!vectorType)
+                    return fail(
+                        ExportRejectReason::UnsupportedNode);
+                Value *packed = operands[0];
+                for (unsigned lane = 0;
+                     lane < vectorType->num_elements_; ++lane) {
+                    auto *index = new ConstantInt(
+                        module_->int32_ty_,
+                        static_cast<int>(lane));
+                    auto *insert = new InsertElementInst(
+                        packed, operands[0], index, destination);
+                    if (lane == 0)
+                        insert->type_ = vectorType;
+                    packed = insert;
+                }
+                instruction =
+                    dynamic_cast<Instruction *>(packed);
             } else {
                 return fail(ExportRejectReason::UnsupportedNode);
             }

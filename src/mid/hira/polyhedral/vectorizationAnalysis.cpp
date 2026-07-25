@@ -1,5 +1,6 @@
 #include "../../../include/mid/hira/polyhedral/vectorizationAnalysis.hpp"
 
+#include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/hira/polyhedral/accessStrideAnalysis.hpp"
 #include "../../../include/mid/ir/type.hpp"
@@ -49,10 +50,9 @@ std::uint32_t lanesFor(
     if (type->tid_ == Type::FloatTyID)
         return target.float32Lanes;
     auto *integer = dynamic_cast<IntegerType *>(type);
-    if (!integer || !integer->num_bits_ ||
-        integer->num_bits_ > target.neonBits)
+    if (!integer || integer->num_bits_ != 32)
         return 1;
-    return target.neonBits / integer->num_bits_;
+    return target.neonBits / 32;
 }
 
 bool containsDimension(const PolyhedralStatement &statement,
@@ -72,6 +72,43 @@ bool provesEqual(const DependenceRelation &relation,
     return false;
 }
 
+const IterationDomain *findDomain(
+    const PolyhedralModel &model,
+    AffineVariable dimension) {
+    for (const IterationDomain &domain : model.domains())
+        if (domain.dimension == dimension)
+            return &domain;
+    return nullptr;
+}
+
+bool containsConditional(const HiraSequence &sequence) {
+    for (const auto &owner : sequence.nodes()) {
+        if (dynamic_cast<const HiraIf *>(owner.get()))
+            return true;
+        if (auto *loop =
+                dynamic_cast<const HiraLoop *>(owner.get()))
+            if (containsConditional(loop->body()))
+                return true;
+    }
+    return false;
+}
+
+bool isSupportedVectorCompute(
+    const HiraComputeOp &compute) {
+    switch (compute.computeKind()) {
+    case ComputeKind::Add:
+    case ComputeKind::Sub:
+    case ComputeKind::Mul:
+    case ComputeKind::FAdd:
+    case ComputeKind::FSub:
+    case ComputeKind::FMul:
+    case ComputeKind::GetElementPtr:
+        return true;
+    default:
+        return false;
+    }
+}
+
 const char *reasonName(VectorizationReason reason) {
     switch (reason) {
     case VectorizationReason::None:
@@ -88,6 +125,8 @@ const char *reasonName(VectorizationReason reason) {
         return "opaque-control";
     case VectorizationReason::UnsupportedElementType:
         return "unsupported-element-type";
+    case VectorizationReason::UnsupportedOperation:
+        return "unsupported-operation";
     }
     return "unknown";
 }
@@ -122,14 +161,46 @@ VectorizationAnalysisResult analyzeVectorization(
             continue;
         }
 
-        bool opaque = false;
-        for (const PolyhedralStatement &statement :
-             model.statements())
-            opaque |= statement.domainPrecision !=
-                      DomainPrecision::Exact;
-        if (opaque) {
+        const IterationDomain *vectorDomain =
+            findDomain(model, *vectorization.dimension);
+        if (!vectorDomain || !vectorDomain->loop) {
+            vectorization.reason =
+                VectorizationReason::MissingInnerDimension;
+            result.schedules_.push_back(vectorization);
+            continue;
+        }
+        if (containsConditional(
+                vectorDomain->loop->body())) {
             vectorization.reason =
                 VectorizationReason::OpaqueControl;
+            result.schedules_.push_back(vectorization);
+            continue;
+        }
+
+        const HiraComputeOp *inductionUpdate = nullptr;
+        if (auto control =
+                analyzeCanonicalLoopControl(
+                    *vectorDomain->loop))
+            inductionUpdate = control->inductionUpdate;
+        bool unsupportedOperation = false;
+        for (const PolyhedralStatement &statement :
+             model.statements()) {
+            if (!containsDimension(
+                    statement,
+                    *vectorization.dimension))
+                continue;
+            auto *compute =
+                dynamic_cast<const HiraComputeOp *>(
+                    statement.node);
+            if (compute && compute != inductionUpdate &&
+                !isSupportedVectorCompute(*compute)) {
+                unsupportedOperation = true;
+                break;
+            }
+        }
+        if (unsupportedOperation) {
+            vectorization.reason =
+                VectorizationReason::UnsupportedOperation;
             result.schedules_.push_back(vectorization);
             continue;
         }
