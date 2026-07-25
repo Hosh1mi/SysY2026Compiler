@@ -156,7 +156,11 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     std::map<Value*, std::vector<Value*>> members;
     for (auto &iv : sorted) members[iv.value] = {iv.value};
 
-    bool mergedAny = true;
+    // Coalescing repeatedly rewrites the interference graph.  Bound it for
+    // very large CFGs; coloring remains correct without affinity merging and
+    // avoids compounding sparse live-range approximations at this scale.
+    constexpr size_t kCoalescingBlockLimit = 80;
+    bool mergedAny = func_->basic_blocks_.size() <= kCoalescingBlockLimit;
     while (mergedAny) {
         mergedAny = false;
         for (auto &e : affEdges) {
@@ -1100,5 +1104,7 @@ void Arm64RegAlloc::allocate() {
     // ---- 12. Loop constant promotion ----
     // srem/sdiv 魔数乘数、Add/Sub/ICmp 大常量在循环里每次迭代重物化。
     // 把高权重常量提升到空闲寄存器，入口物化一次。
-    promoteLoopConstants(blocksOrder, loopDepth, isLeaf);
+    constexpr size_t kConstPromotionBlockLimit = 80;
+    if (func_->basic_blocks_.size() <= kConstPromotionBlockLimit)
+        promoteLoopConstants(blocksOrder, loopDepth, isLeaf);
 }

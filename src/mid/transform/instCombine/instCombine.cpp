@@ -98,6 +98,16 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     };
 
     const size_t initialInstrCount = countInstructions();
+    // RangeAnalysis construction computes whole-function post-dominance and
+    // control dependence.  InstCombine invalidates that analysis after every
+    // replacement because its predicate facts may reference the replaced
+    // instruction.  Rebuilding it for every local fold is prohibitively
+    // expensive on large generated functions.  Keep the range-assisted
+    // combines for normal functions, while large functions use the always-safe
+    // local combines.
+    constexpr size_t kRangeAnalysisInstructionLimit = 1024;
+    const bool useRangeAnalysis =
+        AM && initialInstrCount <= kRangeAnalysisInstructionLimit;
     const size_t processBudget =
         std::max<size_t>(20000, initialInstrCount * 32);
     const size_t createBudget =
@@ -108,7 +118,8 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     bool changed = false;
 
     RangeAnalysis *savedRangeAnalysis = gInstCombineRangeAnalysis;
-    gInstCombineRangeAnalysis = AM ? &AM->getRangeAnalysis(func) : nullptr;
+    gInstCombineRangeAnalysis =
+        useRangeAnalysis ? &AM->getRangeAnalysis(func) : nullptr;
 
     std::vector<Instruction*> worklist;
     std::unordered_set<Instruction *> inWorklist;
@@ -231,7 +242,7 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
 
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
-            if (AM) {
+            if (useRangeAnalysis) {
                 AM->clearRangeAnalyses();
                 gInstCombineRangeAnalysis = &AM->getRangeAnalysis(func);
             } else if (gInstCombineRangeAnalysis) {

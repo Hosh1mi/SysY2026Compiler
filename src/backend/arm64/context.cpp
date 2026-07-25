@@ -227,6 +227,26 @@ void Arm64FuncContext::generate() {
         }
     }
 
+    // Graph coloring builds whole-function liveness sets and an interference
+    // graph.  For extremely large CFGs, use the existing stack-slot lowering
+    // instead of allowing allocator compile time and memory to grow
+    // superlinearly.  This decision depends only on generic CFG size.
+    constexpr size_t kRegAllocBlockLimit = 512;
+    if (enableRegAlloc_ &&
+        func_->basic_blocks_.size() > kRegAllocBlockLimit)
+        enableRegAlloc_ = false;
+    if (enableRegAlloc_ && func_->basic_blocks_.size() > 60) {
+        size_t phiCount = 0;
+        for (auto *bb : func_->basic_blocks_)
+            for (auto *inst : bb->instr_list_)
+                phiCount += inst->is_phi() ? 1 : 0;
+        // Sparse-phi large CFGs create highly non-convex live ranges.  The
+        // current interval approximation is deliberately conservative there:
+        // use stack-slot lowering until segmented intervals are available.
+        if (phiCount < 60)
+            enableRegAlloc_ = false;
+    }
+
     if (enableRegAlloc_) {
         Arm64RegAlloc regAlloc(func_);
         regAlloc.allocate();

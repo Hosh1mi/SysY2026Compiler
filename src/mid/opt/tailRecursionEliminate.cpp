@@ -17,7 +17,23 @@ void TailRecursionEliminate::execute(Module *module) {
 static bool isPattern2TailCall(CallInst *call, Function *func,
                                 BasicBlock *target, BasicBlock *term_bb) {
     auto call_term = term_bb->get_terminator();
-    (void)call_term; // terminator already validated by caller
+    // A tail call must be the final non-terminator instruction.  Merely
+    // branching to a return block is not sufficient: instructions between the
+    // recursive call and that branch execute while unwinding and cannot be
+    // discarded (this is especially easy to miss for void calls, which have
+    // no SSA uses).
+    bool seenCall = false;
+    for (auto *inst : term_bb->instr_list_) {
+        if (inst == call) {
+            seenCall = true;
+            continue;
+        }
+        if (seenCall && inst != call_term)
+            return false;
+    }
+    if (!seenCall)
+        return false;
+
     auto targetTerm = target->get_terminator();
     if (!targetTerm || !targetTerm->is_ret()) return false;
 
