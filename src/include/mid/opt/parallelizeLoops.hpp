@@ -8,9 +8,12 @@
 
 class ArgumentAliasAnalysis;
 
-// ParallelizeLoops（plan 5.2）：把可证明 DOALL 的顶层循环外提为
+// ParallelizeLoops（plan 5.2）：把可证明 DOALL 的循环区域外提为
 // __sysy_par_body_<id>(lo, hi)，调用点替换为 __sysy_parallel_for(id, lo, hi)，
 // 由 .s 末尾追加的双核 runtime（clone+自旋）平分迭代空间执行。
+// 可以外提包含子循环的嵌套循环区域；嵌套叶循环仅保留已有的归约场景，
+// 避免在父循环每次迭代中支付一次并行 dispatch。祖先优先的遍历和 call
+// 副作用检查保证不会生成递归的 parallel runtime 调用。
 // live-in 经 @__sysy_par_ctx_* 全局槽传递；分发经生成的
 // __sysy_par_dispatch(id, lo, hi)，全程不需要函数指针。
 // 设计与判定条件详见 plan 5.2 与 parallel-runtime-design。
