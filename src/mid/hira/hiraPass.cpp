@@ -7,6 +7,8 @@
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/hira/ir/hiraVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/dependenceAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/dependenceVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
@@ -42,6 +44,7 @@ void dumpResult(const Function &function, const Loop &loop,
 bool selectRegions(Function &function, Loop &loop,
                    const LoopInfo &loopInfo, bool debug,
                    bool forceRoundtrip,
+                   bool dumpHira, bool dumpPolyhedral,
                    const ArgumentAliasAnalysis &aliasAnalysis) {
     CandidateResult result = analyzeHiraCandidate(loop, loopInfo);
     if (!result.accepted()) {
@@ -49,7 +52,8 @@ bool selectRegions(Function &function, Loop &loop,
             dumpResult(function, loop, result);
         for (Loop *child : loop.children) {
             if (selectRegions(function, *child, loopInfo, debug,
-                              forceRoundtrip, aliasAnalysis))
+                              forceRoundtrip, dumpHira,
+                              dumpPolyhedral, aliasAnalysis))
                 return true;
         }
         return false;
@@ -76,14 +80,30 @@ bool selectRegions(Function &function, Loop &loop,
 
         if (!verifyRegion("import"))
             return false;
-        if (debug) {
+        if (debug)
             std::cerr << "[Hira] region function=" << function.name_
+                      << " header=" << blockName(loop.header) << "\n";
+        if (dumpHira) {
+            std::cerr << "// hira.dump stage=import function="
+                      << function.name_
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }
         bool optimized = hoistLoopInvariants(*imported.region);
         if (!verifyRegion("transform"))
             return false;
+        if (debug && optimized)
+            std::cerr << "[Hira] transformed function="
+                      << function.name_
+                      << " header=" << blockName(loop.header)
+                      << " pass=loop-invariant-code-motion\n";
+        if (dumpHira && optimized) {
+            std::cerr << "// hira.dump stage=transform function="
+                      << function.name_
+                      << " header=" << blockName(loop.header) << "\n";
+            std::cerr << printHiraRegion(*imported.region,
+                                        function.name_);
+        }
         polyhedral::PolyhedralBuildResult polyhedralModel =
             polyhedral::buildPolyhedralModel(*imported.region,
                                              &aliasAnalysis);
@@ -92,13 +112,55 @@ bool selectRegions(Function &function, Loop &loop,
             polyhedralVerification =
                 polyhedral::verifyPolyhedralModel(
                     *polyhedralModel.model);
-        if (debug) {
+        polyhedral::DependenceBuildResult dependences;
+        polyhedral::DependenceVerificationResult
+            dependenceVerification;
+        if (polyhedralModel.succeeded() &&
+            polyhedralVerification.succeeded()) {
+            dependences = polyhedral::buildDependenceRelations(
+                *polyhedralModel.model);
+            if (dependences.succeeded())
+                dependenceVerification =
+                    polyhedral::verifyDependenceRelations(
+                        *polyhedralModel.model,
+                        *dependences.dependences);
+        }
+        if (dumpPolyhedral) {
             if (polyhedralModel.succeeded() &&
                 polyhedralVerification.succeeded()) {
+                std::cerr
+                    << "// polyhedral.dump function="
+                    << function.name_
+                    << " header=" << blockName(loop.header) << "\n";
                 std::cerr << polyhedral::printPolyhedralModel(
                     *polyhedralModel.model);
+                if (dependences.succeeded() &&
+                    dependenceVerification.succeeded()) {
+                    std::cerr
+                        << polyhedral::printDependenceRelations(
+                               *dependences.dependences);
+                } else if (dependences.succeeded()) {
+                    std::cerr
+                        << "// polyhedral.dependences rejected reason="
+                        << polyhedral::dependenceVerifyErrorName(
+                               dependenceVerification.error);
+                    if (!dependenceVerification.detail.empty())
+                        std::cerr << " detail="
+                                  << dependenceVerification.detail;
+                    std::cerr << "\n";
+                } else {
+                    std::cerr
+                        << "// polyhedral.dependences rejected reason="
+                        << polyhedral::dependenceBuildErrorName(
+                               dependences.error);
+                    if (!dependences.detail.empty())
+                        std::cerr << " detail="
+                                  << dependences.detail;
+                    std::cerr << "\n";
+                }
             } else if (polyhedralModel.succeeded()) {
-                std::cerr << "[Hira] polyhedral-verify-reject function="
+                std::cerr
+                          << "// polyhedral.dump rejected function="
                           << function.name_
                           << " header=" << blockName(loop.header)
                           << " reason="
@@ -109,7 +171,8 @@ bool selectRegions(Function &function, Loop &loop,
                               << polyhedralVerification.detail;
                 std::cerr << "\n";
             } else {
-                std::cerr << "[Hira] polyhedral-reject function="
+                std::cerr
+                          << "// polyhedral.dump rejected function="
                           << function.name_
                           << " header=" << blockName(loop.header)
                           << " reason="
@@ -119,12 +182,6 @@ bool selectRegions(Function &function, Loop &loop,
                     std::cerr << " detail=" << polyhedralModel.detail;
                 std::cerr << "\n";
             }
-        }
-        if (debug && optimized) {
-            std::cerr << "[Hira] transformed function=" << function.name_
-                      << " header=" << blockName(loop.header)
-                      << " pass=loop-invariant-code-motion\n";
-            std::cerr << printHiraRegion(*imported.region, function.name_);
         }
         if (!forceRoundtrip && !imported.region->modified())
             return false;
@@ -156,15 +213,19 @@ bool selectRegions(Function &function, Loop &loop,
     }
     for (Loop *child : loop.children) {
         if (selectRegions(function, *child, loopInfo, debug,
-                          forceRoundtrip, aliasAnalysis))
+                          forceRoundtrip, dumpHira,
+                          dumpPolyhedral, aliasAnalysis))
             return true;
     }
     return false;
 }
 
 bool run(Module *module, AnalysisManager &analysisManager,
-         bool forceRoundtrip) {
+         bool forceRoundtrip, bool dumpHira,
+         bool dumpPolyhedral) {
     const bool debug = std::getenv("DEBUG_HIRA") != nullptr;
+    dumpHira |= debug;
+    dumpPolyhedral |= debug;
     ArgumentAliasAnalysis aliasAnalysis;
     aliasAnalysis.analyze(module);
     bool changed = false;
@@ -174,7 +235,8 @@ bool run(Module *module, AnalysisManager &analysisManager,
         LoopInfo &loopInfo = analysisManager.getLoopInfo(function);
         for (Loop *loop : loopInfo.topLevelLoops()) {
             if (selectRegions(*function, *loop, loopInfo, debug,
-                              forceRoundtrip, aliasAnalysis)) {
+                              forceRoundtrip, dumpHira,
+                              dumpPolyhedral, aliasAnalysis)) {
                 changed = true;
                 break;
             }
@@ -187,12 +249,14 @@ bool run(Module *module, AnalysisManager &analysisManager,
 
 void HiraPass::execute(Module *module) {
     AnalysisManager analysisManager;
-    run(module, analysisManager, forceRoundtrip_);
+    run(module, analysisManager, forceRoundtrip_, dumpHira_,
+        dumpPolyhedral_);
 }
 
 PreservedAnalyses HiraPass::execute(Module *module,
                                     AnalysisManager &analysisManager) {
-    return run(module, analysisManager, forceRoundtrip_)
+    return run(module, analysisManager, forceRoundtrip_, dumpHira_,
+               dumpPolyhedral_)
                ? PreservedAnalyses::none()
                : PreservedAnalyses::all();
 }

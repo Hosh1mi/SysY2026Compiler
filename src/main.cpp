@@ -86,6 +86,8 @@ struct DriverOptions {
     bool dumpPreMachineInstr = false;
     bool enableHira = false;
     bool forceHiraRoundtrip = false;
+    bool dumpHira = false;
+    bool dumpPolyhedral = false;
 };
 
 static bool parseOptLevel(const std::string &arg, int argc, char **argv,
@@ -143,6 +145,12 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.dumpPreMachineInstr = true;
         } else if (arg == "--enable-hira") {
             options.enableHira = true;
+        } else if (arg == "--dump-hira") {
+            options.enableHira = true;
+            options.dumpHira = true;
+        } else if (arg == "--dump-polyhedral") {
+            options.enableHira = true;
+            options.dumpPolyhedral = true;
         } else if (arg == "--hira-force-roundtrip") {
             options.enableHira = true;
             options.forceHiraRoundtrip = true;
@@ -280,7 +288,8 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m,
 // ARM64 后端中端管线。目标相关 pass 在这里显式列出，避免目标能力通过
 // 布尔参数间接拼装而导致 ARM/RISC-V 管线错配。
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
-                               bool enableHira, bool forceHiraRoundtrip) {
+                               bool enableHira, bool forceHiraRoundtrip,
+                               bool dumpHira, bool dumpPolyhedral) {
     if (optLevel < 1)
         return;
 
@@ -293,7 +302,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
         pm.addPass(std::make_unique<CFGSimplify>());
 
         pm.addPass(
-            std::make_unique<hira::HiraPass>(forceHiraRoundtrip));
+            std::make_unique<hira::HiraPass>(
+                forceHiraRoundtrip, dumpHira, dumpPolyhedral));
         addAnalysisDumpIfRequested(pm);
 
         // SLP is a basic-block vectorizer and remains independent of Hira's
@@ -397,12 +407,15 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
 
 static void buildOptimizationPipeline(PassManager &pm, int optLevel, Module *m,
                                       bool enableHira,
-                                      bool forceHiraRoundtrip) {
+                                      bool forceHiraRoundtrip,
+                                      bool dumpHira,
+                                      bool dumpPolyhedral) {
     if (kTargetArch == TargetArch::Riscv)
         buildRiscvPipeline(pm, optLevel, m);
     else
         buildArm64Pipeline(pm, optLevel, m, enableHira,
-                           forceHiraRoundtrip);
+                           forceHiraRoundtrip, dumpHira,
+                           dumpPolyhedral);
 }
 
 template <class CodeGen>
@@ -495,7 +508,9 @@ int main(int argc, char **argv) {
     pm.setVerifyIR(options.verifyIR);
     buildOptimizationPipeline(pm, options.optLevel, m.get(),
                               options.enableHira,
-                              options.forceHiraRoundtrip);
+                              options.forceHiraRoundtrip,
+                              options.dumpHira,
+                              options.dumpPolyhedral);
     pm.run(m.get());
 
     std::ofstream fout;
