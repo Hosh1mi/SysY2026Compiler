@@ -439,11 +439,14 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
             dynamic_cast<BinaryInst *>(inst))
             ++work;
     }
-    // Cortex-A53 is an in-order, dual-issue core.  Two independent vector
-    // parts hide load/use latency and halve branch overhead for small bodies,
-    // while larger bodies are kept at UF=1 to avoid vector register pressure.
-    // This is a target cost decision based only on the planned operations.
-    if (work <= 8 && plan.memoryAccesses.size() <= 3)
+    // Cortex-A53 is an in-order, dual-issue core with 32 architectural SIMD
+    // registers.  Two independent vector parts hide load/use latency and halve
+    // branch overhead.  Keep the limit tied to the planned operation and
+    // memory-access counts: four memory values plus the arithmetic temporaries
+    // of a twelve-operation body still leave headroom for address generation
+    // and lowering scratch registers, while larger bodies stay at UF=1 to
+    // avoid spills.
+    if (work <= 12 && plan.memoryAccesses.size() <= 4)
         plan.unrollFactor = 2;
 
     int lanesPerIteration = plan.vectorWidth * plan.unrollFactor;
