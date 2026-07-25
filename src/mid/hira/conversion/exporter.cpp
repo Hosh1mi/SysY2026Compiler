@@ -240,7 +240,10 @@ private:
                         "missing-root-loop");
         if (!validateLoop(*rootLoop_))
             return false;
-        if (region_.sourceMapping().sourceLoop(rootLoop_) != sourceLoop_)
+        Loop *mappedRoot =
+            region_.sourceMapping().sourceLoop(rootLoop_);
+        if (!mappedRoot || !mappedRoot->header ||
+            !sourceLoop_->isInLoop(mappedRoot->header))
             return fail(ExportRejectReason::InvalidRegion,
                         "invalid-root-loop");
 

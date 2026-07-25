@@ -1,6 +1,7 @@
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/type.hpp"
@@ -675,6 +676,15 @@ private:
         std::vector<ScheduleComponent> loopSchedule = outerSchedule;
         loopSchedule.push_back(
             {ScheduleComponentKind::Iteration, 0, dimension});
+        // The induction update and yield implement the iteration
+        // domain itself. They are not independently schedulable
+        // payload statements.
+        if (auto control =
+                analyzeCanonicalLoopControl(loop)) {
+            structuralControl_.insert(
+                control->inductionUpdate);
+            structuralControl_.insert(control->yield);
+        }
         return visitSequence(loop.body(), domain.dimensions,
                              domain.constraints, loopSchedule);
     }
@@ -688,6 +698,8 @@ private:
         for (std::size_t nodeIndex = 0;
              nodeIndex < nodes.size(); ++nodeIndex) {
             const auto &node = nodes[nodeIndex];
+            if (structuralControl_.count(node.get()))
+                continue;
             std::vector<ScheduleComponent> nodeSchedule =
                 schedulePrefix;
             nodeSchedule.push_back(
@@ -759,6 +771,7 @@ private:
     std::map<const HiraNode *, StatementId> nodeStatements_;
     std::map<const HiraValue *, RecurrenceValue>
         recurrenceValues_;
+    std::set<const HiraNode *> structuralControl_;
     std::set<const HiraValue *> activeExpressions_;
     PolyhedralBuildResult failure_;
 };

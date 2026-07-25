@@ -19,6 +19,7 @@
 #include "../../include/mid/hira/polyhedral/scheduleSelection.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
+#include "../../include/mid/hira/transform/scheduleRealization.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
 
@@ -374,6 +375,99 @@ bool selectRegions(Function &function, Loop &loop,
                 std::cerr << "\n";
             }
         }
+        if (scheduleSelectionValid &&
+            scheduleSelection.selected() != 0) {
+            const polyhedral::ScheduleCandidate &selectedSchedule =
+                schedules.candidates()[scheduleSelection.selected()];
+            polyhedral::ScheduleRealizationResult realization =
+                polyhedral::realizeSelectedSchedule(
+                    *imported.region, *polyhedralModel.model,
+                    schedules, scheduleSelection);
+            if (!realization.succeeded()) {
+                if (debug || dumpPolyhedral) {
+                    std::cerr
+                        << "// polyhedral.schedule_realization C"
+                        << scheduleSelection.selected()
+                        << " = rejected reason="
+                        << polyhedral::
+                               scheduleRealizationErrorName(
+                                   realization.error);
+                    if (!realization.detail.empty())
+                        std::cerr << " detail="
+                                  << realization.detail;
+                    std::cerr << "\n";
+                }
+                return false;
+            }
+            if (!verifyRegion("schedule-realization"))
+                return false;
+
+            polyhedral::PolyhedralBuildResult realizedModel =
+                polyhedral::buildPolyhedralModel(
+                    *imported.region, &aliasAnalysis);
+            polyhedral::PolyhedralVerificationResult
+                realizedVerification;
+            if (realizedModel.succeeded())
+                realizedVerification =
+                    polyhedral::verifyPolyhedralModel(
+                        *realizedModel.model);
+            std::string realizationDetail;
+            bool realizationVerified =
+                realizedModel.succeeded() &&
+                realizedVerification.succeeded() &&
+                polyhedral::verifyScheduleRealization(
+                    *polyhedralModel.model, selectedSchedule,
+                    *realizedModel.model, realizationDetail);
+            if (!realizationVerified) {
+                if (realizationDetail.empty()) {
+                    if (!realizedModel.succeeded())
+                        realizationDetail =
+                            realizedModel.detail.empty()
+                                ? polyhedral::
+                                      polyhedralBuildErrorName(
+                                          realizedModel.error)
+                                : realizedModel.detail;
+                    else
+                        realizationDetail =
+                            realizedVerification.detail.empty()
+                                ? polyhedral::
+                                      polyhedralVerifyErrorName(
+                                          realizedVerification.error)
+                                : realizedVerification.detail;
+                }
+                if (debug || dumpPolyhedral)
+                    std::cerr
+                        << "// polyhedral.schedule_realization C"
+                        << scheduleSelection.selected()
+                        << " = rejected detail="
+                        << realizationDetail << "\n";
+                return false;
+            }
+
+            if (debug || dumpPolyhedral)
+                std::cerr
+                    << "// polyhedral.schedule_realization C"
+                    << scheduleSelection.selected()
+                    << " = realized\n";
+            if (debug)
+                std::cerr
+                    << "[Hira] transformed function="
+                    << function.name_
+                    << " header=" << blockName(loop.header)
+                    << " pass=polyhedral-schedule-realization"
+                    << " schedule=C"
+                    << scheduleSelection.selected() << "\n";
+            if (dumpHira) {
+                std::cerr
+                    << "// hira.dump stage=schedule-realization"
+                    << " function=" << function.name_
+                    << " header=" << blockName(loop.header)
+                    << "\n";
+                std::cerr << printHiraRegion(
+                    *imported.region, function.name_);
+            }
+        }
+
         if (!forceRoundtrip && !imported.region->modified())
             return false;
 

@@ -1,5 +1,6 @@
 #include "../../../include/mid/hira/polyhedral/scheduleApplicability.hpp"
 
+#include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 
 #include <sstream>
@@ -38,53 +39,6 @@ bool isIntegerValue(const HiraValue *value,
 
 bool isUnitStep(const HiraLoop &loop) {
     return isIntegerValue(loop.step(), 1);
-}
-
-bool isSameStepValue(const HiraValue *value,
-                     const HiraValue *step) {
-    if (value == step)
-        return true;
-    return value && step &&
-           value->kind() == ValueKind::IntegerConstant &&
-           step->kind() == ValueKind::IntegerConstant &&
-           value->integerValue() == step->integerValue();
-}
-
-bool isCanonicalLatch(const HiraLoop &loop) {
-    const auto &nodes = loop.body().nodes();
-    if (nodes.size() < 2 || !loop.carriedValues().empty() ||
-        loop.yieldValues().size() != 1)
-        return false;
-
-    auto *update = dynamic_cast<const HiraComputeOp *>(
-        nodes[nodes.size() - 2].get());
-    auto *yield = dynamic_cast<const HiraYield *>(
-        nodes.back().get());
-    if (!update || !yield ||
-        update->computeKind() != ComputeKind::Add ||
-        update->operands().size() != 2 ||
-        update->results().size() != 1 ||
-        yield->operands().size() != 1 ||
-        yield->operands().front() !=
-            update->results().front() ||
-        loop.yieldValues().front() !=
-            update->results().front())
-        return false;
-
-    const HiraValue *left = update->operands()[0];
-    const HiraValue *right = update->operands()[1];
-    return (left == loop.induction() &&
-            isSameStepValue(right, loop.step())) ||
-           (right == loop.induction() &&
-            isSameStepValue(left, loop.step()));
-}
-
-bool isPerfectNest(const HiraLoop &outer,
-                   const HiraLoop &inner) {
-    const auto &nodes = outer.body().nodes();
-    return inner.parent() == &outer.body() &&
-           nodes.size() == 3 &&
-           nodes.front().get() == &inner;
 }
 
 bool hasCoupledBounds(const IterationDomain &outer,
@@ -141,12 +95,12 @@ ScheduleApplicability analyzeInterchange(
         return unsupported(
             candidate.id,
             ScheduleApplicabilityReason::LoopCarriedState);
-    if (!isPerfectNest(*outer->loop, *inner->loop))
+    if (!isPerfectLoopNest(*outer->loop, *inner->loop))
         return unsupported(
             candidate.id,
             ScheduleApplicabilityReason::ImperfectNest);
-    if (!isCanonicalLatch(*outer->loop) ||
-        !isCanonicalLatch(*inner->loop))
+    if (!analyzeCanonicalLoopControl(*outer->loop) ||
+        !analyzeCanonicalLoopControl(*inner->loop))
         return unsupported(
             candidate.id,
             ScheduleApplicabilityReason::NonCanonicalLatch);
