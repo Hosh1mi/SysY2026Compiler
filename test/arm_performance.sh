@@ -4,10 +4,18 @@ PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-RESULT_FILE="$PROJ_DIR/test/results/result_${TIMESTAMP}.txt"
+PIPELINE="legacy"
+COMPILER_FLAGS=(-O1)
+if [ "${ENABLE_HIRA:-0}" = "1" ]; then
+    PIPELINE="hira"
+    COMPILER_FLAGS+=(--enable-hira)
+fi
+TEST_SUITE="${PERFORMANCE_SUITE:-performance}"
+RESULT_FILE="$PROJ_DIR/test/results/result_${TEST_SUITE}_${PIPELINE}_${TIMESTAMP}.txt"
 LIB_DIR="$PROJ_DIR/lib"
-TEST_DIR="$PROJ_DIR/test/performance"
-CACHE_DIR="$SCRIPT_DIR/tmp"
+TEST_DIR="$PROJ_DIR/test/$TEST_SUITE"
+CACHE_DIR="$SCRIPT_DIR/tmp/$TEST_SUITE/$PIPELINE"
+COMPILE_TIMEOUT_SECONDS=20
 
 mkdir -p "$RESULT_DIR" "$CACHE_DIR"
 
@@ -30,7 +38,7 @@ fi
 
 PASS=0; FAIL=0; TOTAL=0
 
-echo "========== Performance Final Tests =========="
+echo "========== $TEST_SUITE Tests ($PIPELINE) =========="
 
 for sy in "$TEST_DIR"/*.sy; do
     [ ! -f "$sy" ] && continue
@@ -53,11 +61,19 @@ for sy in "$TEST_DIR"/*.sy; do
     # 1. Always compile, then compare the complete assembly with the previous
     #    successful run.  A cached time is usable only when its assembly is
     #    byte-identical and the runtime-reported time has a valid format.
-    ./compiler -S "$sy" -o "$candidate_asm" -O1 2>/dev/null
-    if [ $? -ne 0 ]; then
+    timeout "$COMPILE_TIMEOUT_SECONDS" \
+        ./compiler -S "$sy" -o "$candidate_asm" \
+            "${COMPILER_FLAGS[@]}" 2>/dev/null
+    compile_status=$?
+    if [ "$compile_status" -ne 0 ]; then
         rm -f "$candidate_asm"
-        echo "${RED}CE${RESET} ${num} ${name}"
-        echo "$base : CE" >> "$RESULT_FILE"
+        if [ "$compile_status" -eq 124 ]; then
+            echo "${RED}CTE${RESET} ${num} ${name}"
+            echo "$base : CTE" >> "$RESULT_FILE"
+        else
+            echo "${RED}CE${RESET} ${num} ${name}"
+            echo "$base : CE" >> "$RESULT_FILE"
+        fi
         FAIL=$((FAIL + 1))
         continue
     fi

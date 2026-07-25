@@ -6,6 +6,7 @@
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
@@ -47,6 +48,33 @@ bool isAddOne(Value *value, PhiInst *phi) {
             leftConstant->value_ == 1);
 }
 
+bool collectInductionUpdates(Value *value, PhiInst *induction,
+                             BasicBlock *latch,
+                             std::vector<BinaryInst *> &updates,
+                             PhiInst *&merge) {
+    if (isAddOne(value, induction)) {
+        updates.push_back(static_cast<BinaryInst *>(value));
+        return true;
+    }
+
+    merge = dynamic_cast<PhiInst *>(value);
+    if (!merge || merge->parent_ != latch || !merge->num_ops_)
+        return false;
+    for (unsigned index = 0; index + 1 < merge->num_ops_;
+         index += 2) {
+        Value *incoming = merge->get_operand(index);
+        auto *predecessor = dynamic_cast<BasicBlock *>(
+            merge->get_operand(index + 1));
+        if (!predecessor ||
+            std::find(latch->pre_bbs_.begin(), latch->pre_bbs_.end(),
+                      predecessor) == latch->pre_bbs_.end() ||
+            !isAddOne(incoming, induction))
+            return false;
+        updates.push_back(static_cast<BinaryInst *>(incoming));
+    }
+    return !updates.empty();
+}
+
 std::optional<ComputeKind> computeKindFor(Instruction *instruction) {
     switch (instruction->op_id_) {
     case Instruction::Add:
@@ -55,6 +83,14 @@ std::optional<ComputeKind> computeKindFor(Instruction *instruction) {
         return ComputeKind::Sub;
     case Instruction::Mul:
         return ComputeKind::Mul;
+    case Instruction::FAdd:
+        return ComputeKind::FAdd;
+    case Instruction::FSub:
+        return ComputeKind::FSub;
+    case Instruction::FMul:
+        return ComputeKind::FMul;
+    case Instruction::FDiv:
+        return ComputeKind::FDiv;
     case Instruction::And:
         return ComputeKind::And;
     case Instruction::Or:
@@ -101,6 +137,8 @@ private:
         PhiInst *induction = nullptr;
         Value *initial = nullptr;
         Value *bound = nullptr;
+        PhiInst *inductionMerge = nullptr;
+        std::vector<BinaryInst *> inductionUpdates;
     };
 
     struct CarriedPhi {
@@ -147,13 +185,19 @@ private:
             Value *initial =
                 incomingFrom(phi, control.entryPredecessor);
             Value *update = incomingFrom(phi, control.latch);
-            if (!initial || !update || !isAddOne(update, phi))
+            std::vector<BinaryInst *> updates;
+            PhiInst *merge = nullptr;
+            if (!initial || !update ||
+                !collectInductionUpdates(update, phi, control.latch,
+                                         updates, merge))
                 continue;
             if (guard->get_operand(0) != phi)
                 continue;
             control.induction = phi;
             control.initial = initial;
             control.bound = guard->get_operand(1);
+            control.inductionMerge = merge;
+            control.inductionUpdates = std::move(updates);
             break;
         }
         if (!control.induction)
@@ -217,6 +261,10 @@ private:
             std::make_unique<HiraLoop>(induction, lower, upper, step);
         HiraLoop *hiraLoop = loopNode.get();
         region_->sourceMapping().mapLoop(hiraLoop, &loop);
+        for (BinaryInst *update : control.inductionUpdates)
+            structuralInstructions_.insert(update);
+        if (control.inductionMerge)
+            structuralInstructions_.insert(control.inductionMerge);
 
         std::vector<CarriedPhi> carriedPhis;
         for (Instruction *instruction : loop.header->instr_list_) {
@@ -247,14 +295,23 @@ private:
         }
 
         target.append(std::move(loopNode));
-        if (!importLoopBody(loop, *hiraLoop))
+        if (!importLoopBody(loop, control, *hiraLoop))
             return false;
 
-        Value *inductionUpdate =
-            incomingFrom(control.induction, control.latch);
-        HiraValue *inductionYield = getValue(inductionUpdate);
-        if (!inductionYield)
-            return fail(ImportRejectReason::MissingYield, "induction");
+        auto inductionUpdate =
+            std::make_unique<HiraComputeOp>(ComputeKind::Add);
+        inductionUpdate->addOperand(induction);
+        inductionUpdate->addOperand(step);
+        HiraValue *inductionYield =
+            region_->createValue(control.induction->type_);
+        inductionUpdate->addResult(inductionYield);
+        HiraNode *insertedUpdate =
+            hiraLoop->body().append(std::move(inductionUpdate));
+        if (!control.inductionUpdates.empty()) {
+            BinaryInst *source = control.inductionUpdates.front();
+            region_->sourceMapping().mapNode(insertedUpdate, source);
+            region_->sourceMapping().mapValue(inductionYield, source);
+        }
         if (isUsedOutsideLoop(control.induction, loop))
             return fail(ImportRejectReason::LiveOutInduction);
 
@@ -281,7 +338,8 @@ private:
         return true;
     }
 
-    bool importLoopBody(Loop &loop, HiraLoop &hiraLoop) {
+    bool importLoopBody(Loop &loop, const LoopControl &control,
+                        HiraLoop &hiraLoop) {
         BasicBlock *current = nullptr;
         for (BasicBlock *successor : loop.header->succ_bbs_) {
             if (!loop.isInLoop(successor))
@@ -326,6 +384,25 @@ private:
                     ImportRejectReason::NonStraightLineControlFlow,
                     current->name_);
 
+            if (current == control.latch &&
+                control.inductionMerge) {
+                for (Instruction *instruction :
+                     current->instr_list_)
+                    if (instruction != terminator &&
+                        !structuralInstructions_.count(instruction))
+                        return fail(
+                            ImportRejectReason::UnsupportedPhi,
+                            current->name_);
+                if (terminator->num_ops_ != 1 ||
+                    terminator->get_operand(0) != loop.header)
+                    return fail(
+                        ImportRejectReason::
+                            NonStraightLineControlFlow,
+                        current->name_);
+                current = loop.header;
+                continue;
+            }
+
             if (!importBlockContents(current, terminator,
                                      hiraLoop.body()))
                 return false;
@@ -337,7 +414,8 @@ private:
             }
             if (terminator->num_ops_ != 3 ||
                 !importIfDiamond(loop, current, terminator,
-                                 hiraLoop.body(), visited, current))
+                                 hiraLoop.body(), visited, current,
+                                 control.latch))
                 return false;
         }
         return true;
@@ -348,6 +426,8 @@ private:
                              HiraSequence &target) {
         for (Instruction *instruction : block->instr_list_) {
             if (instruction == terminator)
+                continue;
+            if (structuralInstructions_.count(instruction))
                 continue;
             if (instruction->is_phi())
                 return fail(ImportRejectReason::UnsupportedPhi,
@@ -366,6 +446,71 @@ private:
             terminator->num_ops_ != 1)
             return nullptr;
         return dynamic_cast<BasicBlock *>(terminator->get_operand(0));
+    }
+
+    Loop *childLoopAt(Loop &loop, BasicBlock *header) const {
+        for (Loop *child : loop.children)
+            if (child->header == header)
+                return child;
+        return nullptr;
+    }
+
+    bool scanArmToJoin(Loop &loop, BasicBlock *arm,
+                       BasicBlock *join,
+                       BasicBlock *&lastBlock) const {
+        std::set<BasicBlock *> seen;
+        BasicBlock *current = arm;
+        lastBlock = nullptr;
+        while (current != join) {
+            if (!current || !loop.isInLoop(current) ||
+                !seen.insert(current).second)
+                return false;
+            if (Loop *child = childLoopAt(loop, current)) {
+                current = child->singleExit();
+                continue;
+            }
+            Instruction *terminator = current->get_terminator();
+            if (!terminator || !terminator->is_br() ||
+                terminator->num_ops_ != 1)
+                return false;
+            lastBlock = current;
+            current = dynamic_cast<BasicBlock *>(
+                terminator->get_operand(0));
+        }
+        return true;
+    }
+
+    bool importArmToJoin(Loop &loop, BasicBlock *arm,
+                         BasicBlock *join, HiraSequence &target,
+                         std::set<BasicBlock *> &visited) {
+        BasicBlock *current = arm;
+        while (current != join) {
+            if (Loop *child = childLoopAt(loop, current)) {
+                if (!importLoop(*child, target, false))
+                    return false;
+                current = child->singleExit();
+                if (!current)
+                    return fail(
+                        ImportRejectReason::
+                            NonStraightLineControlFlow,
+                        "child-exit");
+                continue;
+            }
+            if (!current || !loop.isInLoop(current) ||
+                !visited.insert(current).second)
+                return fail(
+                    ImportRejectReason::
+                        NonStraightLineControlFlow,
+                    current ? current->name_ : "<null>");
+            Instruction *terminator = current->get_terminator();
+            if (!terminator || !terminator->is_br() ||
+                terminator->num_ops_ != 1 ||
+                !importBlockContents(current, terminator, target))
+                return false;
+            current = dynamic_cast<BasicBlock *>(
+                terminator->get_operand(0));
+        }
+        return true;
     }
 
     bool importIfArm(Loop &loop, BasicBlock *arm,
@@ -394,7 +539,8 @@ private:
                          Instruction *terminator,
                          HiraSequence &target,
                          std::set<BasicBlock *> &visited,
-                         BasicBlock *&join) {
+                         BasicBlock *&join,
+                         BasicBlock *loopLatch) {
         HiraValue *condition = getValue(terminator->get_operand(0));
         auto *thenTarget =
             dynamic_cast<BasicBlock *>(terminator->get_operand(1));
@@ -419,9 +565,50 @@ private:
         } else if (thenNext && thenNext == elseNext) {
             join = thenNext;
         } else {
-            return fail(
-                ImportRejectReason::NonStraightLineControlFlow,
-                branchBlock->name_);
+            BasicBlock *thenLast = nullptr;
+            BasicBlock *elseLast = nullptr;
+            if (!loopLatch ||
+                !scanArmToJoin(loop, thenTarget, loopLatch,
+                               thenLast) ||
+                !scanArmToJoin(loop, elseTarget, loopLatch,
+                               elseLast))
+                return fail(
+                    ImportRejectReason::
+                        NonStraightLineControlFlow,
+                    branchBlock->name_);
+
+            std::set<BasicBlock *> expectedPredecessors;
+            expectedPredecessors.insert(
+                thenLast ? thenLast : branchBlock);
+            expectedPredecessors.insert(
+                elseLast ? elseLast : branchBlock);
+            if (loopLatch->pre_bbs_.size() !=
+                    expectedPredecessors.size())
+                return fail(
+                    ImportRejectReason::
+                        NonStraightLineControlFlow,
+                    loopLatch->name_);
+            for (BasicBlock *predecessor :
+                 loopLatch->pre_bbs_)
+                if (!expectedPredecessors.count(predecessor))
+                    return fail(
+                        ImportRejectReason::
+                            NonStraightLineControlFlow,
+                        loopLatch->name_);
+
+            auto hiraIf = std::make_unique<HiraIf>(condition);
+            HiraIf *inserted = hiraIf.get();
+            if (!importArmToJoin(
+                    loop, thenTarget, loopLatch,
+                    hiraIf->thenSequence(), visited) ||
+                !importArmToJoin(
+                    loop, elseTarget, loopLatch,
+                    hiraIf->elseSequence(), visited))
+                return false;
+            target.append(std::move(hiraIf));
+            region_->sourceMapping().mapNode(inserted, terminator);
+            join = loopLatch;
+            return true;
         }
 
         if (!join || !loop.isInLoop(join) || join == loop.header)
@@ -513,6 +700,7 @@ private:
     const LoopInfo &loopInfo_;
     std::unique_ptr<HiraRegion> region_;
     std::map<Value *, HiraValue *> visibleValues_;
+    std::set<Instruction *> structuralInstructions_;
     ImportResult failure_;
 };
 

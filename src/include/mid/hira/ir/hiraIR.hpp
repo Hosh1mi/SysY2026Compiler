@@ -77,6 +77,7 @@ public:
 
     void addOperand(HiraValue *value);
     void addResult(HiraValue *value);
+    void replaceOperand(std::size_t index, HiraValue *value);
 
 private:
     friend class HiraSequence;
@@ -110,6 +111,10 @@ enum class ComputeKind {
     Add,
     Sub,
     Mul,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
     And,
     Or,
     Xor,
@@ -202,6 +207,14 @@ public:
     HiraValue *lowerBound() const { return lowerBound_; }
     HiraValue *upperBound() const { return upperBound_; }
     HiraValue *step() const { return step_; }
+    void setLowerBound(HiraValue *value) {
+        lowerBound_ = value;
+        replaceOperand(0, value);
+    }
+    void setUpperBound(HiraValue *value) {
+        upperBound_ = value;
+        replaceOperand(1, value);
+    }
     HiraSequence &body() { return body_; }
     const HiraSequence &body() const { return body_; }
 

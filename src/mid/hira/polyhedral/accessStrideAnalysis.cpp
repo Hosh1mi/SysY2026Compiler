@@ -106,6 +106,11 @@ std::optional<std::int64_t> analyzeLinearAccessStride(
     AffineVariable dimension) {
     if (access.object >= model.memoryObjects().size())
         return std::nullopt;
+    // A direct access through a region parameter has no GEP subscripts.
+    // Its address is invariant with respect to every loop dimension, so its
+    // linearized stride is exactly zero.
+    if (access.subscripts.empty())
+        return 0;
     auto weights = subscriptWeights(
         model.memoryObjects()[access.object],
         access.subscripts.size());
@@ -137,6 +142,34 @@ std::optional<std::int64_t> analyzeLinearAccessStride(
             std::numeric_limits<std::int64_t>::max()))
         return std::nullopt;
     return static_cast<std::int64_t>(magnitude);
+}
+
+std::optional<std::int64_t> analyzeAccessElementSize(
+    const PolyhedralModel &model,
+    const AccessRelation &access) {
+    if (access.object >= model.memoryObjects().size())
+        return std::nullopt;
+    const MemoryObject &object =
+        model.memoryObjects()[access.object];
+    auto *pointer =
+        object.base
+            ? dynamic_cast<PointerType *>(object.base->type())
+            : nullptr;
+    if (!pointer)
+        return std::nullopt;
+    if (access.subscripts.empty()) {
+        auto size = typeSize(pointer->contained_);
+        if (!size || *size > kMaxSupportedSize)
+            return std::nullopt;
+        return static_cast<std::int64_t>(*size);
+    }
+    auto weights = subscriptWeights(
+        object, access.subscripts.size());
+    if (!weights || weights->empty() ||
+        weights->back() > kMaxSupportedSize)
+        return std::nullopt;
+    return static_cast<std::int64_t>(
+        weights->back());
 }
 
 } // namespace hira::polyhedral

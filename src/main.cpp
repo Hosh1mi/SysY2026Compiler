@@ -49,6 +49,7 @@
 #include "include/mid/opt/tailDuplication.hpp"
 #include "include/mid/opt/analysisDump.hpp"
 #include "include/mid/hira/hiraPass.hpp"
+#include "include/mid/hira/transform/loopCanonicalization.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -300,6 +301,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
         addCorrelatedCleanup(pm);
         pm.addPass(std::make_unique<SemanticMarkerStamp>());
         pm.addPass(std::make_unique<CFGSimplify>());
+        pm.addPass(
+            std::make_unique<hira::LoopCanonicalizationPass>());
 
         pm.addPass(
             std::make_unique<hira::HiraPass>(

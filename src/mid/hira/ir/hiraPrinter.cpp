@@ -77,6 +77,14 @@ const char *computeName(ComputeKind kind) {
         return "sub";
     case ComputeKind::Mul:
         return "mul";
+    case ComputeKind::FAdd:
+        return "fadd";
+    case ComputeKind::FSub:
+        return "fsub";
+    case ComputeKind::FMul:
+        return "fmul";
+    case ComputeKind::FDiv:
+        return "fdiv";
     case ComputeKind::And:
         return "and";
     case ComputeKind::Or:

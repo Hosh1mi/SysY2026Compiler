@@ -19,6 +19,13 @@ void HiraNode::addResult(HiraValue *value) {
     results_.push_back(value);
 }
 
+void HiraNode::replaceOperand(std::size_t index,
+                              HiraValue *value) {
+    assert(index < operands_.size() && value &&
+           "replacement operands must be valid");
+    operands_[index] = value;
+}
+
 HiraNode *HiraSequence::append(std::unique_ptr<HiraNode> node) {
     return insert(nodes_.size(), std::move(node));
 }

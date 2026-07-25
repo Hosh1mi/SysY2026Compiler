@@ -55,11 +55,17 @@ struct AffineConstraint {
     AffineRelation relation = AffineRelation::GreaterEqualZero;
 };
 
+enum class DomainPrecision {
+    Exact,
+    OpaqueGuardOverapproximation,
+};
+
 struct IterationDomain {
     const HiraLoop *loop = nullptr;
     AffineVariable dimension;
     std::vector<AffineVariable> dimensions;
     std::vector<AffineConstraint> constraints;
+    DomainPrecision precision = DomainPrecision::Exact;
 };
 
 using StatementId = std::uint32_t;
@@ -92,6 +98,7 @@ struct PolyhedralStatement {
     std::vector<AffineVariable> dimensions;
     std::vector<AffineConstraint> constraints;
     std::vector<ScheduleComponent> identitySchedule;
+    DomainPrecision domainPrecision = DomainPrecision::Exact;
 };
 
 struct MemoryObject {

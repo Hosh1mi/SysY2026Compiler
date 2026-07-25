@@ -152,7 +152,8 @@ public:
         std::vector<AffineConstraint> constraints;
         std::vector<ScheduleComponent> schedule;
         if (!visitSequence(region_.rootSequence(), dimensions,
-                           constraints, schedule) ||
+                           constraints, schedule,
+                           DomainPrecision::Exact) ||
             !buildScalarRelations())
             return std::move(failure_);
         classifyMemoryAliases();
@@ -239,9 +240,15 @@ private:
         return AffineExpr::invalid();
     }
 
-    bool buildConditionConstraint(const HiraValue *condition,
-                                  bool truth,
-                                  AffineConstraint &constraint) {
+    enum class ConditionConstraintStatus {
+        Exact,
+        Opaque,
+        Error,
+    };
+
+    ConditionConstraintStatus buildConditionConstraint(
+        const HiraValue *condition, bool truth,
+        AffineConstraint &constraint) {
         auto *comparison =
             condition
                 ? dynamic_cast<const HiraComputeOp *>(
@@ -250,14 +257,12 @@ private:
         if (!comparison ||
             comparison->computeKind() != ComputeKind::ICmp ||
             comparison->operands().size() != 2)
-            return reject(PolyhedralBuildError::NonAffineCondition,
-                          "condition-not-icmp");
+            return ConditionConstraintStatus::Opaque;
 
         AffineExpr left = analyze(comparison->operands()[0]);
         AffineExpr right = analyze(comparison->operands()[1]);
         if (!left.valid() || !right.valid())
-            return reject(PolyhedralBuildError::NonAffineCondition,
-                          "non-affine-icmp-operand");
+            return ConditionConstraintStatus::Opaque;
 
         AffineExpr expression = AffineExpr::invalid();
         AffineRelation relation = AffineRelation::GreaterEqualZero;
@@ -290,30 +295,27 @@ private:
             break;
         case ICmpInst::ICMP_EQ:
             if (!truth)
-                return reject(
-                    PolyhedralBuildError::NonAffineCondition,
-                    "non-convex-equality-complement");
+                return ConditionConstraintStatus::Opaque;
             expression = left.subtract(right);
             relation = AffineRelation::EqualZero;
             break;
         case ICmpInst::ICMP_NE:
             if (truth)
-                return reject(
-                    PolyhedralBuildError::NonAffineCondition,
-                    "non-convex-inequality");
+                return ConditionConstraintStatus::Opaque;
             expression = left.subtract(right);
             relation = AffineRelation::EqualZero;
             break;
         default:
-            return reject(PolyhedralBuildError::NonAffineCondition,
-                          "unsupported-icmp-predicate");
+            return ConditionConstraintStatus::Opaque;
         }
 
-        if (!expression.valid())
-            return reject(PolyhedralBuildError::ConstraintOverflow,
-                          "condition-constraint");
+        if (!expression.valid()) {
+            reject(PolyhedralBuildError::ConstraintOverflow,
+                   "condition-constraint");
+            return ConditionConstraintStatus::Error;
+        }
         constraint = {std::move(expression), relation};
-        return true;
+        return ConditionConstraintStatus::Exact;
     }
 
     bool resolveAddress(const HiraValue *address,
@@ -407,7 +409,8 @@ private:
         const HiraNode &node,
         const std::vector<AffineVariable> &dimensions,
         const std::vector<AffineConstraint> &constraints,
-        const std::vector<ScheduleComponent> &identitySchedule) {
+        const std::vector<ScheduleComponent> &identitySchedule,
+        DomainPrecision domainPrecision) {
         StatementKind kind = StatementKind::Compute;
         if (dynamic_cast<const HiraLoad *>(&node))
             kind = StatementKind::Load;
@@ -425,7 +428,7 @@ private:
             static_cast<StatementId>(model_->statements_.size());
         model_->statements_.push_back(
             {id, kind, &node, dimensions, constraints,
-             identitySchedule});
+             identitySchedule, domainPrecision});
         nodeStatements_[&node] = id;
         if (auto *load = dynamic_cast<const HiraLoad *>(&node))
             return addAccess(id, MemoryAccessKind::Read,
@@ -634,7 +637,8 @@ private:
         const HiraLoop &loop,
         const std::vector<AffineVariable> &outerDimensions,
         const std::vector<AffineConstraint> &outerConstraints,
-        const std::vector<ScheduleComponent> &outerSchedule) {
+        const std::vector<ScheduleComponent> &outerSchedule,
+        DomainPrecision domainPrecision) {
         AffineExpr lower = analyze(loop.lowerBound());
         if (!lower.valid())
             return reject(PolyhedralBuildError::NonAffineLowerBound,
@@ -669,6 +673,7 @@ private:
         domain.constraints.push_back(
             {std::move(upperConstraint),
              AffineRelation::GreaterEqualZero});
+        domain.precision = domainPrecision;
         model_->domains_.push_back(domain);
         model_->proofObligations_.push_back(
             {ProofObligationKind::NoSignedWrap, &loop, dimension});
@@ -686,14 +691,16 @@ private:
             structuralControl_.insert(control->yield);
         }
         return visitSequence(loop.body(), domain.dimensions,
-                             domain.constraints, loopSchedule);
+                             domain.constraints, loopSchedule,
+                             domainPrecision);
     }
 
     bool visitSequence(
         const HiraSequence &sequence,
         const std::vector<AffineVariable> &dimensions,
         const std::vector<AffineConstraint> &constraints,
-        const std::vector<ScheduleComponent> &schedulePrefix) {
+        const std::vector<ScheduleComponent> &schedulePrefix,
+        DomainPrecision domainPrecision) {
         const auto &nodes = sequence.nodes();
         for (std::size_t nodeIndex = 0;
              nodeIndex < nodes.size(); ++nodeIndex) {
@@ -708,7 +715,7 @@ private:
             if (auto *loop =
                     dynamic_cast<const HiraLoop *>(node.get())) {
                 if (!visitLoop(*loop, dimensions, constraints,
-                               nodeSchedule))
+                               nodeSchedule, domainPrecision))
                     return false;
                 continue;
             }
@@ -718,12 +725,23 @@ private:
                     std::vector<AffineConstraint> thenConstraints =
                         constraints;
                     AffineConstraint branchConstraint;
-                    if (!buildConditionConstraint(
+                    ConditionConstraintStatus status =
+                        buildConditionConstraint(
                             condition->condition(), true,
-                            branchConstraint))
+                            branchConstraint);
+                    if (status ==
+                        ConditionConstraintStatus::Error)
                         return false;
-                    thenConstraints.push_back(
-                        std::move(branchConstraint));
+                    DomainPrecision thenPrecision =
+                        domainPrecision;
+                    if (status ==
+                        ConditionConstraintStatus::Exact)
+                        thenConstraints.push_back(
+                            std::move(branchConstraint));
+                    else
+                        thenPrecision =
+                            DomainPrecision::
+                                OpaqueGuardOverapproximation;
                     std::vector<ScheduleComponent> branchSchedule =
                         nodeSchedule;
                     branchSchedule.push_back(
@@ -731,19 +749,31 @@ private:
                     if (!visitSequence(condition->thenSequence(),
                                        dimensions,
                                        thenConstraints,
-                                       branchSchedule))
+                                       branchSchedule,
+                                       thenPrecision))
                         return false;
                 }
                 if (!condition->elseSequence().nodes().empty()) {
                     std::vector<AffineConstraint> elseConstraints =
                         constraints;
                     AffineConstraint branchConstraint;
-                    if (!buildConditionConstraint(
+                    ConditionConstraintStatus status =
+                        buildConditionConstraint(
                             condition->condition(), false,
-                            branchConstraint))
+                            branchConstraint);
+                    if (status ==
+                        ConditionConstraintStatus::Error)
                         return false;
-                    elseConstraints.push_back(
-                        std::move(branchConstraint));
+                    DomainPrecision elsePrecision =
+                        domainPrecision;
+                    if (status ==
+                        ConditionConstraintStatus::Exact)
+                        elseConstraints.push_back(
+                            std::move(branchConstraint));
+                    else
+                        elsePrecision =
+                            DomainPrecision::
+                                OpaqueGuardOverapproximation;
                     std::vector<ScheduleComponent> branchSchedule =
                         nodeSchedule;
                     branchSchedule.push_back(
@@ -751,13 +781,14 @@ private:
                     if (!visitSequence(condition->elseSequence(),
                                        dimensions,
                                        elseConstraints,
-                                       branchSchedule))
+                                       branchSchedule,
+                                       elsePrecision))
                         return false;
                 }
                 continue;
             }
             if (!addStatement(*node, dimensions, constraints,
-                              nodeSchedule))
+                              nodeSchedule, domainPrecision))
                 return false;
         }
         return true;
@@ -914,7 +945,11 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
                 out << ", ";
             out << variableName(domain.dimensions[index]);
         }
-        out << "] {\n";
+        out << "]";
+        if (domain.precision ==
+            DomainPrecision::OpaqueGuardOverapproximation)
+            out << " overapproximated";
+        out << " {\n";
         for (const AffineConstraint &constraint :
              domain.constraints) {
             out << "    " << printExpression(constraint.expression)
@@ -939,6 +974,9 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
         out << "] " << statementKindName(statement.kind)
             << " schedule=";
         printSchedule(out, statement.identitySchedule);
+        if (statement.domainPrecision ==
+            DomainPrecision::OpaqueGuardOverapproximation)
+            out << " domain=opaque-guard-overapproximation";
         out << " {\n";
         for (const AffineConstraint &constraint :
              statement.constraints)

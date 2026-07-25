@@ -10,16 +10,26 @@
 #include "../../include/mid/hira/polyhedral/dependenceAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceFeasibility.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/cacheFootprintAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/accessStrideAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../include/mid/hira/polyhedral/polyhedralVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/reductionAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/privatizationAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/vectorizationAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleApplicability.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleLegality.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleParallelism.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleProfitability.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleSelection.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
+#include "../../include/mid/hira/polyhedral/statementDependenceGraph.hpp"
+#include "../../include/mid/hira/polyhedral/statementPartitionAnalysis.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
+#include "../../include/mid/hira/transform/loopDistribution.hpp"
 #include "../../include/mid/hira/transform/scheduleRealization.hpp"
+#include "../../include/mid/hira/transform/loopTiling.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
 
@@ -34,6 +44,24 @@ std::string blockName(const BasicBlock *block) {
     if (!block)
         return "<null>";
     return block->name_.empty() ? "<anon>" : block->name_;
+}
+
+bool hasTemporalReuse(
+    const polyhedral::PolyhedralModel &model,
+    polyhedral::AffineVariable dimension) {
+    bool invariantAccess = false;
+    bool varyingAccess = false;
+    for (const polyhedral::AccessRelation &access :
+         model.accesses()) {
+        auto stride =
+            polyhedral::analyzeLinearAccessStride(
+                model, access, dimension);
+        if (!stride)
+            return false;
+        invariantAccess |= *stride == 0;
+        varyingAccess |= *stride > 0;
+    }
+    return invariantAccess && varyingAccess;
 }
 
 void dumpResult(const Function &function, const Loop &loop,
@@ -121,15 +149,29 @@ bool selectRegions(Function &function, Loop &loop,
                 polyhedral::verifyPolyhedralModel(
                     *polyhedralModel.model);
         polyhedral::DependenceBuildResult dependences;
+        polyhedral::ReductionAnalysisResult reductions;
+        std::string reductionDetail;
+        bool reductionsValid = false;
         polyhedral::DependenceVerificationResult
             dependenceVerification;
         polyhedral::DependenceFeasibilityResult
             dependenceFeasibility;
         std::string dependenceFeasibilityDetail;
         bool dependenceFeasibilityValid = false;
+        polyhedral::StatementDependenceGraph
+            statementDependenceGraph;
+        std::string statementDependenceGraphDetail;
+        bool statementDependenceGraphValid = false;
+        polyhedral::StatementPartitionResult
+            statementPartitions;
+        std::string statementPartitionDetail;
+        bool statementPartitionsValid = false;
         polyhedral::ScheduleCandidateSet schedules;
         std::string scheduleDetail;
         bool schedulesValid = false;
+        polyhedral::CacheFootprintResult cacheFootprints;
+        std::string cacheFootprintDetail;
+        bool cacheFootprintsValid = false;
         polyhedral::ScheduleApplicabilityResult
             scheduleApplicability;
         std::string scheduleApplicabilityDetail;
@@ -141,11 +183,30 @@ bool selectRegions(Function &function, Loop &loop,
             scheduleProfitability;
         std::string scheduleProfitabilityDetail;
         bool scheduleProfitabilityValid = false;
+        polyhedral::ScheduleParallelismResult
+            scheduleParallelism;
+        std::string scheduleParallelismDetail;
+        bool scheduleParallelismValid = false;
+        polyhedral::PrivatizationAnalysisResult
+            privatization;
+        std::string privatizationDetail;
+        bool privatizationValid = false;
+        polyhedral::VectorizationAnalysisResult
+            vectorization;
+        std::string vectorizationDetail;
+        bool vectorizationValid = false;
         polyhedral::ScheduleSelectionResult scheduleSelection;
         std::string scheduleSelectionDetail;
         bool scheduleSelectionValid = false;
         if (polyhedralModel.succeeded() &&
             polyhedralVerification.succeeded()) {
+            reductions =
+                polyhedral::analyzeReductions(
+                    *polyhedralModel.model);
+            reductionsValid =
+                polyhedral::verifyReductionAnalysis(
+                    *polyhedralModel.model, reductions,
+                    reductionDetail);
             dependences = polyhedral::buildDependenceRelations(
                 *polyhedralModel.model);
             if (dependences.succeeded()) {
@@ -164,6 +225,40 @@ bool selectRegions(Function &function, Loop &loop,
                             dependenceFeasibility,
                             dependenceFeasibilityDetail);
                     if (dependenceFeasibilityValid) {
+                        statementDependenceGraph =
+                            polyhedral::
+                                buildStatementDependenceGraph(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility);
+                        statementDependenceGraphValid =
+                            polyhedral::
+                                verifyStatementDependenceGraph(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    statementDependenceGraph,
+                                    statementDependenceGraphDetail);
+                    }
+                    if (statementDependenceGraphValid) {
+                        statementPartitions =
+                            polyhedral::
+                                analyzeStatementPartitions(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    statementDependenceGraph);
+                        statementPartitionsValid =
+                            polyhedral::
+                                verifyStatementPartitions(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    statementDependenceGraph,
+                                    statementPartitions,
+                                    statementPartitionDetail);
+                    }
+                    if (statementPartitionsValid) {
                         schedules =
                             polyhedral::buildScheduleCandidates(
                                 *polyhedralModel.model);
@@ -173,6 +268,18 @@ bool selectRegions(Function &function, Loop &loop,
                                 scheduleDetail);
                     }
                     if (schedulesValid) {
+                        const target::A53TargetModel targetModel =
+                            target::cortexA53();
+                        cacheFootprints =
+                            polyhedral::analyzeCacheFootprints(
+                                *polyhedralModel.model,
+                                schedules, targetModel);
+                        cacheFootprintsValid =
+                            polyhedral::verifyCacheFootprints(
+                                *polyhedralModel.model,
+                                schedules, targetModel,
+                                cacheFootprints,
+                                cacheFootprintDetail);
                         scheduleApplicability =
                             polyhedral::
                                 analyzeScheduleApplicability(
@@ -206,19 +313,73 @@ bool selectRegions(Function &function, Loop &loop,
                                     schedules,
                                     scheduleProfitability,
                                     scheduleProfitabilityDetail);
+                        scheduleParallelism =
+                            polyhedral::
+                                analyzeScheduleParallelism(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    schedules);
+                        scheduleParallelismValid =
+                            polyhedral::
+                                verifyScheduleParallelism(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    schedules,
+                                    scheduleParallelism,
+                                    scheduleParallelismDetail);
+                        if (scheduleParallelismValid &&
+                            reductionsValid) {
+                            privatization =
+                                polyhedral::
+                                    analyzePrivatization(
+                                        *polyhedralModel.model,
+                                        schedules,
+                                        scheduleParallelism,
+                                        reductions);
+                            privatizationValid =
+                                polyhedral::
+                                    verifyPrivatizationAnalysis(
+                                        *polyhedralModel.model,
+                                        schedules,
+                                        scheduleParallelism,
+                                        reductions,
+                                        privatization,
+                                        privatizationDetail);
+                        }
+                        vectorization =
+                            polyhedral::
+                                analyzeVectorization(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    schedules, targetModel);
+                        vectorizationValid =
+                            polyhedral::
+                                verifyVectorizationAnalysis(
+                                    *polyhedralModel.model,
+                                    *dependences.dependences,
+                                    dependenceFeasibility,
+                                    schedules, targetModel,
+                                    vectorization,
+                                    vectorizationDetail);
                     }
                     if (scheduleApplicabilityValid &&
                         scheduleLegalityValid &&
+                        scheduleParallelismValid &&
                         scheduleProfitabilityValid) {
                         scheduleSelection =
                             polyhedral::selectSchedule(
                                 schedules, scheduleLegality,
                                 scheduleApplicability,
+                                scheduleParallelism,
                                 scheduleProfitability);
                         scheduleSelectionValid =
                             polyhedral::verifyScheduleSelection(
                                 schedules, scheduleLegality,
                                 scheduleApplicability,
+                                scheduleParallelism,
                                 scheduleProfitability,
                                 scheduleSelection,
                                 scheduleSelectionDetail);
@@ -235,6 +396,19 @@ bool selectRegions(Function &function, Loop &loop,
                     << " header=" << blockName(loop.header) << "\n";
                 std::cerr << polyhedral::printPolyhedralModel(
                     *polyhedralModel.model);
+                if (reductionsValid)
+                    std::cerr
+                        << polyhedral::printReductionAnalysis(
+                               reductions);
+                else {
+                    std::cerr
+                        << "// polyhedral.reductions rejected";
+                    if (!reductionDetail.empty())
+                        std::cerr
+                            << " detail="
+                            << reductionDetail;
+                    std::cerr << "\n";
+                }
                 if (dependences.succeeded() &&
                     dependenceVerification.succeeded()) {
                     std::cerr
@@ -245,11 +419,57 @@ bool selectRegions(Function &function, Loop &loop,
                             << polyhedral::
                                    printDependenceFeasibility(
                                        dependenceFeasibility);
+                        if (statementDependenceGraphValid)
+                            std::cerr
+                                << polyhedral::
+                                       printStatementDependenceGraph(
+                                           statementDependenceGraph);
+                        else {
+                            std::cerr
+                                << "// polyhedral.statement_graph "
+                                   "rejected";
+                            if (!statementDependenceGraphDetail
+                                     .empty())
+                                std::cerr
+                                    << " detail="
+                                    << statementDependenceGraphDetail;
+                            std::cerr << "\n";
+                        }
+                        if (statementPartitionsValid)
+                            std::cerr
+                                << polyhedral::
+                                       printStatementPartitions(
+                                           statementPartitions);
+                        else {
+                            std::cerr
+                                << "// polyhedral."
+                                   "statement_partitions rejected";
+                            if (!statementPartitionDetail.empty())
+                                std::cerr
+                                    << " detail="
+                                    << statementPartitionDetail;
+                            std::cerr << "\n";
+                        }
                         if (schedulesValid) {
                             std::cerr
                                 << polyhedral::
                                        printScheduleCandidates(
                                            schedules);
+                            if (cacheFootprintsValid)
+                                std::cerr
+                                    << polyhedral::
+                                           printCacheFootprints(
+                                               cacheFootprints);
+                            else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "cache_footprints rejected";
+                                if (!cacheFootprintDetail.empty())
+                                    std::cerr
+                                        << " detail="
+                                        << cacheFootprintDetail;
+                                std::cerr << "\n";
+                            }
                             if (scheduleApplicabilityValid) {
                                 std::cerr
                                     << polyhedral::
@@ -297,6 +517,53 @@ bool selectRegions(Function &function, Loop &loop,
                                     std::cerr
                                         << " detail="
                                         << scheduleProfitabilityDetail;
+                                std::cerr << "\n";
+                            }
+                            if (vectorizationValid)
+                                std::cerr
+                                    << polyhedral::
+                                           printVectorizationAnalysis(
+                                               vectorization);
+                            else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "vectorization rejected";
+                                if (!vectorizationDetail.empty())
+                                    std::cerr
+                                        << " detail="
+                                        << vectorizationDetail;
+                                std::cerr << "\n";
+                            }
+                            if (scheduleParallelismValid) {
+                                std::cerr
+                                    << polyhedral::
+                                           printScheduleParallelism(
+                                           scheduleParallelism);
+                                if (privatizationValid)
+                                    std::cerr
+                                        << polyhedral::
+                                               printPrivatizationAnalysis(
+                                                   privatization);
+                                else {
+                                    std::cerr
+                                        << "// polyhedral."
+                                           "privatization rejected";
+                                    if (!privatizationDetail.empty())
+                                        std::cerr
+                                            << " detail="
+                                            << privatizationDetail;
+                                    std::cerr << "\n";
+                                }
+                            } else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "schedule_parallelism "
+                                       "rejected";
+                                if (!scheduleParallelismDetail
+                                         .empty())
+                                    std::cerr
+                                        << " detail="
+                                        << scheduleParallelismDetail;
                                 std::cerr << "\n";
                             }
                             if (scheduleSelectionValid) {
@@ -375,6 +642,10 @@ bool selectRegions(Function &function, Loop &loop,
                 std::cerr << "\n";
             }
         }
+        polyhedral::PolyhedralBuildResult
+            realizedScheduleModel;
+        const polyhedral::PolyhedralModel *
+            transformModel = polyhedralModel.model.get();
         if (scheduleSelectionValid &&
             scheduleSelection.selected() != 0) {
             const polyhedral::ScheduleCandidate &selectedSchedule =
@@ -402,31 +673,32 @@ bool selectRegions(Function &function, Loop &loop,
             if (!verifyRegion("schedule-realization"))
                 return false;
 
-            polyhedral::PolyhedralBuildResult realizedModel =
+            realizedScheduleModel =
                 polyhedral::buildPolyhedralModel(
                     *imported.region, &aliasAnalysis);
             polyhedral::PolyhedralVerificationResult
                 realizedVerification;
-            if (realizedModel.succeeded())
+            if (realizedScheduleModel.succeeded())
                 realizedVerification =
                     polyhedral::verifyPolyhedralModel(
-                        *realizedModel.model);
+                        *realizedScheduleModel.model);
             std::string realizationDetail;
             bool realizationVerified =
-                realizedModel.succeeded() &&
+                realizedScheduleModel.succeeded() &&
                 realizedVerification.succeeded() &&
                 polyhedral::verifyScheduleRealization(
                     *polyhedralModel.model, selectedSchedule,
-                    *realizedModel.model, realizationDetail);
+                    *realizedScheduleModel.model,
+                    realizationDetail);
             if (!realizationVerified) {
                 if (realizationDetail.empty()) {
-                    if (!realizedModel.succeeded())
+                    if (!realizedScheduleModel.succeeded())
                         realizationDetail =
-                            realizedModel.detail.empty()
+                            realizedScheduleModel.detail.empty()
                                 ? polyhedral::
                                       polyhedralBuildErrorName(
-                                          realizedModel.error)
-                                : realizedModel.detail;
+                                          realizedScheduleModel.error)
+                                : realizedScheduleModel.detail;
                     else
                         realizationDetail =
                             realizedVerification.detail.empty()
@@ -443,6 +715,8 @@ bool selectRegions(Function &function, Loop &loop,
                         << realizationDetail << "\n";
                 return false;
             }
+            transformModel =
+                realizedScheduleModel.model.get();
 
             if (debug || dumpPolyhedral)
                 std::cerr
@@ -468,8 +742,128 @@ bool selectRegions(Function &function, Loop &loop,
             }
         }
 
-        if (!forceRoundtrip && !imported.region->modified())
+        if (statementPartitionsValid &&
+            statementPartitions.kind() ==
+                polyhedral::
+                    StatementPartitionKind::Distributable) {
+            polyhedral::LoopDistributionResult distribution =
+                polyhedral::distributeStatements(
+                    *imported.region, *polyhedralModel.model,
+                    statementPartitions);
+            if (distribution.succeeded() &&
+                distribution.changed) {
+                if (!verifyRegion("loop-distribution"))
+                    return false;
+                if (debug || dumpPolyhedral)
+                    std::cerr
+                        << "// polyhedral.loop_distribution"
+                        << " = realized\n";
+                if (dumpHira)
+                    std::cerr << printHiraRegion(
+                        *imported.region, function.name_);
+            } else if (!distribution.succeeded() &&
+                       (debug || dumpPolyhedral)) {
+                std::cerr
+                    << "// polyhedral.loop_distribution"
+                    << " = rejected reason="
+                    << polyhedral::
+                           loopDistributionErrorName(
+                               distribution.error);
+                if (!distribution.detail.empty())
+                    std::cerr
+                        << " detail="
+                        << distribution.detail;
+                std::cerr << "\n";
+            }
+        }
+
+        if (cacheFootprintsValid &&
+            scheduleSelectionValid &&
+            transformModel) {
+            const polyhedral::CacheFootprint &footprint =
+                cacheFootprints.schedules()[
+                    scheduleSelection.selected()];
+            if (footprint.kind ==
+                    polyhedral::CacheFootprintKind::Known &&
+                footprint.dimensions.size() >= 2) {
+                std::vector<polyhedral::AffineVariable>
+                    transformedDimensions;
+                bool mappingValid = true;
+                bool hasReuse = false;
+                std::size_t tiledDimensions = 0;
+                for (std::size_t index = 0;
+                     index < footprint.dimensions.size();
+                     ++index) {
+                    const HiraValue *source =
+                        polyhedralModel.model->space().source(
+                            footprint.dimensions[index]);
+                    auto transformedDimension =
+                        source
+                            ? transformModel->space()
+                                  .variableFor(source)
+                            : std::nullopt;
+                    if (!transformedDimension) {
+                        mappingValid = false;
+                        break;
+                    }
+                    transformedDimensions.push_back(
+                        *transformedDimension);
+                    hasReuse |= hasTemporalReuse(
+                        *transformModel,
+                        *transformedDimension);
+                    tiledDimensions +=
+                        footprint.tileSizes[index] > 1;
+                }
+                if (mappingValid && hasReuse &&
+                    tiledDimensions >= 2) {
+                    polyhedral::LoopTilingResult tiling =
+                        polyhedral::tileLoopBand(
+                            *imported.region, *transformModel,
+                            transformedDimensions,
+                            footprint.tileSizes);
+                    if (!tiling.succeeded()) {
+                        if (debug || dumpPolyhedral) {
+                            std::cerr
+                                << "// polyhedral.loop_tiling"
+                                << " = rejected reason="
+                                << polyhedral::
+                                       loopTilingErrorName(
+                                           tiling.error);
+                            if (!tiling.detail.empty())
+                                std::cerr
+                                    << " detail="
+                                    << tiling.detail;
+                            std::cerr << "\n";
+                        }
+                    } else if (!verifyRegion("loop-tiling")) {
+                        return false;
+                    } else if (debug || dumpPolyhedral) {
+                        std::cerr
+                            << "// polyhedral.loop_tiling"
+                            << " dimensions="
+                            << transformedDimensions.size()
+                            << " footprint="
+                            << footprint.l1FootprintBytes
+                            << "B"
+                            << " = realized\n";
+                    }
+                    if (tiling.succeeded() && dumpHira)
+                        std::cerr << printHiraRegion(
+                            *imported.region,
+                            function.name_);
+                }
+            }
+        }
+
+        if (!forceRoundtrip && !imported.region->modified()) {
+            for (Loop *child : loop.children)
+                if (selectRegions(
+                        function, *child, loopInfo, debug,
+                        forceRoundtrip, dumpHira, dumpPolyhedral,
+                        aliasAnalysis))
+                    return true;
             return false;
+        }
 
         ExportResult exported = exportHiraRegion(*imported.region);
         if (debug) {
@@ -517,15 +911,26 @@ bool run(Module *module, AnalysisManager &analysisManager,
     for (Function *function : module->function_list_) {
         if (function->is_declaration())
             continue;
-        LoopInfo &loopInfo = analysisManager.getLoopInfo(function);
-        for (Loop *loop : loopInfo.topLevelLoops()) {
-            if (selectRegions(*function, *loop, loopInfo, debug,
-                              forceRoundtrip, dumpHira,
-                              dumpPolyhedral, aliasAnalysis)) {
-                changed = true;
-                break;
+        bool functionChanged = false;
+        do {
+            functionChanged = false;
+            LoopInfo &loopInfo =
+                analysisManager.getLoopInfo(function);
+            for (Loop *loop : loopInfo.topLevelLoops()) {
+                if (selectRegions(
+                        *function, *loop, loopInfo, debug,
+                        forceRoundtrip, dumpHira,
+                        dumpPolyhedral, aliasAnalysis)) {
+                    changed = true;
+                    functionChanged = true;
+                    break;
+                }
             }
-        }
+            if (functionChanged)
+                analysisManager.clear(function);
+            // Forced round-trip is a conversion diagnostic, not an
+            // optimization fixed-point mode.
+        } while (functionChanged && !forceRoundtrip);
     }
     return changed;
 }

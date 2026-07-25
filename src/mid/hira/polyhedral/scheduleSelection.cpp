@@ -9,19 +9,31 @@ bool qualifies(
     std::size_t index,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability) {
+    bool baselineParallel =
+        parallelism.schedules().front().outerParallel;
+    ScheduleProfitabilityKind profitabilityKind =
+        profitability.schedules()[index].kind;
     return legality.schedules()[index].kind ==
                ScheduleLegalityKind::Legal &&
            applicability.schedules()[index].kind ==
                ScheduleApplicabilityKind::Realizable &&
-           profitability.schedules()[index].kind ==
-               ScheduleProfitabilityKind::ProvenBeneficial;
+           parallelism.schedules()[index].outerParallel &&
+           profitabilityKind !=
+               ScheduleProfitabilityKind::Regressing &&
+           profitabilityKind !=
+               ScheduleProfitabilityKind::Unknown &&
+           (!baselineParallel ||
+            profitabilityKind ==
+                ScheduleProfitabilityKind::ProvenBeneficial);
 }
 
 ScheduleSelectionDecision decisionFor(
     std::size_t index, ScheduleCandidateId selected,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability) {
     if (index == selected)
         return ScheduleSelectionDecision::Selected;
@@ -34,8 +46,11 @@ ScheduleSelectionDecision decisionFor(
         ScheduleApplicabilityKind::Realizable)
         return ScheduleSelectionDecision::
             RejectedApplicability;
-    if (profitability.schedules()[index].kind !=
-        ScheduleProfitabilityKind::ProvenBeneficial)
+    if (!parallelism.schedules()[index].outerParallel)
+        return ScheduleSelectionDecision::
+            RejectedParallelism;
+    if (!qualifies(index, legality, applicability,
+                   parallelism, profitability))
         return ScheduleSelectionDecision::
             RejectedProfitability;
     return ScheduleSelectionDecision::LowerBenefit;
@@ -51,6 +66,8 @@ const char *decisionName(ScheduleSelectionDecision decision) {
         return "rejected-legality";
     case ScheduleSelectionDecision::RejectedApplicability:
         return "rejected-applicability";
+    case ScheduleSelectionDecision::RejectedParallelism:
+        return "rejected-parallelism";
     case ScheduleSelectionDecision::RejectedProfitability:
         return "rejected-profitability";
     case ScheduleSelectionDecision::LowerBenefit:
@@ -65,13 +82,14 @@ ScheduleSelectionResult selectSchedule(
     const ScheduleCandidateSet &schedules,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability) {
     ScheduleSelectionResult result;
-    std::int64_t bestReduction = 0;
+    std::int64_t bestReduction = -1;
     for (std::size_t index = 1;
          index < schedules.candidates().size(); ++index) {
         if (!qualifies(index, legality, applicability,
-                       profitability))
+                       parallelism, profitability))
             continue;
         std::int64_t reduction =
             profitability.schedules()[index]
@@ -87,7 +105,8 @@ ScheduleSelectionResult selectSchedule(
         result.entries_.push_back(
             {schedules.candidates()[index].id,
              decisionFor(index, result.selected_, legality,
-                         applicability, profitability)});
+                         applicability, parallelism,
+                         profitability)});
     return result;
 }
 
@@ -95,6 +114,7 @@ bool verifyScheduleSelection(
     const ScheduleCandidateSet &schedules,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability,
     const ScheduleSelectionResult &selection,
     std::string &detail) {
@@ -107,11 +127,11 @@ bool verifyScheduleSelection(
     }
 
     ScheduleCandidateId expectedSelected = 0;
-    std::int64_t bestReduction = 0;
+    std::int64_t bestReduction = -1;
     for (std::size_t index = 1;
          index < schedules.candidates().size(); ++index) {
         if (!qualifies(index, legality, applicability,
-                       profitability))
+                       parallelism, profitability))
             continue;
         std::int64_t reduction =
             profitability.schedules()[index]
@@ -135,7 +155,7 @@ bool verifyScheduleSelection(
             entry.decision !=
                 decisionFor(index, selection.selected(),
                             legality, applicability,
-                            profitability)) {
+                            parallelism, profitability)) {
             detail = "invalid-schedule-selection-entry";
             return false;
         }

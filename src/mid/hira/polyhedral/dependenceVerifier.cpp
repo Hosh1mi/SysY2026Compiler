@@ -204,9 +204,20 @@ verifyDependenceRelations(const PolyhedralModel &model,
                               sink.subscripts.size()
                           ? DependencePrecision::
                                 ConservativeShape
-                          : DependencePrecision::Exact;
+                          : (model.statements()[source.statement]
+                                         .domainPrecision !=
+                                     DomainPrecision::Exact ||
+                                 model.statements()[sink.statement]
+                                         .domainPrecision !=
+                                     DomainPrecision::Exact)
+                                ? DependencePrecision::
+                                      ConservativeDomain
+                                : DependencePrecision::Exact;
             std::size_t expectedEqualities =
-                expectedPrecision == DependencePrecision::Exact
+                expectedPrecision == DependencePrecision::Exact ||
+                        expectedPrecision ==
+                            DependencePrecision::
+                                ConservativeDomain
                     ? source.subscripts.size()
                     : 0;
             if (relation.precision != expectedPrecision ||

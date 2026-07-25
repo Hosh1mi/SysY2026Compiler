@@ -121,7 +121,9 @@ KnownDistances knownDistances(
         addDistance(distances,
                     {distance.source, distance.sink},
                     distance.distance);
-    if (relation.precision == DependencePrecision::Exact)
+    if (relation.precision == DependencePrecision::Exact ||
+        relation.precision ==
+            DependencePrecision::ConservativeDomain)
         for (const AffineEquality &equality :
              relation.accessEqualities)
             if (auto distance = distanceFromEquality(equality))
@@ -166,6 +168,83 @@ ScheduledDependenceStatus compareSchedulePair(
     if (source.components.size() != sink.components.size())
         return ScheduledDependenceStatus::Unknown;
     return ScheduledDependenceStatus::Violated;
+}
+
+bool preservesIdentityOrderModuloEqualDimensions(
+    const StatementSchedule &identitySource,
+    const StatementSchedule &identitySink,
+    const StatementSchedule &candidateSource,
+    const StatementSchedule &candidateSink,
+    const KnownDistances &distances) {
+    if (distances.conflict ||
+        identitySource.components.size() !=
+            identitySink.components.size() ||
+        identitySource.components.size() !=
+            candidateSource.components.size() ||
+        identitySink.components.size() !=
+            candidateSink.components.size())
+        return false;
+
+    using Pair = std::pair<AffineVariable, AffineVariable>;
+    std::vector<Pair> identityUnequal;
+    std::vector<Pair> candidateUnequal;
+    auto collect = [&](const StatementSchedule &source,
+                       const StatementSchedule &sink,
+                       std::vector<Pair> &unequal) {
+        for (std::size_t index = 0;
+             index < source.components.size(); ++index) {
+            const ScheduleComponent &left =
+                source.components[index];
+            const ScheduleComponent &right =
+                sink.components[index];
+            if (left.kind != right.kind)
+                return false;
+            if (left.kind !=
+                ScheduleComponentKind::Iteration)
+                continue;
+            Pair dimensions{left.dimension, right.dimension};
+            auto distance = distances.values.find(dimensions);
+            if (distance != distances.values.end()) {
+                if (distance->second != 0)
+                    return false;
+                continue;
+            }
+            unequal.push_back(dimensions);
+        }
+        return true;
+    };
+
+    if (!collect(identitySource, identitySink,
+                 identityUnequal) ||
+        !collect(candidateSource, candidateSink,
+                 candidateUnequal) ||
+        identityUnequal != candidateUnequal)
+        return false;
+
+    // Schedule construction may permute iteration components only.  Requiring
+    // all static sequence/branch components to remain in their original slots
+    // ensures that the same within-iteration tie breaker is used after every
+    // dimension proven equal above.
+    for (std::size_t index = 0;
+         index < identitySource.components.size(); ++index) {
+        const ScheduleComponent &sourceIdentity =
+            identitySource.components[index];
+        const ScheduleComponent &sinkIdentity =
+            identitySink.components[index];
+        const ScheduleComponent &sourceCandidate =
+            candidateSource.components[index];
+        const ScheduleComponent &sinkCandidate =
+            candidateSink.components[index];
+        if (sourceIdentity.kind != sourceCandidate.kind ||
+            sinkIdentity.kind != sinkCandidate.kind)
+            return false;
+        if (sourceIdentity.kind !=
+                ScheduleComponentKind::Iteration &&
+            (sourceIdentity.position != sourceCandidate.position ||
+             sinkIdentity.position != sinkCandidate.position))
+            return false;
+    }
+    return true;
 }
 
 const char *dependenceStatusName(
@@ -253,9 +332,26 @@ ScheduleLegalityResult analyzeScheduleLegality(
                     scheduled.status =
                         ScheduledDependenceStatus::Preserved;
                 } else {
+                    KnownDistances distances =
+                        knownDistances(relation);
                     scheduled.status = compareSchedulePair(
-                        *source, *sink,
-                        knownDistances(relation));
+                        *source, *sink, distances);
+                    if (scheduled.status ==
+                            ScheduledDependenceStatus::Unknown &&
+                        relation.ordering ==
+                            DependenceOrdering::IdentityBefore &&
+                        preservesIdentityOrderModuloEqualDimensions(
+                            {relation.sourceStatement.value(),
+                             model.statements()[
+                                 *relation.sourceStatement]
+                                 .identitySchedule},
+                            {relation.sinkStatement.value(),
+                             model.statements()[
+                                 *relation.sinkStatement]
+                                 .identitySchedule},
+                            *source, *sink, distances))
+                        scheduled.status =
+                            ScheduledDependenceStatus::Preserved;
                     if (scheduled.status ==
                             ScheduledDependenceStatus::Violated &&
                         relationFeasibility.kind !=

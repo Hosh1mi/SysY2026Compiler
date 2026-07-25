@@ -4,6 +4,7 @@
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/hira/polyhedral/accessStrideAnalysis.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -125,6 +126,37 @@ std::optional<AffineVariable> innermostDimension(
     return std::nullopt;
 }
 
+bool interchangeAdjacent(HiraLoop &outer,
+                         HiraLoop &inner) {
+    if (!hasMovableNestShape(outer, inner))
+        return false;
+
+    HiraSequence *parent = outer.parent();
+    auto outerPosition = nodePosition(*parent, &outer);
+    if (!outerPosition)
+        return false;
+
+    const std::size_t payloadCount =
+        inner.body().nodes().size() - 2;
+    std::unique_ptr<HiraNode> outerOwner =
+        parent->remove(&outer);
+    std::unique_ptr<HiraNode> innerOwner =
+        outer.body().remove(&inner);
+
+    std::vector<std::unique_ptr<HiraNode>> payload;
+    payload.reserve(payloadCount);
+    for (std::size_t index = 0; index < payloadCount; ++index)
+        payload.push_back(inner.body().remove(
+            inner.body().nodes().front().get()));
+
+    for (std::size_t index = 0;
+         index < payload.size(); ++index)
+        outer.body().insert(index, std::move(payload[index]));
+    inner.body().insert(0, std::move(outerOwner));
+    parent->insert(*outerPosition, std::move(innerOwner));
+    return true;
+}
+
 } // namespace
 
 ScheduleRealizationResult realizeSelectedSchedule(
@@ -148,54 +180,70 @@ ScheduleRealizationResult realizeSelectedSchedule(
     if (candidate.kind == ScheduleCandidateKind::Identity)
         return {false, selected,
                 ScheduleRealizationError::None, {}};
-    if (candidate.kind != ScheduleCandidateKind::Interchange)
+    if (candidate.kind !=
+            ScheduleCandidateKind::Interchange &&
+        candidate.kind !=
+            ScheduleCandidateKind::Permutation)
         return reject(
             selected,
             ScheduleRealizationError::UnsupportedCandidate,
             "unsupported-schedule-kind");
 
-    const IterationDomain *outerDomain =
-        findDomain(model, candidate.outerDimension);
-    const IterationDomain *innerDomain =
-        findDomain(model, candidate.innerDimension);
-    if (!outerDomain || !innerDomain ||
-        !outerDomain->loop || !innerDomain->loop)
-        return reject(
-            selected,
-            ScheduleRealizationError::MissingLoopDomain,
-            "missing-interchange-loop");
+    std::vector<HiraLoop *> current;
+    std::vector<HiraLoop *> desired;
+    for (AffineVariable dimension :
+         candidate.originalDimensions) {
+        const IterationDomain *domain =
+            findDomain(model, dimension);
+        if (!domain || !domain->loop)
+            return reject(
+                selected,
+                ScheduleRealizationError::MissingLoopDomain,
+                "missing-permutation-loop");
+        current.push_back(
+            const_cast<HiraLoop *>(domain->loop));
+    }
+    for (AffineVariable dimension :
+         candidate.scheduledDimensions) {
+        const IterationDomain *domain =
+            findDomain(model, dimension);
+        if (!domain || !domain->loop)
+            return reject(
+                selected,
+                ScheduleRealizationError::MissingLoopDomain,
+                "missing-scheduled-loop");
+        desired.push_back(
+            const_cast<HiraLoop *>(domain->loop));
+    }
 
-    auto *outer = const_cast<HiraLoop *>(outerDomain->loop);
-    auto *inner = const_cast<HiraLoop *>(innerDomain->loop);
-    if (!hasMovableNestShape(*outer, *inner))
-        return reject(
-            selected, ScheduleRealizationError::InvalidNest,
-            "interchange-nest-shape-changed");
-
-    HiraSequence *parent = outer->parent();
-    auto outerPosition = nodePosition(*parent, outer);
-    if (!outerPosition)
-        return reject(
-            selected, ScheduleRealizationError::InvalidNest,
-            "outer-loop-owner-mismatch");
-
-    const std::size_t payloadCount =
-        inner->body().nodes().size() - 2;
-    std::unique_ptr<HiraNode> outerOwner =
-        parent->remove(outer);
-    std::unique_ptr<HiraNode> innerOwner =
-        outer->body().remove(inner);
-
-    std::vector<std::unique_ptr<HiraNode>> payload;
-    payload.reserve(payloadCount);
-    for (std::size_t index = 0; index < payloadCount; ++index)
-        payload.push_back(inner->body().remove(
-            inner->body().nodes().front().get()));
-
-    for (std::size_t index = 0; index < payload.size(); ++index)
-        outer->body().insert(index, std::move(payload[index]));
-    inner->body().insert(0, std::move(outerOwner));
-    parent->insert(*outerPosition, std::move(innerOwner));
+    for (std::size_t target = 0;
+         target < desired.size(); ++target) {
+        auto position = std::find(
+            current.begin() + target, current.end(),
+            desired[target]);
+        if (position == current.end())
+            return reject(
+                selected,
+                ScheduleRealizationError::InvalidNest,
+                "invalid-permutation-order");
+        std::size_t currentPosition =
+            static_cast<std::size_t>(
+                position - current.begin());
+        while (currentPosition > target) {
+            HiraLoop *outer =
+                current[currentPosition - 1];
+            HiraLoop *inner =
+                current[currentPosition];
+            if (!interchangeAdjacent(*outer, *inner))
+                return reject(
+                    selected,
+                    ScheduleRealizationError::InvalidNest,
+                    "permutation-nest-shape-changed");
+            std::swap(current[currentPosition - 1],
+                      current[currentPosition]);
+            --currentPosition;
+        }
+    }
 
     region.markModified();
     return {true, selected,
@@ -206,51 +254,37 @@ bool verifyScheduleRealization(
     const PolyhedralModel &before,
     const ScheduleCandidate &candidate,
     const PolyhedralModel &after, std::string &detail) {
-    if (candidate.kind != ScheduleCandidateKind::Interchange) {
-        detail = "non-interchange-realization";
+    if (candidate.kind ==
+            ScheduleCandidateKind::Identity ||
+        candidate.originalDimensions.size() !=
+            candidate.scheduledDimensions.size()) {
+        detail = "non-permutation-realization";
         return false;
     }
 
-    const IterationDomain *beforeOuter =
-        findDomain(before, candidate.outerDimension);
-    const IterationDomain *beforeInner =
-        findDomain(before, candidate.innerDimension);
-    if (!beforeOuter || !beforeInner ||
-        !beforeOuter->loop || !beforeInner->loop) {
-        detail = "missing-original-loop-domain";
-        return false;
-    }
-    const IterationDomain *afterOuter =
-        findDomain(after, beforeOuter->loop);
-    const IterationDomain *afterInner =
-        findDomain(after, beforeInner->loop);
-    if (!afterOuter || !afterInner) {
-        detail = "missing-realized-loop-domain";
-        return false;
-    }
-
-    std::vector<const HiraValue *> prefix =
-        dimensionSources(before, beforeOuter->dimensions);
-    if (prefix.empty() ||
-        prefix.back() != beforeOuter->loop->induction()) {
-        detail = "invalid-original-outer-domain";
-        return false;
-    }
-    prefix.pop_back();
-
-    std::vector<const HiraValue *> expectedNewOuter = prefix;
-    expectedNewOuter.push_back(
-        beforeInner->loop->induction());
-    std::vector<const HiraValue *> expectedNewInner =
-        expectedNewOuter;
-    expectedNewInner.push_back(
-        beforeOuter->loop->induction());
-    if (dimensionSources(after, afterInner->dimensions) !=
-            expectedNewOuter ||
-        dimensionSources(after, afterOuter->dimensions) !=
-            expectedNewInner) {
-        detail = "realized-loop-order-mismatch";
-        return false;
+    std::vector<const HiraValue *> expected;
+    for (std::size_t index = 0;
+         index < candidate.scheduledDimensions.size();
+         ++index) {
+        const IterationDomain *beforeDomain =
+            findDomain(
+                before,
+                candidate.scheduledDimensions[index]);
+        if (!beforeDomain || !beforeDomain->loop) {
+            detail = "missing-original-loop-domain";
+            return false;
+        }
+        expected.push_back(
+            beforeDomain->loop->induction());
+        const IterationDomain *afterDomain =
+            findDomain(after, beforeDomain->loop);
+        if (!afterDomain ||
+            dimensionSources(after,
+                             afterDomain->dimensions) !=
+                expected) {
+            detail = "realized-loop-order-mismatch";
+            return false;
+        }
     }
 
     if (candidate.statements.size() !=

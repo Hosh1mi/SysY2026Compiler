@@ -11,5 +11,8 @@ std::optional<std::int64_t> analyzeLinearAccessStride(
     const PolyhedralModel &model,
     const AccessRelation &access,
     AffineVariable dimension);
+std::optional<std::int64_t> analyzeAccessElementSize(
+    const PolyhedralModel &model,
+    const AccessRelation &access);
 
 } // namespace hira::polyhedral

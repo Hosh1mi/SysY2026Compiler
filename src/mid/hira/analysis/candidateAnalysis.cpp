@@ -1,13 +1,12 @@
 #include "../../../include/mid/hira/analysis/candidateAnalysis.hpp"
 
-#include "../../../include/mid/analysis/affineAnalysis.hpp"
 #include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
+#include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
 #include <utility>
-#include <vector>
 
 namespace hira {
 namespace {
@@ -60,73 +59,50 @@ bool isSupportedControlFlow(const Loop &loop) {
     return true;
 }
 
-std::vector<PhiInst *> collectInductionVariables(const Loop &loop) {
-    std::vector<PhiInst *> result;
-    const Loop *current = &loop;
-    std::vector<const Loop *> worklist{current};
-    while (!worklist.empty()) {
-        current = worklist.back();
-        worklist.pop_back();
-        if (PhiInst *iv = current->getInductionIV())
-            result.push_back(iv);
-        for (Loop *child : current->children)
-            worklist.push_back(child);
-    }
-    return result;
-}
-
-bool isInvariantForAll(Value *value,
-                       const std::vector<PhiInst *> &inductionVariables) {
-    for (PhiInst *iv : inductionVariables)
-        if (!AffineAnalysis::provablyIndependentOfIV(value, iv))
-            return false;
-    return true;
-}
-
-bool isSupportedAddress(Value *address, const Loop &loop,
-                        AffineAnalysis &affine,
-                        const std::vector<PhiInst *> &inductionVariables) {
-    auto *instruction = dynamic_cast<Instruction *>(address);
-    if (!instruction || !loop.isInLoop(instruction))
-        return true;
-
-    auto *gep = dynamic_cast<GetElementPtrInst *>(instruction);
-    if (!gep)
+bool isStripMinedPointLoop(const Loop &loop) {
+    if (!loop.parent || !loop.inductionInit)
         return false;
-    if (!isSupportedAddress(gep->get_operand(0), loop, affine,
-                            inductionVariables))
+    auto *parentInduction =
+        dynamic_cast<PhiInst *>(loop.inductionInit);
+    if (!parentInduction)
         return false;
-
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
-        Value *index = gep->get_operand(i);
-        if (affine.analyze(index).valid)
+    const Loop *tileLoop = loop.parent;
+    while (tileLoop &&
+           tileLoop->header !=
+               parentInduction->parent_)
+        tileLoop = tileLoop->parent;
+    if (!tileLoop || tileLoop->getInductionIV())
+        return false;
+    BasicBlock *latch = tileLoop->singleLatch();
+    if (!latch)
+        return false;
+    for (unsigned index = 0;
+         index + 1 < parentInduction->num_ops_;
+         index += 2) {
+        auto *predecessor = dynamic_cast<BasicBlock *>(
+            parentInduction->get_operand(index + 1));
+        if (predecessor != latch)
             continue;
-        if (!isInvariantForAll(index, inductionVariables))
+        auto *update = dynamic_cast<BinaryInst *>(
+            parentInduction->get_operand(index));
+        if (!update || update->op_id_ != Instruction::Add)
             return false;
+        Value *other = nullptr;
+        if (update->get_operand(0) == parentInduction)
+            other = update->get_operand(1);
+        else if (update->get_operand(1) == parentInduction)
+            other = update->get_operand(0);
+        auto *step = dynamic_cast<ConstantInt *>(other);
+        return step && step->value_ > 1;
     }
-    return true;
+    return false;
 }
 
-CandidateResult checkInstructions(const Loop &loop, const LoopInfo &loopInfo) {
-    AffineAnalysis affine(loopInfo);
-    std::vector<PhiInst *> inductionVariables =
-        collectInductionVariables(loop);
-
+CandidateResult checkInstructions(const Loop &loop) {
     for (BasicBlock *block : loop.blocksOrdered) {
         for (Instruction *instruction : block->instr_list_) {
             if (instruction->is_call())
                 return reject(CandidateRejectReason::UnsupportedCall);
-
-            Value *address = nullptr;
-            if (instruction->is_load())
-                address = instruction->get_operand(0);
-            else if (instruction->is_store())
-                address = instruction->get_operand(1);
-
-            if (address &&
-                !isSupportedAddress(address, loop, affine,
-                                    inductionVariables))
-                return reject(CandidateRejectReason::NonAffineAccess);
         }
     }
     return CandidateResult::accept();
@@ -164,20 +140,24 @@ const char *candidateRejectReasonName(CandidateRejectReason reason) {
         return "missing-induction-variable";
     case CandidateRejectReason::NonAffineBound:
         return "non-affine-bound";
-    case CandidateRejectReason::NonAffineAccess:
-        return "non-affine-access";
     case CandidateRejectReason::UnsupportedCall:
         return "unsupported-call";
     case CandidateRejectReason::UnsupportedControlFlow:
         return "unsupported-control-flow";
     case CandidateRejectReason::UnsupportedChildLoop:
         return "unsupported-child-loop";
+    case CandidateRejectReason::StripMinedPointLoop:
+        return "strip-mined-point-loop";
     }
     return "unknown";
 }
 
 CandidateResult analyzeHiraCandidate(const Loop &loop,
                                      const LoopInfo &loopInfo) {
+    (void)loopInfo;
+    if (isStripMinedPointLoop(loop))
+        return reject(
+            CandidateRejectReason::StripMinedPointLoop);
     if (!loop.header)
         return reject(CandidateRejectReason::MissingHeader);
     if (!loop.preheader)
@@ -199,7 +179,7 @@ CandidateResult analyzeHiraCandidate(const Loop &loop,
     if (!isSupportedControlFlow(loop))
         return reject(CandidateRejectReason::UnsupportedControlFlow);
 
-    return checkInstructions(loop, loopInfo);
+    return checkInstructions(loop);
 }
 
 } // namespace hira

@@ -2,6 +2,7 @@
 
 #include "scheduleApplicability.hpp"
 #include "scheduleLegality.hpp"
+#include "scheduleParallelism.hpp"
 #include "scheduleProfitability.hpp"
 
 #include <string>
@@ -14,6 +15,7 @@ enum class ScheduleSelectionDecision {
     Baseline,
     RejectedLegality,
     RejectedApplicability,
+    RejectedParallelism,
     RejectedProfitability,
     LowerBenefit,
 };
@@ -36,6 +38,7 @@ private:
         const ScheduleCandidateSet &schedules,
         const ScheduleLegalityResult &legality,
         const ScheduleApplicabilityResult &applicability,
+        const ScheduleParallelismResult &parallelism,
         const ScheduleProfitabilityResult &profitability);
 
     ScheduleCandidateId selected_ = 0;
@@ -46,11 +49,13 @@ ScheduleSelectionResult selectSchedule(
     const ScheduleCandidateSet &schedules,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability);
 bool verifyScheduleSelection(
     const ScheduleCandidateSet &schedules,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
+    const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability,
     const ScheduleSelectionResult &selection,
     std::string &detail);

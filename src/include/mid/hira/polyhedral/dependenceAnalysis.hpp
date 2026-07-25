@@ -28,6 +28,7 @@ enum class DependenceKind {
 
 enum class DependencePrecision {
     Exact,
+    ConservativeDomain,
     ConservativeAlias,
     ConservativeShape,
 };
@@ -50,6 +51,20 @@ struct DimensionDistance {
     std::int64_t distance = 0;
 };
 
+enum class DependenceDirection {
+    Equal,
+    Forward,
+    Backward,
+    Unknown,
+};
+
+struct DirectionComponent {
+    AffineVariable dimension;
+    DependenceDirection direction =
+        DependenceDirection::Unknown;
+    std::optional<std::int64_t> distance;
+};
+
 struct DependenceRelation {
     DependenceId id = 0;
     DependenceKind kind = DependenceKind::ScalarFlow;
@@ -63,6 +78,7 @@ struct DependenceRelation {
     std::optional<ScalarRecurrenceId> sourceRecurrence;
     std::optional<ScalarRecurrenceId> sinkRecurrence;
     std::vector<DimensionDistance> dimensionDistances;
+    std::vector<DirectionComponent> directionVector;
     std::vector<AffineEquality> accessEqualities;
 };
 

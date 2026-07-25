@@ -10,6 +10,10 @@ bool isSafePureCompute(ComputeKind kind) {
     case ComputeKind::Add:
     case ComputeKind::Sub:
     case ComputeKind::Mul:
+    case ComputeKind::FAdd:
+    case ComputeKind::FSub:
+    case ComputeKind::FMul:
+    case ComputeKind::FDiv:
     case ComputeKind::And:
     case ComputeKind::Or:
     case ComputeKind::Xor:

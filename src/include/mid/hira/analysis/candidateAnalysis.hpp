@@ -18,10 +18,10 @@ enum class CandidateRejectReason {
     NonDedicatedExit,
     MissingInductionVariable,
     NonAffineBound,
-    NonAffineAccess,
     UnsupportedCall,
     UnsupportedControlFlow,
     UnsupportedChildLoop,
+    StripMinedPointLoop,
 };
 
 struct CandidateResult {

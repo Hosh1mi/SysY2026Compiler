@@ -74,40 +74,51 @@ ScheduleApplicability unsupported(
             reason};
 }
 
-ScheduleApplicability analyzeInterchange(
+ScheduleApplicability analyzePermutation(
     const PolyhedralModel &model,
     const ScheduleCandidate &candidate) {
-    const IterationDomain *outer =
-        findDomain(model, candidate.outerDimension);
-    const IterationDomain *inner =
-        findDomain(model, candidate.innerDimension);
-    if (!outer || !inner || !outer->loop || !inner->loop)
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::MissingLoopDomain);
-    if (!isUnitStep(*outer->loop) ||
-        !isUnitStep(*inner->loop))
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::NonUnitStep);
-    if (!outer->loop->carriedValues().empty() ||
-        !inner->loop->carriedValues().empty())
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::LoopCarriedState);
-    if (!isPerfectLoopNest(*outer->loop, *inner->loop))
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::ImperfectNest);
-    if (!analyzeCanonicalLoopControl(*outer->loop) ||
-        !analyzeCanonicalLoopControl(*inner->loop))
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::NonCanonicalLatch);
-    if (hasCoupledBounds(*outer, *inner))
-        return unsupported(
-            candidate.id,
-            ScheduleApplicabilityReason::CoupledBounds);
+    std::vector<const IterationDomain *> domains;
+    for (AffineVariable dimension :
+         candidate.originalDimensions) {
+        const IterationDomain *domain =
+            findDomain(model, dimension);
+        if (!domain || !domain->loop)
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::
+                    MissingLoopDomain);
+        domains.push_back(domain);
+    }
+    for (const IterationDomain *domain : domains) {
+        if (!isUnitStep(*domain->loop))
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::NonUnitStep);
+        if (!domain->loop->carriedValues().empty())
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::
+                    LoopCarriedState);
+        if (!analyzeCanonicalLoopControl(*domain->loop))
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::
+                    NonCanonicalLatch);
+    }
+    for (std::size_t index = 1;
+         index < domains.size(); ++index) {
+        if (!isPerfectLoopNest(
+                *domains[index - 1]->loop,
+                *domains[index]->loop))
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::ImperfectNest);
+        if (hasCoupledBounds(*domains[index - 1],
+                             *domains[index]))
+            return unsupported(
+                candidate.id,
+                ScheduleApplicabilityReason::CoupledBounds);
+    }
     return {candidate.id,
             ScheduleApplicabilityKind::Realizable,
             ScheduleApplicabilityReason::None};
@@ -159,10 +170,13 @@ ScheduleApplicabilityResult analyzeScheduleApplicability(
                 {candidate.id,
                  ScheduleApplicabilityKind::Realizable,
                  ScheduleApplicabilityReason::None});
-        } else if (candidate.kind ==
-                   ScheduleCandidateKind::Interchange) {
+        } else if (
+            candidate.kind ==
+                ScheduleCandidateKind::Interchange ||
+            candidate.kind ==
+                ScheduleCandidateKind::Permutation) {
             result.schedules_.push_back(
-                analyzeInterchange(model, candidate));
+                analyzePermutation(model, candidate));
         } else {
             result.schedules_.push_back(unsupported(
                 candidate.id,

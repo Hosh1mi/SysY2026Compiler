@@ -24,6 +24,14 @@ Instruction::OpID binaryOpcode(ComputeKind kind) {
         return Instruction::Sub;
     case ComputeKind::Mul:
         return Instruction::Mul;
+    case ComputeKind::FAdd:
+        return Instruction::FAdd;
+    case ComputeKind::FSub:
+        return Instruction::FSub;
+    case ComputeKind::FMul:
+        return Instruction::FMul;
+    case ComputeKind::FDiv:
+        return Instruction::FDiv;
     case ComputeKind::And:
         return Instruction::And;
     case ComputeKind::Or:
@@ -46,6 +54,10 @@ bool isBinaryCompute(ComputeKind kind) {
     case ComputeKind::Add:
     case ComputeKind::Sub:
     case ComputeKind::Mul:
+    case ComputeKind::FAdd:
+    case ComputeKind::FSub:
+    case ComputeKind::FMul:
+    case ComputeKind::FDiv:
     case ComputeKind::And:
     case ComputeKind::Or:
     case ComputeKind::Xor:
@@ -226,11 +238,12 @@ private:
         for (std::size_t index = 0; index < rootNodes.size(); ++index) {
             if (auto *loop =
                     dynamic_cast<HiraLoop *>(rootNodes[index].get())) {
-                if (rootLoop_)
-                    return fail(ExportRejectReason::InvalidRegion,
-                                "multiple-root-loops");
-                rootLoop_ = loop;
-                rootLoopIndex_ = index;
+                if (!rootLoop_) {
+                    rootLoop_ = loop;
+                    rootLoopIndex_ = index;
+                }
+                if (!validateLoop(*loop))
+                    return false;
             } else if (!validateNode(*rootNodes[index])) {
                 return false;
             }
@@ -238,8 +251,6 @@ private:
         if (!rootLoop_)
             return fail(ExportRejectReason::InvalidRegion,
                         "missing-root-loop");
-        if (!validateLoop(*rootLoop_))
-            return false;
         Loop *mappedRoot =
             region_.sourceMapping().sourceLoop(rootLoop_);
         if (!mappedRoot || !mappedRoot->header ||

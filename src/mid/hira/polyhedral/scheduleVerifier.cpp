@@ -1,14 +1,12 @@
 #include "../../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <utility>
 
 namespace hira::polyhedral {
 namespace {
-
-using DimensionPair =
-    std::pair<AffineVariable, AffineVariable>;
 
 bool sameComponent(const ScheduleComponent &left,
                    const ScheduleComponent &right) {
@@ -18,13 +16,11 @@ bool sameComponent(const ScheduleComponent &left,
             left.dimension == right.dimension);
 }
 
-bool isNestedPair(const PolyhedralModel &model,
-                  DimensionPair dimensions) {
+bool isKnownBand(
+    const PolyhedralModel &model,
+    const std::vector<AffineVariable> &dimensions) {
     for (const IterationDomain &domain : model.domains())
-        if (domain.dimensions.size() >= 2 &&
-            domain.dimensions[domain.dimensions.size() - 2] ==
-                dimensions.first &&
-            domain.dimensions.back() == dimensions.second)
+        if (domain.dimensions == dimensions)
             return true;
     return false;
 }
@@ -42,16 +38,93 @@ bool contains(
 AffineVariable expectedDimension(
     AffineVariable original,
     const std::vector<ScheduleComponent> &identity,
-    std::optional<DimensionPair> interchange) {
-    if (!interchange ||
-        !contains(identity, interchange->first) ||
-        !contains(identity, interchange->second))
+    const std::vector<AffineVariable> &originalBand,
+    const std::vector<AffineVariable> &scheduledBand) {
+    if (originalBand.empty() ||
+        originalBand.size() != scheduledBand.size())
         return original;
-    if (original == interchange->first)
-        return interchange->second;
-    if (original == interchange->second)
-        return interchange->first;
+    for (AffineVariable dimension : originalBand)
+        if (!contains(identity, dimension))
+            return original;
+    auto position = std::find(
+        originalBand.begin(), originalBand.end(), original);
+    if (position != originalBand.end())
+        return scheduledBand[
+            static_cast<std::size_t>(
+                position - originalBand.begin())];
     return original;
+}
+
+std::vector<AffineVariable> scheduledDimensions(
+    const StatementSchedule &statement) {
+    std::vector<AffineVariable> result;
+    for (const ScheduleComponent &component :
+         statement.components)
+        if (component.kind ==
+            ScheduleComponentKind::Iteration)
+            result.push_back(component.dimension);
+    return result;
+}
+
+bool verifyScheduleTree(const ScheduleCandidate &candidate,
+                        std::string &detail) {
+    const ScheduleTree &tree = candidate.tree;
+    const ScheduleTreeNode *root = tree.node(tree.root());
+    if (!root ||
+        root->kind != ScheduleTreeNodeKind::Sequence ||
+        root->parent) {
+        detail = "invalid-schedule-tree-root";
+        return false;
+    }
+
+    std::vector<std::uint32_t> statementUses(
+        candidate.statements.size(), 0);
+    for (std::size_t index = 0;
+         index < tree.nodes().size(); ++index) {
+        const ScheduleTreeNode &node = tree.nodes()[index];
+        if (node.id != index ||
+            (node.id != tree.root() && !node.parent)) {
+            detail = "invalid-schedule-tree-node";
+            return false;
+        }
+        for (ScheduleTreeNodeId child : node.children) {
+            const ScheduleTreeNode *childNode =
+                tree.node(child);
+            if (!childNode || childNode->parent != node.id) {
+                detail = "invalid-schedule-tree-edge";
+                return false;
+            }
+        }
+        if (node.kind != ScheduleTreeNodeKind::Filter)
+            continue;
+        if (!node.parent) {
+            detail = "orphan-schedule-filter";
+            return false;
+        }
+        const ScheduleTreeNode *band =
+            tree.node(*node.parent);
+        if (!band ||
+            band->kind != ScheduleTreeNodeKind::Band) {
+            detail = "filter-without-band";
+            return false;
+        }
+        for (StatementId statement : node.statements) {
+            if (statement >= candidate.statements.size() ||
+                scheduledDimensions(
+                    candidate.statements[statement]) !=
+                    band->band.dimensions) {
+                detail = "invalid-schedule-filter";
+                return false;
+            }
+            ++statementUses[statement];
+        }
+    }
+    for (std::uint32_t uses : statementUses)
+        if (uses != 1) {
+            detail = "incomplete-schedule-tree";
+            return false;
+        }
+    return true;
 }
 
 } // namespace
@@ -81,25 +154,22 @@ bool verifyScheduleCandidates(
             detail = "invalid-identity-schedule";
             return false;
         }
+        if (!verifyScheduleTree(candidate, detail))
+            return false;
 
-        std::optional<DimensionPair> interchange;
-        if (candidate.kind ==
-            ScheduleCandidateKind::Interchange) {
-            interchange = {
-                candidate.outerDimension,
-                candidate.innerDimension};
-            if (candidate.outerDimension.kind !=
-                    AffineVariableKind::Dimension ||
-                candidate.innerDimension.kind !=
-                    AffineVariableKind::Dimension ||
-                candidate.outerDimension ==
-                    candidate.innerDimension ||
-                !model.space().source(
-                    candidate.outerDimension) ||
-                !model.space().source(
-                    candidate.innerDimension) ||
-                !isNestedPair(model, *interchange)) {
-                detail = "invalid-interchange-dimensions";
+        if (candidate.kind !=
+            ScheduleCandidateKind::Identity) {
+            std::multiset<AffineVariable> original(
+                candidate.originalDimensions.begin(),
+                candidate.originalDimensions.end());
+            std::multiset<AffineVariable> scheduled(
+                candidate.scheduledDimensions.begin(),
+                candidate.scheduledDimensions.end());
+            if (candidate.originalDimensions.size() < 2 ||
+                original != scheduled ||
+                !isKnownBand(
+                    model, candidate.originalDimensions)) {
+                detail = "invalid-permutation-dimensions";
                 return false;
             }
         }
@@ -131,7 +201,8 @@ bool verifyScheduleCandidates(
                           expectedDimension(
                               original.dimension,
                               statement.identitySchedule,
-                              interchange))) {
+                              candidate.originalDimensions,
+                              candidate.scheduledDimensions))) {
                         detail = "invalid-iteration-component";
                         return false;
                     }

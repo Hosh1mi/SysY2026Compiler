@@ -1,6 +1,5 @@
 #pragma once
 #include "pass.hpp"
-#include "../analysis/loopInfo.hpp"
 
 // LoopSimplify: canonicalize loops for downstream loop passes.
 //   - Inserts a dedicated preheader for every natural loop that doesn't already
@@ -19,10 +18,4 @@ public:
     void execute(Module *module) override;
     PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "LoopSimplify"; }
-
-private:
-    bool runOnFunction(Function *func);
-    bool insertPreheader(Loop *loop, Function *func);
-    bool insertBackedgeBlock(Loop *loop, Function *func);
-    bool insertDedicatedExits(Loop *loop, Function *func);
 };

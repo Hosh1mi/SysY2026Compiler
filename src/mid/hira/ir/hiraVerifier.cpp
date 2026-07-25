@@ -28,6 +28,10 @@ bool isBinaryCompute(ComputeKind kind) {
     case ComputeKind::Add:
     case ComputeKind::Sub:
     case ComputeKind::Mul:
+    case ComputeKind::FAdd:
+    case ComputeKind::FSub:
+    case ComputeKind::FMul:
+    case ComputeKind::FDiv:
     case ComputeKind::And:
     case ComputeKind::Or:
     case ComputeKind::Xor:
@@ -194,7 +198,7 @@ private:
             !isAvailable(loop.upperBound(), available) ||
             !isConstant(loop.step()) ||
             loop.step()->kind() != ValueKind::IntegerConstant ||
-            loop.step()->integerValue() != 1 ||
+            loop.step()->integerValue() <= 0 ||
             !loop.induction() || !loop.induction()->type() ||
             !dynamic_cast<IntegerType *>(loop.induction()->type()) ||
             loop.lowerBound()->type() != loop.induction()->type() ||

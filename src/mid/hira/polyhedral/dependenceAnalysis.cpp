@@ -1,5 +1,8 @@
 #include "../../../include/mid/hira/polyhedral/dependenceAnalysis.hpp"
 
+#include <algorithm>
+#include <limits>
+#include <map>
 #include <sstream>
 #include <utility>
 
@@ -30,6 +33,8 @@ const char *precisionName(DependencePrecision precision) {
     switch (precision) {
     case DependencePrecision::Exact:
         return "exact";
+    case DependencePrecision::ConservativeDomain:
+        return "opaque-domain";
     case DependencePrecision::ConservativeAlias:
         return "may-alias";
     case DependencePrecision::ConservativeShape:
@@ -50,6 +55,20 @@ const char *orderingName(DependenceOrdering ordering) {
         return "loop-entry";
     }
     return "unknown";
+}
+
+const char *directionName(DependenceDirection direction) {
+    switch (direction) {
+    case DependenceDirection::Equal:
+        return "=";
+    case DependenceDirection::Forward:
+        return "<";
+    case DependenceDirection::Backward:
+        return ">";
+    case DependenceDirection::Unknown:
+        return "*";
+    }
+    return "?";
 }
 
 std::string variableName(AffineVariable variable) {
@@ -146,6 +165,101 @@ private:
                 carried && *carried == dimension ? 1 : 0;
             relation.dimensionDistances.push_back(
                 {dimension, dimension, distance});
+            relation.directionVector.push_back(
+                {dimension,
+                 distance == 0
+                     ? DependenceDirection::Equal
+                     : DependenceDirection::Forward,
+                 distance});
+        }
+    }
+
+    void addUnknownCommonDimensions(
+        DependenceRelation &relation,
+        const PolyhedralStatement &source,
+        const PolyhedralStatement &sink) {
+        for (AffineVariable sourceDimension :
+             source.dimensions)
+            if (std::find(sink.dimensions.begin(),
+                          sink.dimensions.end(),
+                          sourceDimension) !=
+                sink.dimensions.end())
+                relation.directionVector.push_back(
+                    {sourceDimension,
+                     DependenceDirection::Unknown,
+                     std::nullopt});
+    }
+
+    std::optional<std::pair<AffineVariable, std::int64_t>>
+    directDistance(const AffineEquality &equality) const {
+        std::map<AffineVariable, std::int64_t> sourceSymbols;
+        std::map<AffineVariable, std::int64_t> sinkSymbols;
+        std::vector<std::pair<AffineVariable, std::int64_t>>
+            sourceDimensions;
+        std::vector<std::pair<AffineVariable, std::int64_t>>
+            sinkDimensions;
+        for (const auto &term :
+             equality.source.coefficients())
+            if (term.first.kind ==
+                AffineVariableKind::Dimension)
+                sourceDimensions.push_back(term);
+            else
+                sourceSymbols.insert(term);
+        for (const auto &term :
+             equality.sink.coefficients())
+            if (term.first.kind ==
+                AffineVariableKind::Dimension)
+                sinkDimensions.push_back(term);
+            else
+                sinkSymbols.insert(term);
+        if (sourceSymbols != sinkSymbols ||
+            sourceDimensions.size() != 1 ||
+            sinkDimensions.size() != 1 ||
+            !(sourceDimensions.front().first ==
+              sinkDimensions.front().first) ||
+            sourceDimensions.front().second !=
+                sinkDimensions.front().second)
+            return std::nullopt;
+
+        std::int64_t coefficient =
+            sourceDimensions.front().second;
+        __int128 difference =
+            static_cast<__int128>(
+                equality.source.constantTerm()) -
+            static_cast<__int128>(
+                equality.sink.constantTerm());
+        if (!coefficient || difference % coefficient)
+            return std::nullopt;
+        __int128 distance = difference / coefficient;
+        if (distance <
+                std::numeric_limits<std::int64_t>::min() ||
+            distance >
+                std::numeric_limits<std::int64_t>::max())
+            return std::nullopt;
+        return std::make_pair(
+            sourceDimensions.front().first,
+            static_cast<std::int64_t>(distance));
+    }
+
+    void refineDirections(DependenceRelation &relation) {
+        for (const AffineEquality &equality :
+             relation.accessEqualities) {
+            auto distance = directDistance(equality);
+            if (!distance)
+                continue;
+            for (DirectionComponent &component :
+                 relation.directionVector) {
+                if (!(component.dimension ==
+                      distance->first))
+                    continue;
+                component.distance = distance->second;
+                component.direction =
+                    distance->second == 0
+                        ? DependenceDirection::Equal
+                        : distance->second > 0
+                              ? DependenceDirection::Forward
+                              : DependenceDirection::Backward;
+            }
         }
     }
 
@@ -251,6 +365,21 @@ private:
                 relation.sinkAccess = sinkId;
                 relation.ordering =
                     DependenceOrdering::IdentityBefore;
+                const PolyhedralStatement &sourceStatement =
+                    model_.statements()[source.statement];
+                const PolyhedralStatement &sinkStatement =
+                    model_.statements()[sink.statement];
+                addUnknownCommonDimensions(
+                    relation, sourceStatement,
+                    sinkStatement);
+                if (model_.statements()[source.statement]
+                            .domainPrecision !=
+                        DomainPrecision::Exact ||
+                    model_.statements()[sink.statement]
+                            .domainPrecision !=
+                        DomainPrecision::Exact)
+                    relation.precision =
+                        DependencePrecision::ConservativeDomain;
 
                 if (alias == MemoryAliasKind::MayAlias) {
                     relation.precision =
@@ -268,6 +397,7 @@ private:
                     relation.accessEqualities.push_back(
                         {source.subscripts[index],
                          sink.subscripts[index]});
+                refineDirections(relation);
             }
         }
         return true;
@@ -337,6 +467,23 @@ printDependenceRelations(const DependenceSet &dependences) {
                 out << variableName(distance.source) << "->"
                     << variableName(distance.sink) << ":"
                     << distance.distance;
+            }
+            out << "]";
+        }
+        if (!relation.directionVector.empty()) {
+            out << " direction=[";
+            for (std::size_t index = 0;
+                 index < relation.directionVector.size();
+                 ++index) {
+                if (index)
+                    out << ", ";
+                const DirectionComponent &component =
+                    relation.directionVector[index];
+                out << variableName(component.dimension)
+                    << ":" << directionName(
+                           component.direction);
+                if (component.distance)
+                    out << "(" << *component.distance << ")";
             }
             out << "]";
         }
