@@ -11,6 +11,9 @@ enum class PolyhedralVerifyError {
     InvalidSpace,
     InvalidDomain,
     InvalidConstraint,
+    InvalidStatement,
+    InvalidMemoryObject,
+    InvalidAccess,
     MissingProofObligation,
 };
 

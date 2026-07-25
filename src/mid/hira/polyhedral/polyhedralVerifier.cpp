@@ -2,6 +2,7 @@
 
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
+#include "../../../include/mid/ir/type.hpp"
 
 #include <set>
 #include <string>
@@ -28,7 +29,7 @@ bool contains(const std::vector<AffineVariable> &variables,
 
 PolyhedralVerificationResult
 verifyConstraint(const PolyhedralModel &model,
-                 const IterationDomain &domain,
+                 const std::vector<AffineVariable> &dimensions,
                  const AffineConstraint &constraint) {
     if (!constraint.expression.valid())
         return fail(PolyhedralVerifyError::InvalidConstraint,
@@ -40,11 +41,25 @@ verifyConstraint(const PolyhedralModel &model,
             return fail(PolyhedralVerifyError::InvalidConstraint,
                         "invalid-variable");
         if (variable.kind == AffineVariableKind::Dimension &&
-            !contains(domain.dimensions, variable))
+            !contains(dimensions, variable))
             return fail(PolyhedralVerifyError::InvalidConstraint,
                         "out-of-domain-dimension");
     }
     return {};
+}
+
+bool validStatementKind(const PolyhedralStatement &statement) {
+    switch (statement.kind) {
+    case StatementKind::Compute:
+        return dynamic_cast<const HiraComputeOp *>(statement.node);
+    case StatementKind::Load:
+        return dynamic_cast<const HiraLoad *>(statement.node);
+    case StatementKind::Store:
+        return dynamic_cast<const HiraStore *>(statement.node);
+    case StatementKind::Yield:
+        return dynamic_cast<const HiraYield *>(statement.node);
+    }
+    return false;
 }
 
 } // namespace
@@ -59,6 +74,12 @@ const char *polyhedralVerifyErrorName(PolyhedralVerifyError error) {
         return "invalid-domain";
     case PolyhedralVerifyError::InvalidConstraint:
         return "invalid-constraint";
+    case PolyhedralVerifyError::InvalidStatement:
+        return "invalid-statement";
+    case PolyhedralVerifyError::InvalidMemoryObject:
+        return "invalid-memory-object";
+    case PolyhedralVerifyError::InvalidAccess:
+        return "invalid-access";
     case PolyhedralVerifyError::MissingProofObligation:
         return "missing-proof-obligation";
     }
@@ -106,7 +127,8 @@ verifyPolyhedralModel(const PolyhedralModel &model) {
         for (const AffineConstraint &constraint :
              domain.constraints) {
             PolyhedralVerificationResult result =
-                verifyConstraint(model, domain, constraint);
+                verifyConstraint(model, domain.dimensions,
+                                 constraint);
             if (!result.succeeded())
                 return result;
         }
@@ -131,6 +153,90 @@ verifyPolyhedralModel(const PolyhedralModel &model) {
         model.space().dimensions().size())
         return fail(PolyhedralVerifyError::InvalidSpace,
                     "dimension-without-domain");
+
+    std::vector<std::size_t> accessCounts(
+        model.statements().size(), 0);
+    std::set<const HiraValue *> memoryBases;
+    for (std::size_t index = 0;
+         index < model.memoryObjects().size(); ++index) {
+        const MemoryObject &object = model.memoryObjects()[index];
+        if (object.id != index || !object.base ||
+            !dynamic_cast<PointerType *>(object.base->type()) ||
+            !memoryBases.insert(object.base).second)
+            return fail(PolyhedralVerifyError::InvalidMemoryObject,
+                        "invalid-memory-base");
+    }
+
+    for (std::size_t index = 0;
+         index < model.statements().size(); ++index) {
+        const PolyhedralStatement &statement =
+            model.statements()[index];
+        if (statement.id != index || !statement.node ||
+            !validStatementKind(statement))
+            return fail(PolyhedralVerifyError::InvalidStatement,
+                        "invalid-statement-node");
+
+        std::set<AffineVariable> activeDimensions;
+        for (AffineVariable dimension : statement.dimensions)
+            if (dimension.kind !=
+                    AffineVariableKind::Dimension ||
+                !model.space().source(dimension) ||
+                !activeDimensions.insert(dimension).second)
+                return fail(
+                    PolyhedralVerifyError::InvalidStatement,
+                    "invalid-statement-space");
+        if (statement.constraints.size() <
+            statement.dimensions.size() * 2)
+            return fail(PolyhedralVerifyError::InvalidStatement,
+                        "incomplete-statement-domain");
+        for (const AffineConstraint &constraint :
+             statement.constraints) {
+            PolyhedralVerificationResult result =
+                verifyConstraint(model, statement.dimensions,
+                                 constraint);
+            if (!result.succeeded())
+                return result;
+        }
+    }
+
+    for (const AccessRelation &access : model.accesses()) {
+        if (access.statement >= model.statements().size() ||
+            access.object >= model.memoryObjects().size())
+            return fail(PolyhedralVerifyError::InvalidAccess,
+                        "invalid-access-reference");
+        const PolyhedralStatement &statement =
+            model.statements()[access.statement];
+        if ((access.kind == MemoryAccessKind::Read &&
+             statement.kind != StatementKind::Load) ||
+            (access.kind == MemoryAccessKind::Write &&
+             statement.kind != StatementKind::Store))
+            return fail(PolyhedralVerifyError::InvalidAccess,
+                        "access-kind-mismatch");
+        for (const AffineExpr &subscript : access.subscripts) {
+            AffineConstraint constraint{
+                subscript, AffineRelation::EqualZero};
+            PolyhedralVerificationResult result =
+                verifyConstraint(model, statement.dimensions,
+                                 constraint);
+            if (!result.succeeded())
+                return fail(PolyhedralVerifyError::InvalidAccess,
+                            result.detail);
+        }
+        ++accessCounts[access.statement];
+    }
+
+    for (std::size_t index = 0;
+         index < model.statements().size(); ++index) {
+        StatementKind kind = model.statements()[index].kind;
+        std::size_t expected =
+            kind == StatementKind::Load ||
+                    kind == StatementKind::Store
+                ? 1
+                : 0;
+        if (accessCounts[index] != expected)
+            return fail(PolyhedralVerifyError::InvalidAccess,
+                        "incomplete-statement-access");
+    }
     return {};
 }
 

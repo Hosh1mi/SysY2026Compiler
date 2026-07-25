@@ -1,6 +1,7 @@
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
+#include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/type.hpp"
 
 #include <cstdint>
@@ -22,6 +23,20 @@ const char *variablePrefix(AffineVariableKind kind) {
 std::string variableName(AffineVariable variable) {
     return std::string(variablePrefix(variable.kind)) +
            std::to_string(variable.position);
+}
+
+const char *statementKindName(StatementKind kind) {
+    switch (kind) {
+    case StatementKind::Compute:
+        return "compute";
+    case StatementKind::Load:
+        return "load";
+    case StatementKind::Store:
+        return "store";
+    case StatementKind::Yield:
+        return "yield";
+    }
+    return "unknown";
 }
 
 std::uint64_t magnitude(std::int64_t value) {
@@ -91,6 +106,10 @@ private:
         return false;
     }
 
+    std::string statementDetail(StatementId statement) const {
+        return "S" + std::to_string(statement);
+    }
+
     AffineExpr analyze(const HiraValue *value) {
         if (!value || !isInteger(value))
             return AffineExpr::invalid();
@@ -149,6 +168,200 @@ private:
         if (right.isConstant())
             return left.scale(right.constantTerm());
         return AffineExpr::invalid();
+    }
+
+    bool buildConditionConstraint(const HiraValue *condition,
+                                  bool truth,
+                                  AffineConstraint &constraint) {
+        auto *comparison =
+            condition
+                ? dynamic_cast<const HiraComputeOp *>(
+                      condition->definingNode())
+                : nullptr;
+        if (!comparison ||
+            comparison->computeKind() != ComputeKind::ICmp ||
+            comparison->operands().size() != 2)
+            return reject(PolyhedralBuildError::NonAffineCondition,
+                          "condition-not-icmp");
+
+        AffineExpr left = analyze(comparison->operands()[0]);
+        AffineExpr right = analyze(comparison->operands()[1]);
+        if (!left.valid() || !right.valid())
+            return reject(PolyhedralBuildError::NonAffineCondition,
+                          "non-affine-icmp-operand");
+
+        AffineExpr expression = AffineExpr::invalid();
+        AffineRelation relation = AffineRelation::GreaterEqualZero;
+        auto predicate =
+            static_cast<ICmpInst::ICmpOp>(comparison->predicate());
+        switch (predicate) {
+        case ICmpInst::ICMP_SLT:
+            expression =
+                truth ? right.subtract(left).add(
+                            AffineExpr::constant(-1))
+                      : left.subtract(right);
+            break;
+        case ICmpInst::ICMP_SLE:
+            expression =
+                truth ? right.subtract(left)
+                      : left.subtract(right).add(
+                            AffineExpr::constant(-1));
+            break;
+        case ICmpInst::ICMP_SGT:
+            expression =
+                truth ? left.subtract(right).add(
+                            AffineExpr::constant(-1))
+                      : right.subtract(left);
+            break;
+        case ICmpInst::ICMP_SGE:
+            expression =
+                truth ? left.subtract(right)
+                      : right.subtract(left).add(
+                            AffineExpr::constant(-1));
+            break;
+        case ICmpInst::ICMP_EQ:
+            if (!truth)
+                return reject(
+                    PolyhedralBuildError::NonAffineCondition,
+                    "non-convex-equality-complement");
+            expression = left.subtract(right);
+            relation = AffineRelation::EqualZero;
+            break;
+        case ICmpInst::ICMP_NE:
+            if (truth)
+                return reject(
+                    PolyhedralBuildError::NonAffineCondition,
+                    "non-convex-inequality");
+            expression = left.subtract(right);
+            relation = AffineRelation::EqualZero;
+            break;
+        default:
+            return reject(PolyhedralBuildError::NonAffineCondition,
+                          "unsupported-icmp-predicate");
+        }
+
+        if (!expression.valid())
+            return reject(PolyhedralBuildError::ConstraintOverflow,
+                          "condition-constraint");
+        constraint = {std::move(expression), relation};
+        return true;
+    }
+
+    bool resolveAddress(const HiraValue *address,
+                        const HiraValue *&base,
+                        std::vector<AffineExpr> &subscripts) {
+        if (!address)
+            return reject(PolyhedralBuildError::UnsupportedAddress,
+                          "null-address");
+
+        auto *addressCompute =
+            dynamic_cast<const HiraComputeOp *>(
+                address->definingNode());
+        if (!addressCompute) {
+            if (address->kind() != ValueKind::Parameter ||
+                !dynamic_cast<PointerType *>(address->type()))
+                return reject(
+                    PolyhedralBuildError::UnsupportedAddress,
+                    "address-without-base");
+            base = address;
+            return true;
+        }
+
+        if (addressCompute->computeKind() !=
+                ComputeKind::GetElementPtr ||
+            addressCompute->operands().size() < 2)
+            return reject(PolyhedralBuildError::UnsupportedAddress,
+                          "unsupported-address-operation");
+
+        const HiraValue *candidateBase =
+            addressCompute->operands().front();
+        auto *baseCompute =
+            candidateBase
+                ? dynamic_cast<const HiraComputeOp *>(
+                      candidateBase->definingNode())
+                : nullptr;
+        if (baseCompute &&
+            baseCompute->computeKind() ==
+                ComputeKind::GetElementPtr)
+            return reject(PolyhedralBuildError::UnsupportedAddress,
+                          "nested-gep");
+        if (!candidateBase ||
+            candidateBase->kind() != ValueKind::Parameter ||
+            !dynamic_cast<PointerType *>(candidateBase->type()))
+            return reject(PolyhedralBuildError::UnsupportedAddress,
+                          "gep-without-parameter-base");
+
+        base = candidateBase;
+        for (std::size_t index = 1;
+             index < addressCompute->operands().size(); ++index) {
+            AffineExpr subscript =
+                analyze(addressCompute->operands()[index]);
+            if (!subscript.valid())
+                return reject(PolyhedralBuildError::NonAffineAccess,
+                              "non-affine-gep-index");
+            subscripts.push_back(std::move(subscript));
+        }
+        return true;
+    }
+
+    MemoryObjectId memoryObject(const HiraValue *base) {
+        auto existing = memoryObjects_.find(base);
+        if (existing != memoryObjects_.end())
+            return existing->second;
+        MemoryObjectId id = static_cast<MemoryObjectId>(
+            model_->memoryObjects_.size());
+        model_->memoryObjects_.push_back({id, base});
+        memoryObjects_[base] = id;
+        return id;
+    }
+
+    bool addAccess(StatementId statement, MemoryAccessKind kind,
+                   const HiraValue *address) {
+        const HiraValue *base = nullptr;
+        std::vector<AffineExpr> subscripts;
+        if (!resolveAddress(address, base, subscripts)) {
+            if (failure_.detail.empty())
+                failure_.detail = statementDetail(statement);
+            else
+                failure_.detail =
+                    statementDetail(statement) + ":" +
+                    failure_.detail;
+            return false;
+        }
+        model_->accesses_.push_back(
+            {statement, kind, memoryObject(base),
+             std::move(subscripts)});
+        return true;
+    }
+
+    bool addStatement(
+        const HiraNode &node,
+        const std::vector<AffineVariable> &dimensions,
+        const std::vector<AffineConstraint> &constraints) {
+        StatementKind kind = StatementKind::Compute;
+        if (dynamic_cast<const HiraLoad *>(&node))
+            kind = StatementKind::Load;
+        else if (dynamic_cast<const HiraStore *>(&node))
+            kind = StatementKind::Store;
+        else if (dynamic_cast<const HiraYield *>(&node))
+            kind = StatementKind::Yield;
+        else if (!dynamic_cast<const HiraComputeOp *>(&node))
+            return reject(
+                PolyhedralBuildError::UnsupportedStatement,
+                "node-kind-" +
+                    std::to_string(static_cast<int>(node.kind())));
+
+        StatementId id =
+            static_cast<StatementId>(model_->statements_.size());
+        model_->statements_.push_back(
+            {id, kind, &node, dimensions, constraints});
+        if (auto *load = dynamic_cast<const HiraLoad *>(&node))
+            return addAccess(id, MemoryAccessKind::Read,
+                             load->address());
+        if (auto *store = dynamic_cast<const HiraStore *>(&node))
+            return addAccess(id, MemoryAccessKind::Write,
+                             store->address());
+        return true;
     }
 
     bool visitLoop(
@@ -210,12 +423,40 @@ private:
             }
             if (auto *condition =
                     dynamic_cast<const HiraIf *>(node.get())) {
-                if (!visitSequence(condition->thenSequence(),
-                                   dimensions, constraints) ||
-                    !visitSequence(condition->elseSequence(),
-                                   dimensions, constraints))
-                    return false;
+                if (!condition->thenSequence().nodes().empty()) {
+                    std::vector<AffineConstraint> thenConstraints =
+                        constraints;
+                    AffineConstraint branchConstraint;
+                    if (!buildConditionConstraint(
+                            condition->condition(), true,
+                            branchConstraint))
+                        return false;
+                    thenConstraints.push_back(
+                        std::move(branchConstraint));
+                    if (!visitSequence(condition->thenSequence(),
+                                       dimensions,
+                                       thenConstraints))
+                        return false;
+                }
+                if (!condition->elseSequence().nodes().empty()) {
+                    std::vector<AffineConstraint> elseConstraints =
+                        constraints;
+                    AffineConstraint branchConstraint;
+                    if (!buildConditionConstraint(
+                            condition->condition(), false,
+                            branchConstraint))
+                        return false;
+                    elseConstraints.push_back(
+                        std::move(branchConstraint));
+                    if (!visitSequence(condition->elseSequence(),
+                                       dimensions,
+                                       elseConstraints))
+                        return false;
+                }
+                continue;
             }
+            if (!addStatement(*node, dimensions, constraints))
+                return false;
         }
         return true;
     }
@@ -223,6 +464,7 @@ private:
     const HiraRegion &region_;
     std::unique_ptr<PolyhedralModel> model_;
     std::map<const HiraValue *, AffineExpr> expressions_;
+    std::map<const HiraValue *, MemoryObjectId> memoryObjects_;
     std::set<const HiraValue *> activeExpressions_;
     PolyhedralBuildResult failure_;
 };
@@ -294,10 +536,28 @@ const char *polyhedralBuildErrorName(PolyhedralBuildError error) {
         return "non-affine-lower-bound";
     case PolyhedralBuildError::NonAffineUpperBound:
         return "non-affine-upper-bound";
+    case PolyhedralBuildError::NonAffineCondition:
+        return "non-affine-condition";
+    case PolyhedralBuildError::NonAffineAccess:
+        return "non-affine-access";
+    case PolyhedralBuildError::UnsupportedAddress:
+        return "unsupported-address";
+    case PolyhedralBuildError::UnsupportedStatement:
+        return "unsupported-statement";
     case PolyhedralBuildError::ConstraintOverflow:
         return "constraint-overflow";
     }
     return "unknown";
+}
+
+MemoryAliasKind
+PolyhedralModel::aliasRelation(MemoryObjectId first,
+                               MemoryObjectId second) const {
+    if (first >= memoryObjects_.size() ||
+        second >= memoryObjects_.size())
+        return MemoryAliasKind::MayAlias;
+    return first == second ? MemoryAliasKind::MustAlias
+                           : MemoryAliasKind::MayAlias;
 }
 
 PolyhedralBuildResult
@@ -313,6 +573,15 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
                       model.space().dimensions());
     printVariableList(out, "symbols", AffineVariableKind::Symbol,
                       model.space().symbols());
+    out << "  memory_objects(";
+    for (std::size_t index = 0;
+         index < model.memoryObjects().size(); ++index) {
+        if (index)
+            out << ", ";
+        out << "M" << index << " = %h"
+            << model.memoryObjects()[index].base->id();
+    }
+    out << "; alias=conservative)\n";
 
     for (const IterationDomain &domain : model.domains()) {
         out << "  domain " << variableName(domain.dimension) << "[";
@@ -333,6 +602,42 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
                 << "\n";
         }
         out << "  }\n";
+    }
+
+    for (const PolyhedralStatement &statement :
+         model.statements()) {
+        out << "  statement S" << statement.id << "[";
+        for (std::size_t index = 0;
+             index < statement.dimensions.size(); ++index) {
+            if (index)
+                out << ", ";
+            out << variableName(statement.dimensions[index]);
+        }
+        out << "] " << statementKindName(statement.kind) << " {\n";
+        for (const AffineConstraint &constraint :
+             statement.constraints)
+            out << "    " << printExpression(constraint.expression)
+                << (constraint.relation ==
+                            AffineRelation::GreaterEqualZero
+                        ? " >= 0"
+                        : " = 0")
+                << "\n";
+        out << "  }\n";
+    }
+
+    for (const AccessRelation &access : model.accesses()) {
+        out << "  access S" << access.statement << " "
+            << (access.kind == MemoryAccessKind::Read
+                    ? "read "
+                    : "write ")
+            << "M" << access.object << "[";
+        for (std::size_t index = 0;
+             index < access.subscripts.size(); ++index) {
+            if (index)
+                out << ", ";
+            out << printExpression(access.subscripts[index]);
+        }
+        out << "]\n";
     }
 
     out << "  obligations(";

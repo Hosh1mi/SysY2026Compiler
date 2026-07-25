@@ -11,6 +11,7 @@
 namespace hira {
 
 class HiraLoop;
+class HiraNode;
 class HiraRegion;
 class HiraValue;
 
@@ -58,6 +59,47 @@ struct IterationDomain {
     std::vector<AffineConstraint> constraints;
 };
 
+using StatementId = std::uint32_t;
+using MemoryObjectId = std::uint32_t;
+
+enum class StatementKind {
+    Compute,
+    Load,
+    Store,
+    Yield,
+};
+
+struct PolyhedralStatement {
+    StatementId id = 0;
+    StatementKind kind = StatementKind::Compute;
+    const HiraNode *node = nullptr;
+    std::vector<AffineVariable> dimensions;
+    std::vector<AffineConstraint> constraints;
+};
+
+struct MemoryObject {
+    MemoryObjectId id = 0;
+    const HiraValue *base = nullptr;
+};
+
+enum class MemoryAliasKind {
+    MustAlias,
+    MayAlias,
+    NoAlias,
+};
+
+enum class MemoryAccessKind {
+    Read,
+    Write,
+};
+
+struct AccessRelation {
+    StatementId statement = 0;
+    MemoryAccessKind kind = MemoryAccessKind::Read;
+    MemoryObjectId object = 0;
+    std::vector<AffineExpr> subscripts;
+};
+
 enum class ProofObligationKind {
     NoSignedWrap,
 };
@@ -74,6 +116,17 @@ public:
     const std::vector<IterationDomain> &domains() const {
         return domains_;
     }
+    const std::vector<PolyhedralStatement> &statements() const {
+        return statements_;
+    }
+    const std::vector<MemoryObject> &memoryObjects() const {
+        return memoryObjects_;
+    }
+    const std::vector<AccessRelation> &accesses() const {
+        return accesses_;
+    }
+    MemoryAliasKind aliasRelation(MemoryObjectId first,
+                                  MemoryObjectId second) const;
     const std::vector<ProofObligation> &proofObligations() const {
         return proofObligations_;
     }
@@ -83,6 +136,9 @@ private:
 
     AffineSpace space_;
     std::vector<IterationDomain> domains_;
+    std::vector<PolyhedralStatement> statements_;
+    std::vector<MemoryObject> memoryObjects_;
+    std::vector<AccessRelation> accesses_;
     std::vector<ProofObligation> proofObligations_;
 };
 
@@ -90,6 +146,10 @@ enum class PolyhedralBuildError {
     None,
     NonAffineLowerBound,
     NonAffineUpperBound,
+    NonAffineCondition,
+    NonAffineAccess,
+    UnsupportedAddress,
+    UnsupportedStatement,
     ConstraintOverflow,
 };
 
