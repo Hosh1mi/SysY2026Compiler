@@ -15,6 +15,8 @@
 #include "../../include/mid/hira/polyhedral/scheduleAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleApplicability.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleLegality.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleProfitability.hpp"
+#include "../../include/mid/hira/polyhedral/scheduleSelection.hpp"
 #include "../../include/mid/hira/polyhedral/scheduleVerifier.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/ir/function.hpp"
@@ -134,6 +136,13 @@ bool selectRegions(Function &function, Loop &loop,
         polyhedral::ScheduleLegalityResult scheduleLegality;
         std::string scheduleLegalityDetail;
         bool scheduleLegalityValid = false;
+        polyhedral::ScheduleProfitabilityResult
+            scheduleProfitability;
+        std::string scheduleProfitabilityDetail;
+        bool scheduleProfitabilityValid = false;
+        polyhedral::ScheduleSelectionResult scheduleSelection;
+        std::string scheduleSelectionDetail;
+        bool scheduleSelectionValid = false;
         if (polyhedralModel.succeeded() &&
             polyhedralVerification.succeeded()) {
             dependences = polyhedral::buildDependenceRelations(
@@ -184,6 +193,34 @@ bool selectRegions(Function &function, Loop &loop,
                                 *dependences.dependences, schedules,
                                 scheduleLegality,
                                 scheduleLegalityDetail);
+                        scheduleProfitability =
+                            polyhedral::
+                                analyzeScheduleProfitability(
+                                    *polyhedralModel.model,
+                                    schedules);
+                        scheduleProfitabilityValid =
+                            polyhedral::
+                                verifyScheduleProfitability(
+                                    *polyhedralModel.model,
+                                    schedules,
+                                    scheduleProfitability,
+                                    scheduleProfitabilityDetail);
+                    }
+                    if (scheduleApplicabilityValid &&
+                        scheduleLegalityValid &&
+                        scheduleProfitabilityValid) {
+                        scheduleSelection =
+                            polyhedral::selectSchedule(
+                                schedules, scheduleLegality,
+                                scheduleApplicability,
+                                scheduleProfitability);
+                        scheduleSelectionValid =
+                            polyhedral::verifyScheduleSelection(
+                                schedules, scheduleLegality,
+                                scheduleApplicability,
+                                scheduleProfitability,
+                                scheduleSelection,
+                                scheduleSelectionDetail);
                     }
                 }
             }
@@ -242,6 +279,38 @@ bool selectRegions(Function &function, Loop &loop,
                                     std::cerr
                                         << " detail="
                                         << scheduleLegalityDetail;
+                                std::cerr << "\n";
+                            }
+                            if (scheduleProfitabilityValid) {
+                                std::cerr
+                                    << polyhedral::
+                                           printScheduleProfitability(
+                                               scheduleProfitability);
+                            } else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "schedule_profitability "
+                                       "rejected";
+                                if (!scheduleProfitabilityDetail
+                                         .empty())
+                                    std::cerr
+                                        << " detail="
+                                        << scheduleProfitabilityDetail;
+                                std::cerr << "\n";
+                            }
+                            if (scheduleSelectionValid) {
+                                std::cerr
+                                    << polyhedral::
+                                           printScheduleSelection(
+                                               scheduleSelection);
+                            } else {
+                                std::cerr
+                                    << "// polyhedral."
+                                       "schedule_selection rejected";
+                                if (!scheduleSelectionDetail.empty())
+                                    std::cerr
+                                        << " detail="
+                                        << scheduleSelectionDetail;
                                 std::cerr << "\n";
                             }
                         } else {
