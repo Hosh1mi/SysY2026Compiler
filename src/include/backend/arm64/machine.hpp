@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <initializer_list>
 #include <set>
 #include <string>
