@@ -55,46 +55,62 @@ bool isMovableBoundary(Instruction *inst) {
 
 int latencyFor(Instruction *inst) {
     switch (inst->op_id_) {
-        case Instruction::Load:
-            return 4;
-        case Instruction::And:
-        case Instruction::Or:
-        case Instruction::Xor:
-            return 2;
-        case Instruction::Shl:
-        case Instruction::LShr:
-        case Instruction::AShr:
-            return 2;
+        // Integer ALU — WriteI (A53UnitALU, lat=3)
         case Instruction::Add:
         case Instruction::Sub:
         case Instruction::ICmp:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
+        case Instruction::Select:
+        case Instruction::ZExt:
+        case Instruction::BitCast:
+        case Instruction::Clz:
             return 3;
+
+        // Integer multiply — WriteIM32 (A53UnitMAC, lat=4)
         case Instruction::Mul:
             return 4;
+
+        // Integer divide/remainder — WriteID32 (A53UnitDiv, lat=4)
         case Instruction::SDiv:
-            return 4;
-        case Instruction::FAdd:
-        case Instruction::FSub:
-        case Instruction::FCmp:
-            return 6;
-        case Instruction::FMul:
-            return 8;
         case Instruction::UDiv:
         case Instruction::SRem:
         case Instruction::URem:
-        case Instruction::FDiv:
-            return 12;
+            return 4;
+
+        // Scalar load — WriteLD (A53UnitLdSt, lat=4)
+        case Instruction::Load:
+            return 4;
+
+        // FP ALU — WriteF/WriteFCmp/WriteFCvt (A53UnitFPALU, lat=6)
+        case Instruction::FAdd:
+        case Instruction::FSub:
+        case Instruction::FCmp:
         case Instruction::FNeg:
-            return 2;
         case Instruction::FPtoSI:
         case Instruction::SItoFP:
             return 6;
-        case Instruction::Select:
-            return 2;
+
+        // FP multiply — WriteFMul (A53UnitFPMDS, lat=6)
+        case Instruction::FMul:
+            return 6;
+
+        // FP divide — A53WriteFDivSP:18 / A53WriteFDivDP:33
+        // Our IR only has float32; use 18. If double is added later, check type width.
+        case Instruction::FDiv:
+            return 18;
+
+        // NEON ALU (add/sub/shift/cmp/extract/insert/tbl) — WriteVd (A53UnitFPALU, lat=6)
         case Instruction::InsertElement:
         case Instruction::ExtractElement:
         case Instruction::ShuffleVector:
-            return 2;  // tbl on A53
+            return 6;
+
+        // Default: store, branch, ret etc. — latency doesn't matter for these
         default:
             return 1;
     }
@@ -121,6 +137,39 @@ MOpcode opcodeFor(Instruction *inst) {
             return MOpcode::Neon;
         default:
             return MOpcode::Alu;
+    }
+}
+
+PipeResource pipeFor(Instruction *inst) {
+    switch (inst->op_id_) {
+        case Instruction::Mul:                                    return PipeResource::MAC;
+        case Instruction::SDiv: case Instruction::UDiv:
+        case Instruction::SRem: case Instruction::URem:           return PipeResource::Div;
+        case Instruction::Load: case Instruction::Store:          return PipeResource::LdSt;
+        case Instruction::FAdd: case Instruction::FSub:
+        case Instruction::FNeg: case Instruction::FCmp:
+        case Instruction::FPtoSI: case Instruction::SItoFP:       return PipeResource::FPALU;
+        case Instruction::FMul: case Instruction::FDiv:           return PipeResource::FPMDS;
+        case Instruction::InsertElement:
+        case Instruction::ExtractElement:
+        case Instruction::ShuffleVector:                          return PipeResource::FPALU;
+        default:                                                  return PipeResource::ALU;
+    }
+}
+
+int readAdvanceFor(Instruction *inst) {
+    switch (inst->op_id_) {
+        case Instruction::Mul:                                    return 1;  // MAC
+        case Instruction::SDiv: case Instruction::UDiv:
+        case Instruction::SRem: case Instruction::URem:           return 1;  // Div
+        case Instruction::FAdd: case Instruction::FSub:
+        case Instruction::FNeg: case Instruction::FCmp:
+        case Instruction::FMul: case Instruction::FDiv:
+        case Instruction::FPtoSI: case Instruction::SItoFP:
+        case Instruction::InsertElement: case Instruction::ExtractElement:
+        case Instruction::ShuffleVector:                          return 1;  // FP/NEON
+        case Instruction::Load: case Instruction::Store:          return 0;  // no bypass
+        default:                                                  return 2;  // ALU
     }
 }
 
@@ -175,6 +224,8 @@ lowerToPreRA(Instruction *inst,
     mi.opcodeText = "preRA";
     mi.opcode = opcodeFor(inst);
     mi.latency = latencyFor(inst);
+    mi.pipe = pipeFor(inst);
+    mi.issueCycles = 1;
     mi.originalIndex = originalIndex;
     mi.mayLoad = inst->is_load();
     mi.mayStore = inst->is_store();

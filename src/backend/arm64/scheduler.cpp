@@ -104,8 +104,11 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
 
     auto processRegUse = [&](int i, const std::string &reg) {
         auto defIt = lastDef.find(reg);
-        if (defIt != lastDef.end())
-            addEdge(defIt->second, i, instrs[defIt->second].latency);
+        if (defIt != lastDef.end()) {
+            int effLat = std::max(1, instrs[defIt->second].latency -
+                                  readAdvance(instrs[i].opcode));
+            addEdge(defIt->second, i, effLat);
+        }
         liveUsesSinceDef[reg].insert(i);
     };
 
@@ -180,63 +183,108 @@ std::vector<MachineInstr> MachineScheduler::scheduleSegment(const std::vector<Ma
             ready.push_back(i);
     }
 
+    // --- Resource-aware list scheduling ---
     std::vector<int> order;
     order.reserve(n);
     int cycle = 0;
 
-    while (!ready.empty()) {
-        auto available = [&]() {
-            std::vector<int> result;
-            for (int idx : ready) {
-                if (readyCycle[idx] <= cycle)
-                    result.push_back(idx);
-            }
-            return result;
-        };
+    // pipeBusy[p] = first cycle pipe p is free (indexed by (int)PipeResource)
+    int pipeBusy[PIPE_COUNT] = {};
+    // ALU dual-slot tracker
+    int aluSlot0 = 0, aluSlot1 = 0;
 
-        auto choices = available();
-        if (choices.empty()) {
+    auto pipeIsFree = [&](int idx, int atCycle) {
+        int p = static_cast<int>(instrs[idx].pipe);
+        if (p >= PIPE_COUNT) return true;
+        if (p == static_cast<int>(PipeResource::ALU)) {
+            return atCycle >= std::min(aluSlot0, aluSlot1);
+        }
+        return atCycle >= pipeBusy[p];
+    };
+
+    auto reservePipe = [&](int idx, int atCycle) {
+        int p = static_cast<int>(instrs[idx].pipe);
+        if (p >= PIPE_COUNT) return;
+        int until = atCycle + instrs[idx].latency;
+        if (p == static_cast<int>(PipeResource::ALU)) {
+            if (aluSlot0 <= atCycle)      aluSlot0 = until;
+            else if (aluSlot1 <= atCycle) aluSlot1 = until;
+            else             { aluSlot0 = std::min(aluSlot0, aluSlot1); aluSlot0 = until; }
+        } else {
+            pipeBusy[p] = std::max(pipeBusy[p], until);
+        }
+    };
+
+    while (!ready.empty()) {
+        int issued = 0;
+
+        // Try to issue up to 2 instructions this cycle
+        for (int slot = 0; slot < 2; ++slot) {
+            // Collect all candidates ready this cycle
+            std::vector<int> candidates;
+            for (int idx : ready) {
+                if (readyCycle[idx] <= cycle && pipeIsFree(idx, cycle))
+                    candidates.push_back(idx);
+            }
+            if (candidates.empty())
+                break;
+
+            auto better = [&](int a, int b) {
+                bool pseudoA = (a == flagLiveOutIndex);
+                bool pseudoB = (b == flagLiveOutIndex);
+                if (pseudoA != pseudoB) return !pseudoA;
+                if (critical[a] != critical[b]) return critical[a] > critical[b];
+                if (instrs[a].latency != instrs[b].latency)
+                    return instrs[a].latency > instrs[b].latency;
+                return instrs[a].originalIndex < instrs[b].originalIndex;
+            };
+
+            int idx = candidates[0];
+            for (size_t i = 1; i < candidates.size(); ++i)
+                if (better(candidates[i], idx)) idx = candidates[i];
+
+            // Remove from ready
+            auto readyIt = std::find(ready.begin(), ready.end(), idx);
+            if (readyIt == ready.end()) break;
+            ready.erase(readyIt);
+
+            emitCycle[idx] = cycle;
+            order.push_back(idx);
+            if (idx != flagLiveOutIndex)
+                reservePipe(idx, cycle);
+            ++issued;
+
+            // Release successors
+            for (const auto &edge : succ[idx]) {
+                int s = edge.first;
+                readyCycle[s] = std::max(readyCycle[s], emitCycle[idx] + edge.second);
+                if (--remainingPreds[s] == 0)
+                    ready.push_back(s);
+            }
+        }
+
+        if (issued > 0) {
+            ++cycle;
+        } else {
+            // Nothing issued this cycle — advance to next pipe-free or ready cycle.
+            // Only consider pipe-busy times that are strictly after current cycle.
             int nextCycle = std::numeric_limits<int>::max();
-            for (int idx : ready)
-                nextCycle = std::min(nextCycle, readyCycle[idx]);
+            for (int idx : ready) {
+                int start = readyCycle[idx];
+                int p = static_cast<int>(instrs[idx].pipe);
+                if (p >= 0 && p < PIPE_COUNT) {
+                    if (p == static_cast<int>(PipeResource::ALU)) {
+                        int slot = std::min(aluSlot0, aluSlot1);
+                        if (slot > cycle) start = std::max(start, slot);
+                    } else {
+                        if (pipeBusy[p] > cycle) start = std::max(start, pipeBusy[p]);
+                    }
+                }
+                if (start > cycle) nextCycle = std::min(nextCycle, start);
+            }
             if (nextCycle == std::numeric_limits<int>::max())
                 return segment;
             cycle = std::max(cycle, nextCycle);
-            continue;
-        }
-
-        auto better = [&](int a, int b) {
-            bool pseudoA = (a == flagLiveOutIndex);
-            bool pseudoB = (b == flagLiveOutIndex);
-            if (pseudoA != pseudoB)
-                return !pseudoA;
-            if (critical[a] != critical[b])
-                return critical[a] > critical[b];
-            if (instrs[a].latency != instrs[b].latency)
-                return instrs[a].latency > instrs[b].latency;
-            return instrs[a].originalIndex < instrs[b].originalIndex;
-        };
-
-        int idx = choices.front();
-        for (size_t i = 1; i < choices.size(); ++i) {
-            if (better(choices[i], idx))
-                idx = choices[i];
-        }
-
-        auto readyIt = std::find(ready.begin(), ready.end(), idx);
-        if (readyIt == ready.end())
-            return segment;
-        ready.erase(readyIt);
-        emitCycle[idx] = cycle;
-        order.push_back(idx);
-        if (idx != flagLiveOutIndex)
-            ++cycle;
-
-        for (const auto &edge : succ[idx]) {
-            int s = edge.first;
-            readyCycle[s] = std::max(readyCycle[s], emitCycle[idx] + edge.second);
-            if (--remainingPreds[s] == 0)
-                ready.push_back(s);
         }
     }
 
