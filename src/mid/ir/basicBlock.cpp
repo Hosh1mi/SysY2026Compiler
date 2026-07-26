@@ -12,6 +12,8 @@ std::string BasicBlock::print() {
     std::string bb_ir;
     bb_ir += this->name_;
     bb_ir += ":";
+    if (this->hasSemFlag(SemFlag::MemsetIdiomLoop))
+        bb_ir += "                                                ; memset_loop";
     if (!this->pre_bbs_.empty()) {
         bb_ir += "                                                ; preds = ";
     }

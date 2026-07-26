@@ -29,6 +29,7 @@
 #include "include/mid/opt/loopMemoryScalarPromotion.hpp"
 #include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
+#include "include/mid/opt/idiomRecognize.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
 #include "include/mid/opt/scalarExpansion.hpp"
 #include "include/mid/opt/loopDistribution.hpp"
@@ -286,8 +287,10 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
+    pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    pm.addPass(std::make_unique<IdiomRecognize>());
     // IVSR can expose identical pointer recurrences from the two arms of a
     // conditional store.  Re-run if-conversion so they can share one load and
     // select only the destination address.
@@ -334,6 +337,7 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
     addAnalysisDumpIfRequested(pm);
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
+    pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopUnroll>());
     pm.addPass(std::make_unique<SplitGEP>());

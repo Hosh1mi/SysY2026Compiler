@@ -28,6 +28,7 @@ enum class SemFlag : uint32_t {
     VectorizedEpilogue = 1u << 11, // BasicBlock：该标量循环已作为向量余数循环
     TargetPointerRecurrenceLoop = 1u << 12,
         // BasicBlock：循环已显式构造目标化指针递推，IVSR 不应重写
+    MemsetIdiomLoop = 1u << 13, // BasicBlock：preheader 已插入 memset 替换原循环
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {
