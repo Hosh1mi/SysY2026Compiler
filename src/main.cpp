@@ -506,11 +506,6 @@ int main(int argc, char **argv) {
     root->accept(genIR);
     std::unique_ptr<Module> m = genIR.getModule();
 
-    // The optimized ARM64 calling-convention path currently supports only
-    // register-passed formal parameters.  Keep the conservative, fully
-    // ABI-compliant lowering for modules containing stack-passed formals.
-    // This is a target capability check, independent of function names or
-    // inputs.
     bool hasStackPassedFormals = false;
     bool hasDeepLoopNest = false;
     for (auto *func : m->function_list_) {
@@ -522,9 +517,8 @@ int main(int argc, char **argv) {
             else
                 ++intArgs;
         }
-        if (intArgs > 8 || floatArgs > 8) {
+        if (intArgs > 8 || floatArgs > 8)
             hasStackPassedFormals = true;
-        }
         if (!func->is_declaration()) {
             LoopInfo loops;
             loops.analyze(func);

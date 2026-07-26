@@ -1759,6 +1759,12 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                 callArgTemps[arg] = tmp;
             }
         }
+        std::map<Value*, unsigned> callArgTempUses;
+        for (unsigned i = 0; i < numArgs; ++i) {
+            auto *arg = call->get_operand(i);
+            if (callArgTemps.count(arg))
+                ++callArgTempUses[arg];
+        }
 
         // 计算参数分配信息
         int intArg = 0, floatArg = 0;
@@ -1843,12 +1849,22 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
                     }
                 } else {
                     std::string r = callArgTemps.count(arg) ? callArgTemps[arg] : loadInt(arg);
-                    std::string tmp = allocAddrReg();
-                    emitMoveMachine(tmp, r, indexExtendOpcode(arg, inst->parent_));
-                    emitStoreMemMachine(tmp, "[sp, #" + std::to_string(stackIdx * 8) + "]", {tmp, "sp"});
-                    freeAddrReg(tmp);
+                    // Each AAPCS64 stack argument owns an 8-byte slot, but a
+                    // 32-bit integer value occupies only its low-addressed
+                    // word.  Store that word directly.  Extending through an
+                    // address scratch register is unnecessary and can clobber
+                    // another pending argument when the scratch bank is full.
+                    emitStoreMemMachine(r, "[sp, #" + std::to_string(stackIdx * 8) + "]", {r, "sp"});
                     stackIdx++;
                 }
+            }
+
+            auto temp = callArgTemps.find(arg);
+            if (temp != callArgTemps.end() && --callArgTempUses[arg] == 0) {
+                if (isFloat(arg->type_))
+                    usedFloatRegs_.erase(regNo(temp->second));
+                else
+                    freeIntReg(temp->second);
             }
         }
 

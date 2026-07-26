@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <initializer_list>
 #include <set>
 #include <string>
@@ -36,6 +37,21 @@ struct MachineOperand {
     static MachineOperand mem(const std::string &addr);
     static MachineOperand label(const std::string &name);
 };
+
+// Cortex-A53 pipeline resources — maps to functional units with capacities:
+//   ALU ×2, MAC ×1, Div ×1, LdSt ×1, Branch ×1, FPALU ×1, FPMDS ×1
+enum class PipeResource : uint8_t {
+    ALU,      // integer add/sub/and/or/xor/shift/cmp/mov/adr
+    MAC,      // integer multiply
+    Div,      // integer divide/remainder
+    LdSt,     // load/store (scalar + NEON)
+    Branch,   // branch/call/ret/flag-use
+    FPALU,    // FP add/sub/neg/cmp/cvt/fmov + NEON ALU (add/sub/shift/cmp)
+    FPMDS,    // FP mul/div/sqrt/FMA + NEON multiply/MLA/MLS
+    None,
+};
+
+constexpr int PIPE_COUNT = 8;
 
 enum class MOpcode {
     Unknown,
@@ -81,6 +97,8 @@ struct MachineInstr {
     bool isLabelLike = false;
     int latency = 1;
     int originalIndex = 0;
+    PipeResource pipe = PipeResource::ALU;
+    int issueCycles = 1;   // pipe-occupation cycles (1 for most, 2-5 for NEON Ld/St)
 
     // Conservative memory summary for postRA scheduling.  The range is only
     // considered precise when memOffsetKnown is true; otherwise memory ops are
@@ -120,6 +138,11 @@ std::string dumpMachineFunction(const MachineFunction &func);
 void appendMachineInstr(MachineFunction &func, MachineInstr inst);
 void appendMachineLine(MachineModule &module, const std::string &line);
 void appendMachineText(MachineModule &module, const std::string &text);
+
+// Map MOpcode → default A53 pipeline resource
+PipeResource defaultPipe(MOpcode opcode);
+// Operand bypass (ReadAdvance): cycles operands available BEFORE full latency
+int readAdvance(MOpcode opcode);
 
 class MachineEmitter {
 public:

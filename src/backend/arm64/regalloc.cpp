@@ -156,9 +156,6 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
     std::map<Value*, std::vector<Value*>> members;
     for (auto &iv : sorted) members[iv.value] = {iv.value};
 
-    // Coalescing repeatedly rewrites the interference graph.  Bound it for
-    // very large CFGs; coloring remains correct without affinity merging and
-    // avoids compounding sparse live-range approximations at this scale.
     constexpr size_t kCoalescingBlockLimit = 80;
     bool mergedAny = func_->basic_blocks_.size() <= kCoalescingBlockLimit;
     while (mergedAny) {
@@ -168,11 +165,13 @@ void Arm64RegAlloc::colorPool(const std::vector<Interval> &pool,
             Value *b = ufFind(e.second);
             if (a == b) continue;
             if (adj[a].count(b)) {
-                // 凸包重叠 ≠ 真干涉：对两个类的成员做精确两两检测
                 bool conflict = false;
                 for (auto *x : members[a]) {
                     for (auto *y : members[b]) {
-                        if (trulyInterferes(x, y)) { conflict = true; break; }
+                        if (trulyInterferes(x, y)) {
+                            conflict = true;
+                            break;
+                        }
                     }
                     if (conflict) break;
                 }
@@ -954,16 +953,26 @@ void Arm64RegAlloc::promoteLoopConstants(
             usedRegs.insert(std::stoi(r.substr(1)));
     }
     std::vector<int> freeRegs;
+    int maxGepIndices = 0;
+    for (auto *bb : blocksOrder) {
+        for (auto *inst : bb->instr_list_) {
+            if (inst->op_id_ == Instruction::GetElementPtr)
+                maxGepIndices = std::max(
+                    maxGepIndices, static_cast<int>(inst->num_ops_) - 1);
+        }
+    }
     if (isLeaf) {
         for (int r = 28; r >= 19; --r)  // 从高号开始，远离着色常用的低号区
             if (!usedRegs.count(r)) freeRegs.push_back(r);
     } else {
-        // 非叶函数优先用 caller-saved 临时寄存器（call 后按需重物化，
-        // 无需保存/恢复）。caller-saved 不足以覆盖循环里的全部不变大常量
-        // 时，再借用空闲的 callee-saved：它们入口物化一次、不被 call 冲掉，
-        // 对"嵌套在含调用外层循环里、但自身无调用的内层循环常量"尤其划算。
-        // 保存/恢复由 mergePromotedConstRegs 统一接管。
-        for (int r = 10; r <= 15; ++r)
+        // Multi-dimensional GEP lowering needs one or more simultaneous
+        // address temporaries.  Reserve scratch capacity in proportion to the
+        // largest address expression instead of letting promoted constants
+        // force the selector onto its aliasing fallback register.
+        // x16/x17 cover ordinary address formation.  A six-or-more-index GEP
+        // can require the whole x10-x17 bank while accumulating scaled terms.
+        int scratchReserve = maxGepIndices >= 6 ? 6 : 0;
+        for (int r = 10; r <= 15 - scratchReserve; ++r)
             if (!usedRegs.count(r)) freeRegs.push_back(r);
         for (int r = 28; r >= 19; --r)
             if (!usedRegs.count(r)) freeRegs.push_back(r);
@@ -1064,7 +1073,10 @@ void Arm64RegAlloc::allocate() {
                     }
                 }
                 for (auto *x : liveOut[pred])
-                    if (x != incoming) live.insert(x);
+                    if (x != incoming &&
+                        transparentAddressRoot(x) !=
+                            transparentAddressRoot(incoming))
+                        live.insert(x);
             }
         } else if (auto *inst = dynamic_cast<Instruction*>(v)) {
             BasicBlock *bb = inst->parent_;
@@ -1077,6 +1089,9 @@ void Arm64RegAlloc::allocate() {
                 for (unsigned i = 0; i < cur->num_ops_; ++i) {
                     auto *op = cur->get_operand(i);
                     if (canAssignRegister(op)) live.insert(op);
+                    Value *root = transparentAddressRoot(op);
+                    if (root != op && canAssignRegister(root))
+                        live.insert(root);
                 }
             }
         } else {
