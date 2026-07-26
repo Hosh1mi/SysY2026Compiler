@@ -85,7 +85,7 @@ __sysy_worker:
 	.cfi_offset 22, -8
 	ldr	w0, [x0, 128]
 	cbz	w0, .L17
-	mov	w0, 1
+	mov	w0, 3
 	bl	__sysy_bind_cpu.part.0
 .L17:
 	add	x20, x20, :lo12:.LANCHOR0
@@ -213,7 +213,7 @@ __sysy_parallel_for:
 	cbnz	w0, .L30
 	str	w25, [x24, 128]
 .L31:
-	mov	w0, 0
+	mov	w0, 2
 	bl	__sysy_bind_cpu.part.0
 	b	.L32
 	.p2align 2,,3
