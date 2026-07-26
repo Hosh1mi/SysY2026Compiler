@@ -1,5 +1,7 @@
 #include "../../../include/mid/hira/polyhedral/scheduleParallelism.hpp"
 
+#include "../../../include/mid/hira/ir/hiraIR.hpp"
+
 #include <algorithm>
 #include <map>
 #include <sstream>
@@ -78,10 +80,52 @@ AffineVariable scheduledDimension(
     return dimension;
 }
 
+// A recurrence-carried dependence does not block band parallelism when
+// the recurrence is an exact reduction carried by that band and the
+// dependence's sink is the reduction update itself: privatization gives
+// each worker a private accumulator for it.  Any other read of the
+// running value stays a blocker.
+bool isExemptReductionSelfLoop(
+    const PolyhedralModel &model,
+    const ReductionAnalysisResult &reductions,
+    const DependenceRelation &relation,
+    AffineVariable dimension) {
+    if (relation.kind != DependenceKind::RecurrenceCarried ||
+        !relation.sourceRecurrence)
+        return false;
+    const ScalarRecurrence *recurrence = nullptr;
+    for (const ScalarRecurrence &candidate :
+         model.scalarRecurrences())
+        if (candidate.id == *relation.sourceRecurrence) {
+            recurrence = &candidate;
+            break;
+        }
+    if (!recurrence || !(recurrence->dimension == dimension))
+        return false;
+    bool exact = false;
+    for (const ScalarReduction &reduction :
+         reductions.scalarReductions())
+        if (reduction.recurrence == recurrence->id &&
+            reduction.parallelSemantics ==
+                ReductionParallelSemantics::Exact)
+            exact = true;
+    if (!exact)
+        return false;
+    const HiraNode *update =
+        recurrence->yielded
+            ? recurrence->yielded->definingNode()
+            : nullptr;
+    if (!update || !relation.sinkStatement)
+        return false;
+    return model.statements()[*relation.sinkStatement].node ==
+           update;
+}
+
 std::vector<DependenceId> blockersFor(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility,
+    const ReductionAnalysisResult &reductions,
     AffineVariable dimension) {
     std::vector<DependenceId> blockers;
     for (std::size_t index = 0;
@@ -100,6 +144,9 @@ std::vector<DependenceId> blockersFor(
             model.statements()[*relation.sinkStatement];
         if (!containsDimension(source, dimension) ||
             !containsDimension(sink, dimension))
+            continue;
+        if (isExemptReductionSelfLoop(model, reductions,
+                                      relation, dimension))
             continue;
         if (!provesEqualIteration(relation, dimension))
             blockers.push_back(relation.id);
@@ -129,6 +176,7 @@ ScheduleParallelismResult analyzeScheduleParallelism(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility,
+    const ReductionAnalysisResult &reductions,
     const ScheduleCandidateSet &schedules) {
     ScheduleParallelismResult result;
     std::optional<AffineVariable> root =
@@ -141,7 +189,7 @@ ScheduleParallelismResult analyzeScheduleParallelism(
             parallelism.outerDimension =
                 scheduledDimension(*root, candidate);
             parallelism.blockers = blockersFor(
-                model, dependences, feasibility,
+                model, dependences, feasibility, reductions,
                 *parallelism.outerDimension);
             parallelism.outerParallel =
                 parallelism.blockers.empty();
@@ -156,12 +204,14 @@ bool verifyScheduleParallelism(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility,
+    const ReductionAnalysisResult &reductions,
     const ScheduleCandidateSet &schedules,
     const ScheduleParallelismResult &result,
     std::string &detail) {
     ScheduleParallelismResult expected =
         analyzeScheduleParallelism(
-            model, dependences, feasibility, schedules);
+            model, dependences, feasibility, reductions,
+            schedules);
     if (result.schedules().size() !=
         expected.schedules().size()) {
         detail = "incomplete-schedule-parallelism";

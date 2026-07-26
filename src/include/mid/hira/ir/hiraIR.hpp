@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -192,6 +193,7 @@ public:
         Ordinary,
         VectorMain,
         ScalarRemainder,
+        Parallel,
     };
 
     struct CarriedBinding {
@@ -272,6 +274,31 @@ private:
     std::map<const Loop *, HiraLoop *> sourceToLoop_;
 };
 
+enum class ParallelReductionOp {
+    BitAnd,
+    BitOr,
+    BitXor,
+};
+
+// One exact reduction carried by the parallel outer band.  Each worker
+// accumulates a private partial starting from the identity; the partials are
+// combined in band order once all workers join, which reproduces the
+// sequential result exactly for associative operators.
+struct HiraParallelReduction {
+    std::size_t carriedIndex = 0;
+    ParallelReductionOp op = ParallelReductionOp::BitXor;
+    std::int64_t identity = 0;
+};
+
+// Lowering plan for a proven-parallel outer band: the band loop runs inside a
+// worker body function over a [lo, hi) chunk while the source function calls
+// the parallel runtime with the full bounds.
+struct HiraParallelPlan {
+    HiraLoop *loop = nullptr;
+    int bodyId = 0;
+    std::vector<HiraParallelReduction> reductions;
+};
+
 class HiraRegion {
 public:
     explicit HiraRegion(Loop *sourceLoop = nullptr);
@@ -300,6 +327,13 @@ public:
     bool modified() const { return modified_; }
     void markModified() { modified_ = true; }
 
+    const HiraParallelPlan *parallelPlan() const {
+        return parallelPlan_ ? &*parallelPlan_ : nullptr;
+    }
+    void setParallelPlan(HiraParallelPlan plan) {
+        parallelPlan_ = std::move(plan);
+    }
+
 private:
     ValueId nextValueId_ = 0;
     std::vector<std::unique_ptr<HiraValue>> values_;
@@ -311,6 +345,7 @@ private:
     BasicBlock *sourcePreheader_ = nullptr;
     std::vector<BasicBlock *> sourceExits_;
     bool modified_ = false;
+    std::optional<HiraParallelPlan> parallelPlan_;
 };
 
 } // namespace hira

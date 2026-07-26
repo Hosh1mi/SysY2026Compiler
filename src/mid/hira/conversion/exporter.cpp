@@ -9,6 +9,7 @@
 #include "../../../include/mid/ir/module.hpp"
 
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -83,6 +84,8 @@ public:
     ExportResult run() {
         if (!validate())
             return failure_;
+        if (region_.parallelPlan())
+            return runParallel();
 
         BasicBlock *loopEntry = preheader_;
         if (rootLoopIndex_ != 0) {
@@ -130,6 +133,16 @@ private:
     struct CarriedPhi {
         const HiraLoop::CarriedBinding *binding = nullptr;
         PhiInst *phi = nullptr;
+    };
+
+    // Overrides applied when the root loop is lowered into a worker body
+    // function: the band iterates the [lo, hi) chunk handed to the body
+    // and exact-reduction accumulators start from their identity.
+    struct ParallelRootOverrides {
+        Value *lower = nullptr;
+        Value *upper = nullptr;
+        const std::map<std::size_t, std::int64_t> *identityInits =
+            nullptr;
     };
 
     bool fail(ExportRejectReason reason, std::string detail = {}) {
@@ -278,12 +291,308 @@ private:
         return true;
     }
 
+    void collectSubtreeNodes(const HiraSequence &sequence,
+                             std::set<const HiraNode *> &inside) {
+        for (const auto &node : sequence.nodes()) {
+            inside.insert(node.get());
+            if (auto *loop =
+                    dynamic_cast<const HiraLoop *>(node.get()))
+                collectSubtreeNodes(loop->body(), inside);
+            else if (auto *condition =
+                         dynamic_cast<const HiraIf *>(node.get())) {
+                collectSubtreeNodes(condition->thenSequence(),
+                                    inside);
+                collectSubtreeNodes(condition->elseSequence(),
+                                    inside);
+            }
+        }
+    }
+
+    // Structural infallibility check for worker lowering: every value
+    // used inside the band must be a region boundary value (passed
+    // through the parallel context) or be produced within the band, so
+    // the body function never references the source frame.
+    bool validateParallel() {
+        const HiraParallelPlan &plan = *region_.parallelPlan();
+        if (plan.loop != rootLoop_)
+            return fail(ExportRejectReason::InvalidRegion,
+                        "parallel-root-mismatch");
+        std::set<const HiraNode *> inside;
+        inside.insert(rootLoop_);
+        collectSubtreeNodes(rootLoop_->body(), inside);
+        for (const HiraNode *node : inside) {
+            for (const HiraValue *operand : node->operands()) {
+                if (!operand)
+                    return fail(ExportRejectReason::InvalidRegion,
+                                "parallel-null-operand");
+                if (operand->kind() != ValueKind::Temporary)
+                    continue;
+                if (!inside.count(operand->definingNode()))
+                    return fail(ExportRejectReason::InvalidRegion,
+                                "parallel-operand-escapes-band");
+            }
+        }
+        std::set<std::size_t> reductionIndices;
+        for (const HiraParallelReduction &reduction :
+             plan.reductions) {
+            if (reduction.carriedIndex >=
+                rootLoop_->carriedValues().size())
+                return fail(ExportRejectReason::InvalidRegion,
+                            "parallel-reduction-index");
+            reductionIndices.insert(reduction.carriedIndex);
+        }
+        for (const HiraValue *result : region_.results()) {
+            bool covered = false;
+            for (std::size_t index : reductionIndices)
+                covered |= rootLoop_->carriedValues()[index].result ==
+                           result;
+            if (!covered)
+                return fail(ExportRejectReason::UnsupportedResult,
+                            "parallel-result-not-reduction");
+        }
+        return true;
+    }
+
+    Instruction::OpID parallelReductionOpcode(
+        ParallelReductionOp operation) {
+        switch (operation) {
+        case ParallelReductionOp::BitAnd:
+            return Instruction::And;
+        case ParallelReductionOp::BitOr:
+            return Instruction::Or;
+        case ParallelReductionOp::BitXor:
+            return Instruction::Xor;
+        }
+        return Instruction::Xor;
+    }
+
+    Function *parallelForDeclaration() {
+        for (Function *function : module_->function_list_)
+            if (function->name_ == "__sysy_parallel_for")
+                return function;
+        auto *type = new FunctionType(
+            module_->void_ty_,
+            {module_->int32_ty_, module_->int32_ty_,
+             module_->int32_ty_});
+        return new Function(type, "__sysy_parallel_for", module_);
+    }
+
+    // Lowers the outer band into a worker body function.  The source
+    // function publishes the region parameters through context slots,
+    // calls the dual-core runtime with the full band bounds and folds
+    // each worker's exact-reduction partial in band order after the
+    // join.  Every step after the pre-root emission is infallible: the
+    // transform gate and validateParallel guarantee all values resolve.
+    ExportResult runParallel() {
+        if (!validateParallel())
+            return failure_;
+        const HiraParallelPlan &plan = *region_.parallelPlan();
+
+        BasicBlock *loopEntry = preheader_;
+        if (rootLoopIndex_ != 0) {
+            const unsigned id = nextBlockId_++;
+            entryTarget_ = createBlock("preheader", id);
+            loopEntry = entryTarget_;
+            for (std::size_t index = 0; index < rootLoopIndex_;
+                 ++index)
+                if (!emitStructuredNode(
+                        *region_.rootSequence().nodes()[index],
+                        loopEntry)) {
+                    rollbackNewBlocks();
+                    return failure_;
+                }
+        }
+
+        Value *lowerSource = sourceValueOf(rootLoop_->lowerBound());
+        Value *upperSource = sourceValueOf(rootLoop_->upperBound());
+        std::vector<Value *> reductionInitials;
+        for (const HiraParallelReduction &reduction :
+             plan.reductions)
+            reductionInitials.push_back(sourceValueOf(
+                rootLoop_->carriedValues()[reduction.carriedIndex]
+                    .initial));
+
+        // Worker body: lo/hi arrive as arguments, region parameters
+        // arrive through context slots.
+        const std::string suffix = std::to_string(plan.bodyId);
+        auto *bodyType = new FunctionType(
+            module_->void_ty_,
+            {module_->int32_ty_, module_->int32_ty_});
+        Function *bodyFunction = new Function(
+            bodyType, "__sysy_par_body_" + suffix, module_);
+        Value *loArgument = bodyFunction->arguments_[0];
+        Value *hiArgument = bodyFunction->arguments_[1];
+        auto *bodyEntry = new BasicBlock(module_, "label_par_entry",
+                                         bodyFunction);
+
+        std::vector<GlobalVariable *> contextSlots;
+        std::size_t slotIndex = 0;
+        for (HiraValue *parameter : region_.parameters()) {
+            auto *slot = new GlobalVariable(
+                "__sysy_par_ctx_" + suffix + "_" +
+                    std::to_string(slotIndex++),
+                module_, parameter->type(), false,
+                new ConstantZero(parameter->type()));
+            contextSlots.push_back(slot);
+            auto *loaded = new LoadInst(slot, bodyEntry);
+            bind(parameter, loaded);
+        }
+
+        std::map<std::size_t, std::int64_t> identityInits;
+        std::vector<GlobalVariable *> partialSlots;
+        for (const HiraParallelReduction &reduction :
+             plan.reductions) {
+            identityInits.emplace(reduction.carriedIndex,
+                                  reduction.identity);
+            Type *valueType =
+                rootLoop_->carriedValues()[reduction.carriedIndex]
+                    .iteration->type();
+            const std::string base =
+                "__sysy_par_red_" + suffix + "_" +
+                std::to_string(reduction.carriedIndex);
+            partialSlots.push_back(new GlobalVariable(
+                base + "_0", module_, valueType, false,
+                new ConstantZero(valueType)));
+            partialSlots.push_back(new GlobalVariable(
+                base + "_1", module_, valueType, false,
+                new ConstantZero(valueType)));
+        }
+
+        ParallelRootOverrides overrides;
+        overrides.lower = loArgument;
+        overrides.upper = hiArgument;
+        overrides.identityInits = &identityInits;
+        blockFunction_ = bodyFunction;
+        LoopEmission emission;
+        if (!emitLoop(*rootLoop_, bodyEntry, true, emission,
+                      &overrides))
+            return failure_;
+        blockFunction_ = nullptr;
+
+        // The runtime hands the first chunk to the calling thread and
+        // the second chunk to the worker, so the body tells them apart
+        // by comparing its lo argument against the band's lower bound.
+        Value *bodyLower = value(rootLoop_->lowerBound());
+        auto *isFirstChunk = new ICmpInst(ICmpInst::ICMP_EQ, loArgument,
+                                          bodyLower, emission.exit);
+        for (std::size_t index = 0; index < plan.reductions.size();
+             ++index) {
+            const HiraParallelReduction &reduction =
+                plan.reductions[index];
+            Value *partial = value(
+                rootLoop_->carriedValues()[reduction.carriedIndex]
+                    .result);
+            auto *destination =
+                new SelectInst(isFirstChunk, partialSlots[index * 2],
+                               partialSlots[index * 2 + 1],
+                               emission.exit);
+            new StoreInst(partial, destination, emission.exit);
+        }
+        new ReturnInst(emission.exit);
+
+        // Source side: publish the context, dispatch both workers, then
+        // combine the partials.  Combining in chunk order keeps the
+        // folded value identical to the sequential accumulation for
+        // associative operators.
+        const unsigned callId = nextBlockId_++;
+        BasicBlock *parallelCall = createBlock("par_call", callId);
+        slotIndex = 0;
+        for (HiraValue *parameter : region_.parameters())
+            new StoreInst(sourceValueOf(parameter),
+                          contextSlots[slotIndex++], parallelCall);
+        for (std::size_t index = 0; index < plan.reductions.size();
+             ++index) {
+            Type *valueType =
+                rootLoop_
+                    ->carriedValues()[plan.reductions[index]
+                                          .carriedIndex]
+                    .iteration->type();
+            auto *identity = new ConstantInt(
+                valueType,
+                static_cast<int>(plan.reductions[index].identity));
+            new StoreInst(identity, partialSlots[index * 2],
+                          parallelCall);
+            new StoreInst(identity, partialSlots[index * 2 + 1],
+                          parallelCall);
+        }
+        new CallInst(parallelForDeclaration(),
+                     {new ConstantInt(module_->int32_ty_, plan.bodyId),
+                      lowerSource, upperSource},
+                     parallelCall);
+        for (std::size_t index = 0; index < plan.reductions.size();
+             ++index) {
+            const HiraParallelReduction &reduction =
+                plan.reductions[index];
+            const HiraLoop::CarriedBinding &binding =
+                rootLoop_->carriedValues()[reduction.carriedIndex];
+            auto *first =
+                new LoadInst(partialSlots[index * 2], parallelCall);
+            auto *second = new LoadInst(partialSlots[index * 2 + 1],
+                                        parallelCall);
+            Instruction::OpID opcode =
+                parallelReductionOpcode(reduction.op);
+            auto *foldFirst =
+                new BinaryInst(binding.iteration->type(), opcode,
+                               reductionInitials[index], first,
+                               parallelCall);
+            auto *folded =
+                new BinaryInst(binding.iteration->type(), opcode,
+                               foldFirst, second, parallelCall);
+            bind(binding.result, folded);
+        }
+
+        BasicBlock *regionExit = createBlock("par_join", callId);
+        new BranchInst(regionExit, parallelCall);
+        if (!entryTarget_)
+            entryTarget_ = parallelCall;
+        else
+            new BranchInst(parallelCall, loopEntry);
+
+        // The body function no longer needs the parameter rebinding;
+        // post-band nodes resolve parameters to their source values.
+        for (HiraValue *parameter : region_.parameters())
+            bind(parameter,
+                 region_.sourceMapping().sourceValue(parameter));
+
+        const auto &rootNodes = region_.rootSequence().nodes();
+        for (std::size_t index = rootLoopIndex_ + 1;
+             index < rootNodes.size(); ++index)
+            if (!emitStructuredNode(*rootNodes[index], regionExit)) {
+                rollbackNewBlocks();
+                return failure_;
+            }
+        new BranchInst(oldExit_, regionExit);
+        commit();
+        return ExportResult::success();
+    }
+
     BasicBlock *createBlock(const std::string &role, unsigned id) {
         auto *block = new BasicBlock(
             module_, "label_hira_" + role + "_" + std::to_string(id),
-            function_);
+            blockFunction_ ? blockFunction_ : function_);
         newBlocks_.push_back(block);
         return block;
+    }
+
+    // Resolves a region boundary value for use inside the source
+    // function, independent of any worker-body rebinding.
+    Value *sourceValueOf(HiraValue *hiraValue) {
+        if (!hiraValue)
+            return nullptr;
+        switch (hiraValue->kind()) {
+        case ValueKind::Parameter:
+            return region_.sourceMapping().sourceValue(hiraValue);
+        case ValueKind::IntegerConstant:
+            return new ConstantInt(
+                hiraValue->type(),
+                static_cast<int>(hiraValue->integerValue()));
+        case ValueKind::FloatConstant:
+            return new ConstantFloat(hiraValue->type(),
+                                     hiraValue->floatValue());
+        case ValueKind::Temporary:
+            return value(hiraValue);
+        }
+        return nullptr;
     }
 
     Value *value(HiraValue *hiraValue) {
@@ -324,7 +633,8 @@ private:
     }
 
     bool emitLoop(HiraLoop &loop, BasicBlock *entry,
-                  bool connectEntry, LoopEmission &emission) {
+                  bool connectEntry, LoopEmission &emission,
+                  const ParallelRootOverrides *parallel = nullptr) {
         const unsigned id = nextBlockId_++;
         BasicBlock *header = createBlock("header", id);
         BasicBlock *body = createBlock("body", id);
@@ -339,8 +649,10 @@ private:
             header->setSemFlag(
                 SemFlag::VectorizedEpilogue);
 
-        Value *lower = value(loop.lowerBound());
-        Value *upper = value(loop.upperBound());
+        Value *lower = parallel ? parallel->lower
+                                : value(loop.lowerBound());
+        Value *upper = parallel ? parallel->upper
+                                : value(loop.upperBound());
         if (!lower || !upper)
             return fail(ExportRejectReason::MissingValue,
                         "loop-bound");
@@ -352,8 +664,19 @@ private:
         bind(loop.induction(), inductionPhi);
 
         std::vector<CarriedPhi> carriedPhis;
+        std::size_t bindingIndex = 0;
         for (const auto &binding : loop.carriedValues()) {
-            Value *initial = value(binding.initial);
+            Value *initial = nullptr;
+            if (parallel && parallel->identityInits) {
+                auto identity =
+                    parallel->identityInits->find(bindingIndex);
+                if (identity != parallel->identityInits->end())
+                    initial = new ConstantInt(
+                        binding.iteration->type(),
+                        static_cast<int>(identity->second));
+            }
+            if (!initial)
+                initial = value(binding.initial);
             if (!initial)
                 return fail(ExportRejectReason::MissingValue,
                             "carried-initial");
@@ -363,6 +686,7 @@ private:
             phi->addIncoming(initial, entry);
             bind(binding.iteration, phi);
             carriedPhis.push_back({&binding, phi});
+            ++bindingIndex;
         }
 
         auto *comparison = new ICmpInst(ICmpInst::ICMP_SLT,
@@ -594,13 +918,15 @@ private:
                 block->delete_instr(*it);
         }
         for (BasicBlock *block : newBlocks_)
-            function_->remove_bb(block);
+            if (block->parent_)
+                block->parent_->remove_bb(block);
     }
 
     HiraRegion &region_;
     Loop *sourceLoop_ = nullptr;
     HiraLoop *rootLoop_ = nullptr;
     Function *function_ = nullptr;
+    Function *blockFunction_ = nullptr;
     Module *module_ = nullptr;
     BasicBlock *preheader_ = nullptr;
     BasicBlock *oldHeader_ = nullptr;

@@ -28,6 +28,7 @@
 #include "../../include/mid/hira/polyhedral/statementPartitionAnalysis.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
 #include "../../include/mid/hira/transform/loopDistribution.hpp"
+#include "../../include/mid/hira/transform/loopParallelization.hpp"
 #include "../../include/mid/hira/transform/loopVectorization.hpp"
 #include "../../include/mid/hira/transform/scheduleRealization.hpp"
 #include "../../include/mid/hira/transform/loopTiling.hpp"
@@ -320,6 +321,7 @@ bool selectRegions(Function &function, Loop &loop,
                                     *polyhedralModel.model,
                                     *dependences.dependences,
                                     dependenceFeasibility,
+                                    reductions,
                                     schedules);
                         scheduleParallelismValid =
                             polyhedral::
@@ -327,6 +329,7 @@ bool selectRegions(Function &function, Loop &loop,
                                     *polyhedralModel.model,
                                     *dependences.dependences,
                                     dependenceFeasibility,
+                                    reductions,
                                     schedules,
                                     scheduleParallelism,
                                     scheduleParallelismDetail);
@@ -923,6 +926,57 @@ bool selectRegions(Function &function, Loop &loop,
             }
         }
 
+        if (!distributedRegion &&
+            scheduleParallelismValid &&
+            privatizationValid &&
+            reductionsValid &&
+            scheduleSelectionValid &&
+            transformModel) {
+            const target::A53TargetModel targetModel =
+                target::cortexA53();
+            polyhedral::LoopParallelizationResult
+                parallelized =
+                    polyhedral::parallelizeOuterBand(
+                        *imported.region, *polyhedralModel.model,
+                        schedules, scheduleSelection,
+                        scheduleParallelism, privatization,
+                        reductions, targetModel);
+            if (!parallelized.succeeded()) {
+                if ((debug || dumpPolyhedral) &&
+                    parallelized.error !=
+                        polyhedral::LoopParallelizationError::
+                            OuterSequential) {
+                    std::cerr
+                        << "// polyhedral."
+                           "loop_parallelization"
+                        << " = rejected reason="
+                        << polyhedral::
+                               loopParallelizationErrorName(
+                                   parallelized.error);
+                    if (!parallelized.detail.empty())
+                        std::cerr
+                            << " detail="
+                            << parallelized.detail;
+                    std::cerr << "\n";
+                }
+            } else if (!verifyRegion(
+                           "loop-parallelization")) {
+                return false;
+            } else {
+                if (debug || dumpPolyhedral)
+                    std::cerr
+                        << "// polyhedral."
+                           "loop_parallelization"
+                        << " workers="
+                        << targetModel.evaluationWorkers
+                        << " = realized\n";
+                if (dumpHira)
+                    std::cerr << printHiraRegion(
+                        *imported.region,
+                        function.name_);
+            }
+        }
+
         if (!forceRoundtrip && !imported.region->modified()) {
             for (Loop *child : loop.children)
                 if (selectRegions(
@@ -976,7 +1030,13 @@ bool run(Module *module, AnalysisManager &analysisManager,
     ArgumentAliasAnalysis aliasAnalysis;
     aliasAnalysis.analyze(module);
     bool changed = false;
-    for (Function *function : module->function_list_) {
+    // Worker body functions are appended to the module while regions
+    // are exported; iterate over a snapshot so the export cannot
+    // invalidate the traversal or revisit freshly lowered bodies.
+    std::vector<Function *> functions;
+    for (Function *function : module->function_list_)
+        functions.push_back(function);
+    for (Function *function : functions) {
         if (function->is_declaration())
             continue;
         bool functionChanged = false;

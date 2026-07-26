@@ -24,6 +24,11 @@ struct A53TargetModel {
     std::size_t maxScheduleStates = 128;
     std::size_t maxTileChoicesPerBand = 6;
     std::uint32_t minimumParallelTilesPerWorker = 4;
+    // Steady-state cost of one dual-core dispatch (job handoff, join and
+    // context traffic) approximated in statement executions.  A band is
+    // lowered to workers only when its static work exceeds this cost by
+    // minimumParallelOverheadRatio.
+    std::uint32_t parallelDispatchStatements = 512;
     std::uint32_t minimumParallelOverheadRatio = 8;
 };
 

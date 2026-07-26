@@ -165,6 +165,8 @@ void printNode(std::ostringstream &out, const HiraRegion &region,
         else if (loop->role() ==
                  HiraLoop::Role::ScalarRemainder)
             out << " scalar_remainder";
+        else if (loop->role() == HiraLoop::Role::Parallel)
+            out << " parallel";
         if (Loop *source = region.sourceMapping().sourceLoop(loop))
             out << "  // llvm-loop="
                 << (source->header ? source->header->name_ : "<null>");

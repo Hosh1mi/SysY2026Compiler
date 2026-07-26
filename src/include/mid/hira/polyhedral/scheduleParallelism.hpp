@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dependenceFeasibility.hpp"
+#include "reductionAnalysis.hpp"
 #include "scheduleAnalysis.hpp"
 
 #include <cstdint>
@@ -28,6 +29,7 @@ private:
         const PolyhedralModel &model,
         const DependenceSet &dependences,
         const DependenceFeasibilityResult &feasibility,
+        const ReductionAnalysisResult &reductions,
         const ScheduleCandidateSet &schedules);
 
     std::vector<ScheduleParallelism> schedules_;
@@ -37,11 +39,13 @@ ScheduleParallelismResult analyzeScheduleParallelism(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility,
+    const ReductionAnalysisResult &reductions,
     const ScheduleCandidateSet &schedules);
 bool verifyScheduleParallelism(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility,
+    const ReductionAnalysisResult &reductions,
     const ScheduleCandidateSet &schedules,
     const ScheduleParallelismResult &result,
     std::string &detail);
