@@ -241,6 +241,149 @@ private:
         return AffineExpr::invalid();
     }
 
+    std::vector<AffineExpr> analyzeIntersectedBound(
+        const HiraValue *value, bool upper) {
+        auto *select =
+            value
+                ? dynamic_cast<const HiraComputeOp *>(
+                      value->definingNode())
+                : nullptr;
+        if (!select ||
+            select->computeKind() !=
+                ComputeKind::Select ||
+            select->operands().size() != 3)
+            return {analyze(value)};
+        auto *comparison =
+            dynamic_cast<const HiraComputeOp *>(
+                select->operands()[0]->definingNode());
+        if (!comparison ||
+            comparison->computeKind() !=
+                ComputeKind::ICmp ||
+            comparison->operands().size() != 2)
+            return {analyze(value)};
+        const auto predicate =
+            static_cast<ICmpInst::ICmpOp>(
+                comparison->predicate());
+        const bool less =
+            predicate == ICmpInst::ICMP_SLT ||
+            predicate == ICmpInst::ICMP_SLE;
+        if (!less)
+            return {analyze(value)};
+
+        const HiraValue *left =
+            comparison->operands()[0];
+        const HiraValue *right =
+            comparison->operands()[1];
+        const bool canonical =
+            upper
+                ? select->operands()[1] == left &&
+                      select->operands()[2] == right
+                : select->operands()[1] == right &&
+                      select->operands()[2] == left;
+        if (!canonical)
+            return {analyze(value)};
+        AffineExpr first = analyze(left);
+        AffineExpr second = analyze(right);
+        if (!first.valid() || !second.valid())
+            return {AffineExpr::invalid()};
+        return {std::move(first), std::move(second)};
+    }
+
+    std::optional<AffineVariable> singleVariable(
+        const AffineExpr &expression,
+        AffineVariableKind kind) const {
+        if (!expression.valid() ||
+            expression.constantTerm() != 0 ||
+            expression.coefficients().size() != 1)
+            return std::nullopt;
+        const auto &[variable, coefficient] =
+            *expression.coefficients().begin();
+        if (variable.kind != kind || coefficient != 1)
+            return std::nullopt;
+        return variable;
+    }
+
+    bool isCanonicalColumn(
+        const AffineExpr &column,
+        AffineVariable extent) const {
+        auto dimension = singleVariable(
+            column, AffineVariableKind::Dimension);
+        if (!dimension ||
+            extent.kind != AffineVariableKind::Symbol)
+            return false;
+        for (const IterationDomain &domain : model_->domains_) {
+            if (!(domain.dimension == *dimension) ||
+                !domain.loop)
+                continue;
+            const HiraValue *lower = domain.loop->lowerBound();
+            const HiraValue *upper = domain.loop->upperBound();
+            const HiraValue *step = domain.loop->step();
+            return lower && upper && step &&
+                   lower->kind() ==
+                       ValueKind::IntegerConstant &&
+                   lower->integerValue() == 0 &&
+                   step->kind() ==
+                       ValueKind::IntegerConstant &&
+                   step->integerValue() == 1 &&
+                   model_->space_.source(extent) == upper;
+        }
+        return false;
+    }
+
+    bool matchRowMajorIndex(
+        const HiraValue *value, AffineExpr &row,
+        AffineExpr &column, AffineVariable &extent) {
+        auto *sum = value
+                        ? dynamic_cast<const HiraComputeOp *>(
+                              value->definingNode())
+                        : nullptr;
+        if (!sum ||
+            sum->computeKind() != ComputeKind::Add ||
+            sum->operands().size() != 2)
+            return false;
+
+        for (unsigned productOperand = 0;
+             productOperand != 2; ++productOperand) {
+            const HiraValue *productValue =
+                sum->operands()[productOperand];
+            auto *product =
+                productValue
+                    ? dynamic_cast<const HiraComputeOp *>(
+                          productValue->definingNode())
+                    : nullptr;
+            if (!product ||
+                product->computeKind() != ComputeKind::Mul ||
+                product->operands().size() != 2)
+                continue;
+
+            AffineExpr candidateColumn =
+                analyze(sum->operands()[1 - productOperand]);
+            if (!candidateColumn.valid())
+                continue;
+            for (unsigned extentOperand = 0;
+                 extentOperand != 2; ++extentOperand) {
+                AffineExpr candidateExtent =
+                    analyze(product->operands()[extentOperand]);
+                auto extentVariable = singleVariable(
+                    candidateExtent,
+                    AffineVariableKind::Symbol);
+                AffineExpr candidateRow =
+                    analyze(product->operands()[
+                        1 - extentOperand]);
+                if (!extentVariable ||
+                    !candidateRow.valid() ||
+                    !isCanonicalColumn(
+                        candidateColumn, *extentVariable))
+                    continue;
+                row = std::move(candidateRow);
+                column = std::move(candidateColumn);
+                extent = *extentVariable;
+                return true;
+            }
+        }
+        return false;
+    }
+
     enum class ConditionConstraintStatus {
         Exact,
         Opaque,
@@ -321,7 +464,9 @@ private:
 
     bool resolveAddress(const HiraValue *address,
                         const HiraValue *&base,
-                        std::vector<AffineExpr> &subscripts) {
+                        std::vector<AffineExpr> &subscripts,
+                        std::optional<AffineVariable>
+                            &linearizedExtent) {
         if (!address)
             return reject(PolyhedralBuildError::UnsupportedAddress,
                           "null-address");
@@ -356,15 +501,35 @@ private:
         // subscript into a chain of GEPs.  Preserve every index while
         // recovering the original memory object so linear stride and
         // dependence reasoning see the complete affine address.
-        if (!resolveAddress(candidateBase, base, subscripts))
+        if (!resolveAddress(candidateBase, base, subscripts,
+                            linearizedExtent))
             return false;
         for (std::size_t index = 1;
              index < addressCompute->operands().size(); ++index) {
             AffineExpr subscript =
                 analyze(addressCompute->operands()[index]);
-            if (!subscript.valid())
+            if (!subscript.valid()) {
+                AffineExpr row = AffineExpr::invalid();
+                AffineExpr column = AffineExpr::invalid();
+                AffineVariable extent;
+                if (linearizedExtent ||
+                    !subscripts.empty() ||
+                    index + 1 !=
+                        addressCompute->operands().size() ||
+                    !matchRowMajorIndex(
+                        addressCompute->operands()[index],
+                        row, column, extent))
+                    return reject(
+                        PolyhedralBuildError::NonAffineAccess,
+                        "non-affine-gep-index");
+                subscripts.push_back(std::move(row));
+                subscripts.push_back(std::move(column));
+                linearizedExtent = extent;
+                continue;
+            }
+            if (linearizedExtent)
                 return reject(PolyhedralBuildError::NonAffineAccess,
-                              "non-affine-gep-index");
+                              "index-after-linearized-access");
             subscripts.push_back(std::move(subscript));
         }
         return true;
@@ -405,7 +570,9 @@ private:
                    const HiraValue *address) {
         const HiraValue *base = nullptr;
         std::vector<AffineExpr> subscripts;
-        if (!resolveAddress(address, base, subscripts)) {
+        std::optional<AffineVariable> linearizedExtent;
+        if (!resolveAddress(address, base, subscripts,
+                            linearizedExtent)) {
             if (failure_.detail.empty())
                 failure_.detail = statementDetail(statement);
             else
@@ -416,7 +583,7 @@ private:
         }
         model_->accesses_.push_back(
             {statement, kind, memoryObject(base),
-             std::move(subscripts)});
+             std::move(subscripts), linearizedExtent});
         return true;
     }
 
@@ -655,13 +822,27 @@ private:
         const std::vector<AffineConstraint> &outerConstraints,
         const std::vector<ScheduleComponent> &outerSchedule,
         DomainPrecision domainPrecision) {
-        AffineExpr lower = analyze(loop.lowerBound());
-        if (!lower.valid())
+        std::vector<AffineExpr> lowerBounds =
+            analyzeIntersectedBound(
+                loop.lowerBound(), false);
+        if (lowerBounds.empty() ||
+            std::any_of(
+                lowerBounds.begin(), lowerBounds.end(),
+                [](const AffineExpr &bound) {
+                    return !bound.valid();
+                }))
             return reject(PolyhedralBuildError::NonAffineLowerBound,
                           "loop-h" +
                               std::to_string(loop.induction()->id()));
-        AffineExpr upper = analyze(loop.upperBound());
-        if (!upper.valid())
+        std::vector<AffineExpr> upperBounds =
+            analyzeIntersectedBound(
+                loop.upperBound(), true);
+        if (upperBounds.empty() ||
+            std::any_of(
+                upperBounds.begin(), upperBounds.end(),
+                [](const AffineExpr &bound) {
+                    return !bound.valid();
+                }))
             return reject(PolyhedralBuildError::NonAffineUpperBound,
                           "loop-h" +
                               std::to_string(loop.induction()->id()));
@@ -669,13 +850,6 @@ private:
         AffineVariable dimension =
             model_->space_.addDimension(loop.induction());
         AffineExpr induction = AffineExpr::variable(dimension);
-        AffineExpr lowerConstraint = induction.subtract(lower);
-        AffineExpr upperConstraint =
-            upper.subtract(induction).add(AffineExpr::constant(-1));
-        if (!lowerConstraint.valid() || !upperConstraint.valid())
-            return reject(PolyhedralBuildError::ConstraintOverflow,
-                          "loop-h" +
-                              std::to_string(loop.induction()->id()));
 
         IterationDomain domain;
         domain.loop = &loop;
@@ -683,12 +857,33 @@ private:
         domain.dimensions = outerDimensions;
         domain.dimensions.push_back(dimension);
         domain.constraints = outerConstraints;
-        domain.constraints.push_back(
-            {std::move(lowerConstraint),
-             AffineRelation::GreaterEqualZero});
-        domain.constraints.push_back(
-            {std::move(upperConstraint),
-             AffineRelation::GreaterEqualZero});
+        for (const AffineExpr &lower : lowerBounds) {
+            AffineExpr lowerConstraint =
+                induction.subtract(lower);
+            if (!lowerConstraint.valid())
+                return reject(
+                    PolyhedralBuildError::ConstraintOverflow,
+                    "loop-h" +
+                        std::to_string(
+                            loop.induction()->id()));
+            domain.constraints.push_back(
+                {std::move(lowerConstraint),
+                 AffineRelation::GreaterEqualZero});
+        }
+        for (const AffineExpr &upper : upperBounds) {
+            AffineExpr upperConstraint =
+                upper.subtract(induction).add(
+                    AffineExpr::constant(-1));
+            if (!upperConstraint.valid())
+                return reject(
+                    PolyhedralBuildError::ConstraintOverflow,
+                    "loop-h" +
+                        std::to_string(
+                            loop.induction()->id()));
+            domain.constraints.push_back(
+                {std::move(upperConstraint),
+                 AffineRelation::GreaterEqualZero});
+        }
         domain.precision = domainPrecision;
         model_->domains_.push_back(domain);
         model_->proofObligations_.push_back(
@@ -1025,7 +1220,11 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
                 out << ", ";
             out << printExpression(access.subscripts[index]);
         }
-        out << "]\n";
+        out << "]";
+        if (access.linearizedExtent)
+            out << " row_major_extent="
+                << variableName(*access.linearizedExtent);
+        out << "\n";
     }
 
     for (const ScalarFlowRelation &flow : model.scalarFlows()) {

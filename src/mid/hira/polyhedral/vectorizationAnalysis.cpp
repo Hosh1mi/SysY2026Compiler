@@ -102,6 +102,8 @@ bool isSupportedVectorCompute(
     case ComputeKind::FAdd:
     case ComputeKind::FSub:
     case ComputeKind::FMul:
+    case ComputeKind::ICmp:
+    case ComputeKind::Select:
     case ComputeKind::GetElementPtr:
         return true;
     default:

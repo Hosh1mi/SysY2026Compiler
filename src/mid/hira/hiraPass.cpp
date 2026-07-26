@@ -27,6 +27,8 @@
 #include "../../include/mid/hira/polyhedral/statementDependenceGraph.hpp"
 #include "../../include/mid/hira/polyhedral/statementPartitionAnalysis.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
+#include "../../include/mid/hira/transform/conditionalIfConversion.hpp"
+#include "../../include/mid/hira/transform/affineDomainSimplification.hpp"
 #include "../../include/mid/hira/transform/loopAddressRecurrence.hpp"
 #include "../../include/mid/hira/transform/loopRepetitionFolding.hpp"
 #include "../../include/mid/hira/transform/statementPartitionRealization.hpp"
@@ -87,7 +89,8 @@ bool selectRegions(Function &function, Loop &loop,
                    const LoopInfo &loopInfo, bool debug,
                    bool forceRoundtrip,
                    bool dumpHira, bool dumpPolyhedral,
-                   const ArgumentAliasAnalysis &aliasAnalysis) {
+                   const ArgumentAliasAnalysis &aliasAnalysis,
+                   bool allowParallelization) {
     CandidateResult result = analyzeHiraCandidate(loop, loopInfo);
     if (!result.accepted()) {
         if (debug)
@@ -95,7 +98,8 @@ bool selectRegions(Function &function, Loop &loop,
         for (Loop *child : loop.children) {
             if (selectRegions(function, *child, loopInfo, debug,
                               forceRoundtrip, dumpHira,
-                              dumpPolyhedral, aliasAnalysis))
+                              dumpPolyhedral, aliasAnalysis,
+                              allowParallelization))
                 return true;
         }
         return false;
@@ -131,11 +135,17 @@ bool selectRegions(Function &function, Loop &loop,
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }
+        bool interiorDomainsExtracted =
+            extractAffineInteriorDomains(*imported.region);
+        bool conditionalsConverted =
+            convertPureConditionals(*imported.region);
         bool invariantsHoisted = hoistLoopInvariants(
             *imported.region, &aliasAnalysis);
         bool repetitionsFolded =
             foldRepeatedAdditiveLoops(*imported.region);
         bool optimized =
+            conditionalsConverted ||
+            interiorDomainsExtracted ||
             invariantsHoisted || repetitionsFolded;
         if (!verifyRegion("transform"))
             return false;
@@ -155,6 +165,10 @@ bool selectRegions(Function &function, Loop &loop,
             };
             printPass("loop-invariant-code-motion",
                       invariantsHoisted);
+            printPass("conditional-if-conversion",
+                      conditionalsConverted);
+            printPass("affine-interior-domain",
+                      interiorDomainsExtracted);
             printPass("loop-repetition-folding",
                       repetitionsFolded);
             std::cerr << "\n";
@@ -866,6 +880,7 @@ bool selectRegions(Function &function, Loop &loop,
                 bool mappingValid = true;
                 bool hasReuse = false;
                 std::size_t tiledDimensions = 0;
+                std::size_t reorderableTiledDimensions = 0;
                 for (std::size_t index = 0;
                      index < footprint.dimensions.size();
                      ++index) {
@@ -886,11 +901,25 @@ bool selectRegions(Function &function, Loop &loop,
                     hasReuse |= hasTemporalReuse(
                         *transformModel,
                         *transformedDimension);
-                    tiledDimensions +=
-                        footprint.tileSizes[index] > 1;
+                    if (footprint.tileSizes[index] > 1) {
+                        ++tiledDimensions;
+                        for (const polyhedral::IterationDomain
+                                 &domain :
+                             transformModel->domains())
+                            if (domain.dimension ==
+                                    *transformedDimension &&
+                                domain.loop &&
+                                domain.loop
+                                    ->carriedValues()
+                                    .empty()) {
+                                ++reorderableTiledDimensions;
+                                break;
+                            }
+                    }
                 }
                 if (mappingValid && hasReuse &&
-                    tiledDimensions >= 2) {
+                    tiledDimensions >= 2 &&
+                    reorderableTiledDimensions >= 2) {
                     polyhedral::LoopTilingResult tiling =
                         polyhedral::tileLoopBand(
                             *imported.region, *transformModel,
@@ -926,6 +955,14 @@ bool selectRegions(Function &function, Loop &loop,
                         std::cerr << printHiraRegion(
                             *imported.region,
                             function.name_);
+                } else if ((debug || dumpPolyhedral) &&
+                           mappingValid && hasReuse &&
+                           tiledDimensions >= 2 &&
+                           reorderableTiledDimensions < 2) {
+                    std::cerr
+                        << "// polyhedral.loop_tiling"
+                        << " = rejected reason="
+                        << "insufficient-spatial-tile-rank\n";
                 }
             }
         }
@@ -942,6 +979,18 @@ bool selectRegions(Function &function, Loop &loop,
                     polyhedral::
                         VectorizationKind::Vectorizable &&
                 selectedVectorization.dimension) {
+                const bool selectedDimensionIsParallelOuter =
+                    allowParallelization &&
+                    scheduleParallelismValid &&
+                    scheduleSelection.selected() <
+                        scheduleParallelism.schedules().size() &&
+                    scheduleParallelism
+                        .schedules()[scheduleSelection.selected()]
+                        .outerParallel &&
+                    scheduleParallelism
+                        .schedules()[scheduleSelection.selected()]
+                        .outerDimension ==
+                        selectedVectorization.dimension;
                 const HiraValue *source =
                     polyhedralModel.model->space().source(
                         *selectedVectorization.dimension);
@@ -950,7 +999,31 @@ bool selectRegions(Function &function, Loop &loop,
                         ? transformModel->space()
                               .variableFor(source)
                         : std::nullopt;
-                if (transformedDimension) {
+                bool profitableParallelBand = false;
+                if (selectedDimensionIsParallelOuter &&
+                    transformedDimension) {
+                    const HiraValue *transformedSource =
+                        transformModel->space().source(
+                            *transformedDimension);
+                    for (const auto &node :
+                         imported.region->rootSequence().nodes()) {
+                        auto *candidate =
+                            dynamic_cast<HiraLoop *>(node.get());
+                        if (candidate &&
+                            candidate->induction() ==
+                                transformedSource) {
+                            profitableParallelBand =
+                                polyhedral::
+                                    isParallelBandProfitable(
+                                        *candidate,
+                                        target::cortexA53());
+                            break;
+                        }
+                    }
+                }
+                if (transformedDimension &&
+                    !(selectedDimensionIsParallelOuter &&
+                      profitableParallelBand)) {
                     polyhedral::LoopVectorizationResult
                         vectorized =
                             polyhedral::vectorizeLoop(
@@ -1118,6 +1191,7 @@ bool selectRegions(Function &function, Loop &loop,
         }
 
         if (!distributedRegion &&
+            allowParallelization &&
             scheduleParallelismValid &&
             privatizationValid &&
             reductionsValid &&
@@ -1173,7 +1247,7 @@ bool selectRegions(Function &function, Loop &loop,
                 if (selectRegions(
                         function, *child, loopInfo, debug,
                         forceRoundtrip, dumpHira, dumpPolyhedral,
-                        aliasAnalysis))
+                        aliasAnalysis, allowParallelization))
                     return true;
             return false;
         }
@@ -1206,7 +1280,8 @@ bool selectRegions(Function &function, Loop &loop,
     for (Loop *child : loop.children) {
         if (selectRegions(function, *child, loopInfo, debug,
                           forceRoundtrip, dumpHira,
-                          dumpPolyhedral, aliasAnalysis))
+                          dumpPolyhedral, aliasAnalysis,
+                          allowParallelization))
             return true;
     }
     return false;
@@ -1239,7 +1314,7 @@ bool run(Module *module, AnalysisManager &analysisManager,
                 if (selectRegions(
                         *function, *loop, loopInfo, debug,
                         forceRoundtrip, dumpHira,
-                        dumpPolyhedral, aliasAnalysis)) {
+                        dumpPolyhedral, aliasAnalysis, true)) {
                     changed = true;
                     functionChanged = true;
                     break;
@@ -1250,6 +1325,39 @@ bool run(Module *module, AnalysisManager &analysisManager,
             // Forced round-trip is a conversion diagnostic, not an
             // optimization fixed-point mode.
         } while (functionChanged && !forceRoundtrip);
+    }
+
+    // Parallel bodies are deliberately revisited only after all source
+    // regions have been exported.  Their semantic marker, rather than
+    // their generated name, selects this phase.  Parallelization is
+    // disabled here so a worker can acquire a SIMD main loop and scalar
+    // tail over its exact [lo, hi) chunk without recursively dispatching.
+    std::vector<Function *> workers;
+    for (Function *function : module->function_list_)
+        if (function->isPendingHiraParallelWorker())
+            workers.push_back(function);
+    if (!workers.empty())
+        aliasAnalysis.analyze(module);
+    for (Function *function : workers) {
+        bool functionChanged = false;
+        do {
+            functionChanged = false;
+            LoopInfo &loopInfo =
+                analysisManager.getLoopInfo(function);
+            for (Loop *loop : loopInfo.topLevelLoops()) {
+                if (selectRegions(
+                        *function, *loop, loopInfo, debug,
+                        forceRoundtrip, dumpHira,
+                        dumpPolyhedral, aliasAnalysis, false)) {
+                    changed = true;
+                    functionChanged = true;
+                    break;
+                }
+            }
+            if (functionChanged)
+                analysisManager.clear(function);
+        } while (functionChanged && !forceRoundtrip);
+        function->markHiraParallelWorkerOptimized();
     }
     return changed;
 }

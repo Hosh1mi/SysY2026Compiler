@@ -89,6 +89,8 @@ bool isVectorCompute(ComputeKind kind) {
     case ComputeKind::FAdd:
     case ComputeKind::FSub:
     case ComputeKind::FMul:
+    case ComputeKind::ICmp:
+    case ComputeKind::Select:
         return true;
     default:
         return false;
@@ -305,6 +307,32 @@ LoopVectorizationResult vectorizeLoop(
         }
     }
 
+    std::set<const HiraValue *> varyingData;
+    for (const HiraNode *node : payload) {
+        if (auto *load =
+                dynamic_cast<const HiraLoad *>(node)) {
+            if (accessModes.at(node).varying)
+                varyingData.insert(
+                    load->results().front());
+            continue;
+        }
+        auto *compute =
+            dynamic_cast<const HiraComputeOp *>(node);
+        if (!compute || addressNodes.count(node))
+            continue;
+        bool varying = false;
+        for (const HiraValue *operand : compute->operands())
+            varying |= varyingData.count(operand);
+        if (compute->computeKind() == ComputeKind::Select &&
+            varying &&
+            !varyingData.count(compute->operands().front()))
+            return reject(
+                LoopVectorizationError::UnsupportedBody,
+                "non-vector-select-condition");
+        if (varying)
+            varyingData.insert(compute->results().front());
+    }
+
     for (const HiraNode *node : payload) {
         auto *compute =
             dynamic_cast<const HiraComputeOp *>(node);
@@ -454,8 +482,11 @@ LoopVectorizationResult vectorizeLoop(
             }
             Type *resultType =
                 vectorResult
-                    ? vectorType(
-                          compute->results().front()->type())
+                    ? (compute->computeKind() ==
+                               ComputeKind::ICmp
+                           ? vectorType(module->int32_ty_)
+                           : vectorType(
+                                 compute->results().front()->type()))
                     : compute->results().front()->type();
             HiraValue *result =
                 region.createValue(resultType);

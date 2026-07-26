@@ -17,6 +17,25 @@ bool isIntegerWidth(const HiraValue *value, unsigned width) {
     return integer && integer->num_bits_ == width;
 }
 
+bool isVectorMaskFor(const HiraValue *mask,
+                     const HiraValue *value) {
+    auto *maskType =
+        mask ? dynamic_cast<VectorType *>(mask->type())
+             : nullptr;
+    auto *valueType =
+        value ? dynamic_cast<VectorType *>(value->type())
+              : nullptr;
+    auto *element =
+        maskType
+            ? dynamic_cast<IntegerType *>(
+                  maskType->contained_)
+            : nullptr;
+    return maskType && valueType && element &&
+           element->num_bits_ == 32 &&
+           maskType->num_elements_ ==
+               valueType->num_elements_;
+}
+
 bool isConstant(const HiraValue *value) {
     return value &&
            (value->kind() == ValueKind::IntegerConstant ||
@@ -147,14 +166,30 @@ private:
 
         HiraValue *result = compute.results().front();
         if (compute.computeKind() == ComputeKind::ICmp) {
+            auto *operandVector =
+                dynamic_cast<VectorType *>(
+                    compute.operands()[0]->type());
+            auto *resultVector =
+                dynamic_cast<VectorType *>(
+                    result->type());
             if (!isValidPredicate(compute.predicate()) ||
-                !isIntegerWidth(result, 1) ||
                 compute.operands()[0]->type() !=
-                    compute.operands()[1]->type())
+                    compute.operands()[1]->type() ||
+                ((!operandVector &&
+                  !isIntegerWidth(result, 1)) ||
+                 (operandVector &&
+                  (!resultVector ||
+                   !isVectorMaskFor(
+                       result,
+                       compute.operands()[0])))))
                 return reject(HiraVerifyError::InvalidNode,
                               "invalid-icmp-types");
         } else if (compute.computeKind() == ComputeKind::Select) {
-            if (!isIntegerWidth(compute.operands()[0], 1) ||
+            const bool validCondition =
+                isIntegerWidth(compute.operands()[0], 1) ||
+                isVectorMaskFor(compute.operands()[0],
+                                result);
+            if (!validCondition ||
                 result->type() != compute.operands()[1]->type() ||
                 result->type() != compute.operands()[2]->type())
                 return reject(HiraVerifyError::InvalidNode,

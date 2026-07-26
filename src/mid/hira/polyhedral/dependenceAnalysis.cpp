@@ -387,7 +387,9 @@ private:
                     continue;
                 }
                 if (source.subscripts.size() !=
-                    sink.subscripts.size()) {
+                        sink.subscripts.size() ||
+                    source.linearizedExtent !=
+                        sink.linearizedExtent) {
                     relation.precision =
                         DependencePrecision::ConservativeShape;
                     continue;

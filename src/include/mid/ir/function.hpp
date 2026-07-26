@@ -48,6 +48,21 @@ public:
     void add_basic_block(BasicBlock* bb) { basic_blocks_.push_back(bb); invalidateDominatorInfo(); }
     Type* get_return_type() const { return static_cast<FunctionType*>(type_)->result_; }
     bool is_declaration() { return basic_blocks_.empty(); }  // 无基本块→仅为声明
+    enum class HiraWorkerState {
+        None,
+        Pending,
+        Optimized,
+    };
+    void markHiraParallelWorker() {
+        hiraWorkerState_ = HiraWorkerState::Pending;
+    }
+    bool isPendingHiraParallelWorker() const {
+        return hiraWorkerState_ == HiraWorkerState::Pending;
+    }
+    void markHiraParallelWorkerOptimized() {
+        if (hiraWorkerState_ == HiraWorkerState::Pending)
+            hiraWorkerState_ = HiraWorkerState::Optimized;
+    }
     void set_instr_name();       // 统一命名所有未命名的指令
     void remove_bb(BasicBlock* bb);
     BasicBlock* getRetBB();      // 获取唯一 return 基本块
@@ -68,4 +83,5 @@ public:
 private:
     void computeDominatorInfo();
     std::unique_ptr<DominatorInfo> domInfo_;
+    HiraWorkerState hiraWorkerState_ = HiraWorkerState::None;
 };

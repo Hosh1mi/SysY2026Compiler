@@ -11,10 +11,15 @@
 namespace hira {
 
 class HiraRegion;
+class HiraLoop;
 
 namespace polyhedral {
 
 class PolyhedralModel;
+
+bool isParallelBandProfitable(
+    const HiraLoop &band,
+    const target::A53TargetModel &target);
 
 enum class LoopParallelizationError {
     None,

@@ -111,6 +111,37 @@ std::optional<std::int64_t> analyzeLinearAccessStride(
     // linearized stride is exactly zero.
     if (access.subscripts.empty())
         return 0;
+    if (access.linearizedExtent) {
+        if (access.subscripts.size() != 2)
+            return std::nullopt;
+        auto elementSize =
+            analyzeAccessElementSize(model, access);
+        if (!elementSize)
+            return std::nullopt;
+        auto row = access.subscripts[0].coefficients().find(
+            dimension);
+        if (row !=
+                access.subscripts[0].coefficients().end() &&
+            row->second != 0)
+            return std::nullopt;
+        auto column =
+            access.subscripts[1].coefficients().find(dimension);
+        WideInt stride =
+            column ==
+                    access.subscripts[1].coefficients().end()
+                ? 0
+                : static_cast<WideInt>(column->second) *
+                      *elementSize;
+        WideUInt magnitude =
+            stride < 0
+                ? static_cast<WideUInt>(-(stride + 1)) + 1
+                : static_cast<WideUInt>(stride);
+        if (magnitude >
+            static_cast<WideUInt>(
+                std::numeric_limits<std::int64_t>::max()))
+            return std::nullopt;
+        return static_cast<std::int64_t>(magnitude);
+    }
     auto weights = subscriptWeights(
         model.memoryObjects()[access.object],
         access.subscripts.size());
@@ -157,6 +188,12 @@ std::optional<std::int64_t> analyzeAccessElementSize(
             : nullptr;
     if (!pointer)
         return std::nullopt;
+    if (access.linearizedExtent) {
+        auto size = typeSize(pointer->contained_);
+        if (!size || *size > kMaxSupportedSize)
+            return std::nullopt;
+        return static_cast<std::int64_t>(*size);
+    }
     if (access.subscripts.empty()) {
         auto size = typeSize(pointer->contained_);
         if (!size || *size > kMaxSupportedSize)

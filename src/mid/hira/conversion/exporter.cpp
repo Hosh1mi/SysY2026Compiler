@@ -432,6 +432,11 @@ private:
         std::set<const HiraNode *> inside;
         inside.insert(rootLoop_);
         collectSubtreeNodes(rootLoop_->body(), inside);
+        std::set<const HiraNode *> availablePrefix;
+        const auto &rootNodes = region_.rootSequence().nodes();
+        for (std::size_t index = 0; index < rootLoopIndex_; ++index)
+            availablePrefix.insert(rootNodes[index].get());
+        std::set<const HiraValue *> captured;
         for (const HiraNode *node : inside) {
             for (const HiraValue *operand : node->operands()) {
                 if (!operand)
@@ -439,9 +444,15 @@ private:
                                 "parallel-null-operand");
                 if (operand->kind() != ValueKind::Temporary)
                     continue;
-                if (!inside.count(operand->definingNode()))
+                if (inside.count(operand->definingNode()))
+                    continue;
+                if (!availablePrefix.count(
+                        operand->definingNode()))
                     return fail(ExportRejectReason::InvalidRegion,
                                 "parallel-operand-escapes-band");
+                if (captured.insert(operand).second)
+                    parallelCaptures_.push_back(
+                        const_cast<HiraValue *>(operand));
             }
         }
         std::set<std::size_t> reductionIndices;
@@ -517,6 +528,9 @@ private:
 
         Value *lowerSource = sourceValueOf(rootLoop_->lowerBound());
         Value *upperSource = sourceValueOf(rootLoop_->upperBound());
+        std::map<HiraValue *, Value *> captureSources;
+        for (HiraValue *capture : parallelCaptures_)
+            captureSources[capture] = sourceValueOf(capture);
         std::vector<Value *> reductionInitials;
         for (const HiraParallelReduction &reduction :
              plan.reductions)
@@ -532,6 +546,7 @@ private:
             {module_->int32_ty_, module_->int32_ty_});
         Function *bodyFunction = new Function(
             bodyType, "__sysy_par_body_" + suffix, module_);
+        bodyFunction->markHiraParallelWorker();
         Value *loArgument = bodyFunction->arguments_[0];
         Value *hiArgument = bodyFunction->arguments_[1];
         auto *bodyEntry = new BasicBlock(module_, "label_par_entry",
@@ -574,6 +589,16 @@ private:
             contextSlots[parameter] = slot;
             auto *loaded = new LoadInst(slot, bodyEntry);
             bind(parameter, loaded);
+        }
+        for (HiraValue *capture : parallelCaptures_) {
+            auto *slot = new GlobalVariable(
+                "__sysy_par_ctx_" + suffix + "_" +
+                    std::to_string(slotIndex++),
+                module_, capture->type(), false,
+                new ConstantZero(capture->type()));
+            contextSlots[capture] = slot;
+            auto *loaded = new LoadInst(slot, bodyEntry);
+            bind(capture, loaded);
         }
 
         std::map<std::size_t, std::int64_t> identityInits;
@@ -641,6 +666,10 @@ private:
             new StoreInst(sourceValueOf(parameter),
                           slot->second, parallelCall);
         }
+        for (HiraValue *capture : parallelCaptures_)
+            new StoreInst(captureSources.at(capture),
+                          contextSlots.at(capture),
+                          parallelCall);
         for (std::size_t index = 0; index < plan.reductions.size();
              ++index) {
             Type *valueType =
@@ -694,6 +723,8 @@ private:
         for (HiraValue *parameter : region_.parameters())
             bind(parameter,
                  region_.sourceMapping().sourceValue(parameter));
+        for (HiraValue *capture : parallelCaptures_)
+            bind(capture, captureSources.at(capture));
 
         const auto &rootNodes = region_.rootSequence().nodes();
         for (std::size_t index = rootLoopIndex_ + 1;
@@ -1136,6 +1167,7 @@ private:
     std::size_t rootLoopIndex_ = 0;
     std::vector<BasicBlock *> newBlocks_;
     std::vector<ExitPhiRewrite> exitPhiRewrites_;
+    std::vector<HiraValue *> parallelCaptures_;
     std::map<HiraValue *, Value *> values_;
     ExportResult failure_;
 

@@ -311,6 +311,14 @@ verifyPolyhedralModel(const PolyhedralModel &model) {
                 return fail(PolyhedralVerifyError::InvalidAccess,
                             result.detail);
         }
+        if (access.linearizedExtent &&
+            (access.subscripts.size() != 2 ||
+             access.linearizedExtent->kind !=
+                 AffineVariableKind::Symbol ||
+             !model.space().source(
+                 *access.linearizedExtent)))
+            return fail(PolyhedralVerifyError::InvalidAccess,
+                        "invalid-linearized-extent");
         ++accessCounts[access.statement];
     }
 

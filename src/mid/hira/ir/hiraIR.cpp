@@ -26,6 +26,17 @@ void HiraNode::replaceOperand(std::size_t index,
     operands_[index] = value;
 }
 
+void HiraNode::replaceResult(std::size_t index,
+                             HiraValue *value) {
+    assert(index < results_.size() && value &&
+           !value->definingNode_ &&
+           "replacement result must be undefined");
+    if (results_[index]->definingNode_ == this)
+        results_[index]->definingNode_ = nullptr;
+    results_[index] = value;
+    value->definingNode_ = this;
+}
+
 void HiraNode::clearResults() {
     for (HiraValue *value : results_) {
         if (value->definingNode_ == this)
@@ -80,6 +91,13 @@ void HiraLoop::setCarriedInitial(std::size_t index,
     assert(index < carriedValues_.size() && value);
     carriedValues_[index].initial = value;
     replaceOperand(3 + index, value);
+}
+
+void HiraLoop::setCarriedResult(std::size_t index,
+                                HiraValue *value) {
+    assert(index < carriedValues_.size() && value);
+    carriedValues_[index].result = value;
+    replaceResult(index * 2 + 2, value);
 }
 
 void HiraLoop::setCarriedYield(std::size_t index, HiraValue *value) {

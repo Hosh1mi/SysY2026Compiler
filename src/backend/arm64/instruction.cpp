@@ -645,6 +645,7 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
 
         // Skip compare if its only user is a Select (Select emits its own cmp)
         if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+            !isVector(inst->type_) &&
             inst->use_list_.size() == 1) {
             auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
             if (user) continue; // Select will emit cmp + csel
@@ -1311,6 +1312,73 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto *icmp = static_cast<ICmpInst*>(inst);
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+        if (isVector(v1->type_)) {
+            std::string lhs = loadVector(v1);
+            std::string rhs = loadVector(v2);
+            std::string destination =
+                hasAssignedReg(inst)
+                    ? assignedReg(inst)
+                    : allocNEONReg();
+            const char *opcode = nullptr;
+            bool reverse = false;
+            bool invert = false;
+            switch (icmp->icmp_op_) {
+            case ICmpInst::ICMP_EQ:
+                opcode = "cmeq";
+                break;
+            case ICmpInst::ICMP_NE:
+                opcode = "cmeq";
+                invert = true;
+                break;
+            case ICmpInst::ICMP_SGT:
+                opcode = "cmgt";
+                break;
+            case ICmpInst::ICMP_SGE:
+                opcode = "cmge";
+                break;
+            case ICmpInst::ICMP_SLT:
+                opcode = "cmgt";
+                reverse = true;
+                break;
+            case ICmpInst::ICMP_SLE:
+                opcode = "cmge";
+                reverse = true;
+                break;
+            case ICmpInst::ICMP_UGT:
+                opcode = "cmhi";
+                break;
+            case ICmpInst::ICMP_UGE:
+                opcode = "cmhs";
+                break;
+            case ICmpInst::ICMP_ULT:
+                opcode = "cmhi";
+                reverse = true;
+                break;
+            case ICmpInst::ICMP_ULE:
+                opcode = "cmhs";
+                reverse = true;
+                break;
+            }
+            const std::string &left =
+                reverse ? rhs : lhs;
+            const std::string &right =
+                reverse ? lhs : rhs;
+            emitRawAluMachine(
+                "\t" + std::string(opcode) + " " +
+                    destination + ".4s, " + left +
+                    ".4s, " + right + ".4s",
+                destination, {left, right},
+                MOpcode::Neon);
+            if (invert)
+                emitRawAluMachine(
+                    "\tmvn " + destination + ".16b, " +
+                        destination + ".16b",
+                    destination, {destination},
+                    MOpcode::Neon);
+            if (!hasAssignedReg(inst))
+                storeVector(inst, destination);
+            break;
+        }
         std::string r1 = isPtr(v1->type_) ? loadAddr(v1) : loadInt(v1);
         std::string r2 = isPtr(v2->type_) ? loadAddr(v2) : loadInt(v2);
         std::string rd = allocIntReg();
@@ -1327,6 +1395,37 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         auto *condVal = inst->get_operand(0);
         auto *tv = inst->get_operand(1);
         auto *fv = inst->get_operand(2);
+        if (isVector(inst->type_)) {
+            std::string mask = loadVector(condVal);
+            std::string trueValue = loadVector(tv);
+            std::string falseValue = loadVector(fv);
+            std::string selected = allocNEONReg();
+            emitRawAluMachine(
+                "\tmov " + selected + ".16b, " +
+                    mask + ".16b",
+                selected, {mask}, MOpcode::Neon);
+            emitRawAluMachine(
+                "\tbsl " + selected + ".16b, " +
+                    trueValue + ".16b, " +
+                    falseValue + ".16b",
+                selected,
+                {selected, trueValue, falseValue},
+                MOpcode::Neon);
+            if (hasAssignedReg(inst)) {
+                std::string destination =
+                    assignedReg(inst);
+                if (destination != selected)
+                    emitRawAluMachine(
+                        "\tmov " + destination +
+                            ".16b, " + selected +
+                            ".16b",
+                        destination, {selected},
+                        MOpcode::Neon);
+            } else {
+                storeVector(inst, selected);
+            }
+            break;
+        }
         const char *cond = nullptr;
         if (auto *icmp = dynamic_cast<ICmpInst*>(condVal)) {
             auto *cv1 = icmp->get_operand(0);

@@ -23,6 +23,9 @@ struct AffineVariable {
     bool operator==(const AffineVariable &other) const {
         return kind == other.kind && position == other.position;
     }
+    bool operator!=(const AffineVariable &other) const {
+        return !(*this == other);
+    }
 };
 
 class AffineExpr {

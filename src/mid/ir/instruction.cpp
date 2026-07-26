@@ -260,7 +260,8 @@ std::string FCmpInst::print() {
 
 // %v = select i1 %cond, %true_val, %false_val
 std::string SelectInst::print() {
-    std::string instr_ir = "%" + this->name_ + " = select i1 "
+    std::string instr_ir = "%" + this->name_ + " = select "
+        + this->get_operand(0)->type_->print() + " "
         + print_as_op(this->get_operand(0), false) + ", "
         + print_as_op(this->get_operand(1), true) + ", "
         + print_as_op(this->get_operand(2), true);

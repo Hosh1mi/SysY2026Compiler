@@ -120,9 +120,6 @@ LoopTilingResult stripMineLoop(
         pointLoop->step()->integerValue() != 1)
         return reject(LoopTilingError::NonUnitPointLoop,
                       "point-loop-step");
-    if (!pointLoop->carriedValues().empty())
-        return reject(LoopTilingError::LoopCarriedState,
-                      "point-loop-carried-state");
     HiraSequence *parent = pointLoop->parent();
     if (!parent)
         return reject(LoopTilingError::InvalidNest,
@@ -155,6 +152,30 @@ LoopTilingResult stripMineLoop(
     HiraLoop *tileLoop = tileOwner.get();
     region.sourceMapping().mapLoop(tileLoop, sourceLoop);
 
+    struct TiledCarried {
+        HiraValue *pointResult = nullptr;
+    };
+    std::vector<TiledCarried> tiledCarried;
+    tiledCarried.reserve(
+        pointLoop->carriedValues().size());
+    for (std::size_t index = 0;
+         index < pointLoop->carriedValues().size();
+         ++index) {
+        HiraLoop::CarriedBinding binding =
+            pointLoop->carriedValues()[index];
+        HiraValue *pointResult =
+            region.createValue(binding.result->type());
+        pointLoop->setCarriedResult(index, pointResult);
+        HiraValue *tileIteration =
+            region.createValue(binding.iteration->type());
+        tileLoop->addCarriedValue(
+            binding.initial, tileIteration,
+            binding.result);
+        pointLoop->setCarriedInitial(
+            index, tileIteration);
+        tiledCarried.push_back({pointResult});
+    }
+
     std::unique_ptr<HiraNode> pointOwner =
         parent->remove(pointLoop);
     HiraSequence &tileBody = tileLoop->body();
@@ -181,8 +202,17 @@ LoopTilingResult stripMineLoop(
     appendCompute(tileBody, ComputeKind::Add, tileNext,
                   {tileInduction, tileStep});
     tileLoop->addYieldValue(tileNext);
+    for (std::size_t index = 0;
+         index < tiledCarried.size(); ++index) {
+        tileLoop->setCarriedYield(
+            index, tiledCarried[index].pointResult);
+        tileLoop->addYieldValue(
+            tiledCarried[index].pointResult);
+    }
     auto yield = std::make_unique<HiraYield>();
     yield->addOperand(tileNext);
+    for (const TiledCarried &binding : tiledCarried)
+        yield->addOperand(binding.pointResult);
     tileBody.append(std::move(yield));
 
     parent->insert(*position, std::move(tileOwner));
@@ -220,10 +250,11 @@ LoopTilingResult tileLoopBand(
             return reject(
                 LoopTilingError::NonUnitPointLoop,
                 "non-unit-band-loop");
-        if (!loop->carriedValues().empty())
+        if (!loop->carriedValues().empty() &&
+            index + 1 != dimensions.size())
             return reject(
                 LoopTilingError::LoopCarriedState,
-                "band-loop-carried-state");
+                "non-innermost-band-carried-state");
         pointLoops.push_back(loop);
         if (tileSizes[index] > 1) {
             firstTiled = std::min(firstTiled, index);
@@ -234,13 +265,17 @@ LoopTilingResult tileLoopBand(
         return reject(LoopTilingError::InvalidTileSize,
                       "band-needs-multiple-tiled-dimensions");
     for (std::size_t index = firstTiled + 1;
-         index < pointLoops.size(); ++index)
+         index < pointLoops.size(); ++index) {
+        if (!pointLoops[index]->carriedValues().empty()) {
+            continue;
+        }
         if (!analyzeAdjacentLoopInterchange(
                 model, *pointLoops[index - 1],
                 *pointLoops[index]))
             return reject(
                 LoopTilingError::InvalidNest,
                 "unsafe-imperfect-band");
+    }
 
     std::vector<HiraLoop *> tileLoops(
         dimensions.size(), nullptr);
@@ -281,11 +316,19 @@ LoopTilingResult tileLoopBand(
         desired.push_back(pointLoops[index]);
     for (std::size_t index = firstTiled;
          index < dimensions.size(); ++index)
-        if (tileLoops[index])
+        if (tileLoops[index] &&
+            pointLoops[index]->carriedValues().empty())
             desired.push_back(tileLoops[index]);
     for (std::size_t index = firstTiled;
-         index < dimensions.size(); ++index)
+         index < dimensions.size(); ++index) {
         desired.push_back(pointLoops[index]);
+        if (!pointLoops[index]->carriedValues().empty() &&
+            tileLoops[index]) {
+            desired.pop_back();
+            desired.push_back(tileLoops[index]);
+            desired.push_back(pointLoops[index]);
+        }
+    }
 
     for (std::size_t target = 0;
          target < desired.size(); ++target) {

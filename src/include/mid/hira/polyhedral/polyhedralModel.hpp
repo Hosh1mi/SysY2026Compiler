@@ -123,6 +123,11 @@ struct AccessRelation {
     MemoryAccessKind kind = MemoryAccessKind::Read;
     MemoryObjectId object = 0;
     std::vector<AffineExpr> subscripts;
+    // A frontend-flattened row-major index row * extent + column is restored
+    // to the exact logical coordinates [row, column] only after the model
+    // proves 0 <= column < extent.  The extent remains symbolic; it is not
+    // represented as an illegal dimension-by-symbol affine coefficient.
+    std::optional<AffineVariable> linearizedExtent;
 };
 
 using ScalarRecurrenceId = std::uint32_t;

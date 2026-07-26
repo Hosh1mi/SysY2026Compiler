@@ -168,6 +168,17 @@ std::optional<std::uint64_t> typeBytes(Type *type) {
 
 } // namespace
 
+bool isParallelBandProfitable(
+    const HiraLoop &band,
+    const target::A53TargetModel &target) {
+    const std::uint64_t threshold =
+        static_cast<std::uint64_t>(
+            target.parallelDispatchStatements) *
+        target.minimumParallelOverheadRatio;
+    auto work = nodeWork(band, threshold);
+    return !work || *work >= threshold;
+}
+
 LoopParallelizationResult parallelizeOuterBand(
     HiraRegion &region, const PolyhedralModel &model,
     const ScheduleCandidateSet &schedules,
@@ -387,12 +398,7 @@ LoopParallelizationResult parallelizeOuterBand(
                 "non-reduction-live-out");
     }
 
-const std::uint64_t threshold =
-        static_cast<std::uint64_t>(
-            target.parallelDispatchStatements) *
-        target.minimumParallelOverheadRatio;
-    auto work = nodeWork(*band, threshold);
-    if (work && *work < threshold)
+    if (!isParallelBandProfitable(*band, target))
         return reject(LoopParallelizationError::NotProfitable,
                       "static-work-below-dispatch-overhead");
 

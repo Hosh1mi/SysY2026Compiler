@@ -79,6 +79,7 @@ public:
     void addOperand(HiraValue *value);
     void addResult(HiraValue *value);
     void replaceOperand(std::size_t index, HiraValue *value);
+    void replaceResult(std::size_t index, HiraValue *value);
     void clearResults();
 
 private:
@@ -266,6 +267,7 @@ public:
     std::size_t addCarriedValue(HiraValue *initial, HiraValue *iteration,
                                 HiraValue *result);
     void setCarriedInitial(std::size_t index, HiraValue *value);
+    void setCarriedResult(std::size_t index, HiraValue *value);
     void setCarriedYield(std::size_t index, HiraValue *value);
     void addYieldValue(HiraValue *value);
     void setYieldValue(std::size_t index, HiraValue *value);

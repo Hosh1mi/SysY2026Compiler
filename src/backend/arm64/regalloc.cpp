@@ -616,6 +616,7 @@ void Arm64RegAlloc::computeInstructionNumbers(
             if (canAssignRegister(inst)) {
                 bool skipForSelect = false;
                 if ((inst->op_id_ == Instruction::ICmp || inst->op_id_ == Instruction::FCmp) &&
+                    !isVector(inst->type_) &&
                     inst->use_list_.size() == 1) {
                     auto *user = dynamic_cast<SelectInst*>((*inst->use_list_.begin()).val_);
                     if (user) skipForSelect = true;

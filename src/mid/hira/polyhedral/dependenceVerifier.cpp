@@ -201,7 +201,9 @@ verifyDependenceRelations(const PolyhedralModel &model,
                 alias == MemoryAliasKind::MayAlias
                     ? DependencePrecision::ConservativeAlias
                     : source.subscripts.size() !=
-                              sink.subscripts.size()
+                              sink.subscripts.size() ||
+                              source.linearizedExtent !=
+                                  sink.linearizedExtent
                           ? DependencePrecision::
                                 ConservativeShape
                           : (model.statements()[source.statement]

@@ -152,14 +152,22 @@ public:
         ICMP_SGT, ICMP_SGE, ICMP_SLT, ICMP_SLE
     };
     static const std::map<ICmpInst::ICmpOp, std::string> ICmpOpName;
+    static Type *infer_result_type(Value *v1, BasicBlock *bb) {
+        auto *vector = dynamic_cast<VectorType *>(v1->type_);
+        if (vector)
+            return bb->parent_->parent_->get_vector_type(
+                bb->parent_->parent_->int32_ty_,
+                vector->num_elements_);
+        return bb->parent_->parent_->int1_ty_;
+    }
     ICmpInst(ICmpOp op, Value* v1, Value* v2, BasicBlock* bb)
-        : Instruction(bb->parent_->parent_->int1_ty_, Instruction::ICmp, 2, bb), icmp_op_(op) {
+        : Instruction(infer_result_type(v1, bb), Instruction::ICmp, 2, bb), icmp_op_(op) {
         set_operand(0, v1);
         set_operand(1, v2);
     }
     // no-insert constructor (caller uses add_instruction_before_inst)
     ICmpInst(ICmpOp op, Value* v1, Value* v2, BasicBlock* bb, bool)
-        : Instruction(bb->parent_->parent_->int1_ty_, Instruction::ICmp, 2), icmp_op_(op) {
+        : Instruction(infer_result_type(v1, bb), Instruction::ICmp, 2), icmp_op_(op) {
         set_operand(0, v1);
         set_operand(1, v2);
         this->parent_ = bb;
