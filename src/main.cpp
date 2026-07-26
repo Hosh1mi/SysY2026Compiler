@@ -84,7 +84,7 @@ struct DriverOptions {
     bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
     bool dumpPreMachineInstr = false;
-    bool enableHira = false;
+    bool enableHira = true;
     bool forceHiraRoundtrip = false;
     bool dumpHira = false;
     bool dumpPolyhedral = false;
