@@ -1,5 +1,5 @@
 #pragma once
-// IdiomRecognize：识别 memset 语义的纯 store 计数循环，改写为 libc memset 调用。
+// IdiomRecognize：识别 memset/memcpy 语义循环，改写为 libc 调用。
 
 #include "../analysis/analysisManager.hpp"
 #include "../analysis/loopInfo.hpp"
@@ -14,6 +14,4 @@ public:
 
 private:
     bool runOnFunction(Function *func, AnalysisManager &AM);
-
-    Function *memsetDecl_ = nullptr;
 };
