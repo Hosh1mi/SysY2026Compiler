@@ -34,6 +34,7 @@
 #include "../../include/mid/hira/transform/loopVectorization.hpp"
 #include "../../include/mid/hira/transform/pointLoopExpansion.hpp"
 #include "../../include/mid/hira/transform/scheduleRealization.hpp"
+#include "../../include/mid/hira/transform/scheduleFusion.hpp"
 #include "../../include/mid/hira/transform/loopTiling.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -173,6 +174,41 @@ bool selectRegions(Function &function, Loop &loop,
             polyhedralVerification =
                 polyhedral::verifyPolyhedralModel(
                     *polyhedralModel.model);
+        if (polyhedralModel.succeeded() &&
+            polyhedralVerification.succeeded()) {
+            std::size_t fusedBands = 0;
+            while (true) {
+                polyhedral::ScheduleFusionResult fusion =
+                    polyhedral::
+                        fuseProvablyDisjointAdjacentBands(
+                            *imported.region,
+                            *polyhedralModel.model);
+                if (!fusion.changed)
+                    break;
+                fusedBands += fusion.fusedBands;
+                if (!verifyRegion("schedule-fusion"))
+                    return false;
+                polyhedralModel =
+                    polyhedral::buildPolyhedralModel(
+                        *imported.region, &aliasAnalysis);
+                polyhedralVerification = {};
+                if (polyhedralModel.succeeded())
+                    polyhedralVerification =
+                        polyhedral::verifyPolyhedralModel(
+                            *polyhedralModel.model);
+                if (!polyhedralModel.succeeded() ||
+                    !polyhedralVerification.succeeded())
+                    return false;
+            }
+            if (fusedBands && (debug || dumpPolyhedral))
+                std::cerr
+                    << "// polyhedral.schedule_fusion"
+                    << " bands=" << fusedBands
+                    << " = realized\n";
+            if (fusedBands && dumpHira)
+                std::cerr << printHiraRegion(
+                    *imported.region, function.name_);
+        }
         polyhedral::DependenceBuildResult dependences;
         polyhedral::ReductionAnalysisResult reductions;
         std::string reductionDetail;
@@ -395,19 +431,25 @@ bool selectRegions(Function &function, Loop &loop,
                     if (scheduleApplicabilityValid &&
                         scheduleLegalityValid &&
                         scheduleParallelismValid &&
-                        scheduleProfitabilityValid) {
+                        scheduleProfitabilityValid &&
+                        cacheFootprintsValid &&
+                        vectorizationValid) {
                         scheduleSelection =
                             polyhedral::selectSchedule(
                                 schedules, scheduleLegality,
                                 scheduleApplicability,
                                 scheduleParallelism,
-                                scheduleProfitability);
+                                scheduleProfitability,
+                                cacheFootprints,
+                                vectorization);
                         scheduleSelectionValid =
                             polyhedral::verifyScheduleSelection(
                                 schedules, scheduleLegality,
                                 scheduleApplicability,
                                 scheduleParallelism,
                                 scheduleProfitability,
+                                cacheFootprints,
+                                vectorization,
                                 scheduleSelection,
                                 scheduleSelectionDetail);
                     }

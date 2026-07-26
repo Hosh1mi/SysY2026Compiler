@@ -5,12 +5,46 @@
 namespace hira::polyhedral {
 namespace {
 
+bool preservesBaselineCapabilities(
+    std::size_t index,
+    const ScheduleParallelismResult &parallelism,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization) {
+    const ScheduleParallelism &baselineParallel =
+        parallelism.schedules().front();
+    const ScheduleParallelism &candidateParallel =
+        parallelism.schedules()[index];
+    if (baselineParallel.outerParallel &&
+        !candidateParallel.outerParallel)
+        return false;
+
+    const ScheduleVectorization &baselineVector =
+        vectorization.schedules().front();
+    const ScheduleVectorization &candidateVector =
+        vectorization.schedules()[index];
+    if (baselineVector.kind ==
+            VectorizationKind::Vectorizable &&
+        (candidateVector.kind !=
+             VectorizationKind::Vectorizable ||
+         candidateVector.lanes < baselineVector.lanes))
+        return false;
+
+    const CacheFootprint &baselineCache =
+        cacheFootprints.schedules().front();
+    const CacheFootprint &candidateCache =
+        cacheFootprints.schedules()[index];
+    return baselineCache.kind != CacheFootprintKind::Known ||
+           candidateCache.kind == CacheFootprintKind::Known;
+}
+
 bool qualifies(
     std::size_t index,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
-    const ScheduleProfitabilityResult &profitability) {
+    const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization) {
     bool baselineParallel =
         parallelism.schedules().front().outerParallel;
     bool gainsParallelism =
@@ -22,6 +56,9 @@ bool qualifies(
                ScheduleLegalityKind::Legal &&
            applicability.schedules()[index].kind ==
                ScheduleApplicabilityKind::Realizable &&
+           preservesBaselineCapabilities(
+               index, parallelism, cacheFootprints,
+               vectorization) &&
            profitabilityKind !=
                ScheduleProfitabilityKind::Regressing &&
            profitabilityKind !=
@@ -36,7 +73,9 @@ ScheduleSelectionDecision decisionFor(
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
-    const ScheduleProfitabilityResult &profitability) {
+    const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization) {
     if (index == selected)
         return ScheduleSelectionDecision::Selected;
     if (index == 0)
@@ -48,6 +87,11 @@ ScheduleSelectionDecision decisionFor(
         ScheduleApplicabilityKind::Realizable)
         return ScheduleSelectionDecision::
             RejectedApplicability;
+    if (!preservesBaselineCapabilities(
+            index, parallelism, cacheFootprints,
+            vectorization))
+        return ScheduleSelectionDecision::
+            RejectedCapability;
     bool baselineParallel =
         parallelism.schedules().front().outerParallel;
     bool gainsParallelism =
@@ -62,7 +106,8 @@ ScheduleSelectionDecision decisionFor(
                    : ScheduleSelectionDecision::
                          RejectedParallelism;
     if (!qualifies(index, legality, applicability,
-                   parallelism, profitability))
+                   parallelism, profitability,
+                   cacheFootprints, vectorization))
         return ScheduleSelectionDecision::
             RejectedProfitability;
     return ScheduleSelectionDecision::LowerBenefit;
@@ -78,6 +123,8 @@ const char *decisionName(ScheduleSelectionDecision decision) {
         return "rejected-legality";
     case ScheduleSelectionDecision::RejectedApplicability:
         return "rejected-applicability";
+    case ScheduleSelectionDecision::RejectedCapability:
+        return "rejected-capability";
     case ScheduleSelectionDecision::RejectedParallelism:
         return "rejected-parallelism";
     case ScheduleSelectionDecision::RejectedProfitability:
@@ -95,13 +142,16 @@ ScheduleSelectionResult selectSchedule(
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
-    const ScheduleProfitabilityResult &profitability) {
+    const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization) {
     ScheduleSelectionResult result;
     std::int64_t bestReduction = -1;
     for (std::size_t index = 1;
          index < schedules.candidates().size(); ++index) {
         if (!qualifies(index, legality, applicability,
-                       parallelism, profitability))
+                       parallelism, profitability,
+                       cacheFootprints, vectorization))
             continue;
         std::int64_t reduction =
             profitability.schedules()[index]
@@ -118,7 +168,8 @@ ScheduleSelectionResult selectSchedule(
             {schedules.candidates()[index].id,
              decisionFor(index, result.selected_, legality,
                          applicability, parallelism,
-                         profitability)});
+                         profitability, cacheFootprints,
+                         vectorization)});
     return result;
 }
 
@@ -128,6 +179,8 @@ bool verifyScheduleSelection(
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization,
     const ScheduleSelectionResult &selection,
     std::string &detail) {
     if (selection.selected() >=
@@ -143,7 +196,8 @@ bool verifyScheduleSelection(
     for (std::size_t index = 1;
          index < schedules.candidates().size(); ++index) {
         if (!qualifies(index, legality, applicability,
-                       parallelism, profitability))
+                       parallelism, profitability,
+                       cacheFootprints, vectorization))
             continue;
         std::int64_t reduction =
             profitability.schedules()[index]
@@ -167,7 +221,9 @@ bool verifyScheduleSelection(
             entry.decision !=
                 decisionFor(index, selection.selected(),
                             legality, applicability,
-                            parallelism, profitability)) {
+                            parallelism, profitability,
+                            cacheFootprints,
+                            vectorization)) {
             detail = "invalid-schedule-selection-entry";
             return false;
         }

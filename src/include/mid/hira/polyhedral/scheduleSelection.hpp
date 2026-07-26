@@ -1,9 +1,11 @@
 #pragma once
 
+#include "cacheFootprintAnalysis.hpp"
 #include "scheduleApplicability.hpp"
 #include "scheduleLegality.hpp"
 #include "scheduleParallelism.hpp"
 #include "scheduleProfitability.hpp"
+#include "vectorizationAnalysis.hpp"
 
 #include <string>
 #include <vector>
@@ -15,6 +17,7 @@ enum class ScheduleSelectionDecision {
     Baseline,
     RejectedLegality,
     RejectedApplicability,
+    RejectedCapability,
     RejectedParallelism,
     RejectedProfitability,
     LowerBenefit,
@@ -39,7 +42,9 @@ private:
         const ScheduleLegalityResult &legality,
         const ScheduleApplicabilityResult &applicability,
         const ScheduleParallelismResult &parallelism,
-        const ScheduleProfitabilityResult &profitability);
+        const ScheduleProfitabilityResult &profitability,
+        const CacheFootprintResult &cacheFootprints,
+        const VectorizationAnalysisResult &vectorization);
 
     ScheduleCandidateId selected_ = 0;
     std::vector<ScheduleSelectionEntry> entries_;
@@ -50,13 +55,17 @@ ScheduleSelectionResult selectSchedule(
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
-    const ScheduleProfitabilityResult &profitability);
+    const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization);
 bool verifyScheduleSelection(
     const ScheduleCandidateSet &schedules,
     const ScheduleLegalityResult &legality,
     const ScheduleApplicabilityResult &applicability,
     const ScheduleParallelismResult &parallelism,
     const ScheduleProfitabilityResult &profitability,
+    const CacheFootprintResult &cacheFootprints,
+    const VectorizationAnalysisResult &vectorization,
     const ScheduleSelectionResult &selection,
     std::string &detail);
 std::string printScheduleSelection(

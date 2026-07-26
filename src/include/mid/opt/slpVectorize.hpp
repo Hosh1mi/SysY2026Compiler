@@ -28,6 +28,7 @@ private:
     struct Pack {
         std::vector<Instruction*> instrs;  // VF 条同构指令
         Value *vecValue = nullptr;         // 产生的向量值（发射后）
+        std::vector<Value*> scalarValues;  // 未打包用户所需的逐 lane 值
         bool emitted = false;
     };
 
@@ -60,6 +61,8 @@ private:
     bool isIsomorphic(Instruction *a, Instruction *b);
     bool isIndependent(Instruction *a, Instruction *b);
     bool isVectorizable(Instruction *inst);
+    bool hasInterveningMemoryEffect(
+        BasicBlock *bb, const std::vector<Instruction*> &instructions);
     bool isAdjacentStore(Instruction *a, Instruction *b, Module *module);
     bool isAdjacentLoad(Instruction *a, Instruction *b, Module *module);
     Value *getStoredValue(Instruction *store);

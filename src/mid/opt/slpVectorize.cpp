@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <set>
 #include <vector>
 
 // =====================================================================
@@ -117,7 +118,7 @@ SLPVectorize::PackSet SLPVectorize::findAdjacentMemoryRefs(
         }
 
         if ((int)pack.size() == VF) {
-            P.add({pack, nullptr, false});
+            P.add({pack, nullptr, {}, false});
         } else {
             for (size_t k = i; k < stores.size(); ++k)
                 for (auto *s : pack)
@@ -180,7 +181,7 @@ SLPVectorize::PackSet SLPVectorize::extendPackSet(
                             indep = false;
                 if (!indep) continue;
 
-                newPacks.push_back({producers, nullptr, false});
+                newPacks.push_back({producers, nullptr, {}, false});
                 if (dbg)
                     std::cerr << "[SLP] phase2 follow_use_defs: packed "
                               << producers.size() << " producers\n";
@@ -218,7 +219,7 @@ SLPVectorize::PackSet SLPVectorize::extendPackSet(
                     if (np.instrs[0] == loads[0]) { dup = true; break; }
                 if (dup) continue;
 
-                newPacks.push_back({loads, nullptr, false});
+                newPacks.push_back({loads, nullptr, {}, false});
                 if (dbg)
                     std::cerr << "[SLP] phase2 follow_use_defs: packed "
                               << loads.size() << " loads\n";
@@ -269,7 +270,7 @@ SLPVectorize::PackSet SLPVectorize::extendPackSet(
                             indep = false;
                 if (!indep) continue;
 
-                newPacks.push_back({users, nullptr, false});
+                newPacks.push_back({users, nullptr, {}, false});
                 if (dbg)
                     std::cerr << "[SLP] phase2 follow_def_uses: packed "
                               << users.size() << " users\n";
@@ -378,6 +379,19 @@ void SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
             emitVectorBinary(bb, *pack, module, P);
         }
     }
+
+    // Restore scalar values only after every vector pack has been emitted.
+    // Producer matching above must keep seeing the original lane
+    // instructions while the vector DAG is constructed.
+    for (Pack &pack : P.packs) {
+        if (!pack.emitted ||
+            pack.scalarValues.size() != pack.instrs.size())
+            continue;
+        for (std::size_t lane = 0;
+             lane < pack.instrs.size(); ++lane)
+            pack.instrs[lane]->replace_all_use_with(
+                pack.scalarValues[lane]);
+    }
 }
 
 // ── Emit: vector load ─────────────────────────────────────────────────
@@ -386,6 +400,7 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
 {
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
     if ((int)pack.instrs.size() != VF) return;
+    if (hasInterveningMemoryEffect(bb, pack.instrs)) return;
 
     // Verify contiguous loads with same base
     Value *basePtr = nullptr;
@@ -417,8 +432,10 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
     }
 
     Type *scalarTy = pack.instrs[0]->type_;
-    if (scalarTy->tid_ != Type::IntegerTyID &&
-        scalarTy->tid_ != Type::FloatTyID) return;
+    auto *integerTy = dynamic_cast<IntegerType *>(scalarTy);
+    if (scalarTy->tid_ != Type::FloatTyID &&
+        (!integerTy || integerTy->num_bits_ != 32))
+        return;
 
     if (debug)
         std::cerr << "[SLP] emit vector load, offset=" << baseOffset << "\n";
@@ -445,6 +462,19 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
 
     pack.vecValue = vecLoad;
 
+    pack.scalarValues.reserve(pack.instrs.size());
+    for (std::size_t lane = 0;
+         lane < pack.instrs.size(); ++lane) {
+        auto *laneIndex = new ConstantInt(
+            module->int32_ty_, static_cast<int>(lane));
+        auto *extract =
+            new ExtractElementInst(vecLoad, laneIndex, bb);
+        bb->remove_instr(extract);
+        bb->add_instruction_before_inst(
+            extract, pack.instrs[0]);
+        pack.scalarValues.push_back(extract);
+    }
+
     for (auto *ld : pack.instrs)
         bb->delete_instr(ld);
     pack.emitted = true;
@@ -456,6 +486,7 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
 {
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
     if ((int)pack.instrs.size() != VF) return;
+    if (hasInterveningMemoryEffect(bb, pack.instrs)) return;
 
     if (!pack.vecValue) {
         std::map<Instruction *, size_t> order;
@@ -505,8 +536,10 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
     }
 
     Type *scalarTy = pack.instrs[0]->get_operand(0)->type_;
-    if (scalarTy->tid_ != Type::IntegerTyID &&
-        scalarTy->tid_ != Type::FloatTyID) return;
+    auto *integerTy = dynamic_cast<IntegerType *>(scalarTy);
+    if (scalarTy->tid_ != Type::FloatTyID &&
+        (!integerTy || integerTy->num_bits_ != 32))
+        return;
 
     if (debug)
         std::cerr << "[SLP] emit vector store, offset=" << baseOffset << "\n";
@@ -593,8 +626,10 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
     // Gather operands per lane
     int numOps = firstBin->num_ops_;
     Type *scalarTy = firstBin->type_;
-    if (scalarTy->tid_ != Type::IntegerTyID &&
-        scalarTy->tid_ != Type::FloatTyID) return;
+    auto *integerTy = dynamic_cast<IntegerType *>(scalarTy);
+    if (scalarTy->tid_ != Type::FloatTyID &&
+        (!integerTy || integerTy->num_bits_ != 32))
+        return;
 
     Type *vecTy = module->get_vector_type(scalarTy, VF);
     std::vector<Value*> vecOperands(numOps, nullptr);
@@ -680,6 +715,19 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
     bb->add_instruction_before_inst(vecBin, pack.instrs[0]);
     pack.vecValue = vecBin;
 
+    pack.scalarValues.reserve(pack.instrs.size());
+    for (std::size_t lane = 0;
+         lane < pack.instrs.size(); ++lane) {
+        auto *laneIndex = new ConstantInt(
+            module->int32_ty_, static_cast<int>(lane));
+        auto *extract =
+            new ExtractElementInst(vecBin, laneIndex, bb);
+        bb->remove_instr(extract);
+        bb->add_instruction_before_inst(
+            extract, pack.instrs[0]);
+        pack.scalarValues.push_back(extract);
+    }
+
     // Delete original scalar instructions
     for (auto *inst : pack.instrs)
         bb->delete_instr(inst);
@@ -693,6 +741,7 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
 bool SLPVectorize::isIsomorphic(Instruction *a, Instruction *b) {
     if (a->op_id_ != b->op_id_) return false;
     if (a->num_ops_ != b->num_ops_) return false;
+    if (a->type_ != b->type_) return false;
 
     if (a->is_store()) {
         Value *va = a->get_operand(0);
@@ -730,6 +779,32 @@ bool SLPVectorize::isVectorizable(Instruction *inst) {
             bi->op_id_ == Instruction::Xor) return true;
     }
     return false;
+}
+
+bool SLPVectorize::hasInterveningMemoryEffect(
+    BasicBlock *bb,
+    const std::vector<Instruction*> &instructions) {
+    if (!bb || instructions.empty())
+        return true;
+    std::set<Instruction*> selected(
+        instructions.begin(), instructions.end());
+    bool inside = false;
+    std::size_t seen = 0;
+    for (Instruction *instruction : bb->instr_list_) {
+        if (selected.count(instruction)) {
+            inside = true;
+            ++seen;
+            if (seen == selected.size())
+                return false;
+            continue;
+        }
+        if (inside &&
+            (instruction->is_load() ||
+             instruction->is_store() ||
+             instruction->is_call()))
+            return true;
+    }
+    return true;
 }
 
 bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,

@@ -300,6 +300,9 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
             std::make_unique<hira::HiraPass>(
                 forceHiraRoundtrip, dumpHira, dumpPolyhedral));
         addAnalysisDumpIfRequested(pm);
+        // SLP owns basic-block expression DAGs rather than loop structure.
+        // Run it only after Hira has exported all selected loop regions.
+        pm.addPass(std::make_unique<SLPVectorize>());
         pm.addPass(std::make_unique<SplitGEP>());
         addDeepCleanup(pm);
         addLateTargetIndependentPasses(
