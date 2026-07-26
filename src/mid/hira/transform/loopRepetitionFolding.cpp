@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -199,6 +200,292 @@ HiraComputeOp *insertCompute(
         sequence.insert(position, std::move(owner)));
 }
 
+struct ModularRecurrence {
+    HiraValue *initial = nullptr;
+    HiraValue *bound = nullptr;
+    HiraValue *stateResult = nullptr;
+    IntegerType *type = nullptr;
+    std::int64_t increment = 0;
+    std::int64_t modulus = 0;
+    std::int64_t safeBound = 0;
+};
+
+std::optional<ModularRecurrence>
+analyzeModularRecurrence(HiraLoop &loop) {
+    if (loop.role() != HiraLoop::Role::Ordinary ||
+        loop.carriedValues().size() != 1 ||
+        !loop.lowerBound() ||
+        loop.lowerBound()->kind() !=
+            ValueKind::IntegerConstant ||
+        loop.lowerBound()->integerValue() != 0 ||
+        !loop.step() ||
+        loop.step()->kind() !=
+            ValueKind::IntegerConstant ||
+        loop.step()->integerValue() != 1 ||
+        hasMemoryWriteOrConditional(loop.body()))
+        return std::nullopt;
+
+    auto control = loopControl(loop);
+    HiraSequence *parent = loop.parent();
+    if (!control || !parent ||
+        !nodePosition(*parent, &loop) ||
+        countUses(loop.body(), loop.induction()) != 1 ||
+        countUses(*parent, loop.induction()) != 1)
+        return std::nullopt;
+
+    const HiraLoop::CarriedBinding &binding =
+        loop.carriedValues().front();
+    auto *indexType = dynamic_cast<IntegerType *>(
+        loop.induction()->type());
+    auto *stateType = binding.iteration
+                          ? dynamic_cast<IntegerType *>(
+                                binding.iteration->type())
+                          : nullptr;
+    if (!binding.initial || !binding.yielded ||
+        !binding.result || !indexType ||
+        indexType->num_bits_ != 32 || !stateType ||
+        stateType->num_bits_ != 32 ||
+        loop.upperBound()->type() != indexType ||
+        binding.initial->type() != stateType ||
+        binding.result->type() != stateType)
+        return std::nullopt;
+
+    auto *remainder = dynamic_cast<HiraComputeOp *>(
+        binding.yielded->definingNode());
+    if (!remainder ||
+        remainder->computeKind() != ComputeKind::SRem ||
+        remainder->operands().size() != 2 ||
+        remainder->results().size() != 1 ||
+        remainder->results().front() != binding.yielded)
+        return std::nullopt;
+    HiraValue *modulusValue = remainder->operands()[1];
+    if (!modulusValue ||
+        modulusValue->kind() !=
+            ValueKind::IntegerConstant ||
+        modulusValue->type() != stateType ||
+        modulusValue->integerValue() <= 0)
+        return std::nullopt;
+
+    HiraValue *addResult = remainder->operands()[0];
+    auto *addition = addResult
+                         ? dynamic_cast<HiraComputeOp *>(
+                               addResult->definingNode())
+                         : nullptr;
+    if (!addition ||
+        addition->computeKind() != ComputeKind::Add ||
+        addition->operands().size() != 2 ||
+        addition->results().size() != 1 ||
+        addition->results().front() != addResult)
+        return std::nullopt;
+
+    HiraValue *incrementValue = nullptr;
+    if (addition->operands()[0] == binding.iteration)
+        incrementValue = addition->operands()[1];
+    else if (addition->operands()[1] == binding.iteration)
+        incrementValue = addition->operands()[0];
+    if (!incrementValue ||
+        incrementValue->kind() !=
+            ValueKind::IntegerConstant ||
+        incrementValue->type() != stateType ||
+        incrementValue->integerValue() <= 0 ||
+        countUses(loop.body(), binding.iteration) != 1)
+        return std::nullopt;
+
+    const std::int64_t increment =
+        incrementValue->integerValue();
+    const std::int64_t modulus =
+        modulusValue->integerValue();
+    const std::int64_t safeBound =
+        (static_cast<std::int64_t>(
+             std::numeric_limits<int>::max()) -
+         modulus) /
+        increment;
+    if (safeBound < 1)
+        return std::nullopt;
+
+    return ModularRecurrence{
+        binding.initial, loop.upperBound(), binding.result,
+        stateType, increment, modulus, safeBound};
+}
+
+bool foldModularRecurrence(HiraRegion &region,
+                           HiraLoop &loop, Module &module) {
+    std::optional<ModularRecurrence> recurrence =
+        analyzeModularRecurrence(loop);
+    if (!recurrence)
+        return false;
+
+    HiraSequence *parent = loop.parent();
+    std::optional<std::size_t> position =
+        nodePosition(*parent, &loop);
+    Loop *source = region.sourceMapping().sourceLoop(&loop);
+    if (!position || !source)
+        return false;
+
+    // All checks above are read-only.  From here onward every created value
+    // is immediately owned by the replacement diamond, so rejection never
+    // leaves a partially changed region.
+    HiraValue *zero =
+        region.createIntegerConstant(recurrence->type, 0);
+    HiraValue *one =
+        region.createIntegerConstant(recurrence->type, 1);
+    HiraValue *boundConstant =
+        region.createIntegerConstant(
+            recurrence->type, recurrence->safeBound);
+    // The bound proves every post-remainder step and the closed form safe.
+    // The first source add still sees the unreduced initial value, so
+    // also guard it explicitly; init >= 0 alone is insufficient near INT_MAX.
+    HiraValue *largestSafeInitial =
+        region.createIntegerConstant(
+            recurrence->type,
+            static_cast<std::int64_t>(
+                std::numeric_limits<int>::max()) -
+                recurrence->increment);
+    HiraValue *incrementConstant =
+        region.createIntegerConstant(
+            recurrence->type, recurrence->increment);
+    HiraValue *modulusConstant =
+        region.createIntegerConstant(
+            recurrence->type, recurrence->modulus);
+
+    HiraValue *nonnegative =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::ICmp,
+                  nonnegative, {recurrence->initial, zero},
+                  ICmpInst::ICMP_SGE);
+    HiraValue *initialAdditionSafe =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::ICmp,
+                  initialAdditionSafe,
+                  {recurrence->initial, largestSafeInitial},
+                  ICmpInst::ICMP_SLE);
+    HiraValue *nonempty =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::ICmp,
+                  nonempty, {recurrence->bound, one},
+                  ICmpInst::ICMP_SGE);
+    HiraValue *withinBound =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::ICmp,
+                  withinBound,
+                  {recurrence->bound, boundConstant},
+                  ICmpInst::ICMP_SLE);
+    HiraValue *safeInitial =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::And,
+                  safeInitial,
+                  {nonnegative, initialAdditionSafe});
+    HiraValue *safeInitialAndNonempty =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::And,
+                  safeInitialAndNonempty,
+                  {safeInitial, nonempty});
+    HiraValue *guard =
+        region.createValue(module.int1_ty_);
+    insertCompute(*parent, (*position)++, ComputeKind::And,
+                  guard,
+                  {safeInitialAndNonempty, withinBound});
+
+    auto conditional = std::make_unique<HiraIf>(guard);
+    HiraIf *insertedConditional = conditional.get();
+
+    HiraValue *reducedInitial =
+        region.createValue(recurrence->type);
+    insertCompute(insertedConditional->thenSequence(), 0,
+                  ComputeKind::SRem, reducedInitial,
+                  {recurrence->initial, modulusConstant});
+    HiraValue *scaledIncrement =
+        region.createValue(recurrence->type);
+    insertCompute(insertedConditional->thenSequence(), 1,
+                  ComputeKind::Mul, scaledIncrement,
+                  {incrementConstant, recurrence->bound});
+    HiraValue *sum = region.createValue(recurrence->type);
+    insertCompute(insertedConditional->thenSequence(), 2,
+                  ComputeKind::Add, sum,
+                  {reducedInitial, scaledIncrement});
+    HiraValue *fastResult =
+        region.createValue(recurrence->type);
+    insertCompute(insertedConditional->thenSequence(), 3,
+                  ComputeKind::SRem, fastResult,
+                  {sum, modulusConstant});
+
+    HiraValue *slowResult =
+        region.createValue(recurrence->type);
+    loop.setCarriedResult(0, slowResult);
+
+    // Encode that this loop is now only a preserved fallback in the
+    // structured IR itself.  Hira runs to a CFG fixed point; without this
+    // inert carried token, a later import would rediscover and wrap the same
+    // fallback indefinitely.  The token has no external result or operation.
+    LoopControl slowControl = *loopControl(loop);
+    HiraValue *fallbackTokenIteration =
+        region.createValue(recurrence->type);
+    HiraValue *fallbackTokenResult =
+        region.createValue(recurrence->type);
+    const std::size_t fallbackToken =
+        loop.addCarriedValue(
+            zero, fallbackTokenIteration,
+            fallbackTokenResult);
+    loop.setCarriedYield(
+        fallbackToken, fallbackTokenIteration);
+    loop.addYieldValue(fallbackTokenIteration);
+    slowControl.yield->addOperand(fallbackTokenIteration);
+
+    insertedConditional->elseSequence().append(
+        parent->remove(&loop));
+
+    // The exporter requires one mapped loop at the root.  Keep that
+    // structural contract with a one-trip wrapper; the guarded fast formula
+    // and the complete original loop remain mutually exclusive inside it.
+    HiraValue *wrapperInduction =
+        region.createValue(recurrence->type);
+    auto wrapper = std::make_unique<HiraLoop>(
+        wrapperInduction, zero, one, one);
+    HiraLoop *insertedWrapper = wrapper.get();
+    HiraValue *wrapperIteration =
+        region.createValue(recurrence->type);
+    insertedWrapper->addCarriedValue(
+        recurrence->initial, wrapperIteration,
+        recurrence->stateResult);
+    HiraValue *mergedResult =
+        region.createValue(recurrence->type);
+    insertedConditional->addResultBinding(
+        fastResult, slowResult, mergedResult);
+    insertedWrapper->body().append(std::move(conditional));
+
+    HiraValue *wrapperNext =
+        region.createValue(recurrence->type);
+    insertCompute(insertedWrapper->body(),
+                  insertedWrapper->body().nodes().size(),
+                  ComputeKind::Add, wrapperNext,
+                  {wrapperInduction, one});
+    insertedWrapper->setCarriedYield(0, mergedResult);
+    insertedWrapper->addYieldValue(wrapperNext);
+    insertedWrapper->addYieldValue(mergedResult);
+    auto wrapperYield = std::make_unique<HiraYield>();
+    wrapperYield->addOperand(wrapperNext);
+    wrapperYield->addOperand(mergedResult);
+    insertedWrapper->body().append(std::move(wrapperYield));
+    insertedWrapper->setRole(
+        HiraLoop::Role::RepetitionFolded);
+    parent->insert(*position, std::move(wrapper));
+
+    region.sourceMapping().unmapLoop(&loop);
+    region.sourceMapping().mapLoop(insertedWrapper, source);
+
+    region.markModified();
+    if (std::getenv("DEBUG_HIRA_REPETITION")) {
+        std::cerr
+            << "// hira.repetition_folding = modular-realized";
+        if (source && source->header)
+            std::cerr << " header=" << source->header->name_;
+        std::cerr << " c=" << recurrence->increment
+                  << " m=" << recurrence->modulus
+                  << " bound=" << recurrence->safeBound << "\n";
+    }
+    return true;
+}
+
 bool foldLoop(HiraRegion &region, HiraLoop &loop,
               Module &module) {
     auto reject = [&](const char *reason) {
@@ -230,6 +517,8 @@ bool foldLoop(HiraRegion &region, HiraLoop &loop,
         return reject("nonunit-step");
     if (hasMemoryWriteOrConditional(loop.body()))
         return reject("side-effect-or-conditional");
+    if (foldModularRecurrence(region, loop, module))
+        return true;
     if (!additiveCarriedChain(loop))
         return reject("non-additive-carried-chain");
 

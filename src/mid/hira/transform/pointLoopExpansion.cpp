@@ -278,8 +278,10 @@ std::map<const HiraValue *, std::int64_t>
 collectAddressStrides(
     const PolyhedralModel &model,
     AffineVariable dimension,
-    const std::set<const HiraNode *> &payload) {
+    const std::set<const HiraNode *> &payload,
+    std::vector<const HiraValue *> &addressOrder) {
     std::map<const HiraValue *, std::int64_t> result;
+    std::set<const HiraValue *> ambiguous;
     for (const AccessRelation &access : model.accesses()) {
         if (access.statement >= model.statements().size())
             continue;
@@ -307,11 +309,15 @@ collectAddressStrides(
             continue;
         const std::int64_t elementStride =
             static_cast<std::int64_t>(*stride / *elementSize);
-        auto inserted =
-            result.emplace(address, elementStride);
-        if (!inserted.second &&
-            inserted.first->second != elementStride)
+        if (ambiguous.count(address))
+            continue;
+        auto inserted = result.emplace(address, elementStride);
+        if (inserted.second)
+            addressOrder.push_back(address);
+        else if (inserted.first->second != elementStride) {
             result.erase(inserted.first);
+            ambiguous.insert(address);
+        }
     }
     return result;
 }
@@ -389,9 +395,12 @@ PointLoopExpansionResult expandPointLoop(
     for (std::size_t index = 0;
          index < payloadCount; ++index)
         payload.insert(bodyNodes[index].get());
+    // Keep first structural access order separate from the pointer-keyed
+    // lookup table; pointer ordering is process-dependent.
+    std::vector<const HiraValue *> addressOrder;
     const std::map<const HiraValue *, std::int64_t>
         addressStrides = collectAddressStrides(
-            model, dimension, payload);
+            model, dimension, payload, addressOrder);
 
     HiraValue *oldLower = pointLoop->lowerBound();
     HiraValue *oldUpper = pointLoop->upperBound();
@@ -438,8 +447,10 @@ PointLoopExpansionResult expandPointLoop(
         IntegerType *offsetType = nullptr;
     };
     std::vector<AddressRecurrence> addressRecurrences;
-    for (const auto &[sourceAddress, stride] :
-         addressStrides) {
+    for (const HiraValue *sourceAddress : addressOrder) {
+        auto stride = addressStrides.find(sourceAddress);
+        if (stride == addressStrides.end())
+            continue;
         auto *definition =
             dynamic_cast<HiraComputeOp *>(
                 sourceAddress->definingNode());
@@ -487,7 +498,7 @@ PointLoopExpansionResult expandPointLoop(
                 initial, iteration, result);
         addressRecurrences.push_back(
             {sourceAddress, iteration, binding,
-             stride, offsetType});
+             stride->second, offsetType});
     }
 
     HiraValue *cursorIteration =

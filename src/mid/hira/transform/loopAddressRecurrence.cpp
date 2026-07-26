@@ -188,6 +188,9 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
 
     std::map<HiraValue *, std::int64_t> strides;
     std::set<HiraValue *> ambiguous;
+    // Pointer-keyed maps are lookup tables only.  Preserve model access order
+    // for IR construction so allocator addresses cannot affect emitted code.
+    std::vector<HiraValue *> addressOrder;
     for (const AccessRelation &access : model.accesses()) {
         if (access.statement >= model.statements().size())
             continue;
@@ -217,14 +220,18 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
         const std::int64_t elementStride =
             *byteStride / *elementSize;
         auto inserted = strides.emplace(address, elementStride);
-        if (!inserted.second &&
-            inserted.first->second != elementStride)
+        if (inserted.second)
+            addressOrder.push_back(address);
+        else if (inserted.first->second != elementStride)
             ambiguous.insert(address);
     }
 
     std::vector<Candidate> candidates;
-    for (const auto &[address, stride] : strides) {
+    for (HiraValue *address : addressOrder) {
         if (ambiguous.count(address))
+            continue;
+        auto stride = strides.find(address);
+        if (stride == strides.end())
             continue;
         auto *definition = dynamic_cast<HiraComputeOp *>(
             address->definingNode());
@@ -241,7 +248,7 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
         if (!offsetType)
             continue;
         candidates.push_back(
-            {address, definition, offsetType, stride});
+            {address, definition, offsetType, stride->second});
     }
     if (candidates.empty()) {
         result.detail = "no-affine-point-address";

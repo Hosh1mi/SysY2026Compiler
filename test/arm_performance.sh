@@ -4,11 +4,11 @@ PROJ_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-PIPELINE="legacy"
+PIPELINE="hira"
 COMPILER_FLAGS=(-O1 --enable-hira)
-if [ "${ENABLE_HIRA:-0}" = "1" ]; then
-    PIPELINE="hira"
-    COMPILER_FLAGS=(-O1 --enable-hira)
+if [ "${ENABLE_HIRA:-1}" = "0" ]; then
+    PIPELINE="legacy"
+    COMPILER_FLAGS=(-O1 --disable-hira)
 fi
 TEST_SUITE="${PERFORMANCE_SUITE:-performance}"
 RESULT_FILE="$PROJ_DIR/test/results/result_${TEST_SUITE}_${PIPELINE}_${TIMESTAMP}.txt"
