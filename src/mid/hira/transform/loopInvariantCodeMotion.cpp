@@ -25,15 +25,23 @@ std::size_t nodePosition(const HiraSequence &sequence,
         std::distance(nodes.begin(), position));
 }
 
-bool processSequence(HiraSequence &sequence);
+bool processSequence(
+    HiraSequence &sequence,
+    const SourceMapping &sourceMapping,
+    const ::ArgumentAliasAnalysis *aliasAnalysis);
 
-bool processLoop(HiraLoop &loop) {
-    bool changed = processSequence(loop.body());
+bool processLoop(
+    HiraLoop &loop,
+    const SourceMapping &sourceMapping,
+    const ::ArgumentAliasAnalysis *aliasAnalysis) {
+    bool changed = processSequence(
+        loop.body(), sourceMapping, aliasAnalysis);
     HiraSequence *parent = loop.parent();
     if (!parent)
         return changed;
 
-    LoopInvarianceAnalysis analysis(loop);
+    LoopInvarianceAnalysis analysis(
+        loop, &sourceMapping, aliasAnalysis);
     std::set<const HiraNode *> invariantNodes;
     std::vector<HiraNode *> candidates;
     for (const auto &node : loop.body().nodes()) {
@@ -55,7 +63,10 @@ bool processLoop(HiraLoop &loop) {
     return changed;
 }
 
-bool processSequence(HiraSequence &sequence) {
+bool processSequence(
+    HiraSequence &sequence,
+    const SourceMapping &sourceMapping,
+    const ::ArgumentAliasAnalysis *aliasAnalysis) {
     std::vector<HiraNode *> nodes;
     nodes.reserve(sequence.nodes().size());
     for (const auto &node : sequence.nodes())
@@ -64,12 +75,17 @@ bool processSequence(HiraSequence &sequence) {
     bool changed = false;
     for (HiraNode *node : nodes) {
         if (auto *loop = dynamic_cast<HiraLoop *>(node)) {
-            changed |= processLoop(*loop);
+            changed |= processLoop(
+                *loop, sourceMapping, aliasAnalysis);
             continue;
         }
         if (auto *condition = dynamic_cast<HiraIf *>(node)) {
-            changed |= processSequence(condition->thenSequence());
-            changed |= processSequence(condition->elseSequence());
+            changed |= processSequence(
+                condition->thenSequence(), sourceMapping,
+                aliasAnalysis);
+            changed |= processSequence(
+                condition->elseSequence(), sourceMapping,
+                aliasAnalysis);
         }
     }
     return changed;
@@ -77,8 +93,12 @@ bool processSequence(HiraSequence &sequence) {
 
 } // namespace
 
-bool hoistLoopInvariants(HiraRegion &region) {
-    bool changed = processSequence(region.rootSequence());
+bool hoistLoopInvariants(
+    HiraRegion &region,
+    const ::ArgumentAliasAnalysis *aliasAnalysis) {
+    bool changed = processSequence(
+        region.rootSequence(), region.sourceMapping(),
+        aliasAnalysis);
     if (changed)
         region.markModified();
     return changed;

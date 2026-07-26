@@ -2,6 +2,7 @@
 
 #include "../../../include/mid/hira/polyhedral/accessStrideAnalysis.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -31,6 +32,21 @@ std::optional<AffineVariable> innermostDimension(
             ScheduleComponentKind::Iteration)
             return component->dimension;
     return std::nullopt;
+}
+
+std::size_t iterationDepth(
+    const ScheduleCandidate &candidate,
+    StatementId statement) {
+    const StatementSchedule *schedule =
+        statementSchedule(candidate, statement);
+    if (!schedule)
+        return 0;
+    std::size_t depth = 0;
+    for (const ScheduleComponent &component :
+         schedule->components)
+        depth += component.kind ==
+                 ScheduleComponentKind::Iteration;
+    return depth;
 }
 
 ScheduleProfitability unknown(
@@ -83,6 +99,11 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
 
     const ScheduleCandidate &identity =
         schedules.candidates().front();
+    std::size_t maximumAccessDepth = 0;
+    for (const AccessRelation &access : model.accesses())
+        maximumAccessDepth = std::max(
+            maximumAccessDepth,
+            iterationDepth(identity, access.statement));
     for (const ScheduleCandidate &candidate :
          schedules.candidates()) {
         ScheduleProfitability profitability;
@@ -131,9 +152,19 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
             }
             profitability.accesses.push_back(
                 {accessId, *baseline, *current});
-            regression |= *current > *baseline;
-            improvement |= *current < *baseline;
-            if (*current < *baseline) {
+            // Compare the highest-complexity memory operations first. A
+            // stride change in an O(n^k) statement asymptotically dominates
+            // any number of changes in statements nested fewer than k
+            // iteration dimensions. Lower-order accesses are still reported,
+            // but they must not veto a schedule that preserves the hot tier.
+            const bool highestOrder =
+                iterationDepth(identity, access.statement) ==
+                maximumAccessDepth;
+            regression |= highestOrder &&
+                          *current > *baseline;
+            improvement |= highestOrder &&
+                           *current < *baseline;
+            if (highestOrder && *current < *baseline) {
                 std::int64_t reduction =
                     *baseline - *current;
                 if (totalReduction >

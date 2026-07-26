@@ -48,6 +48,16 @@ bool isAddOne(Value *value, PhiInst *phi) {
             leftConstant->value_ == 1);
 }
 
+bool sameIncomingValue(Value *left, Value *right) {
+    if (left == right)
+        return true;
+    auto *leftInteger = dynamic_cast<ConstantInt *>(left);
+    auto *rightInteger = dynamic_cast<ConstantInt *>(right);
+    return leftInteger && rightInteger &&
+           leftInteger->type_ == rightInteger->type_ &&
+           leftInteger->value_ == rightInteger->value_;
+}
+
 bool collectInductionUpdates(Value *value, PhiInst *induction,
                              BasicBlock *latch,
                              std::vector<BinaryInst *> &updates,
@@ -83,6 +93,14 @@ std::optional<ComputeKind> computeKindFor(Instruction *instruction) {
         return ComputeKind::Sub;
     case Instruction::Mul:
         return ComputeKind::Mul;
+    case Instruction::SDiv:
+        return ComputeKind::SDiv;
+    case Instruction::SRem:
+        return ComputeKind::SRem;
+    case Instruction::UDiv:
+        return ComputeKind::UDiv;
+    case Instruction::URem:
+        return ComputeKind::URem;
     case Instruction::FAdd:
         return ComputeKind::FAdd;
     case Instruction::FSub:
@@ -132,7 +150,9 @@ public:
 private:
     struct LoopControl {
         BasicBlock *entryPredecessor = nullptr;
+        std::vector<BasicBlock *> entryPredecessors;
         BasicBlock *latch = nullptr;
+        std::vector<BasicBlock *> latches;
         BasicBlock *exit = nullptr;
         PhiInst *induction = nullptr;
         Value *initial = nullptr;
@@ -153,20 +173,21 @@ private:
     }
 
     bool deriveControl(Loop &loop, LoopControl &control) {
-        if (!loop.header || !loop.singleLatch() || !loop.singleExit())
+        if (!loop.header || loop.latches.empty() || !loop.singleExit())
             return false;
         control.latch = loop.singleLatch();
+        control.latches = loop.latches;
         control.exit = loop.singleExit();
 
         for (BasicBlock *predecessor : loop.header->pre_bbs_) {
             if (loop.isInLoop(predecessor))
                 continue;
-            if (control.entryPredecessor)
-                return false;
-            control.entryPredecessor = predecessor;
+            control.entryPredecessors.push_back(predecessor);
         }
-        if (!control.entryPredecessor)
+        if (control.entryPredecessors.empty())
             return false;
+        control.entryPredecessor =
+            control.entryPredecessors.front();
 
         Instruction *terminator = loop.header->get_terminator();
         if (!terminator || !terminator->is_br() ||
@@ -180,16 +201,44 @@ private:
             auto *phi = dynamic_cast<PhiInst *>(instruction);
             if (!phi)
                 break;
-            if (phi->num_ops_ != 4)
+            if (phi->num_ops_ !=
+                2 * (control.latches.size() +
+                     control.entryPredecessors.size()))
                 continue;
             Value *initial =
                 incomingFrom(phi, control.entryPredecessor);
-            Value *update = incomingFrom(phi, control.latch);
             std::vector<BinaryInst *> updates;
             PhiInst *merge = nullptr;
-            if (!initial || !update ||
-                !collectInductionUpdates(update, phi, control.latch,
-                                         updates, merge))
+            if (!initial)
+                continue;
+            bool validInitials = true;
+            for (BasicBlock *entry :
+                 control.entryPredecessors)
+                validInitials &=
+                    sameIncomingValue(
+                        initial, incomingFrom(phi, entry));
+            if (!validInitials)
+                continue;
+            bool validUpdates = true;
+            for (BasicBlock *latch : control.latches) {
+                Value *update = incomingFrom(phi, latch);
+                PhiInst *latchMerge = nullptr;
+                if (!update ||
+                    !collectInductionUpdates(
+                        update, phi, latch, updates,
+                        latchMerge)) {
+                    validUpdates = false;
+                    break;
+                }
+                if (latchMerge) {
+                    if (control.latches.size() != 1) {
+                        validUpdates = false;
+                        break;
+                    }
+                    merge = latchMerge;
+                }
+            }
+            if (!validUpdates)
                 continue;
             if (guard->get_operand(0) != phi)
                 continue;
@@ -252,6 +301,17 @@ private:
 
         HiraValue *step =
             region_->createIntegerConstant(control.induction->type_, 1);
+        for (BinaryInst *update :
+             control.inductionUpdates)
+            for (unsigned index = 0;
+                 index < update->num_ops_; ++index) {
+                auto *constant = dynamic_cast<ConstantInt *>(
+                    update->get_operand(index));
+                if (constant && constant->value_ == 1 &&
+                    constant->type_ ==
+                        control.induction->type_)
+                    visibleValues_[constant] = step;
+            }
         HiraValue *induction =
             region_->createValue(control.induction->type_);
         visibleValues_[control.induction] = induction;
@@ -261,8 +321,17 @@ private:
             std::make_unique<HiraLoop>(induction, lower, upper, step);
         HiraLoop *hiraLoop = loopNode.get();
         region_->sourceMapping().mapLoop(hiraLoop, &loop);
-        for (BinaryInst *update : control.inductionUpdates)
-            structuralInstructions_.insert(update);
+        std::set<BinaryInst *> distinctInductionUpdates(
+            control.inductionUpdates.begin(),
+            control.inductionUpdates.end());
+        // A single increment may also feed ordinary computations in the
+        // point body.  Import it at its source position and use that value
+        // as the structured yield.  Only path-local duplicate increments
+        // are virtual control instructions represented by Hira's single
+        // canonical yield.
+        if (distinctInductionUpdates.size() != 1)
+            for (BinaryInst *update : distinctInductionUpdates)
+                structuralInstructions_.insert(update);
         if (control.inductionMerge)
             structuralInstructions_.insert(control.inductionMerge);
 
@@ -273,12 +342,29 @@ private:
                 break;
             if (phi == control.induction)
                 continue;
-            if (phi->num_ops_ != 4)
+            // Multiple control backedges are represented by Hira's virtual
+            // latch only when the header has no additional carried state.
+            // Path-dependent carried values require explicit structured
+            // result merging and are rejected until that representation is
+            // available.
+            if (control.latches.size() != 1)
+                return fail(ImportRejectReason::UnsupportedPhi,
+                            "multi-latch-carried-value");
+            if (phi->num_ops_ !=
+                2 * (control.entryPredecessors.size() + 1))
                 return fail(ImportRejectReason::UnsupportedPhi,
                             loop.header->name_);
 
             Value *initialSource =
                 incomingFrom(phi, control.entryPredecessor);
+            for (BasicBlock *entry :
+                 control.entryPredecessors)
+                if (!sameIncomingValue(
+                        initialSource,
+                        incomingFrom(phi, entry)))
+                    return fail(
+                        ImportRejectReason::UnsupportedPhi,
+                        "path-dependent-loop-initial");
             HiraValue *initial = getValue(initialSource);
             if (!initial)
                 return fail(ImportRejectReason::MissingValue,
@@ -298,19 +384,31 @@ private:
         if (!importLoopBody(loop, control, *hiraLoop))
             return false;
 
-        auto inductionUpdate =
-            std::make_unique<HiraComputeOp>(ComputeKind::Add);
-        inductionUpdate->addOperand(induction);
-        inductionUpdate->addOperand(step);
-        HiraValue *inductionYield =
-            region_->createValue(control.induction->type_);
-        inductionUpdate->addResult(inductionYield);
-        HiraNode *insertedUpdate =
-            hiraLoop->body().append(std::move(inductionUpdate));
-        if (!control.inductionUpdates.empty()) {
-            BinaryInst *source = control.inductionUpdates.front();
-            region_->sourceMapping().mapNode(insertedUpdate, source);
-            region_->sourceMapping().mapValue(inductionYield, source);
+        HiraValue *inductionYield = nullptr;
+        if (distinctInductionUpdates.size() == 1) {
+            auto existing = visibleValues_.find(
+                *distinctInductionUpdates.begin());
+            if (existing != visibleValues_.end())
+                inductionYield = existing->second;
+        }
+        if (!inductionYield) {
+            auto inductionUpdate =
+                std::make_unique<HiraComputeOp>(ComputeKind::Add);
+            inductionUpdate->addOperand(induction);
+            inductionUpdate->addOperand(step);
+            inductionYield =
+                region_->createValue(control.induction->type_);
+            inductionUpdate->addResult(inductionYield);
+            HiraNode *insertedUpdate =
+                hiraLoop->body().append(std::move(inductionUpdate));
+            if (!control.inductionUpdates.empty()) {
+                BinaryInst *source =
+                    control.inductionUpdates.front();
+                region_->sourceMapping().mapNode(insertedUpdate,
+                                                 source);
+                region_->sourceMapping().mapValue(inductionYield,
+                                                  source);
+            }
         }
         if (isUsedOutsideLoop(control.induction, loop))
             return fail(ImportRejectReason::LiveOutInduction);
@@ -415,7 +513,9 @@ private:
             if (terminator->num_ops_ != 3 ||
                 !importIfDiamond(loop, current, terminator,
                                  hiraLoop.body(), visited, current,
-                                 control.latch))
+                                 control.latch
+                                     ? control.latch
+                                     : loop.header))
                 return false;
         }
         return true;
@@ -535,6 +635,218 @@ private:
         return importBlockContents(arm, terminator, target);
     }
 
+    bool importIfResults(BasicBlock *join,
+                         BasicBlock *thenPredecessor,
+                         BasicBlock *elsePredecessor,
+                         HiraIf &condition) {
+        for (Instruction *instruction : join->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(instruction);
+            if (!phi)
+                break;
+            if (phi->num_ops_ != 4)
+                return fail(ImportRejectReason::UnsupportedPhi,
+                            join->name_);
+            Value *thenSource =
+                incomingFrom(phi, thenPredecessor);
+            Value *elseSource =
+                incomingFrom(phi, elsePredecessor);
+            HiraValue *thenValue = getValue(thenSource);
+            HiraValue *elseValue = getValue(elseSource);
+            if (!thenValue || !elseValue ||
+                thenValue->type() != elseValue->type())
+                return fail(ImportRejectReason::UnsupportedPhi,
+                            join->name_);
+
+            HiraValue *result =
+                region_->createValue(phi->type_);
+            condition.addResultBinding(
+                thenValue, elseValue, result);
+            visibleValues_[phi] = result;
+            region_->sourceMapping().mapValue(result, phi);
+            structuralInstructions_.insert(phi);
+        }
+        return true;
+    }
+
+    bool importGuardChainNode(
+        Loop &loop, BasicBlock *branchBlock,
+        Instruction *terminator, BasicBlock *join,
+        HiraSequence &target,
+        std::set<BasicBlock *> &visited,
+        std::set<BasicBlock *> &coveredPredecessors,
+        std::vector<HiraValue *> &results) {
+        if (!terminator || terminator->num_ops_ != 3)
+            return false;
+        HiraValue *condition =
+            getValue(terminator->get_operand(0));
+        auto *thenTarget = dynamic_cast<BasicBlock *>(
+            terminator->get_operand(1));
+        auto *elseTarget = dynamic_cast<BasicBlock *>(
+            terminator->get_operand(2));
+        const bool thenContinues =
+            thenTarget && thenTarget != join &&
+            elseTarget == join;
+        const bool elseContinues =
+            elseTarget && elseTarget != join &&
+            thenTarget == join;
+        if (!condition ||
+            (!thenContinues && !elseContinues))
+            return false;
+
+        BasicBlock *continuation =
+            thenContinues ? thenTarget : elseTarget;
+        if (!continuation || !loop.isInLoop(continuation) ||
+            !visited.insert(continuation).second)
+            return fail(
+                ImportRejectReason::
+                    NonStraightLineControlFlow,
+                continuation ? continuation->name_ : "<null>");
+
+        auto hiraIf = std::make_unique<HiraIf>(condition);
+        HiraIf *inserted = hiraIf.get();
+        HiraSequence &continuationSequence =
+            thenContinues ? hiraIf->thenSequence()
+                          : hiraIf->elseSequence();
+
+        Instruction *continuationTerminator =
+            continuation->get_terminator();
+        if (!continuationTerminator ||
+            !continuationTerminator->is_br())
+            return fail(
+                ImportRejectReason::
+                    NonStraightLineControlFlow,
+                continuation->name_);
+        if (!importBlockContents(
+                continuation, continuationTerminator,
+                continuationSequence))
+            return false;
+
+        std::vector<HiraValue *> continuationResults;
+        if (continuationTerminator->num_ops_ == 1 &&
+            continuationTerminator->get_operand(0) == join) {
+            coveredPredecessors.insert(continuation);
+            for (Instruction *instruction :
+                 join->instr_list_) {
+                auto *phi =
+                    dynamic_cast<PhiInst *>(instruction);
+                if (!phi)
+                    break;
+                HiraValue *incoming = getValue(
+                    incomingFrom(phi, continuation));
+                if (!incoming)
+                    return fail(
+                        ImportRejectReason::MissingValue,
+                        "guard-chain-result");
+                continuationResults.push_back(incoming);
+            }
+        } else if (continuationTerminator->num_ops_ == 3) {
+            if (!importGuardChainNode(
+                    loop, continuation,
+                    continuationTerminator, join,
+                    continuationSequence, visited,
+                    coveredPredecessors,
+                    continuationResults))
+                return false;
+        } else {
+            return fail(
+                ImportRejectReason::
+                    NonStraightLineControlFlow,
+                continuation->name_);
+        }
+
+        coveredPredecessors.insert(branchBlock);
+        std::size_t resultIndex = 0;
+        for (Instruction *instruction : join->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(instruction);
+            if (!phi)
+                break;
+            if (resultIndex >= continuationResults.size())
+                return fail(
+                    ImportRejectReason::UnsupportedPhi,
+                    join->name_);
+            HiraValue *bypass = getValue(
+                incomingFrom(phi, branchBlock));
+            HiraValue *continued =
+                continuationResults[resultIndex++];
+            if (!bypass || !continued ||
+                bypass->type() != continued->type())
+                return fail(
+                    ImportRejectReason::UnsupportedPhi,
+                    join->name_);
+            HiraValue *result =
+                region_->createValue(phi->type_);
+            if (thenContinues)
+                hiraIf->addResultBinding(
+                    continued, bypass, result);
+            else
+                hiraIf->addResultBinding(
+                    bypass, continued, result);
+            results.push_back(result);
+        }
+        if (resultIndex != continuationResults.size())
+            return fail(
+                ImportRejectReason::UnsupportedPhi,
+                join->name_);
+
+        target.append(std::move(hiraIf));
+        region_->sourceMapping().mapNode(inserted, terminator);
+        return true;
+    }
+
+    bool importGuardChain(
+        Loop &loop, BasicBlock *branchBlock,
+        Instruction *terminator, BasicBlock *join,
+        HiraSequence &target,
+        std::set<BasicBlock *> &visited) {
+        if (!join || join == loop.header ||
+            terminator->num_ops_ != 3)
+            return false;
+        auto *thenTarget = dynamic_cast<BasicBlock *>(
+            terminator->get_operand(1));
+        auto *elseTarget = dynamic_cast<BasicBlock *>(
+            terminator->get_operand(2));
+        if ((thenTarget == join) == (elseTarget == join))
+            return false;
+
+        std::set<BasicBlock *> coveredPredecessors;
+        std::vector<HiraValue *> results;
+        if (!importGuardChainNode(
+                loop, branchBlock, terminator, join,
+                target, visited, coveredPredecessors,
+                results))
+            return false;
+
+        std::set<BasicBlock *> actualPredecessors;
+        for (BasicBlock *predecessor : join->pre_bbs_)
+            if (loop.isInLoop(predecessor))
+                actualPredecessors.insert(predecessor);
+        if (actualPredecessors != coveredPredecessors)
+            return fail(
+                ImportRejectReason::
+                    NonStraightLineControlFlow,
+                join->name_);
+
+        std::size_t resultIndex = 0;
+        for (Instruction *instruction : join->instr_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(instruction);
+            if (!phi)
+                break;
+            if (resultIndex >= results.size())
+                return fail(
+                    ImportRejectReason::UnsupportedPhi,
+                    join->name_);
+            HiraValue *result = results[resultIndex++];
+            visibleValues_[phi] = result;
+            region_->sourceMapping().mapValue(result, phi);
+            structuralInstructions_.insert(phi);
+        }
+        if (resultIndex != results.size())
+            return fail(
+                ImportRejectReason::UnsupportedPhi,
+                join->name_);
+        return true;
+    }
+
     bool importIfDiamond(Loop &loop, BasicBlock *branchBlock,
                          Instruction *terminator,
                          HiraSequence &target,
@@ -551,6 +863,14 @@ private:
             return fail(
                 ImportRejectReason::NonStraightLineControlFlow,
                 branchBlock->name_);
+
+        if (loopLatch && loopLatch != loop.header &&
+            importGuardChain(
+                loop, branchBlock, terminator, loopLatch,
+                target, visited)) {
+            join = loopLatch;
+            return true;
+        }
 
         BasicBlock *thenArm = thenTarget;
         BasicBlock *elseArm = elseTarget;
@@ -582,14 +902,19 @@ private:
                 thenLast ? thenLast : branchBlock);
             expectedPredecessors.insert(
                 elseLast ? elseLast : branchBlock);
-            if (loopLatch->pre_bbs_.size() !=
+            std::set<BasicBlock *> actualPredecessors;
+            for (BasicBlock *predecessor :
+                 loopLatch->pre_bbs_)
+                if (loop.isInLoop(predecessor))
+                    actualPredecessors.insert(predecessor);
+            if (actualPredecessors.size() !=
                     expectedPredecessors.size())
                 return fail(
                     ImportRejectReason::
                         NonStraightLineControlFlow,
                     loopLatch->name_);
             for (BasicBlock *predecessor :
-                 loopLatch->pre_bbs_)
+                 actualPredecessors)
                 if (!expectedPredecessors.count(predecessor))
                     return fail(
                         ImportRejectReason::
@@ -611,7 +936,36 @@ private:
             return true;
         }
 
-        if (!join || !loop.isInLoop(join) || join == loop.header)
+        if (join == loop.header) {
+            std::set<BasicBlock *> expectedLatches;
+            expectedLatches.insert(
+                thenArm ? thenArm : branchBlock);
+            expectedLatches.insert(
+                elseArm ? elseArm : branchBlock);
+            std::set<BasicBlock *> actualLatches;
+            for (BasicBlock *predecessor :
+                 loop.header->pre_bbs_)
+                if (loop.isInLoop(predecessor))
+                    actualLatches.insert(predecessor);
+            if (actualLatches != expectedLatches)
+                return fail(
+                    ImportRejectReason::
+                        NonStraightLineControlFlow,
+                    branchBlock->name_);
+
+            auto hiraIf = std::make_unique<HiraIf>(condition);
+            HiraIf *inserted = hiraIf.get();
+            if (!importIfArm(loop, thenArm, join,
+                             hiraIf->thenSequence(), visited) ||
+                !importIfArm(loop, elseArm, join,
+                             hiraIf->elseSequence(), visited))
+                return false;
+            target.append(std::move(hiraIf));
+            region_->sourceMapping().mapNode(inserted, terminator);
+            return true;
+        }
+
+        if (!join || !loop.isInLoop(join))
             return fail(
                 ImportRejectReason::NonStraightLineControlFlow,
                 branchBlock->name_);
@@ -634,7 +988,12 @@ private:
         if (!importIfArm(loop, thenArm, join,
                          hiraIf->thenSequence(), visited) ||
             !importIfArm(loop, elseArm, join,
-                         hiraIf->elseSequence(), visited))
+                         hiraIf->elseSequence(), visited) ||
+            !importIfResults(
+                join,
+                thenArm ? thenArm : branchBlock,
+                elseArm ? elseArm : branchBlock,
+                *hiraIf))
             return false;
         target.append(std::move(hiraIf));
         region_->sourceMapping().mapNode(inserted, terminator);

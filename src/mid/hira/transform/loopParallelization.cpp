@@ -1,6 +1,7 @@
 #include "../../../include/mid/hira/transform/loopParallelization.hpp"
 
 #include "../../../include/mid/analysis/loopInfo.hpp"
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 #include "../../../include/mid/ir/function.hpp"
@@ -53,60 +54,6 @@ bool carriesOuterDimension(
     const ScalarRecurrence *parent =
         findRecurrence(model, source.source);
     return parent && parent->dimension == outerDimension;
-}
-
-// The two evaluation cores share a single 1 MB L2.  A band whose body only
-// streams memory (loads/stores plus light index or guard arithmetic) is
-// bounded by the shared L2 write/read bandwidth, so a second worker cannot
-// double throughput and the dispatch overhead only regresses it.  Such
-// bands are left sequential.  A band qualifies when it contains a
-// vectorized point loop (SIMD packs compute into each memory op) or a
-// multi-cycle compute op (multiply/divide) that makes it core-bound.
-bool isHeavyCompute(ComputeKind kind) {
-    switch (kind) {
-    case ComputeKind::Mul:
-    case ComputeKind::FMul:
-    case ComputeKind::FDiv:
-        return true;
-    default:
-        return false;
-    }
-}
-
-void scanComputeIntensity(const HiraSequence &sequence,
-                          bool &sawVectorized,
-                          bool &sawHeavyCompute) {
-    for (const auto &node : sequence.nodes()) {
-        if (auto *loop = dynamic_cast<const HiraLoop *>(
-                node.get())) {
-            if (loop->role() == HiraLoop::Role::VectorMain ||
-                loop->role() == HiraLoop::Role::ScalarRemainder)
-                sawVectorized = true;
-            scanComputeIntensity(loop->body(), sawVectorized,
-                                 sawHeavyCompute);
-            continue;
-        }
-        if (auto *condition =
-                dynamic_cast<const HiraIf *>(node.get())) {
-            scanComputeIntensity(condition->thenSequence(),
-                                 sawVectorized, sawHeavyCompute);
-            scanComputeIntensity(condition->elseSequence(),
-                                 sawVectorized, sawHeavyCompute);
-            continue;
-        }
-        auto *compute =
-            dynamic_cast<const HiraComputeOp *>(node.get());
-        if (compute && isHeavyCompute(compute->computeKind()))
-            sawHeavyCompute = true;
-    }
-}
-
-bool bandIsComputeBound(const HiraLoop &loop) {
-    bool sawVectorized = false;
-    bool sawHeavyCompute = false;
-    scanComputeIntensity(loop.body(), sawVectorized,
-                         sawHeavyCompute);
-    return sawVectorized || sawHeavyCompute;
 }
 
 std::optional<ParallelReductionOp> parallelOp(
@@ -201,6 +148,24 @@ int nextBodyId(const Module *module) {
     return next;
 }
 
+std::optional<std::uint64_t> typeBytes(Type *type) {
+    if (auto *integer = dynamic_cast<IntegerType *>(type))
+        return std::max<std::uint64_t>(
+            1, integer->num_bits_ / 8);
+    if (type && type->tid_ == Type::FloatTyID)
+        return 4;
+    if (auto *array = dynamic_cast<ArrayType *>(type)) {
+        auto element = typeBytes(array->contained_);
+        if (!element ||
+            array->num_elements_ >
+                std::numeric_limits<std::uint64_t>::max() /
+                    *element)
+            return std::nullopt;
+        return *element * array->num_elements_;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 LoopParallelizationResult parallelizeOuterBand(
@@ -272,6 +237,27 @@ LoopParallelizationResult parallelizeOuterBand(
 
     HiraParallelPlan plan;
     plan.loop = band;
+    std::uint64_t privateBytes = 0;
+    for (const MemoryObject &object : model.memoryObjects()) {
+        if (!object.taskPrivate)
+            continue;
+        ::Value *source =
+            region.sourceMapping().sourceValue(object.base);
+        source =
+            ArgumentAliasAnalysis::underlyingObject(source);
+        auto *alloca = dynamic_cast<AllocaInst *>(source);
+        auto bytes =
+            alloca ? typeBytes(alloca->alloca_ty_)
+                   : std::nullopt;
+        if (!alloca || !bytes || *bytes > 64 * 1024 ||
+            privateBytes > 64 * 1024 - *bytes)
+            return reject(
+                LoopParallelizationError::UnsupportedLoop,
+                "task-private-memory-budget");
+        privateBytes += *bytes;
+        plan.privateParameters.push_back(
+            const_cast<HiraValue *>(object.base));
+    }
     const SchedulePrivatization &privacy =
         privatization.schedules()[selected];
     for (const RecurrencePrivatization &entry :
@@ -409,10 +395,6 @@ const std::uint64_t threshold =
     if (work && *work < threshold)
         return reject(LoopParallelizationError::NotProfitable,
                       "static-work-below-dispatch-overhead");
-
-    if (!bandIsComputeBound(*band))
-        return reject(LoopParallelizationError::MemoryBound,
-                      "band-memory-bound-no-l2-headroom");
 
     Loop *sourceLoop = region.sourceLoop();
     Module *module =

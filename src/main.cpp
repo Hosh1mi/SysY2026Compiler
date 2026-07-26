@@ -49,7 +49,6 @@
 #include "include/mid/opt/tailDuplication.hpp"
 #include "include/mid/opt/analysisDump.hpp"
 #include "include/mid/hira/hiraPass.hpp"
-#include "include/mid/hira/transform/loopCanonicalization.hpp"
 
 #include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
@@ -235,16 +234,6 @@ static void addScalarNormalization(PassManager &pm) {
     pm.addPass(std::make_unique<CodeSink>());
 }
 
-// Hira owns loop-region optimization when enabled.  Keep the scalar part of
-// the normalization pipeline, but do not run the old loop distribution pair.
-static void addHiraScalarNormalization(PassManager &pm) {
-    pm.addPass(std::make_unique<Reassociate>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<LocalCopyPropagation>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<CodeSink>());
-}
-
 static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<BitFuncRecognize>());
     pm.addPass(std::make_unique<InlineExpand>());
@@ -296,25 +285,25 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
 
     addSsaPreparation(pm);
     if (enableHira) {
-        addHiraScalarNormalization(pm);
         addInterproceduralAndGlobals(pm);
         addCorrelatedCleanup(pm);
         pm.addPass(std::make_unique<SemanticMarkerStamp>());
         pm.addPass(std::make_unique<CFGSimplify>());
-        pm.addPass(
-            std::make_unique<hira::LoopCanonicalizationPass>());
 
+        // HiraPass is the sole owner of loop-region transformations in this
+        // branch.  In particular, do not add CFG loop canonicalization,
+        // scalar expansion, distribution, rotation, LICM, unrolling,
+        // vectorization, or parallelization passes here.  Required loop
+        // normalization and optimization belong in Hira import, Hira IR,
+        // the polyhedral scheduler, or Hira export.
         pm.addPass(
             std::make_unique<hira::HiraPass>(
                 forceHiraRoundtrip, dumpHira, dumpPolyhedral));
         addAnalysisDumpIfRequested(pm);
-
-        // SLP is a basic-block vectorizer and remains independent of Hira's
-        // loop-region ownership.
-        pm.addPass(std::make_unique<SLPVectorize>());
+        pm.addPass(std::make_unique<SplitGEP>());
         addDeepCleanup(pm);
-        addLateTargetIndependentPasses(pm, m,
-                                       /*enableOldLoopPasses=*/false);
+        addLateTargetIndependentPasses(
+            pm, m, /*enableOldLoopPasses=*/false);
         return;
     }
 

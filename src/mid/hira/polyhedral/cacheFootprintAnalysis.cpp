@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace hira::polyhedral {
@@ -62,6 +63,183 @@ std::optional<std::uint64_t> footprintFor(
         std::numeric_limits<std::uint64_t>::max())
         return std::nullopt;
     return static_cast<std::uint64_t>(total);
+}
+
+const PolyhedralStatement *findStatement(
+    const PolyhedralModel &model, StatementId id) {
+    for (const PolyhedralStatement &statement :
+         model.statements())
+        if (statement.id == id)
+            return &statement;
+    return nullptr;
+}
+
+std::set<MemoryObjectId> reusableObjects(
+    const PolyhedralModel &model,
+    const std::vector<AffineVariable> &dimensions,
+    const std::vector<std::uint32_t> *activeTileSizes = nullptr) {
+    std::set<MemoryObjectId> result;
+    for (const AccessRelation &access : model.accesses()) {
+        const PolyhedralStatement *statement =
+            findStatement(model, access.statement);
+        if (!statement)
+            continue;
+        for (std::size_t index = 0;
+             index < dimensions.size(); ++index) {
+            AffineVariable dimension = dimensions[index];
+            if (activeTileSizes &&
+                (*activeTileSizes)[index] <= 1)
+                continue;
+            // An invariant subscript is temporal reuse only when the
+            // statement actually executes inside that dimension.  A load
+            // already hoisted outside a loop must not make its whole object
+            // look resident across that loop.
+            if (std::find(statement->dimensions.begin(),
+                          statement->dimensions.end(),
+                          dimension) ==
+                statement->dimensions.end())
+                continue;
+            auto stride = analyzeLinearAccessStride(
+                model, access, dimension);
+            if (stride && *stride == 0) {
+                result.insert(access.object);
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+std::optional<std::uint64_t> reusableFootprintFor(
+    const PolyhedralModel &model,
+    const std::vector<AffineVariable> &dimensions,
+    const std::vector<std::uint32_t> &tileSizes,
+    const std::set<MemoryObjectId> &reusable) {
+    if (dimensions.size() != tileSizes.size())
+        return std::nullopt;
+
+    std::map<MemoryObjectId, WideUInt> objectSpans;
+    for (const AccessRelation &access : model.accesses()) {
+        if (!reusable.count(access.object))
+            continue;
+        auto elementSize =
+            analyzeAccessElementSize(model, access);
+        if (!elementSize || *elementSize < 0)
+            return std::nullopt;
+        WideUInt span =
+            static_cast<WideUInt>(*elementSize);
+        for (std::size_t index = 0;
+             index < dimensions.size(); ++index) {
+            auto stride = analyzeLinearAccessStride(
+                model, access, dimensions[index]);
+            if (!stride)
+                return std::nullopt;
+            span += static_cast<WideUInt>(
+                        tileSizes[index] - 1) *
+                    static_cast<WideUInt>(*stride);
+        }
+        auto &objectSpan = objectSpans[access.object];
+        objectSpan = std::max(objectSpan, span);
+    }
+
+    WideUInt total = 0;
+    for (const auto &[object, span] : objectSpans) {
+        (void)object;
+        total += span;
+    }
+    if (total >
+        std::numeric_limits<std::uint64_t>::max())
+        return std::nullopt;
+    return static_cast<std::uint64_t>(total);
+}
+
+std::optional<std::uint32_t> constantTripCount(
+    const PolyhedralModel &model,
+    AffineVariable dimension) {
+    for (const IterationDomain &domain : model.domains()) {
+        if (!(domain.dimension == dimension) || !domain.loop)
+            continue;
+        const HiraValue *lower = domain.loop->lowerBound();
+        const HiraValue *upper = domain.loop->upperBound();
+        const HiraValue *step = domain.loop->step();
+        if (!lower || !upper || !step ||
+            lower->kind() != ValueKind::IntegerConstant ||
+            upper->kind() != ValueKind::IntegerConstant ||
+            step->kind() != ValueKind::IntegerConstant ||
+            step->integerValue() != 1)
+            return std::nullopt;
+        std::int64_t trip =
+            upper->integerValue() - lower->integerValue();
+        if (trip <= 0 ||
+            static_cast<std::uint64_t>(trip) >
+                std::numeric_limits<std::uint32_t>::max())
+            return std::nullopt;
+        return static_cast<std::uint32_t>(trip);
+    }
+    return std::nullopt;
+}
+
+bool reusableWorkingSetAlreadyFits(
+    const PolyhedralModel &model,
+    const target::A53TargetModel &target,
+    CacheFootprint &result) {
+    std::set<MemoryObjectId> reusable =
+        reusableObjects(model, result.dimensions);
+    if (reusable.empty()) {
+        result.kind = CacheFootprintKind::Known;
+        result.l1FootprintBytes = 0;
+        result.tileVolume = 1;
+        result.tileSizes.assign(result.dimensions.size(), 1);
+        return true;
+    }
+
+    std::vector<std::uint32_t> fullSizes;
+    fullSizes.reserve(result.dimensions.size());
+    for (AffineVariable dimension : result.dimensions) {
+        auto trip = constantTripCount(model, dimension);
+        if (!trip)
+            return false;
+        fullSizes.push_back(*trip);
+    }
+    auto footprint = reusableFootprintFor(
+        model, result.dimensions, fullSizes, reusable);
+    if (!footprint ||
+        *footprint > target.l1UsableBytes)
+        return false;
+
+    result.kind = CacheFootprintKind::Known;
+    result.l1FootprintBytes = *footprint;
+    result.tileVolume = 1;
+    result.tileSizes.assign(result.dimensions.size(), 1);
+    return true;
+}
+
+bool capturedReusableWorkingSetAlreadyFits(
+    const PolyhedralModel &model,
+    const target::A53TargetModel &target,
+    CacheFootprint &result) {
+    std::set<MemoryObjectId> captured =
+        reusableObjects(model, result.dimensions,
+                        &result.tileSizes);
+    std::vector<std::uint32_t> fullSizes;
+    fullSizes.reserve(result.dimensions.size());
+    for (AffineVariable dimension : result.dimensions) {
+        auto trip = constantTripCount(model, dimension);
+        if (!trip)
+            return false;
+        fullSizes.push_back(*trip);
+    }
+    auto footprint = reusableFootprintFor(
+        model, result.dimensions, fullSizes, captured);
+    if (!footprint ||
+        *footprint > target.l1UsableBytes)
+        return false;
+
+    result.kind = CacheFootprintKind::Known;
+    result.l1FootprintBytes = *footprint;
+    result.tileVolume = 1;
+    result.tileSizes.assign(result.dimensions.size(), 1);
+    return true;
 }
 
 std::uint64_t tileVolume(
@@ -184,9 +362,19 @@ CacheFootprintResult analyzeCacheFootprints(
             footprint.kind = CacheFootprintKind::Known;
             footprint.tileSizes = current;
             footprint.tileVolume = 1;
+        } else if (reusableWorkingSetAlreadyFits(
+                       model, target, footprint)) {
+            // Keeping a streaming array's whole affine span in L1 is neither
+            // necessary nor possible.  If every object with proven temporal
+            // reuse already fits, strip-mining only adds control overhead and
+            // inhibits downstream unrolling/vectorization.
         } else {
             searchTiles(model, target, footprint, 0,
                         current);
+            if (footprint.kind ==
+                    CacheFootprintKind::Known)
+                capturedReusableWorkingSetAlreadyFits(
+                    model, target, footprint);
         }
         result.schedules_.push_back(
             std::move(footprint));

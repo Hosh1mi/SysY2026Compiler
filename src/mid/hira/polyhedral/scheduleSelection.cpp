@@ -13,20 +13,22 @@ bool qualifies(
     const ScheduleProfitabilityResult &profitability) {
     bool baselineParallel =
         parallelism.schedules().front().outerParallel;
+    bool gainsParallelism =
+        !baselineParallel &&
+        parallelism.schedules()[index].outerParallel;
     ScheduleProfitabilityKind profitabilityKind =
         profitability.schedules()[index].kind;
     return legality.schedules()[index].kind ==
                ScheduleLegalityKind::Legal &&
            applicability.schedules()[index].kind ==
                ScheduleApplicabilityKind::Realizable &&
-           parallelism.schedules()[index].outerParallel &&
            profitabilityKind !=
                ScheduleProfitabilityKind::Regressing &&
            profitabilityKind !=
                ScheduleProfitabilityKind::Unknown &&
-           (!baselineParallel ||
-            profitabilityKind ==
-                ScheduleProfitabilityKind::ProvenBeneficial);
+           (profitabilityKind ==
+                ScheduleProfitabilityKind::ProvenBeneficial ||
+            gainsParallelism);
 }
 
 ScheduleSelectionDecision decisionFor(
@@ -46,9 +48,19 @@ ScheduleSelectionDecision decisionFor(
         ScheduleApplicabilityKind::Realizable)
         return ScheduleSelectionDecision::
             RejectedApplicability;
-    if (!parallelism.schedules()[index].outerParallel)
-        return ScheduleSelectionDecision::
-            RejectedParallelism;
+    bool baselineParallel =
+        parallelism.schedules().front().outerParallel;
+    bool gainsParallelism =
+        !baselineParallel &&
+        parallelism.schedules()[index].outerParallel;
+    if (profitability.schedules()[index].kind !=
+            ScheduleProfitabilityKind::ProvenBeneficial &&
+        !gainsParallelism)
+        return parallelism.schedules()[index].outerParallel
+                   ? ScheduleSelectionDecision::
+                         RejectedProfitability
+                   : ScheduleSelectionDecision::
+                         RejectedParallelism;
     if (!qualifies(index, legality, applicability,
                    parallelism, profitability))
         return ScheduleSelectionDecision::

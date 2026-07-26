@@ -121,6 +121,22 @@ bool isExemptReductionSelfLoop(
            update;
 }
 
+bool isTaskPrivateMemoryDependence(
+    const PolyhedralModel &model,
+    const DependenceRelation &relation) {
+    if (!relation.sourceAccess || !relation.sinkAccess ||
+        *relation.sourceAccess >= model.accesses().size() ||
+        *relation.sinkAccess >= model.accesses().size())
+        return false;
+    const AccessRelation &source =
+        model.accesses()[*relation.sourceAccess];
+    const AccessRelation &sink =
+        model.accesses()[*relation.sinkAccess];
+    return source.object == sink.object &&
+           source.object < model.memoryObjects().size() &&
+           model.memoryObjects()[source.object].taskPrivate;
+}
+
 std::vector<DependenceId> blockersFor(
     const PolyhedralModel &model,
     const DependenceSet &dependences,
@@ -147,6 +163,8 @@ std::vector<DependenceId> blockersFor(
             continue;
         if (isExemptReductionSelfLoop(model, reductions,
                                       relation, dimension))
+            continue;
+        if (isTaskPrivateMemoryDependence(model, relation))
             continue;
         if (!provesEqualIteration(relation, dimension))
             blockers.push_back(relation.id);

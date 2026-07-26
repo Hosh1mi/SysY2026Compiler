@@ -10,7 +10,7 @@ class HiraRegion;
 
 namespace polyhedral {
 
-enum class LoopDistributionError {
+enum class StatementPartitionRealizationError {
     None,
     Indivisible,
     UnsupportedDomain,
@@ -20,22 +20,23 @@ enum class LoopDistributionError {
     UnsupportedNode,
 };
 
-struct LoopDistributionResult {
+struct StatementPartitionRealizationResult {
     bool changed = false;
-    LoopDistributionError error =
-        LoopDistributionError::None;
+    StatementPartitionRealizationError error =
+        StatementPartitionRealizationError::None;
     std::string detail;
 
     bool succeeded() const {
-        return error == LoopDistributionError::None;
+        return error ==
+               StatementPartitionRealizationError::None;
     }
 };
 
-LoopDistributionResult distributeStatements(
+StatementPartitionRealizationResult realizeStatementPartitions(
     HiraRegion &region, const PolyhedralModel &model,
     const StatementPartitionResult &partitions);
-const char *loopDistributionErrorName(
-    LoopDistributionError error);
+const char *statementPartitionRealizationErrorName(
+    StatementPartitionRealizationError error);
 
 } // namespace polyhedral
 } // namespace hira

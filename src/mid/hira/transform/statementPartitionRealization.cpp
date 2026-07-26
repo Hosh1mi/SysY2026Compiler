@@ -1,4 +1,4 @@
-#include "../../../include/mid/hira/transform/loopDistribution.hpp"
+#include "../../../include/mid/hira/transform/statementPartitionRealization.hpp"
 
 #include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
@@ -15,9 +15,10 @@
 namespace hira::polyhedral {
 namespace {
 
-LoopDistributionResult reject(
-    LoopDistributionError error, std::string detail) {
-    LoopDistributionResult result;
+StatementPartitionRealizationResult reject(
+    StatementPartitionRealizationError error,
+    std::string detail) {
+    StatementPartitionRealizationResult result;
     result.error = error;
     result.detail = std::move(detail);
     return result;
@@ -134,19 +135,19 @@ bool partitionIsSelfContained(
 
 } // namespace
 
-LoopDistributionResult distributeStatements(
+StatementPartitionRealizationResult realizeStatementPartitions(
     HiraRegion &region, const PolyhedralModel &model,
     const StatementPartitionResult &partitions) {
     if (partitions.kind() !=
             StatementPartitionKind::Distributable ||
         partitions.partitions().size() < 2)
-        return reject(LoopDistributionError::Indivisible,
+        return reject(StatementPartitionRealizationError::Indivisible,
                       "no-distribution-plan");
     const auto &firstPartition =
         partitions.partitions().front();
     if (firstPartition.dimensions.size() != 1)
         return reject(
-            LoopDistributionError::UnsupportedDomain,
+            StatementPartitionRealizationError::UnsupportedDomain,
             "only-single-loop-distribution-is-realizable");
 
     AffineVariable dimension =
@@ -161,13 +162,13 @@ LoopDistributionResult distributeStatements(
     if (!domain || !domain->loop ||
         domain->dimensions.size() != 1)
         return reject(
-            LoopDistributionError::UnsupportedDomain,
+            StatementPartitionRealizationError::UnsupportedDomain,
             "missing-root-loop-domain");
     auto *sourceLoop =
         const_cast<HiraLoop *>(domain->loop);
     if (!sourceLoop->carriedValues().empty())
         return reject(
-            LoopDistributionError::LoopCarriedState,
+            StatementPartitionRealizationError::LoopCarriedState,
             "loop-carried-state");
     HiraSequence *parent = sourceLoop->parent();
     auto sourcePosition =
@@ -176,7 +177,7 @@ LoopDistributionResult distributeStatements(
     if (!parent || !sourcePosition ||
         sourceLoop->body().nodes().size() < 2)
         return reject(
-            LoopDistributionError::InvalidLoopBody,
+            StatementPartitionRealizationError::InvalidLoopBody,
             "invalid-loop-owner");
 
     std::map<const HiraNode *, StatementPartitionId>
@@ -187,7 +188,7 @@ LoopDistributionResult distributeStatements(
             statement.id >=
                 partitions.partitionByStatement().size())
             return reject(
-                LoopDistributionError::InvalidLoopBody,
+                StatementPartitionRealizationError::InvalidLoopBody,
                 "invalid-statement-partition");
         nodePartitions[statement.node] =
             partitions.partitionByStatement()[
@@ -204,7 +205,7 @@ LoopDistributionResult distributeStatements(
             sourceLoop->body().nodes()[index].get();
         if (!nodePartitions.count(node))
             return reject(
-                LoopDistributionError::InvalidLoopBody,
+                StatementPartitionRealizationError::InvalidLoopBody,
                 "unmodelled-loop-node");
         payload.push_back(node);
     }
@@ -216,7 +217,7 @@ LoopDistributionResult distributeStatements(
     for (const auto &nodes : nodesByPartition)
         if (!partitionIsSelfContained(*sourceLoop, nodes))
             return reject(
-                LoopDistributionError::
+                StatementPartitionRealizationError::
                     CrossPartitionScalar,
                 "partition-is-not-self-contained");
 
@@ -244,7 +245,7 @@ LoopDistributionResult distributeStatements(
                     region, *sourceLoop, *node, values);
             if (!clone)
                 return reject(
-                    LoopDistributionError::
+                    StatementPartitionRealizationError::
                         CrossPartitionScalar,
                     "unavailable-cloned-operand");
             if (Instruction *source =
@@ -268,25 +269,26 @@ LoopDistributionResult distributeStatements(
             sourceLoop->body().remove(node);
 
     region.markModified();
-    return {true, LoopDistributionError::None, {}};
+    return {
+        true, StatementPartitionRealizationError::None, {}};
 }
 
-const char *loopDistributionErrorName(
-    LoopDistributionError error) {
+const char *statementPartitionRealizationErrorName(
+    StatementPartitionRealizationError error) {
     switch (error) {
-    case LoopDistributionError::None:
+    case StatementPartitionRealizationError::None:
         return "none";
-    case LoopDistributionError::Indivisible:
+    case StatementPartitionRealizationError::Indivisible:
         return "indivisible";
-    case LoopDistributionError::UnsupportedDomain:
+    case StatementPartitionRealizationError::UnsupportedDomain:
         return "unsupported-domain";
-    case LoopDistributionError::LoopCarriedState:
+    case StatementPartitionRealizationError::LoopCarriedState:
         return "loop-carried-state";
-    case LoopDistributionError::InvalidLoopBody:
+    case StatementPartitionRealizationError::InvalidLoopBody:
         return "invalid-loop-body";
-    case LoopDistributionError::CrossPartitionScalar:
+    case StatementPartitionRealizationError::CrossPartitionScalar:
         return "cross-partition-scalar";
-    case LoopDistributionError::UnsupportedNode:
+    case StatementPartitionRealizationError::UnsupportedNode:
         return "unsupported-node";
     }
     return "unknown";

@@ -28,6 +28,10 @@ bool isBinaryCompute(ComputeKind kind) {
     case ComputeKind::Add:
     case ComputeKind::Sub:
     case ComputeKind::Mul:
+    case ComputeKind::SDiv:
+    case ComputeKind::SRem:
+    case ComputeKind::UDiv:
+    case ComputeKind::URem:
     case ComputeKind::FAdd:
     case ComputeKind::FSub:
     case ComputeKind::FMul:
@@ -190,9 +194,11 @@ private:
     }
 
     bool verifyIf(const HiraIf &condition,
-                  const std::set<const HiraValue *> &available) {
-        if (condition.operands().size() != 1 ||
-            !condition.results().empty() ||
+                  std::set<const HiraValue *> &available) {
+        if (condition.operands().size() !=
+                condition.resultBindings().size() * 2 + 1 ||
+            condition.results().size() !=
+                condition.resultBindings().size() ||
             !isAvailable(condition.condition(), available) ||
             !isIntegerWidth(condition.condition(), 1))
             return reject(HiraVerifyError::InvalidNode,
@@ -202,8 +208,28 @@ private:
                             nullptr))
             return false;
         auto elseAvailable = available;
-        return verifySequence(condition.elseSequence(), elseAvailable,
-                              nullptr);
+        if (!verifySequence(condition.elseSequence(), elseAvailable,
+                            nullptr))
+            return false;
+        for (std::size_t index = 0;
+             index < condition.resultBindings().size(); ++index) {
+            const HiraIf::ResultBinding &binding =
+                condition.resultBindings()[index];
+            if (condition.results()[index] != binding.result ||
+                !isAvailable(binding.thenValue, thenAvailable) ||
+                !isAvailable(binding.elseValue, elseAvailable) ||
+                !binding.result ||
+                binding.result->type() !=
+                    binding.thenValue->type() ||
+                binding.result->type() !=
+                    binding.elseValue->type())
+                return reject(HiraVerifyError::InvalidNode,
+                              "invalid-if-result");
+            if (!defineResult(condition, binding.result,
+                              available))
+                return false;
+        }
+        return true;
     }
 
     bool verifyLoop(const HiraLoop &loop,

@@ -1,6 +1,7 @@
 #include "../../../include/mid/hira/polyhedral/polyhedralModel.hpp"
 
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -346,23 +347,17 @@ private:
 
         const HiraValue *candidateBase =
             addressCompute->operands().front();
-        auto *baseCompute =
-            candidateBase
-                ? dynamic_cast<const HiraComputeOp *>(
-                      candidateBase->definingNode())
-                : nullptr;
-        if (baseCompute &&
-            baseCompute->computeKind() ==
-                ComputeKind::GetElementPtr)
-            return reject(PolyhedralBuildError::UnsupportedAddress,
-                          "nested-gep");
         if (!candidateBase ||
-            candidateBase->kind() != ValueKind::Parameter ||
             !dynamic_cast<PointerType *>(candidateBase->type()))
             return reject(PolyhedralBuildError::UnsupportedAddress,
-                          "gep-without-parameter-base");
+                          "gep-without-pointer-base");
 
-        base = candidateBase;
+        // Frontend lowering may split one source-level multidimensional
+        // subscript into a chain of GEPs.  Preserve every index while
+        // recovering the original memory object so linear stride and
+        // dependence reasoning see the complete affine address.
+        if (!resolveAddress(candidateBase, base, subscripts))
+            return false;
         for (std::size_t index = 1;
              index < addressCompute->operands().size(); ++index) {
             AffineExpr subscript =
@@ -381,7 +376,27 @@ private:
             return existing->second;
         MemoryObjectId id = static_cast<MemoryObjectId>(
             model_->memoryObjects_.size());
-        model_->memoryObjects_.push_back({id, base});
+        bool taskPrivate = false;
+        ::Value *source =
+            region_.sourceMapping().sourceValue(base);
+        source = ArgumentAliasAnalysis::underlyingObject(source);
+        auto *alloca = dynamic_cast<AllocaInst *>(source);
+        Loop *sourceLoop = region_.sourceLoop();
+        if (alloca && alloca->isLoopExpansionScratch() &&
+            sourceLoop) {
+            taskPrivate = true;
+            for (const Use &use : alloca->use_list_) {
+                auto *user =
+                    dynamic_cast<Instruction *>(use.val_);
+                if (!user || !user->parent_ ||
+                    !sourceLoop->isInLoop(user->parent_)) {
+                    taskPrivate = false;
+                    break;
+                }
+            }
+        }
+        model_->memoryObjects_.push_back(
+            {id, base, taskPrivate});
         memoryObjects_[base] = id;
         return id;
     }
@@ -418,7 +433,8 @@ private:
             kind = StatementKind::Store;
         else if (dynamic_cast<const HiraYield *>(&node))
             kind = StatementKind::Yield;
-        else if (!dynamic_cast<const HiraComputeOp *>(&node))
+        else if (!dynamic_cast<const HiraComputeOp *>(&node) &&
+                 !dynamic_cast<const HiraIf *>(&node))
             return reject(
                 PolyhedralBuildError::UnsupportedStatement,
                 "node-kind-" +
@@ -785,6 +801,12 @@ private:
                                        elsePrecision))
                         return false;
                 }
+                if (!condition->results().empty()) {
+                    if (!addStatement(
+                            *condition, dimensions, constraints,
+                            nodeSchedule, domainPrecision))
+                        return false;
+                }
                 continue;
             }
             if (!addStatement(*node, dimensions, constraints,
@@ -929,6 +951,8 @@ std::string printPolyhedralModel(const PolyhedralModel &model) {
             out << ", ";
         out << "M" << index << " = %h"
             << model.memoryObjects()[index].base->id();
+        if (model.memoryObjects()[index].taskPrivate)
+            out << " task_private";
     }
     out << ")\n";
     for (const MemoryAliasRelation &relation :

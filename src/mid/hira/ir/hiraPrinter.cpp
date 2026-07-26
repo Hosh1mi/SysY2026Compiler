@@ -77,6 +77,14 @@ const char *computeName(ComputeKind kind) {
         return "sub";
     case ComputeKind::Mul:
         return "mul";
+    case ComputeKind::SDiv:
+        return "sdiv";
+    case ComputeKind::SRem:
+        return "srem";
+    case ComputeKind::UDiv:
+        return "udiv";
+    case ComputeKind::URem:
+        return "urem";
     case ComputeKind::FAdd:
         return "fadd";
     case ComputeKind::FSub:
@@ -190,12 +198,38 @@ void printNode(std::ostringstream &out, const HiraRegion &region,
     }
 
     if (auto *condition = dynamic_cast<const HiraIf *>(&node)) {
-        out << spaces << "hira.if " << valueRef(condition->condition())
+        if (!condition->results().empty()) {
+            out << spaces;
+            for (std::size_t index = 0;
+                 index < condition->results().size(); ++index) {
+                if (index)
+                    out << ", ";
+                out << valueRef(condition->results()[index]);
+            }
+            out << " = ";
+        } else {
+            out << spaces;
+        }
+        out << "hira.if " << valueRef(condition->condition())
             << " {\n";
         printSequence(out, region, condition->thenSequence(), indent + 2);
         out << spaces << "} else {\n";
         printSequence(out, region, condition->elseSequence(), indent + 2);
-        out << spaces << "}\n";
+        out << spaces << "}";
+        if (!condition->resultBindings().empty()) {
+            out << " yields(";
+            for (std::size_t index = 0;
+                 index < condition->resultBindings().size(); ++index) {
+                if (index)
+                    out << ", ";
+                const HiraIf::ResultBinding &binding =
+                    condition->resultBindings()[index];
+                out << valueRef(binding.thenValue) << " : "
+                    << valueRef(binding.elseValue);
+            }
+            out << ")";
+        }
+        out << "\n";
         return;
     }
 

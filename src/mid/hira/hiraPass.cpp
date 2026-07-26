@@ -27,9 +27,12 @@
 #include "../../include/mid/hira/polyhedral/statementDependenceGraph.hpp"
 #include "../../include/mid/hira/polyhedral/statementPartitionAnalysis.hpp"
 #include "../../include/mid/hira/transform/loopInvariantCodeMotion.hpp"
-#include "../../include/mid/hira/transform/loopDistribution.hpp"
+#include "../../include/mid/hira/transform/loopAddressRecurrence.hpp"
+#include "../../include/mid/hira/transform/loopRepetitionFolding.hpp"
+#include "../../include/mid/hira/transform/statementPartitionRealization.hpp"
 #include "../../include/mid/hira/transform/loopParallelization.hpp"
 #include "../../include/mid/hira/transform/loopVectorization.hpp"
+#include "../../include/mid/hira/transform/pointLoopExpansion.hpp"
 #include "../../include/mid/hira/transform/scheduleRealization.hpp"
 #include "../../include/mid/hira/transform/loopTiling.hpp"
 #include "../../include/mid/ir/function.hpp"
@@ -127,14 +130,34 @@ bool selectRegions(Function &function, Loop &loop,
                       << " header=" << blockName(loop.header) << "\n";
             std::cerr << printHiraRegion(*imported.region, function.name_);
         }
-        bool optimized = hoistLoopInvariants(*imported.region);
+        bool invariantsHoisted = hoistLoopInvariants(
+            *imported.region, &aliasAnalysis);
+        bool repetitionsFolded =
+            foldRepeatedAdditiveLoops(*imported.region);
+        bool optimized =
+            invariantsHoisted || repetitionsFolded;
         if (!verifyRegion("transform"))
             return false;
-        if (debug && optimized)
+        if (debug && optimized) {
             std::cerr << "[Hira] transformed function="
                       << function.name_
                       << " header=" << blockName(loop.header)
-                      << " pass=loop-invariant-code-motion\n";
+                      << " passes=";
+            bool separator = false;
+            auto printPass = [&](const char *name, bool applied) {
+                if (!applied)
+                    return;
+                if (separator)
+                    std::cerr << ",";
+                std::cerr << name;
+                separator = true;
+            };
+            printPass("loop-invariant-code-motion",
+                      invariantsHoisted);
+            printPass("loop-repetition-folding",
+                      repetitionsFolded);
+            std::cerr << "\n";
+        }
         if (dumpHira && optimized) {
             std::cerr << "// hira.dump stage=transform function="
                       << function.name_
@@ -751,34 +774,38 @@ bool selectRegions(Function &function, Loop &loop,
             statementPartitions.kind() ==
                 polyhedral::
                     StatementPartitionKind::Distributable) {
-            polyhedral::LoopDistributionResult distribution =
-                polyhedral::distributeStatements(
+            polyhedral::StatementPartitionRealizationResult
+                partitionRealization =
+                    polyhedral::realizeStatementPartitions(
                     *imported.region, *polyhedralModel.model,
                     statementPartitions);
-            if (distribution.succeeded() &&
-                distribution.changed) {
+            if (partitionRealization.succeeded() &&
+                partitionRealization.changed) {
                 distributedRegion = true;
-                if (!verifyRegion("loop-distribution"))
+                if (!verifyRegion(
+                        "statement-partition-realization"))
                     return false;
                 if (debug || dumpPolyhedral)
                     std::cerr
-                        << "// polyhedral.loop_distribution"
+                        << "// polyhedral."
+                           "statement_partition_realization"
                         << " = realized\n";
                 if (dumpHira)
                     std::cerr << printHiraRegion(
                         *imported.region, function.name_);
-            } else if (!distribution.succeeded() &&
+            } else if (!partitionRealization.succeeded() &&
                        (debug || dumpPolyhedral)) {
                 std::cerr
-                    << "// polyhedral.loop_distribution"
+                    << "// polyhedral."
+                       "statement_partition_realization"
                     << " = rejected reason="
                     << polyhedral::
-                           loopDistributionErrorName(
-                               distribution.error);
-                if (!distribution.detail.empty())
+                           statementPartitionRealizationErrorName(
+                               partitionRealization.error);
+                if (!partitionRealization.detail.empty())
                     std::cerr
                         << " detail="
-                        << distribution.detail;
+                        << partitionRealization.detail;
                 std::cerr << "\n";
             }
         }
@@ -916,6 +943,128 @@ bool selectRegions(Function &function, Loop &loop,
                                 << transformedDimension->position
                                 << " lanes="
                                 << selectedVectorization.lanes
+                                << " = realized\n";
+                        if (dumpHira)
+                            std::cerr << printHiraRegion(
+                                *imported.region,
+                                function.name_);
+                    }
+                }
+            }
+        }
+
+        if (!distributedRegion &&
+            vectorizationValid &&
+            scheduleSelectionValid &&
+            transformModel) {
+            const polyhedral::ScheduleVectorization
+                &selectedVectorization =
+                    vectorization.schedules()[
+                        scheduleSelection.selected()];
+            if (selectedVectorization.kind ==
+                    polyhedral::VectorizationKind::Scalar &&
+                selectedVectorization.reason ==
+                    polyhedral::VectorizationReason::
+                        LoopCarriedDependence &&
+                selectedVectorization.dimension) {
+                const HiraValue *source =
+                    polyhedralModel.model->space().source(
+                        *selectedVectorization.dimension);
+                auto transformedDimension =
+                    source
+                        ? transformModel->space()
+                              .variableFor(source)
+                        : std::nullopt;
+                if (transformedDimension) {
+                    // Preserve the exact scalar dependence order while
+                    // amortizing point-loop control and address work across
+                    // the four 32-bit lanes available on Cortex-A53.
+                    polyhedral::PointLoopExpansionResult
+                        expanded =
+                            polyhedral::expandPointLoop(
+                                *imported.region,
+                                *transformModel,
+                                *transformedDimension, 4);
+                    if (!expanded.succeeded()) {
+                        if (debug || dumpPolyhedral) {
+                            std::cerr
+                                << "// polyhedral."
+                                   "point_loop_expansion"
+                                << " = rejected reason="
+                                << polyhedral::
+                                       pointLoopExpansionErrorName(
+                                           expanded.error);
+                            if (!expanded.detail.empty())
+                                std::cerr
+                                    << " detail="
+                                    << expanded.detail;
+                            std::cerr << "\n";
+                        }
+                    } else {
+                        if (debug || dumpPolyhedral)
+                            std::cerr
+                                << "// polyhedral."
+                                   "point_loop_expansion"
+                                << " factor=4"
+                                << " = realized\n";
+                        if (dumpHira)
+                            std::cerr << printHiraRegion(
+                                *imported.region,
+                                function.name_);
+                    }
+                }
+            }
+        }
+
+        if (!distributedRegion &&
+            vectorizationValid &&
+            scheduleSelectionValid &&
+            transformModel) {
+            const polyhedral::ScheduleVectorization
+                &selectedVectorization =
+                    vectorization.schedules()[
+                        scheduleSelection.selected()];
+            const bool selectedDimensionIsParallelOuter =
+                scheduleParallelismValid &&
+                scheduleSelection.selected() <
+                    scheduleParallelism.schedules().size() &&
+                scheduleParallelism
+                    .schedules()[scheduleSelection.selected()]
+                    .outerParallel &&
+                scheduleParallelism
+                    .schedules()[scheduleSelection.selected()]
+                    .outerDimension ==
+                    selectedVectorization.dimension;
+            if (selectedVectorization.kind ==
+                    polyhedral::VectorizationKind::Scalar &&
+                selectedVectorization.dimension &&
+                !selectedDimensionIsParallelOuter) {
+                const HiraValue *source =
+                    polyhedralModel.model->space().source(
+                        *selectedVectorization.dimension);
+                auto transformedDimension =
+                    source
+                        ? transformModel->space()
+                              .variableFor(source)
+                        : std::nullopt;
+                if (transformedDimension) {
+                    polyhedral::LoopAddressRecurrenceResult
+                        recurrences =
+                            polyhedral::
+                                introduceLoopAddressRecurrences(
+                                    *imported.region,
+                                    *transformModel,
+                                    *transformedDimension);
+                    if (recurrences.changed) {
+                        if (!verifyRegion(
+                                "loop-address-recurrence"))
+                            return false;
+                        if (debug || dumpPolyhedral)
+                            std::cerr
+                                << "// polyhedral."
+                                   "loop_address_recurrence"
+                                << " count="
+                                << recurrences.recurrences
                                 << " = realized\n";
                         if (dumpHira)
                             std::cerr << printHiraRegion(

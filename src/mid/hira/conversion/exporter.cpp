@@ -1,5 +1,6 @@
 #include "../../../include/mid/hira/conversion/exporter.hpp"
 
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
@@ -8,6 +9,7 @@
 #include "../../../include/mid/ir/instruction.hpp"
 #include "../../../include/mid/ir/module.hpp"
 
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -25,6 +27,14 @@ Instruction::OpID binaryOpcode(ComputeKind kind) {
         return Instruction::Sub;
     case ComputeKind::Mul:
         return Instruction::Mul;
+    case ComputeKind::SDiv:
+        return Instruction::SDiv;
+    case ComputeKind::SRem:
+        return Instruction::SRem;
+    case ComputeKind::UDiv:
+        return Instruction::UDiv;
+    case ComputeKind::URem:
+        return Instruction::URem;
     case ComputeKind::FAdd:
         return Instruction::FAdd;
     case ComputeKind::FSub:
@@ -55,6 +65,10 @@ bool isBinaryCompute(ComputeKind kind) {
     case ComputeKind::Add:
     case ComputeKind::Sub:
     case ComputeKind::Mul:
+    case ComputeKind::SDiv:
+    case ComputeKind::SRem:
+    case ComputeKind::UDiv:
+    case ComputeKind::URem:
     case ComputeKind::FAdd:
     case ComputeKind::FSub:
     case ComputeKind::FMul:
@@ -69,6 +83,17 @@ bool isBinaryCompute(ComputeKind kind) {
     default:
         return false;
     }
+}
+
+std::vector<BasicBlock *> collectEntryPredecessors(
+    const Loop &loop) {
+    std::vector<BasicBlock *> entries;
+    for (BasicBlock *predecessor : loop.header->pre_bbs_) {
+        if (loop.isInLoop(predecessor))
+            continue;
+        entries.push_back(predecessor);
+    }
+    return entries;
 }
 
 class RegionExporter {
@@ -87,8 +112,10 @@ public:
         if (region_.parallelPlan())
             return runParallel();
 
-        BasicBlock *loopEntry = preheader_;
-        if (rootLoopIndex_ != 0) {
+        BasicBlock *loopEntry = entryPredecessors_.front();
+        const bool needsEntryMerge =
+            rootLoopIndex_ != 0 || entryPredecessors_.size() != 1;
+        if (needsEntryMerge) {
             const unsigned id = nextBlockId_++;
             entryTarget_ = createBlock("preheader", id);
             loopEntry = entryTarget_;
@@ -102,7 +129,7 @@ public:
         }
 
         LoopEmission rootEmission;
-        if (!emitLoop(*rootLoop_, loopEntry, rootLoopIndex_ != 0,
+        if (!emitLoop(*rootLoop_, loopEntry, needsEntryMerge,
                       rootEmission)) {
             rollbackNewBlocks();
             return failure_;
@@ -119,6 +146,7 @@ public:
                 rollbackNewBlocks();
                 return failure_;
             }
+        newExitPredecessor_ = regionExit;
         new BranchInst(oldExit_, regionExit);
         commit();
         return ExportResult::success();
@@ -128,6 +156,11 @@ private:
     struct LoopEmission {
         BasicBlock *header = nullptr;
         BasicBlock *exit = nullptr;
+    };
+
+    struct ExitPhiRewrite {
+        PhiInst *phi = nullptr;
+        Value *sourceValue = nullptr;
     };
 
     struct CarriedPhi {
@@ -154,8 +187,10 @@ private:
         if (auto *loop = dynamic_cast<const HiraLoop *>(&node))
             return validateLoop(*loop);
         if (auto *condition = dynamic_cast<const HiraIf *>(&node)) {
-            if (condition->operands().size() != 1 ||
-                !condition->results().empty() ||
+            if (condition->operands().size() !=
+                    condition->resultBindings().size() * 2 + 1 ||
+                condition->results().size() !=
+                    condition->resultBindings().size() ||
                 condition->condition()->type() != module_->int1_ty_)
                 return fail(ExportRejectReason::InvalidRegion,
                             "invalid-if-interface");
@@ -229,22 +264,83 @@ private:
 
     bool validate() {
         if (!sourceLoop_ || !function_ || !module_ ||
-            !sourceLoop_->preheader || !sourceLoop_->singleExit())
+            !sourceLoop_->singleExit())
             return fail(ExportRejectReason::InvalidRegion);
 
-        preheader_ = sourceLoop_->preheader;
         oldHeader_ = sourceLoop_->header;
+        entryPredecessors_ =
+            collectEntryPredecessors(*sourceLoop_);
         oldExit_ = sourceLoop_->singleExit();
-        Instruction *preheaderTerminator = preheader_->get_terminator();
-        if (!preheaderTerminator || !preheaderTerminator->is_br() ||
-            preheaderTerminator->num_ops_ != 1 ||
-            preheaderTerminator->get_operand(0) != oldHeader_)
+        if (entryPredecessors_.empty())
             return fail(ExportRejectReason::InvalidSourceCFG);
+        for (BasicBlock *entry : entryPredecessors_) {
+            Instruction *terminator = entry->get_terminator();
+            if (!terminator || !terminator->is_br() ||
+                (terminator->num_ops_ != 1 &&
+                 terminator->num_ops_ != 3))
+                return fail(ExportRejectReason::InvalidSourceCFG);
+            bool targetsHeader = false;
+            for (unsigned index = 0;
+                 index < terminator->num_ops_; ++index)
+                targetsHeader |=
+                    terminator->get_operand(index) == oldHeader_;
+            if (!targetsHeader)
+                return fail(ExportRejectReason::InvalidSourceCFG);
+        }
 
         for (Instruction *instruction : oldExit_->instr_list_) {
-            if (instruction->is_phi())
-                return fail(ExportRejectReason::UnsupportedExitPhi);
-            break;
+            auto *phi = dynamic_cast<PhiInst *>(instruction);
+            if (!phi)
+                break;
+            Value *sourceValue = nullptr;
+            bool foundRegionIncoming = false;
+            for (unsigned index = 0;
+                 index + 1 < phi->num_ops_; index += 2) {
+                auto *predecessor = dynamic_cast<BasicBlock *>(
+                    phi->get_operand(index + 1));
+                if (!predecessor ||
+                    !sourceLoop_->isInLoop(predecessor))
+                    continue;
+                Value *incoming = phi->get_operand(index);
+                if (!foundRegionIncoming) {
+                    sourceValue = incoming;
+                    foundRegionIncoming = true;
+                    continue;
+                }
+                if (incoming == sourceValue)
+                    continue;
+                auto *left =
+                    dynamic_cast<ConstantInt *>(sourceValue);
+                auto *right =
+                    dynamic_cast<ConstantInt *>(incoming);
+                if (!left || !right ||
+                    left->type_ != right->type_ ||
+                    left->value_ != right->value_)
+                    return fail(
+                        ExportRejectReason::UnsupportedExitPhi,
+                        oldExit_->name_ +
+                            ":path-dependent-incoming");
+            }
+            if (!foundRegionIncoming)
+                return fail(ExportRejectReason::InvalidSourceCFG,
+                            oldExit_->name_ +
+                                ":missing-region-incoming");
+            auto *sourceInstruction =
+                dynamic_cast<Instruction *>(sourceValue);
+            if (sourceInstruction &&
+                sourceLoop_->isInLoop(sourceInstruction)) {
+                bool exportedResult = false;
+                for (HiraValue *result : region_.results())
+                    exportedResult |=
+                        region_.sourceMapping().sourceValue(result) ==
+                        sourceValue;
+                if (!exportedResult)
+                    return fail(
+                        ExportRejectReason::UnsupportedExitPhi,
+                        oldExit_->name_ +
+                            ":unmodeled-live-out");
+            }
+            exitPhiRewrites_.push_back({phi, sourceValue});
         }
 
         const auto &rootNodes = region_.rootSequence().nodes();
@@ -282,11 +378,6 @@ private:
             if (!region_.sourceMapping().sourceValue(result))
                 return fail(ExportRejectReason::InvalidRegion,
                             "unmapped-result");
-            bool found = false;
-            for (const auto &binding : rootLoop_->carriedValues())
-                found |= binding.result == result;
-            if (!found)
-                return fail(ExportRejectReason::UnsupportedResult);
         }
         return true;
     }
@@ -317,6 +408,27 @@ private:
         if (plan.loop != rootLoop_)
             return fail(ExportRejectReason::InvalidRegion,
                         "parallel-root-mismatch");
+        std::set<const HiraValue *> privateParameters;
+        for (const HiraValue *parameter :
+             plan.privateParameters) {
+            if (!parameter ||
+                std::find(region_.parameters().begin(),
+                          region_.parameters().end(),
+                          parameter) ==
+                    region_.parameters().end() ||
+                !privateParameters.insert(parameter).second)
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-private-parameter");
+            ::Value *source =
+                region_.sourceMapping().sourceValue(parameter);
+            source =
+                ArgumentAliasAnalysis::underlyingObject(source);
+            auto *alloca = dynamic_cast<AllocaInst *>(source);
+            if (!alloca ||
+                !alloca->isLoopExpansionScratch())
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-private-allocation");
+        }
         std::set<const HiraNode *> inside;
         inside.insert(rootLoop_);
         collectSubtreeNodes(rootLoop_->body(), inside);
@@ -388,7 +500,7 @@ private:
             return failure_;
         const HiraParallelPlan &plan = *region_.parallelPlan();
 
-        BasicBlock *loopEntry = preheader_;
+        BasicBlock *loopEntry = entryPredecessors_.front();
         if (rootLoopIndex_ != 0) {
             const unsigned id = nextBlockId_++;
             entryTarget_ = createBlock("preheader", id);
@@ -425,15 +537,41 @@ private:
         auto *bodyEntry = new BasicBlock(module_, "label_par_entry",
                                          bodyFunction);
 
-        std::vector<GlobalVariable *> contextSlots;
+        std::map<HiraValue *, GlobalVariable *> contextSlots;
         std::size_t slotIndex = 0;
         for (HiraValue *parameter : region_.parameters()) {
+            const bool taskPrivate =
+                std::find(
+                    plan.privateParameters.begin(),
+                    plan.privateParameters.end(),
+                    parameter) !=
+                plan.privateParameters.end();
+            if (taskPrivate) {
+                ::Value *source =
+                    region_.sourceMapping().sourceValue(parameter);
+                source =
+                    ArgumentAliasAnalysis::underlyingObject(source);
+                auto *sourceAlloca =
+                    dynamic_cast<AllocaInst *>(source);
+                if (!sourceAlloca) {
+                    fail(ExportRejectReason::InvalidRegion,
+                         "private-parameter-not-alloca");
+                    return failure_;
+                }
+                auto *privateAlloca = new AllocaInst(
+                    sourceAlloca->alloca_ty_, bodyEntry, true);
+                privateAlloca->markLoopExpansionScratch();
+                bodyEntry->add_instruction_front(privateAlloca);
+                bind(parameter, privateAlloca);
+                ++slotIndex;
+                continue;
+            }
             auto *slot = new GlobalVariable(
                 "__sysy_par_ctx_" + suffix + "_" +
                     std::to_string(slotIndex++),
                 module_, parameter->type(), false,
                 new ConstantZero(parameter->type()));
-            contextSlots.push_back(slot);
+            contextSlots[parameter] = slot;
             auto *loaded = new LoadInst(slot, bodyEntry);
             bind(parameter, loaded);
         }
@@ -496,10 +634,13 @@ private:
         // associative operators.
         const unsigned callId = nextBlockId_++;
         BasicBlock *parallelCall = createBlock("par_call", callId);
-        slotIndex = 0;
-        for (HiraValue *parameter : region_.parameters())
+        for (HiraValue *parameter : region_.parameters()) {
+            auto slot = contextSlots.find(parameter);
+            if (slot == contextSlots.end())
+                continue;
             new StoreInst(sourceValueOf(parameter),
-                          contextSlots[slotIndex++], parallelCall);
+                          slot->second, parallelCall);
+        }
         for (std::size_t index = 0; index < plan.reductions.size();
              ++index) {
             Type *valueType =
@@ -561,6 +702,7 @@ private:
                 rollbackNewBlocks();
                 return failure_;
             }
+        newExitPredecessor_ = regionExit;
         new BranchInst(oldExit_, regionExit);
         commit();
         return ExportResult::success();
@@ -638,7 +780,6 @@ private:
         const unsigned id = nextBlockId_++;
         BasicBlock *header = createBlock("header", id);
         BasicBlock *body = createBlock("body", id);
-        BasicBlock *latch = createBlock("latch", id);
         BasicBlock *exit = createBlock("exit", id);
         emission = {header, exit};
         if (loop.role() == HiraLoop::Role::VectorMain)
@@ -648,6 +789,10 @@ private:
                  HiraLoop::Role::ScalarRemainder)
             header->setSemFlag(
                 SemFlag::VectorizedEpilogue);
+        else if (loop.role() ==
+                 HiraLoop::Role::RepetitionFolded)
+            header->setSemFlag(
+                SemFlag::HiraRepetitionFolded);
 
         Value *lower = parallel ? parallel->lower
                                 : value(loop.lowerBound());
@@ -699,21 +844,23 @@ private:
         if (!emitSequence(loop.body(), body, continuation))
             return false;
 
-        new BranchInst(latch, continuation);
-        new BranchInst(header, latch);
+        // The unique continuation is already a valid loop latch.  Avoid an
+        // empty forwarding block and preserve Hira's compact structured CFG
+        // in the scalar IR handed to the backend.
+        new BranchInst(header, continuation);
 
         Value *inductionYield = value(loop.yieldValues().front());
         if (!inductionYield)
             return fail(ExportRejectReason::MissingValue,
                         "induction-yield");
-        inductionPhi->addIncoming(inductionYield, latch);
+        inductionPhi->addIncoming(inductionYield, continuation);
 
         for (const CarriedPhi &entryPhi : carriedPhis) {
             Value *yielded = value(entryPhi.binding->yielded);
             if (!yielded)
                 return fail(ExportRejectReason::MissingValue,
                             "carried-yield");
-            entryPhi.phi->addIncoming(yielded, latch);
+            entryPhi.phi->addIncoming(yielded, continuation);
 
             auto *exitPhi = PhiInst::create_phi(
                 entryPhi.binding->result->type(), exit);
@@ -774,6 +921,21 @@ private:
                           elseContinuation))
             return false;
         new BranchInst(joinBlock, elseContinuation);
+
+        for (const HiraIf::ResultBinding &binding :
+             condition.resultBindings()) {
+            Value *thenValue = value(binding.thenValue);
+            Value *elseValue = value(binding.elseValue);
+            if (!thenValue || !elseValue)
+                return fail(ExportRejectReason::MissingValue,
+                            "if-result");
+            auto *phi =
+                PhiInst::create_phi(binding.result->type(), joinBlock);
+            joinBlock->add_instruction(phi);
+            phi->addIncoming(thenValue, thenContinuation);
+            phi->addIncoming(elseValue, elseContinuation);
+            bind(binding.result, phi);
+        }
 
         continuation = joinBlock;
         return true;
@@ -889,11 +1051,48 @@ private:
             replaceExternalUses(oldValue, newValue);
         }
 
-        Instruction *oldBranch = preheader_->get_terminator();
-        preheader_->delete_instr(oldBranch);
-        preheader_->remove_succ_basic_block(oldHeader_);
-        oldHeader_->remove_pre_basic_block(preheader_);
-        new BranchInst(entryTarget_, preheader_);
+        for (const ExitPhiRewrite &rewrite :
+             exitPhiRewrites_) {
+            Value *replacement = rewrite.sourceValue;
+            auto *sourceInstruction =
+                dynamic_cast<Instruction *>(replacement);
+            if (sourceInstruction &&
+                sourceLoop_->isInLoop(sourceInstruction)) {
+                replacement = nullptr;
+                for (HiraValue *result : region_.results()) {
+                    if (region_.sourceMapping().sourceValue(result) !=
+                        rewrite.sourceValue)
+                        continue;
+                    replacement = value(result);
+                    break;
+                }
+            }
+            for (int index =
+                     static_cast<int>(rewrite.phi->num_ops_) - 2;
+                 index >= 0; index -= 2) {
+                auto *predecessor =
+                    dynamic_cast<BasicBlock *>(
+                        rewrite.phi->get_operand(index + 1));
+                if (predecessor &&
+                    sourceLoop_->isInLoop(predecessor))
+                    rewrite.phi->remove_operands(index,
+                                                 index + 1);
+            }
+            rewrite.phi->addIncoming(
+                replacement, newExitPredecessor_);
+        }
+
+        for (BasicBlock *entry : entryPredecessors_) {
+            Instruction *oldBranch = entry->get_terminator();
+            entry->remove_succ_basic_block(oldHeader_);
+            oldHeader_->remove_pre_basic_block(entry);
+            for (unsigned index = 0;
+                 index < oldBranch->num_ops_; ++index)
+                if (oldBranch->get_operand(index) == oldHeader_)
+                    oldBranch->set_operand(index, entryTarget_);
+            entry->add_succ_basic_block(entryTarget_);
+            entryTarget_->add_pre_basic_block(entry);
+        }
 
         std::vector<BasicBlock *> oldBlocks =
             sourceLoop_->blocksOrdered;
@@ -928,13 +1127,15 @@ private:
     Function *function_ = nullptr;
     Function *blockFunction_ = nullptr;
     Module *module_ = nullptr;
-    BasicBlock *preheader_ = nullptr;
+    std::vector<BasicBlock *> entryPredecessors_;
     BasicBlock *oldHeader_ = nullptr;
     BasicBlock *oldExit_ = nullptr;
     BasicBlock *rootHeader_ = nullptr;
     BasicBlock *entryTarget_ = nullptr;
+    BasicBlock *newExitPredecessor_ = nullptr;
     std::size_t rootLoopIndex_ = 0;
     std::vector<BasicBlock *> newBlocks_;
+    std::vector<ExitPhiRewrite> exitPhiRewrites_;
     std::map<HiraValue *, Value *> values_;
     ExportResult failure_;
 

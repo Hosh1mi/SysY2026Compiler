@@ -178,8 +178,6 @@ bool preservesIdentityOrderModuloEqualDimensions(
     const KnownDistances &distances) {
     if (distances.conflict ||
         identitySource.components.size() !=
-            identitySink.components.size() ||
-        identitySource.components.size() !=
             candidateSource.components.size() ||
         identitySink.components.size() !=
             candidateSink.components.size())
@@ -191,17 +189,25 @@ bool preservesIdentityOrderModuloEqualDimensions(
     auto collect = [&](const StatementSchedule &source,
                        const StatementSchedule &sink,
                        std::vector<Pair> &unequal) {
-        for (std::size_t index = 0;
-             index < source.components.size(); ++index) {
-            const ScheduleComponent &left =
-                source.components[index];
-            const ScheduleComponent &right =
-                sink.components[index];
-            if (left.kind != right.kind)
-                return false;
-            if (left.kind !=
+        std::vector<const ScheduleComponent *> sourceIterations;
+        std::vector<const ScheduleComponent *> sinkIterations;
+        for (const ScheduleComponent &component :
+             source.components)
+            if (component.kind ==
                 ScheduleComponentKind::Iteration)
-                continue;
+                sourceIterations.push_back(&component);
+        for (const ScheduleComponent &component :
+             sink.components)
+            if (component.kind ==
+                ScheduleComponentKind::Iteration)
+                sinkIterations.push_back(&component);
+        const std::size_t common = std::min(
+            sourceIterations.size(), sinkIterations.size());
+        for (std::size_t index = 0; index < common; ++index) {
+            const ScheduleComponent &left =
+                *sourceIterations[index];
+            const ScheduleComponent &right =
+                *sinkIterations[index];
             Pair dimensions{left.dimension, right.dimension};
             auto distance = distances.values.find(dimensions);
             if (distance != distances.values.end()) {
@@ -221,29 +227,32 @@ bool preservesIdentityOrderModuloEqualDimensions(
         identityUnequal != candidateUnequal)
         return false;
 
-    // Schedule construction may permute iteration components only.  Requiring
-    // all static sequence/branch components to remain in their original slots
-    // ensures that the same within-iteration tie breaker is used after every
-    // dimension proven equal above.
-    for (std::size_t index = 0;
-         index < identitySource.components.size(); ++index) {
-        const ScheduleComponent &sourceIdentity =
-            identitySource.components[index];
-        const ScheduleComponent &sinkIdentity =
-            identitySink.components[index];
-        const ScheduleComponent &sourceCandidate =
-            candidateSource.components[index];
-        const ScheduleComponent &sinkCandidate =
-            candidateSink.components[index];
-        if (sourceIdentity.kind != sourceCandidate.kind ||
-            sinkIdentity.kind != sinkCandidate.kind)
-            return false;
-        if (sourceIdentity.kind !=
-                ScheduleComponentKind::Iteration &&
-            (sourceIdentity.position != sourceCandidate.position ||
-             sinkIdentity.position != sinkCandidate.position))
-            return false;
-    }
+    // Schedule construction may permute iteration components only. Preserve
+    // every static sequence/branch component independently for each statement;
+    // source and sink statements need not have the same loop depth.
+    auto preservesStaticComponents =
+        [](const StatementSchedule &identity,
+           const StatementSchedule &candidate) {
+            for (std::size_t index = 0;
+                 index < identity.components.size(); ++index) {
+                const ScheduleComponent &before =
+                    identity.components[index];
+                const ScheduleComponent &after =
+                    candidate.components[index];
+                if (before.kind != after.kind)
+                    return false;
+                if (before.kind !=
+                        ScheduleComponentKind::Iteration &&
+                    before.position != after.position)
+                    return false;
+            }
+            return true;
+        };
+    if (!preservesStaticComponents(identitySource,
+                                   candidateSource) ||
+        !preservesStaticComponents(identitySink,
+                                   candidateSink))
+        return false;
     return true;
 }
 

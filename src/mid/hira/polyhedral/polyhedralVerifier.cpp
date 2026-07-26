@@ -52,7 +52,8 @@ verifyConstraint(const PolyhedralModel &model,
 bool validStatementKind(const PolyhedralStatement &statement) {
     switch (statement.kind) {
     case StatementKind::Compute:
-        return dynamic_cast<const HiraComputeOp *>(statement.node);
+        return dynamic_cast<const HiraComputeOp *>(statement.node) ||
+               dynamic_cast<const HiraIf *>(statement.node);
     case StatementKind::Load:
         return dynamic_cast<const HiraLoad *>(statement.node);
     case StatementKind::Store:

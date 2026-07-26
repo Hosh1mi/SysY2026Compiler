@@ -2,8 +2,11 @@
 
 #include <set>
 
+class ArgumentAliasAnalysis;
+
 namespace hira {
 
+class SourceMapping;
 class HiraLoop;
 class HiraNode;
 class HiraSequence;
@@ -11,7 +14,10 @@ class HiraValue;
 
 class LoopInvarianceAnalysis {
 public:
-    explicit LoopInvarianceAnalysis(const HiraLoop &loop);
+    LoopInvarianceAnalysis(
+        const HiraLoop &loop,
+        const SourceMapping *sourceMapping = nullptr,
+        const ::ArgumentAliasAnalysis *aliasAnalysis = nullptr);
 
     bool isInvariant(
         const HiraValue *value,
@@ -25,7 +31,10 @@ private:
     void collectNode(const HiraNode &node);
 
     const HiraLoop &loop_;
+    const SourceMapping *sourceMapping_ = nullptr;
+    const ::ArgumentAliasAnalysis *aliasAnalysis_ = nullptr;
     std::set<const HiraNode *> internalNodes_;
+    std::set<const HiraValue *> storedBases_;
 };
 
 } // namespace hira

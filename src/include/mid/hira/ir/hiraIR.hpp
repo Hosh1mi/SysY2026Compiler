@@ -79,6 +79,7 @@ public:
     void addOperand(HiraValue *value);
     void addResult(HiraValue *value);
     void replaceOperand(std::size_t index, HiraValue *value);
+    void clearResults();
 
 private:
     friend class HiraSequence;
@@ -112,6 +113,10 @@ enum class ComputeKind {
     Add,
     Sub,
     Mul,
+    SDiv,
+    SRem,
+    UDiv,
+    URem,
     FAdd,
     FSub,
     FMul,
@@ -172,11 +177,33 @@ public:
 
 class HiraIf final : public HiraNode {
 public:
+    struct ResultBinding {
+        HiraValue *thenValue = nullptr;
+        HiraValue *elseValue = nullptr;
+        HiraValue *result = nullptr;
+    };
+
     explicit HiraIf(HiraValue *condition) : HiraNode(NodeKind::If) {
         addOperand(condition);
     }
 
     HiraValue *condition() const { return operands().front(); }
+    void addResultBinding(HiraValue *thenValue,
+                          HiraValue *elseValue,
+                          HiraValue *result) {
+        bindings_.push_back({thenValue, elseValue, result});
+        addOperand(thenValue);
+        addOperand(elseValue);
+        addResult(result);
+    }
+    const std::vector<ResultBinding> &resultBindings() const {
+        return bindings_;
+    }
+    std::vector<ResultBinding> releaseResultBindings() {
+        std::vector<ResultBinding> result = std::move(bindings_);
+        clearResults();
+        return result;
+    }
     HiraSequence &thenSequence() { return thenSequence_; }
     HiraSequence &elseSequence() { return elseSequence_; }
     const HiraSequence &thenSequence() const { return thenSequence_; }
@@ -185,6 +212,7 @@ public:
 private:
     HiraSequence thenSequence_;
     HiraSequence elseSequence_;
+    std::vector<ResultBinding> bindings_;
 };
 
 class HiraLoop final : public HiraNode {
@@ -194,6 +222,7 @@ public:
         VectorMain,
         ScalarRemainder,
         Parallel,
+        RepetitionFolded,
     };
 
     struct CarriedBinding {
@@ -236,8 +265,10 @@ public:
     }
     std::size_t addCarriedValue(HiraValue *initial, HiraValue *iteration,
                                 HiraValue *result);
+    void setCarriedInitial(std::size_t index, HiraValue *value);
     void setCarriedYield(std::size_t index, HiraValue *value);
     void addYieldValue(HiraValue *value);
+    void setYieldValue(std::size_t index, HiraValue *value);
     Role role() const { return role_; }
     void setRole(Role role) { role_ = role; }
 
@@ -257,6 +288,7 @@ public:
     void mapValue(HiraValue *hiraValue, ::Value *llvmValue);
     void mapNode(HiraNode *hiraNode, Instruction *llvmInstruction);
     void mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop);
+    void unmapNode(HiraNode *hiraNode);
 
     ::Value *sourceValue(const HiraValue *value) const;
     HiraValue *hiraValue(const ::Value *value) const;
@@ -297,6 +329,7 @@ struct HiraParallelPlan {
     HiraLoop *loop = nullptr;
     int bodyId = 0;
     std::vector<HiraParallelReduction> reductions;
+    std::vector<HiraValue *> privateParameters;
 };
 
 class HiraRegion {

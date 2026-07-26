@@ -378,7 +378,8 @@ bool Arm64FuncContext::tryEmitLogicalConst(Instruction *inst, Value *v1, Value *
 void Arm64FuncContext::emitGepIndexStep(std::string &addr, Value *idx, int elemSize,
                                         Instruction *inst) {
     if (auto *ci = dynamic_cast<ConstantInt *>(idx)) {
-        int offset = ci->value_ * elemSize;
+        int64_t offset =
+            static_cast<int64_t>(ci->value_) * elemSize;
         if (offset != 0) {
             if (offset > 0 && offset <= 4095) {
                 emitRawAluMachine("\tadd " + addr + ", " + addr + ", #" + std::to_string(offset),
@@ -386,8 +387,32 @@ void Arm64FuncContext::emitGepIndexStep(std::string &addr, Value *idx, int elemS
             } else if (offset < 0 && -offset <= 4095) {
                 emitRawAluMachine("\tsub " + addr + ", " + addr + ", #" + std::to_string(-offset),
                                   addr, {addr});
+            } else if (static_cast<uint64_t>(
+                           offset < 0 ? -offset : offset) <=
+                       (static_cast<uint64_t>(4095) << 12) + 4095) {
+                const uint64_t magnitude =
+                    static_cast<uint64_t>(
+                        offset < 0 ? -offset : offset);
+                const uint64_t high = magnitude >> 12;
+                const uint64_t low = magnitude & 0xfffU;
+                const char *opcode = offset > 0 ? "add" : "sub";
+                if (high)
+                    emitRawAluMachine(
+                        "\t" + std::string(opcode) + " " +
+                            addr + ", " + addr + ", #" +
+                            std::to_string(high) +
+                            ", lsl #12",
+                        addr, {addr});
+                if (low)
+                    emitRawAluMachine(
+                        "\t" + std::string(opcode) + " " +
+                            addr + ", " + addr + ", #" +
+                            std::to_string(low),
+                        addr, {addr});
             } else {
-                emitIntConst(abs(offset), "x17");
+                emitIntConst(
+                    static_cast<int>(offset < 0 ? -offset : offset),
+                    "x17");
                 if (offset > 0)
                     emitBinaryMachine("add", addr, addr, "x17");
                 else

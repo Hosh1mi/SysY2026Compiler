@@ -104,6 +104,7 @@ struct PolyhedralStatement {
 struct MemoryObject {
     MemoryObjectId id = 0;
     const HiraValue *base = nullptr;
+    bool taskPrivate = false;
 };
 
 enum class MemoryAliasKind {

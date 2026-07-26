@@ -26,6 +26,14 @@ void HiraNode::replaceOperand(std::size_t index,
     operands_[index] = value;
 }
 
+void HiraNode::clearResults() {
+    for (HiraValue *value : results_) {
+        if (value->definingNode_ == this)
+            value->definingNode_ = nullptr;
+    }
+    results_.clear();
+}
+
 HiraNode *HiraSequence::append(std::unique_ptr<HiraNode> node) {
     return insert(nodes_.size(), std::move(node));
 }
@@ -67,6 +75,13 @@ std::size_t HiraLoop::addCarriedValue(HiraValue *initial,
     return carriedValues_.size() - 1;
 }
 
+void HiraLoop::setCarriedInitial(std::size_t index,
+                                 HiraValue *value) {
+    assert(index < carriedValues_.size() && value);
+    carriedValues_[index].initial = value;
+    replaceOperand(3 + index, value);
+}
+
 void HiraLoop::setCarriedYield(std::size_t index, HiraValue *value) {
     assert(index < carriedValues_.size() && value);
     carriedValues_[index].yielded = value;
@@ -75,6 +90,12 @@ void HiraLoop::setCarriedYield(std::size_t index, HiraValue *value) {
 void HiraLoop::addYieldValue(HiraValue *value) {
     assert(value && "loop yield values must be explicit");
     yieldValues_.push_back(value);
+}
+
+void HiraLoop::setYieldValue(std::size_t index,
+                             HiraValue *value) {
+    assert(index < yieldValues_.size() && value);
+    yieldValues_[index] = value;
 }
 
 void SourceMapping::mapValue(HiraValue *hiraValue, ::Value *llvmValue) {
@@ -97,6 +118,17 @@ void SourceMapping::mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop) {
     assert(hiraLoop && llvmLoop);
     loopToSource_[hiraLoop] = llvmLoop;
     sourceToLoop_[llvmLoop] = hiraLoop;
+}
+
+void SourceMapping::unmapNode(HiraNode *hiraNode) {
+    auto node = nodeToSource_.find(hiraNode);
+    if (node == nodeToSource_.end())
+        return;
+    auto source = sourceToNode_.find(node->second);
+    if (source != sourceToNode_.end() &&
+        source->second == hiraNode)
+        sourceToNode_.erase(source);
+    nodeToSource_.erase(node);
 }
 
 ::Value *SourceMapping::sourceValue(const HiraValue *value) const {

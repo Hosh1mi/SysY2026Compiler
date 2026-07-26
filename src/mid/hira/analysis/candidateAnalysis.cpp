@@ -16,11 +16,6 @@ CandidateResult reject(CandidateRejectReason reason,
     return CandidateResult::reject(reason, detail);
 }
 
-bool isDefinedInLoop(Value *value, const Loop &loop) {
-    auto *instruction = dynamic_cast<Instruction *>(value);
-    return instruction && loop.isInLoop(instruction);
-}
-
 bool hasSingleEntry(const Loop &loop) {
     for (BasicBlock *block : loop.blocksOrdered) {
         if (block == loop.header)
@@ -32,16 +27,15 @@ bool hasSingleEntry(const Loop &loop) {
     return true;
 }
 
-bool hasDedicatedExit(const Loop &loop) {
-    BasicBlock *exit = loop.singleExit();
-    if (!exit)
+bool hasEntryPredecessor(const Loop &loop) {
+    if (!loop.header)
         return false;
-    if (exit->pre_bbs_.empty())
-        return false;
-    return std::all_of(exit->pre_bbs_.begin(), exit->pre_bbs_.end(),
-                       [&loop](BasicBlock *predecessor) {
-                           return loop.isInLoop(predecessor);
-                       });
+    for (BasicBlock *predecessor : loop.header->pre_bbs_) {
+        if (loop.isInLoop(predecessor))
+            continue;
+        return true;
+    }
+    return false;
 }
 
 bool isSupportedControlFlow(const Loop &loop) {
@@ -150,6 +144,8 @@ const char *candidateRejectReasonName(CandidateRejectReason reason) {
         return "strip-mined-point-loop";
     case CandidateRejectReason::AlreadyVectorized:
         return "already-vectorized";
+    case CandidateRejectReason::AlreadyTransformed:
+        return "already-transformed";
     }
     return "unknown";
 }
@@ -164,27 +160,27 @@ CandidateResult analyzeHiraCandidate(const Loop &loop,
              SemFlag::TargetPointerRecurrenceLoop)))
         return reject(
             CandidateRejectReason::AlreadyVectorized);
+    if (loop.header &&
+        loop.header->hasSemFlag(
+            SemFlag::HiraRepetitionFolded))
+        return reject(
+            CandidateRejectReason::AlreadyTransformed);
     if (isStripMinedPointLoop(loop))
         return reject(
             CandidateRejectReason::StripMinedPointLoop);
     if (!loop.header)
         return reject(CandidateRejectReason::MissingHeader);
-    if (!loop.preheader)
-        return reject(CandidateRejectReason::MissingPreheader);
-    if (loop.latches.size() != 1)
-        return reject(CandidateRejectReason::MultipleLatches);
+    // Hira imports the region directly from its unique entry edge.  A
+    // dedicated CFG preheader is an implementation detail of the traditional
+    // loop pipeline and is deliberately not required here.
+    if (!hasEntryPredecessor(loop))
+        return reject(CandidateRejectReason::MultipleEntry);
     if (!hasSingleEntry(loop))
         return reject(CandidateRejectReason::MultipleEntry);
     if (loop.exiting.size() != 1)
         return reject(CandidateRejectReason::MultipleExitingBlocks);
     if (loop.exits.size() != 1)
         return reject(CandidateRejectReason::MultipleExits);
-    if (!hasDedicatedExit(loop))
-        return reject(CandidateRejectReason::NonDedicatedExit);
-    if (!loop.hasInductionIV() || !loop.inductionInit || !loop.tripCount)
-        return reject(CandidateRejectReason::MissingInductionVariable);
-    if (isDefinedInLoop(loop.tripCount, loop))
-        return reject(CandidateRejectReason::NonAffineBound);
     if (!isSupportedControlFlow(loop))
         return reject(CandidateRejectReason::UnsupportedControlFlow);
 

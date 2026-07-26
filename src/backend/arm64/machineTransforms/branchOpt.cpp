@@ -339,14 +339,85 @@ static bool tryMachineThreadMonotoneFirstIteration(MachineFunction &func) {
 		    !parseImmediate(headerCmp.asmOperands[1], init))
 			continue;
 
-		int predIdx = previousExecutableBlock(func, headerIdx);
-		if (predIdx < 0 || !blockFallsThrough(func.blocks[predIdx]))
-			continue;
-		auto predExec = executableInstructions(func.blocks[predIdx]);
-		if (predExec.size() < 3)
+		int predIdx = -1;
+		bool explicitBackedge = false;
+		std::vector<size_t> predExec;
+		size_t updateExecIndex = 0;
+		for (size_t candidate = 0;
+		     candidate < func.blocks.size(); ++candidate) {
+			auto candidateExec =
+				executableInstructions(func.blocks[candidate]);
+			if (candidateExec.size() < 3)
+				continue;
+			const MachineInstr &last =
+				func.blocks[candidate]
+				    .instrs[candidateExec.back()];
+			bool explicitEdge =
+				last.opcodeText == "b" &&
+				last.asmOperands.size() == 1 &&
+				findBlockByLabel(
+				    func, last.asmOperands[0]) ==
+				    static_cast<int>(headerIdx);
+			bool fallthroughEdge =
+				blockFallsThrough(func.blocks[candidate]) &&
+				nextExecutableBlock(func, candidate) ==
+				    static_cast<int>(headerIdx);
+			if (!explicitEdge && !fallthroughEdge)
+				continue;
+			size_t candidateUpdateIndex =
+				candidateExec.size() - 1 -
+				(explicitEdge ? 1 : 0);
+			const MachineInstr &candidateUpdate =
+				func.blocks[candidate]
+				    .instrs[candidateExec[
+				        candidateUpdateIndex]];
+			if (candidateUpdate.opcodeText != "add" ||
+			    candidateUpdate.asmOperands.size() != 3 ||
+			    !peephSamePhysicalReg(
+			        candidateUpdate.asmOperands[0], ivReg) ||
+			    !peephSamePhysicalReg(
+			        candidateUpdate.asmOperands[1], ivReg) ||
+			    candidateUpdate.asmOperands[2] != "#1")
+				continue;
+
+			bool candidateGuarded = false;
+			for (size_t position = candidateUpdateIndex;
+			     position-- > 0;) {
+				const MachineInstr &branch =
+					func.blocks[candidate]
+					    .instrs[candidateExec[position]];
+				if (branch.opcodeText != "b.ge")
+					continue;
+				for (size_t comparePosition = position;
+				     comparePosition-- > 0;) {
+					const MachineInstr &guard =
+						func.blocks[candidate]
+						    .instrs[candidateExec[
+						        comparePosition]];
+					if (!guard.setsFlags)
+						continue;
+					candidateGuarded =
+						guard.opcodeText == "cmp" &&
+						guard.asmOperands.size() == 2 &&
+						peephSamePhysicalReg(
+						    guard.asmOperands[0], ivReg);
+					break;
+				}
+				break;
+			}
+			if (!candidateGuarded)
+				continue;
+			predIdx = static_cast<int>(candidate);
+			explicitBackedge = explicitEdge;
+			predExec = std::move(candidateExec);
+			updateExecIndex = candidateUpdateIndex;
+			break;
+		}
+		if (predIdx < 0)
 			continue;
 		const MachineInstr &update =
-			func.blocks[predIdx].instrs[predExec.back()];
+			func.blocks[predIdx]
+			    .instrs[predExec[updateExecIndex]];
 		if (update.opcodeText != "add" || update.asmOperands.size() != 3 ||
 		    !peephSamePhysicalReg(update.asmOperands[0], ivReg) ||
 		    !peephSamePhysicalReg(update.asmOperands[1], ivReg) ||
@@ -356,7 +427,7 @@ static bool tryMachineThreadMonotoneFirstIteration(MachineFunction &func) {
 		// The update must be control-dependent on a signed upper-bound test of
 		// the old IV.  No intervening flag definition may separate cmp/b.ge.
 		bool guarded = false;
-		for (size_t p = predExec.size() - 1; p-- > 0;) {
+		for (size_t p = updateExecIndex; p-- > 0;) {
 			const MachineInstr &candidate =
 				func.blocks[predIdx].instrs[predExec[p]];
 			if (candidate.opcodeText != "b.ge")
@@ -413,6 +484,9 @@ static bool tryMachineThreadMonotoneFirstIteration(MachineFunction &func) {
 
 		auto &predInstrs = func.blocks[predIdx].instrs;
 		int originalIndex = update.originalIndex;
+		if (explicitBackedge)
+			predInstrs.erase(
+				predInstrs.begin() + predExec.back());
 		for (auto &inst : steadyTail) {
 			inst.originalIndex = originalIndex;
 			predInstrs.push_back(std::move(inst));
@@ -637,6 +711,226 @@ static MachineParityResult analyzeMachineParity(const MachineFunction &func) {
 // control only once.  Other predecessors keep the unit-count latch cloned on
 // their edge.  Requiring the sentinel to be odd proves that no intermediate
 // exact shift can have taken the exit before the final shifted value.
+static bool tryMachineBatchHeaderTestedHalvingLoop(
+	MachineFunction &func, const MachineLivenessResult &liveness) {
+	MachineParityResult parity = analyzeMachineParity(func);
+	for (size_t parityIdx = 0; parityIdx < func.blocks.size(); ++parityIdx) {
+		auto parityExec = executableInstructions(func.blocks[parityIdx]);
+		if (parityExec.size() != 1)
+			continue;
+		const MachineInstr &bitBranch =
+			func.blocks[parityIdx].instrs[parityExec[0]];
+		if (bitBranch.opcodeText != "tbz" ||
+		    bitBranch.asmOperands.size() != 3 ||
+		    bitBranch.asmOperands[1] != "#0")
+			continue;
+		const std::string stateReg = bitBranch.asmOperands[0];
+		if (peephRegClass(stateReg) != 'w')
+			continue;
+
+		int evenIdx =
+			findBlockByLabel(func, bitBranch.asmOperands[2]);
+		if (evenIdx < 0)
+			continue;
+		bool evenHasOtherEntry = false;
+		for (size_t block = 0;
+		     block < func.blocks.size(); ++block) {
+			for (size_t position :
+			     executableInstructions(func.blocks[block])) {
+				const MachineInstr &instruction =
+					func.blocks[block].instrs[position];
+				int target =
+					branchTargetOperandIndex(instruction);
+				if (target >= 0 &&
+				    instruction.asmOperands[target] ==
+				        bitBranch.asmOperands[2] &&
+				    &instruction != &bitBranch) {
+					evenHasOtherEntry = true;
+					break;
+				}
+			}
+			if (evenHasOtherEntry)
+				break;
+		}
+		int beforeEven = previousExecutableBlock(
+			func, static_cast<size_t>(evenIdx));
+		if (beforeEven >= 0 &&
+		    blockFallsThrough(func.blocks[beforeEven]))
+			evenHasOtherEntry = true;
+		if (evenHasOtherEntry)
+			continue;
+
+		auto evenExec =
+			executableInstructions(func.blocks[evenIdx]);
+		if (evenExec.size() != 2 &&
+		    evenExec.size() != 3)
+			continue;
+		const MachineInstr &shift =
+			func.blocks[evenIdx].instrs[evenExec[0]];
+		const MachineInstr &increment =
+			func.blocks[evenIdx].instrs[evenExec[1]];
+		if (shift.opcodeText != "asr" ||
+		    shift.asmOperands.size() != 3 ||
+		    !peephSamePhysicalReg(
+		        shift.asmOperands[0], stateReg) ||
+		    !peephSamePhysicalReg(
+		        shift.asmOperands[1], stateReg) ||
+		    shift.asmOperands[2] != "#1" ||
+		    increment.opcodeText != "add" ||
+		    increment.asmOperands.size() != 3 ||
+		    !peephSamePhysicalReg(
+		        increment.asmOperands[0],
+		        increment.asmOperands[1]) ||
+		    increment.asmOperands[2] != "#1")
+			continue;
+		const std::string countReg =
+			increment.asmOperands[0];
+		if (peephRegClass(countReg) != 'w' ||
+		    peephSamePhysicalReg(countReg, stateReg))
+			continue;
+
+		int headerIdx = -1;
+		if (evenExec.size() == 3) {
+			const MachineInstr &backedge =
+				func.blocks[evenIdx].instrs[evenExec[2]];
+			if (backedge.opcodeText != "b" ||
+			    backedge.asmOperands.size() != 1)
+				continue;
+			headerIdx = findBlockByLabel(
+				func, backedge.asmOperands[0]);
+		} else {
+			headerIdx = nextExecutableBlock(
+				func, static_cast<size_t>(evenIdx));
+		}
+		if (headerIdx < 0)
+			continue;
+		auto headerExec =
+			executableInstructions(func.blocks[headerIdx]);
+		if (headerExec.size() != 2 &&
+		    headerExec.size() != 3)
+			continue;
+		const MachineInstr &compare =
+			func.blocks[headerIdx].instrs[headerExec[0]];
+		const MachineInstr &conditionalBranch =
+			func.blocks[headerIdx].instrs[headerExec[1]];
+		const MachineInstr *continueBranch =
+			&conditionalBranch;
+		if (headerExec.size() == 3) {
+			if (conditionalBranch.opcodeText != "b.eq" ||
+			    conditionalBranch.asmOperands.size() != 1)
+				continue;
+			continueBranch =
+				&func.blocks[headerIdx]
+				     .instrs[headerExec[2]];
+		}
+		int sentinel = 0;
+		if (compare.opcodeText != "cmp" ||
+		    compare.asmOperands.size() != 2 ||
+		    !peephSamePhysicalReg(
+		        compare.asmOperands[0], stateReg) ||
+		    !parseImmediate(compare.asmOperands[1], sentinel) ||
+		    (sentinel & 1) == 0 ||
+		    ((headerExec.size() == 2 &&
+		      continueBranch->opcodeText != "b.ne") ||
+		     (headerExec.size() == 3 &&
+		      continueBranch->opcodeText != "b")) ||
+		    continueBranch->asmOperands.size() != 1 ||
+		    findBlockByLabel(
+		        func, continueBranch->asmOperands[0]) !=
+		        static_cast<int>(parityIdx))
+			continue;
+
+		std::set<std::string> unavailable = {
+			normalizedIntegerReg(stateReg),
+			normalizedIntegerReg(countReg),
+		};
+		auto collectLive = [&](size_t block) {
+			if (block < liveness.blockLiveIn.size())
+				unavailable.insert(
+					liveness.blockLiveIn[block].begin(),
+					liveness.blockLiveIn[block].end());
+			if (block < liveness.blockLiveOut.size())
+				unavailable.insert(
+					liveness.blockLiveOut[block].begin(),
+					liveness.blockLiveOut[block].end());
+		};
+		collectLive(parityIdx);
+		collectLive(static_cast<size_t>(evenIdx));
+		collectLive(static_cast<size_t>(headerIdx));
+		std::string scratchReg;
+		for (int reg = 9; reg <= 17; ++reg) {
+			if (!unavailable.count(
+			        "r" + std::to_string(reg))) {
+				scratchReg =
+					"w" + std::to_string(reg);
+				break;
+			}
+		}
+		if (scratchReg.empty())
+			continue;
+
+		// An explicit edge to the odd-sentinel header whose outgoing state is
+		// proven even cannot take the equality exit and will immediately take
+		// the parity branch.  Thread it straight to the batched even block.
+		for (size_t block = 0;
+		     block < func.blocks.size(); ++block) {
+			auto executable =
+				executableInstructions(func.blocks[block]);
+			if (executable.empty() ||
+			    block >= parity.atTerminator.size())
+				continue;
+			MachineInstr &branch =
+				func.blocks[block]
+				    .instrs[executable.back()];
+			if (branch.opcodeText != "b" ||
+			    branch.asmOperands.size() != 1 ||
+			    findBlockByLabel(
+			        func, branch.asmOperands[0]) !=
+			        headerIdx)
+				continue;
+			auto fact = parity.atTerminator[block].find(
+				normalizedIntegerReg(stateReg));
+			if (fact == parity.atTerminator[block].end() ||
+			    fact->second != LowBitParity::Even)
+				continue;
+			auto operands = branch.asmOperands;
+			operands[0] = bitBranch.asmOperands[2];
+			peephReplaceInstr(
+				branch,
+				peephMakeInsn("b", operands));
+		}
+
+		auto &instructions = func.blocks[evenIdx].instrs;
+		const size_t shiftPosition = evenExec[0];
+		const int originalIndex =
+			instructions[shiftPosition].originalIndex;
+		instructions.insert(
+			instructions.begin() + shiftPosition,
+			parseMachineInstr(
+				peephMakeInsn(
+					"rbit", {scratchReg, stateReg}),
+				originalIndex));
+		instructions.insert(
+			instructions.begin() + shiftPosition + 1,
+			parseMachineInstr(
+				peephMakeInsn(
+					"clz", {scratchReg, scratchReg}),
+				originalIndex));
+		peephReplaceInstr(
+			instructions[shiftPosition + 2],
+			peephMakeInsn(
+				"asr",
+				{stateReg, stateReg, scratchReg}));
+		peephReplaceInstr(
+			instructions[evenExec[1] + 2],
+			peephMakeInsn(
+				"add",
+				{countReg, countReg, scratchReg}));
+		return true;
+	}
+	return false;
+}
+
 static bool tryMachineBatchExactHalvingLoop(
 	MachineFunction &func, const MachineLivenessResult &liveness) {
 	MachineParityResult parity = analyzeMachineParity(func);
@@ -1231,6 +1525,8 @@ bool runMachineCFGOptimization(MachineFunction &func) {
 
 bool runMachineBitBranchOptimization(
     MachineFunction &func, const MachineLivenessResult &liveness) {
+	if (tryMachineBatchHeaderTestedHalvingLoop(func, liveness))
+		return true;
 	if (tryMachineBatchExactHalvingLoop(func, liveness))
 		return true;
 	for (size_t b = 0; b < func.blocks.size(); ++b) {
