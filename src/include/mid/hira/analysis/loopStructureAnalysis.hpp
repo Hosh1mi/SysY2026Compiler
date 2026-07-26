@@ -16,6 +16,8 @@ struct CanonicalLoopControl {
 std::optional<CanonicalLoopControl>
 analyzeCanonicalLoopControl(const HiraLoop &loop);
 
+const HiraComputeOp *findInductionUpdate(const HiraLoop &loop);
+
 bool isPerfectLoopNest(
     const HiraLoop &outer, const HiraLoop &inner);
 

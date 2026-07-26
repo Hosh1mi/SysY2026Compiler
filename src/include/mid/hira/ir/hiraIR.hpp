@@ -134,6 +134,7 @@ enum class ComputeKind {
     ZExt,
     BitCast,
     Splat,
+    ExtractElement,
 };
 
 class HiraComputeOp final : public HiraNode {

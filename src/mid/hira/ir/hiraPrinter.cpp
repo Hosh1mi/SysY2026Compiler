@@ -117,6 +117,8 @@ const char *computeName(ComputeKind kind) {
         return "bitcast";
     case ComputeKind::Splat:
         return "splat";
+    case ComputeKind::ExtractElement:
+        return "extract";
     }
     return "unknown";
 }

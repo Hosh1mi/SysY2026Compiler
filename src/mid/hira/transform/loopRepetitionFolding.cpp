@@ -83,20 +83,6 @@ bool hasMemoryWriteOrConditional(
     return false;
 }
 
-bool hasNestedLoop(const HiraSequence &sequence) {
-    for (const auto &owner : sequence.nodes()) {
-        if (dynamic_cast<const HiraLoop *>(owner.get()))
-            return true;
-        if (auto *condition =
-                dynamic_cast<const HiraIf *>(owner.get())) {
-            if (hasNestedLoop(condition->thenSequence()) ||
-                hasNestedLoop(condition->elseSequence()))
-                return true;
-        }
-    }
-    return false;
-}
-
 bool dependsOn(const HiraValue *value,
                const HiraValue *target,
                std::set<const HiraValue *> &active) {
@@ -244,11 +230,6 @@ bool foldLoop(HiraRegion &region, HiraLoop &loop,
         return reject("nonunit-step");
     if (hasMemoryWriteOrConditional(loop.body()))
         return reject("side-effect-or-conditional");
-    // Folding a trip-count loop into a single guarded iteration makes the
-    // upper bound non-affine (select 0/1) and blocks polyhedral scheduling
-    // and vectorization on nested memory loops underneath.
-    if (hasNestedLoop(loop.body()))
-        return reject("nested-loop");
     if (!additiveCarriedChain(loop))
         return reject("non-additive-carried-chain");
 

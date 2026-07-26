@@ -72,6 +72,33 @@ bool provesEqual(const DependenceRelation &relation,
     return false;
 }
 
+bool isVectorizableReductionDependence(
+    const PolyhedralModel &model,
+    const DependenceRelation &relation,
+    AffineVariable dimension) {
+    if (relation.kind != DependenceKind::RecurrenceCarried ||
+        !relation.sourceRecurrence)
+        return false;
+    const ScalarRecurrence *recurrence = nullptr;
+    for (const ScalarRecurrence &candidate :
+         model.scalarRecurrences())
+        if (candidate.id == *relation.sourceRecurrence) {
+            recurrence = &candidate;
+            break;
+        }
+    if (!recurrence || recurrence->dimension != dimension)
+        return false;
+    auto *update =
+        recurrence->yielded
+            ? dynamic_cast<const HiraComputeOp *>(
+                  recurrence->yielded->definingNode())
+            : nullptr;
+    if (!update || update->operands().size() != 2)
+        return false;
+    return update->computeKind() == ComputeKind::Add ||
+           update->computeKind() == ComputeKind::FAdd;
+}
+
 const IterationDomain *findDomain(
     const PolyhedralModel &model,
     AffineVariable dimension) {
@@ -184,6 +211,10 @@ VectorizationAnalysisResult analyzeVectorization(
                 analyzeCanonicalLoopControl(
                     *vectorDomain->loop))
             inductionUpdate = control->inductionUpdate;
+        else if (vectorDomain->loop->carriedValues().size() ==
+                 1)
+            inductionUpdate = findInductionUpdate(
+                *vectorDomain->loop);
         bool unsupportedOperation = false;
         for (const PolyhedralStatement &statement :
              model.statements()) {
@@ -229,6 +260,9 @@ VectorizationAnalysisResult analyzeVectorization(
                     sink, *vectorization.dimension) &&
                 !provesEqual(
                     relation,
+                    *vectorization.dimension) &&
+                !isVectorizableReductionDependence(
+                    model, relation,
                     *vectorization.dimension))
                 vectorization.blockers.push_back(
                     relation.id);
@@ -255,12 +289,14 @@ VectorizationAnalysisResult analyzeVectorization(
             }
             if (*stride == 0)
                 continue;
-            varying = true;
-            nonContiguous |= *stride != *elementSize;
-            lanes = std::min(
-                lanes,
-                lanesFor(accessElementType(model, access),
-                         target));
+            if (access.kind == MemoryAccessKind::Read) {
+                varying = true;
+                nonContiguous |= *stride != *elementSize;
+                lanes = std::min(
+                    lanes,
+                    lanesFor(accessElementType(model, access),
+                             target));
+            }
         }
         if (!varying) {
             vectorization.reason =

@@ -49,6 +49,28 @@ analyzeCanonicalLoopControl(const HiraLoop &loop) {
     return CanonicalLoopControl{update, yield};
 }
 
+const HiraComputeOp *findInductionUpdate(const HiraLoop &loop) {
+    const auto &nodes = loop.body().nodes();
+    if (nodes.size() < 2)
+        return nullptr;
+    auto *update = dynamic_cast<const HiraComputeOp *>(
+        nodes[nodes.size() - 2].get());
+    if (!update || update->computeKind() != ComputeKind::Add ||
+        update->operands().size() != 2)
+        return nullptr;
+    const HiraValue *step = loop.step();
+    const bool usesInduction =
+        update->operands()[0] == loop.induction() ||
+        update->operands()[1] == loop.induction();
+    const bool usesStep =
+        step &&
+        (update->operands()[0] == step ||
+         update->operands()[1] == step);
+    if (!usesInduction || !usesStep)
+        return nullptr;
+    return update;
+}
+
 bool isPerfectLoopNest(
     const HiraLoop &outer, const HiraLoop &inner) {
     const auto &nodes = outer.body().nodes();

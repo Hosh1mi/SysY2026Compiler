@@ -156,6 +156,9 @@ private:
                  compute.computeKind() == ComputeKind::BitCast ||
                  compute.computeKind() == ComputeKind::Splat)
             expectedOperands = 1;
+        else if (compute.computeKind() ==
+                 ComputeKind::ExtractElement)
+            expectedOperands = 2;
         else if (compute.computeKind() == ComputeKind::GetElementPtr)
             expectedOperands = compute.operands().size();
         if (compute.operands().size() != expectedOperands ||
@@ -224,6 +227,17 @@ private:
                     compute.operands()[0]->type())
                 return reject(HiraVerifyError::InvalidNode,
                               "invalid-splat-types");
+        } else if (compute.computeKind() ==
+                   ComputeKind::ExtractElement) {
+            auto *vector =
+                dynamic_cast<VectorType *>(
+                    compute.operands()[0]->type());
+            if (!vector ||
+                result->type() != vector->contained_ ||
+                compute.operands()[1]->kind() !=
+                    ValueKind::IntegerConstant)
+                return reject(HiraVerifyError::InvalidNode,
+                              "invalid-extract-types");
         }
         return defineResult(compute, result, available);
     }

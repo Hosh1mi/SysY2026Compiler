@@ -228,6 +228,32 @@ private:
                        : left.subtract(right);
         }
 
+        if (compute.computeKind() == ComputeKind::Select &&
+            compute.operands().size() == 3) {
+            const HiraValue *thenValue = compute.operands()[1];
+            const HiraValue *elseValue = compute.operands()[2];
+            if (thenValue &&
+                thenValue->kind() ==
+                    ValueKind::IntegerConstant &&
+                thenValue->integerValue() == 1 &&
+                elseValue &&
+                elseValue->kind() ==
+                    ValueKind::IntegerConstant &&
+                elseValue->integerValue() == 0) {
+                auto *comparison =
+                    dynamic_cast<const HiraComputeOp *>(
+                        compute.operands()[0]->definingNode());
+                if (comparison &&
+                    comparison->computeKind() ==
+                        ComputeKind::ICmp &&
+                    comparison->operands().size() == 2 &&
+                    comparison->predicate() ==
+                        ICmpInst::ICMP_SGT)
+                    return AffineExpr::constant(1);
+            }
+            return AffineExpr::invalid();
+        }
+
         if (compute.computeKind() != ComputeKind::Mul ||
             compute.operands().size() != 2)
             return AffineExpr::invalid();

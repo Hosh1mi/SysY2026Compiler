@@ -157,14 +157,17 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
             // any number of changes in statements nested fewer than k
             // iteration dimensions. Lower-order accesses are still reported,
             // but they must not veto a schedule that preserves the hot tier.
+            // Only innermost read regressions are treated as blockers: a
+            // strided store is acceptable when the innermost load becomes
+            // contiguous after interchange.
             const bool highestOrder =
                 iterationDepth(identity, access.statement) ==
                 maximumAccessDepth;
-            regression |= highestOrder &&
-                          *current > *baseline;
-            improvement |= highestOrder &&
-                           *current < *baseline;
+            if (highestOrder && *current > *baseline &&
+                access.kind == MemoryAccessKind::Read)
+                regression = true;
             if (highestOrder && *current < *baseline) {
+                improvement = true;
                 std::int64_t reduction =
                     *baseline - *current;
                 if (totalReduction >

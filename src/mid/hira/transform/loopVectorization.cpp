@@ -191,6 +191,81 @@ void mapSourceNode(
             target, instruction);
 }
 
+std::size_t countValueUses(
+    const HiraSequence &sequence, const HiraValue *value) {
+    std::size_t uses = 0;
+    for (const auto &owner : sequence.nodes()) {
+        for (const HiraValue *operand : owner->operands())
+            uses += operand == value;
+        if (auto *loop =
+                dynamic_cast<const HiraLoop *>(owner.get()))
+            uses += countValueUses(loop->body(), value);
+        else if (auto *condition =
+                     dynamic_cast<const HiraIf *>(owner.get())) {
+            uses += countValueUses(
+                condition->thenSequence(), value);
+            uses += countValueUses(
+                condition->elseSequence(), value);
+        }
+    }
+    return uses;
+}
+
+struct AddReductionBinding {
+    const HiraLoop::CarriedBinding *binding = nullptr;
+};
+
+std::optional<AddReductionBinding> recognizeAddReduction(
+    const HiraLoop &loop) {
+    if (loop.carriedValues().size() != 1)
+        return std::nullopt;
+    const HiraLoop::CarriedBinding &binding =
+        loop.carriedValues().front();
+    if (!binding.initial || !binding.iteration ||
+        !binding.yielded || !binding.result)
+        return std::nullopt;
+    auto *update = dynamic_cast<HiraComputeOp *>(
+        binding.yielded->definingNode());
+    if (!update || update->computeKind() != ComputeKind::Add ||
+        update->operands().size() != 2)
+        return std::nullopt;
+    const bool usesIteration =
+        update->operands()[0] == binding.iteration ||
+        update->operands()[1] == binding.iteration;
+    if (!usesIteration ||
+        (update->operands()[0] == binding.iteration &&
+         update->operands()[1] == binding.iteration))
+        return std::nullopt;
+    return AddReductionBinding{&binding};
+}
+
+HiraValue *horizontalReduce(
+    HiraRegion &region, HiraSequence &parent,
+    std::size_t &position, Module *module,
+    HiraValue *vectorValue, Type *scalarType,
+    std::uint32_t lanes) {
+    HiraValue *sum = nullptr;
+    for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+        HiraValue *index = region.createIntegerConstant(
+            module->int32_ty_, static_cast<std::int64_t>(lane));
+        HiraValue *laneValue =
+            region.createValue(scalarType);
+        insertCompute(
+            parent, position++, ComputeKind::ExtractElement,
+            laneValue, {vectorValue, index});
+        if (!sum)
+            sum = laneValue;
+        else {
+            HiraValue *next = region.createValue(scalarType);
+            insertCompute(
+                parent, position++, ComputeKind::Add, next,
+                {sum, laneValue});
+            sum = next;
+        }
+    }
+    return sum;
+}
+
 } // namespace
 
 LoopVectorizationResult vectorizeLoop(
@@ -211,15 +286,25 @@ LoopVectorizationResult vectorizeLoop(
         const_cast<HiraLoop *>(domain->loop);
     auto control =
         analyzeCanonicalLoopControl(*pointLoop);
+    const HiraComputeOp *inductionUpdate =
+        control ? control->inductionUpdate
+                : findInductionUpdate(*pointLoop);
     auto *indexType =
         dynamic_cast<IntegerType *>(
             pointLoop->induction()->type());
-    if (!control || !indexType ||
+    if (!inductionUpdate || !indexType ||
         indexType->num_bits_ != 32 ||
         !pointLoop->step() ||
         pointLoop->step()->kind() !=
             ValueKind::IntegerConstant ||
-        pointLoop->step()->integerValue() != 1 ||
+        pointLoop->step()->integerValue() != 1)
+        return reject(
+            LoopVectorizationError::UnsupportedLoop,
+            "non-canonical-vector-loop");
+
+    std::optional<AddReductionBinding> addReduction =
+        recognizeAddReduction(*pointLoop);
+    if (!addReduction &&
         !pointLoop->carriedValues().empty())
         return reject(
             LoopVectorizationError::UnsupportedLoop,
@@ -371,6 +456,20 @@ LoopVectorizationResult vectorizeLoop(
         }
     }
 
+    if (addReduction) {
+        if (countValueUses(
+                pointLoop->body(),
+                addReduction->binding->iteration) != 1)
+            return reject(
+                LoopVectorizationError::UnsupportedBody,
+                "non-vector-reduction-use");
+        if (!isVectorScalarType(
+                addReduction->binding->iteration->type()))
+            return reject(
+                LoopVectorizationError::UnsupportedType,
+                "unsupported-reduction-type");
+    }
+
     HiraValue *oldLower = pointLoop->lowerBound();
     HiraValue *oldUpper = pointLoop->upperBound();
     const std::int64_t laneOffset =
@@ -428,16 +527,42 @@ LoopVectorizationResult vectorizeLoop(
     mapped[pointLoop->induction()] = vectorInduction;
     HiraSequence &vectorBody = vectorLoop->body();
 
+    auto vectorType = [&](Type *scalar) -> Type * {
+        return module->get_vector_type(
+            scalar, lanes);
+    };
+
+    std::optional<std::size_t> accBinding;
+    HiraValue *vectorAccExit = nullptr;
+    if (addReduction) {
+        Type *scalarAccType =
+            addReduction->binding->iteration->type();
+        HiraValue *vectorAccIteration =
+            region.createValue(vectorType(scalarAccType));
+        vectorAccExit =
+            region.createValue(vectorType(scalarAccType));
+        HiraValue *vectorAccInitial =
+            region.createValue(vectorType(scalarAccType));
+        HiraValue *zeroScalar =
+            region.createIntegerConstant(scalarAccType, 0);
+        insertCompute(
+            *parent, (*position)++, ComputeKind::Splat,
+            vectorAccInitial, {zeroScalar});
+        accBinding = vectorLoop->addCarriedValue(
+            vectorAccInitial, vectorAccIteration,
+            vectorAccExit);
+        mapped[addReduction->binding->iteration] =
+            vectorAccIteration;
+        vectorValues.insert(
+            addReduction->binding->iteration);
+    }
+
     auto mappedValue =
         [&](const HiraValue *value) -> HiraValue * {
         auto found = mapped.find(value);
         return found == mapped.end()
                    ? const_cast<HiraValue *>(value)
                    : found->second;
-    };
-    auto vectorType = [&](Type *scalar) -> Type * {
-        return module->get_vector_type(
-            scalar, lanes);
     };
     auto splat = [&](HiraValue *scalar) -> HiraValue * {
         auto found = splats.find(scalar);
@@ -567,16 +692,44 @@ LoopVectorizationResult vectorizeLoop(
     appendCompute(
         vectorBody, ComputeKind::Add,
         vectorNext, {vectorInduction, vectorStep});
-    vectorLoop->addYieldValue(vectorNext);
+    std::vector<HiraValue *> bindingYields(
+        vectorLoop->carriedValues().size(), nullptr);
     vectorLoop->setCarriedYield(
         cursorBinding, vectorNext);
+    bindingYields[cursorBinding] = vectorNext;
+    if (addReduction && accBinding) {
+        HiraValue *vectorAccNext = mappedValue(
+            addReduction->binding->yielded);
+        vectorLoop->setCarriedYield(
+            *accBinding, vectorAccNext);
+        bindingYields[*accBinding] = vectorAccNext;
+    }
     vectorLoop->addYieldValue(vectorNext);
+    for (HiraValue *yielded : bindingYields)
+        vectorLoop->addYieldValue(yielded);
     auto yield = std::make_unique<HiraYield>();
     yield->addOperand(vectorNext);
-    yield->addOperand(vectorNext);
+    for (HiraValue *yielded : bindingYields)
+        yield->addOperand(yielded);
     vectorBody.append(std::move(yield));
 
     parent->insert(*position, std::move(vectorOwner));
+    if (addReduction && vectorAccExit) {
+        std::size_t reducePosition = *position + 1;
+        HiraValue *partialSum = horizontalReduce(
+            region, *parent, reducePosition, module,
+            vectorAccExit,
+            addReduction->binding->iteration->type(),
+            lanes);
+        HiraValue *scalarAcc =
+            region.createValue(
+                addReduction->binding->iteration->type());
+        insertCompute(
+            *parent, reducePosition++, ComputeKind::Add,
+            scalarAcc,
+            {addReduction->binding->initial, partialSum});
+        pointLoop->setCarriedInitial(0, scalarAcc);
+    }
     pointLoop->setLowerBound(vectorEnd);
     pointLoop->setRole(
         HiraLoop::Role::ScalarRemainder);
