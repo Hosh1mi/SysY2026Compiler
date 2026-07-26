@@ -95,7 +95,8 @@ bool LoopInvarianceAnalysis::isInvariant(
         return false;
     if (value->kind() == ValueKind::IntegerConstant ||
         value->kind() == ValueKind::FloatConstant ||
-        value->kind() == ValueKind::Parameter)
+        value->kind() == ValueKind::Parameter ||
+        value->kind() == ValueKind::Scratch)
         return true;
 
     const HiraNode *definition = value->definingNode();
@@ -128,6 +129,12 @@ bool LoopInvarianceAnalysis::isHoistable(
     for (const HiraValue *storeBase : storedBases_) {
         if (!loadBase || !storeBase || loadBase == storeBase)
             return false;
+        // Region-local scratch is a fresh allocation and cannot alias any
+        // imported parameter/global.  Loads from the scratch itself were
+        // rejected by the identity check above.
+        if (loadBase->kind() == ValueKind::Scratch ||
+            storeBase->kind() == ValueKind::Scratch)
+            continue;
         if (!sourceMapping_ || !aliasAnalysis_)
             return false;
         ::Value *loadSource =

@@ -31,6 +31,7 @@
 #include "../../include/mid/hira/transform/affineDomainSimplification.hpp"
 #include "../../include/mid/hira/transform/loopAddressRecurrence.hpp"
 #include "../../include/mid/hira/transform/loopRepetitionFolding.hpp"
+#include "../../include/mid/hira/transform/reductionInterchangeBuffering.hpp"
 #include "../../include/mid/hira/transform/statementPartitionRealization.hpp"
 #include "../../include/mid/hira/transform/loopParallelization.hpp"
 #include "../../include/mid/hira/transform/loopVectorization.hpp"
@@ -188,6 +189,59 @@ bool selectRegions(Function &function, Loop &loop,
             polyhedralVerification =
                 polyhedral::verifyPolyhedralModel(
                     *polyhedralModel.model);
+        if (polyhedralModel.succeeded() &&
+            polyhedralVerification.succeeded()) {
+            polyhedral::ReductionInterchangeBufferingResult buffering =
+                polyhedral::bufferReductionInterchange(
+                    *imported.region, *polyhedralModel.model);
+            if (buffering.changed) {
+                // Buffering changes which values are invariant in the new
+                // compute inner loop.  Hoisting a GEP can expose its load only
+                // on the following round, so converge before rebuilding the
+                // model rather than leaving per-point invariant loads behind.
+                while (hoistLoopInvariants(
+                    *imported.region, &aliasAnalysis)) {
+                }
+                if (!verifyRegion(
+                        "reduction-interchange-buffering"))
+                    return false;
+                polyhedralModel =
+                    polyhedral::buildPolyhedralModel(
+                        *imported.region, &aliasAnalysis);
+                polyhedralVerification = {};
+                if (polyhedralModel.succeeded())
+                    polyhedralVerification =
+                        polyhedral::verifyPolyhedralModel(
+                            *polyhedralModel.model);
+                if (!polyhedralModel.succeeded() ||
+                    !polyhedralVerification.succeeded())
+                    return false;
+                optimized = true;
+                if (debug || dumpPolyhedral)
+                    std::cerr
+                        << "// polyhedral."
+                           "reduction_interchange_buffering"
+                        << " = realized\n";
+                if (dumpHira)
+                    std::cerr << printHiraRegion(
+                        *imported.region, function.name_);
+            } else if ((debug || dumpPolyhedral) &&
+                       buffering.error !=
+                           polyhedral::
+                               ReductionInterchangeBufferingError::
+                                   NoCandidate) {
+                std::cerr
+                    << "// polyhedral."
+                       "reduction_interchange_buffering"
+                    << " = rejected reason="
+                    << polyhedral::
+                           reductionInterchangeBufferingErrorName(
+                               buffering.error);
+                if (!buffering.detail.empty())
+                    std::cerr << " detail=" << buffering.detail;
+                std::cerr << "\n";
+            }
+        }
         if (polyhedralModel.succeeded() &&
             polyhedralVerification.succeeded()) {
             std::size_t fusedBands = 0;

@@ -30,7 +30,6 @@
 #include "include/mid/opt/loopDeletion.hpp"
 #include "include/mid/opt/indVarStrengthReduce.hpp"
 #include "include/mid/opt/loopRepFold.hpp"
-#include "include/mid/opt/scalarExpansion.hpp"
 #include "include/mid/opt/loopDistribution.hpp"
 #include "include/mid/opt/loopUnroll.hpp"
 #include "include/mid/opt/reassociate.hpp"
@@ -226,14 +225,19 @@ static void addSsaPreparation(PassManager &pm) {
     pm.addPass(std::make_unique<TailRecursionEliminate>());
 }
 
-static void addScalarNormalization(PassManager &pm) {
-    pm.addPass(std::make_unique<ScalarExpansion>());
-    pm.addPass(std::make_unique<LoopDistribution>());
+static void addScalarCleanup(PassManager &pm) {
     pm.addPass(std::make_unique<Reassociate>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LocalCopyPropagation>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<CodeSink>());
+}
+
+static void addLegacyReductionBuffering(PassManager &pm) {
+    // LoopDistribution owns the complete reduction-buffering realization,
+    // including scratch allocation, compute-loop interchange and storeback.
+    // ScalarExpansion only preallocated the same scratch and was redundant.
+    pm.addPass(std::make_unique<LoopDistribution>());
 }
 
 static void addInterproceduralAndGlobals(PassManager &pm) {
@@ -287,17 +291,15 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
 
     addSsaPreparation(pm);
     if (enableHira) {
+        addScalarCleanup(pm);
+        pm.addPass(std::make_unique<IfConversion>());
         addInterproceduralAndGlobals(pm);
         addCorrelatedCleanup(pm);
         pm.addPass(std::make_unique<SemanticMarkerStamp>());
         pm.addPass(std::make_unique<CFGSimplify>());
 
-        // HiraPass is the sole owner of loop-region transformations in this
-        // branch.  In particular, do not add CFG loop canonicalization,
-        // scalar expansion, distribution, rotation, LICM, unrolling,
-        // vectorization, or parallelization passes here.  Required loop
-        // normalization and optimization belong in Hira import, Hira IR,
-        // the polyhedral scheduler, or Hira export.
+        // Hira owns reduction buffering, scheduling, tiling, vectorization
+        // and parallelization after target-independent scalar cleanup.
         pm.addPass(
             std::make_unique<hira::HiraPass>(
                 forceHiraRoundtrip, dumpHira, dumpPolyhedral));
@@ -312,7 +314,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
         return;
     }
 
-    addScalarNormalization(pm);
+    addLegacyReductionBuffering(pm);
+    addScalarCleanup(pm);
     addInterproceduralAndGlobals(pm);
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<SemanticMarkerStamp>());
@@ -361,7 +364,8 @@ static void buildRiscvPipeline(PassManager &pm, int optLevel, Module *m) {
         return;
 
     addSsaPreparation(pm);
-    addScalarNormalization(pm);
+    addLegacyReductionBuffering(pm);
+    addScalarCleanup(pm);
     addInterproceduralAndGlobals(pm);
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<SemanticMarkerStamp>());

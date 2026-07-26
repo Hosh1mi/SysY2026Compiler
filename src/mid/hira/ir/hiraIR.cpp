@@ -1,6 +1,9 @@
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 
 #include "../../../include/mid/analysis/loopInfo.hpp"
+#include "../../../include/mid/ir/basicBlock.hpp"
+#include "../../../include/mid/ir/function.hpp"
+#include "../../../include/mid/ir/module.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -149,6 +152,17 @@ void SourceMapping::unmapNode(HiraNode *hiraNode) {
     nodeToSource_.erase(node);
 }
 
+void SourceMapping::unmapLoop(HiraLoop *hiraLoop) {
+    auto loop = loopToSource_.find(hiraLoop);
+    if (loop == loopToSource_.end())
+        return;
+    auto source = sourceToLoop_.find(loop->second);
+    if (source != sourceToLoop_.end() &&
+        source->second == hiraLoop)
+        sourceToLoop_.erase(source);
+    loopToSource_.erase(loop);
+}
+
 ::Value *SourceMapping::sourceValue(const HiraValue *value) const {
     auto it = valueToSource_.find(value);
     return it == valueToSource_.end() ? nullptr : it->second;
@@ -198,6 +212,22 @@ HiraValue *HiraRegion::createParameter(Type *type) {
         nextValueId_++, type, ValueKind::Parameter));
     HiraValue *value = values_.back().get();
     addParameter(value);
+    return value;
+}
+
+HiraValue *HiraRegion::createScratch(Type *allocatedType) {
+    assert(allocatedType && sourceLoop_ && sourceLoop_->header &&
+           sourceLoop_->header->parent_ &&
+           sourceLoop_->header->parent_->parent_ &&
+           "scratch creation requires a sourced Hira region");
+    Type *pointerType =
+        sourceLoop_->header->parent_->parent_->get_pointer_type(
+            allocatedType);
+    values_.push_back(std::make_unique<HiraValue>(
+        nextValueId_++, pointerType, ValueKind::Scratch));
+    HiraValue *value = values_.back().get();
+    value->allocatedType_ = allocatedType;
+    scratches_.push_back(value);
     return value;
 }
 

@@ -27,6 +27,7 @@ std::string valueRef(const HiraValue *value) {
     }
     case ValueKind::Temporary:
     case ValueKind::Parameter:
+    case ValueKind::Scratch:
         return "%h" + std::to_string(value->id());
     }
     return "<invalid>";
@@ -293,6 +294,22 @@ void printBoundary(std::ostringstream &out, const char *label,
     out << ")\n";
 }
 
+void printScratches(std::ostringstream &out,
+                    const std::vector<HiraValue *> &scratches) {
+    out << "  scratches(";
+    for (std::size_t index = 0; index < scratches.size(); ++index) {
+        if (index)
+            out << ", ";
+        const HiraValue *scratch = scratches[index];
+        out << valueRef(scratch) << ": " << typeRef(scratch)
+            << " allocates "
+            << (scratch && scratch->allocatedType()
+                    ? scratch->allocatedType()->print()
+                    : "<null-type>");
+    }
+    out << ")\n";
+}
+
 } // namespace
 
 std::string printHiraRegion(const HiraRegion &region,
@@ -304,6 +321,7 @@ std::string printHiraRegion(const HiraRegion &region,
     out << " {\n";
     printBoundary(out, "parameters", region.parameters(),
                   region.sourceMapping());
+    printScratches(out, region.scratches());
     printBoundary(out, "results", region.results(),
                   region.sourceMapping());
     printSequence(out, region, region.rootSequence(), 2);

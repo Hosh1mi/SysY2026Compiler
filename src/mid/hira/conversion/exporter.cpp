@@ -111,6 +111,10 @@ public:
             return failure_;
         if (region_.parallelPlan())
             return runParallel();
+        if (!materializeScratches(function_->basic_blocks_.front())) {
+            rollbackNewBlocks();
+            return failure_;
+        }
 
         BasicBlock *loopEntry = entryPredecessors_.front();
         const bool needsEntryMerge =
@@ -380,6 +384,19 @@ private:
                 return fail(ExportRejectReason::InvalidRegion,
                             "unmapped-result");
         }
+        for (HiraValue *scratch : region_.scratches()) {
+            auto *pointer =
+                scratch
+                    ? dynamic_cast<PointerType *>(scratch->type())
+                    : nullptr;
+            if (!pointer ||
+                scratch->kind() != ValueKind::Scratch ||
+                !scratch->allocatedType() ||
+                pointer->contained_ != scratch->allocatedType() ||
+                scratch->definingNode())
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-scratch");
+        }
         return true;
     }
 
@@ -413,11 +430,22 @@ private:
         for (const HiraValue *parameter :
              plan.privateParameters) {
             if (!parameter ||
-                std::find(region_.parameters().begin(),
+                !privateParameters.insert(parameter).second)
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-private-parameter");
+            if (parameter->kind() == ValueKind::Scratch) {
+                if (std::find(region_.scratches().begin(),
+                              region_.scratches().end(),
+                              parameter) ==
+                    region_.scratches().end())
+                    return fail(ExportRejectReason::InvalidRegion,
+                                "invalid-private-scratch");
+                continue;
+            }
+            if (std::find(region_.parameters().begin(),
                           region_.parameters().end(),
                           parameter) ==
-                    region_.parameters().end() ||
-                !privateParameters.insert(parameter).second)
+                region_.parameters().end())
                 return fail(ExportRejectReason::InvalidRegion,
                             "invalid-private-parameter");
             ::Value *source =
@@ -433,6 +461,16 @@ private:
         std::set<const HiraNode *> inside;
         inside.insert(rootLoop_);
         collectSubtreeNodes(rootLoop_->body(), inside);
+        std::set<const HiraNode *> allNodes;
+        collectSubtreeNodes(region_.rootSequence(), allNodes);
+        for (const HiraNode *node : allNodes)
+            if (!inside.count(node))
+                for (const HiraValue *operand : node->operands())
+                    if (operand &&
+                        operand->kind() == ValueKind::Scratch)
+                        return fail(
+                            ExportRejectReason::InvalidRegion,
+                            "parallel-scratch-outside-band");
         std::set<const HiraNode *> availablePrefix;
         const auto &rootNodes = region_.rootSequence().nodes();
         for (std::size_t index = 0; index < rootLoopIndex_; ++index)
@@ -552,6 +590,8 @@ private:
         Value *hiArgument = bodyFunction->arguments_[1];
         auto *bodyEntry = new BasicBlock(module_, "label_par_entry",
                                          bodyFunction);
+        if (!materializeScratches(bodyEntry))
+            return failure_;
 
         std::map<HiraValue *, GlobalVariable *> contextSlots;
         std::size_t slotIndex = 0;
@@ -748,6 +788,28 @@ private:
         return block;
     }
 
+    bool materializeScratches(BasicBlock *entry) {
+        if (!entry)
+            return fail(ExportRejectReason::InvalidSourceCFG,
+                        "missing-scratch-entry");
+        for (HiraValue *scratch : region_.scratches()) {
+            if (!scratch || !scratch->allocatedType())
+                return fail(ExportRejectReason::InvalidRegion,
+                            "invalid-scratch");
+            auto *alloca = new AllocaInst(
+                scratch->allocatedType(), entry, true);
+            alloca->markLoopExpansionScratch();
+            alloca->name_ =
+                "hira.scratch." + std::to_string(scratch->id());
+            if (!entry->add_instruction_front(alloca))
+                return fail(ExportRejectReason::InvalidSourceCFG,
+                            "failed-to-insert-scratch");
+            scratchAllocas_.push_back(alloca);
+            bind(scratch, alloca);
+        }
+        return true;
+    }
+
     // Resolves a region boundary value for use inside the source
     // function, independent of any worker-body rebinding.
     Value *sourceValueOf(HiraValue *hiraValue) {
@@ -756,6 +818,8 @@ private:
         switch (hiraValue->kind()) {
         case ValueKind::Parameter:
             return region_.sourceMapping().sourceValue(hiraValue);
+        case ValueKind::Scratch:
+            return value(hiraValue);
         case ValueKind::IntegerConstant:
             return new ConstantInt(
                 hiraValue->type(),
@@ -780,6 +844,8 @@ private:
         switch (hiraValue->kind()) {
         case ValueKind::Parameter:
             result = region_.sourceMapping().sourceValue(hiraValue);
+            break;
+        case ValueKind::Scratch:
             break;
         case ValueKind::IntegerConstant:
             result = new ConstantInt(
@@ -1155,6 +1221,10 @@ private:
         for (BasicBlock *block : newBlocks_)
             if (block->parent_)
                 block->parent_->remove_bb(block);
+        for (AllocaInst *alloca : scratchAllocas_)
+            if (alloca && alloca->parent_)
+                alloca->parent_->delete_instr(alloca);
+        scratchAllocas_.clear();
     }
 
     HiraRegion &region_;
@@ -1173,6 +1243,7 @@ private:
     std::vector<BasicBlock *> newBlocks_;
     std::vector<ExitPhiRewrite> exitPhiRewrites_;
     std::vector<HiraValue *> parallelCaptures_;
+    std::vector<AllocaInst *> scratchAllocas_;
     std::map<HiraValue *, Value *> values_;
     ExportResult failure_;
 

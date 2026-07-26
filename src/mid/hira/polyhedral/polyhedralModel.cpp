@@ -501,7 +501,8 @@ private:
             dynamic_cast<const HiraComputeOp *>(
                 address->definingNode());
         if (!addressCompute) {
-            if (address->kind() != ValueKind::Parameter ||
+            if ((address->kind() != ValueKind::Parameter &&
+                 address->kind() != ValueKind::Scratch) ||
                 !dynamic_cast<PointerType *>(address->type()))
                 return reject(
                     PolyhedralBuildError::UnsupportedAddress,
@@ -567,13 +568,14 @@ private:
             return existing->second;
         MemoryObjectId id = static_cast<MemoryObjectId>(
             model_->memoryObjects_.size());
-        bool taskPrivate = false;
+        bool taskPrivate = base->kind() == ValueKind::Scratch;
         ::Value *source =
             region_.sourceMapping().sourceValue(base);
         source = ArgumentAliasAnalysis::underlyingObject(source);
         auto *alloca = dynamic_cast<AllocaInst *>(source);
         Loop *sourceLoop = region_.sourceLoop();
-        if (alloca && alloca->isLoopExpansionScratch() &&
+        if (!taskPrivate && alloca &&
+            alloca->isLoopExpansionScratch() &&
             sourceLoop) {
             taskPrivate = true;
             for (const Use &use : alloca->use_list_) {
@@ -819,13 +821,21 @@ private:
                     first == second
                         ? MemoryAliasKind::MustAlias
                         : MemoryAliasKind::MayAlias;
-                if (first != second && aliasAnalysis_) {
+                const HiraValue *firstBase =
+                    model_->memoryObjects_[first].base;
+                const HiraValue *secondBase =
+                    model_->memoryObjects_[second].base;
+                if (first != second &&
+                    (firstBase->kind() == ValueKind::Scratch ||
+                     secondBase->kind() == ValueKind::Scratch)) {
+                    kind = MemoryAliasKind::NoAlias;
+                } else if (first != second && aliasAnalysis_) {
                     ::Value *firstSource =
                         region_.sourceMapping().sourceValue(
-                            model_->memoryObjects_[first].base);
+                            firstBase);
                     ::Value *secondSource =
                         region_.sourceMapping().sourceValue(
-                            model_->memoryObjects_[second].base);
+                            secondBase);
                     firstSource =
                         ArgumentAliasAnalysis::underlyingObject(
                             firstSource);

@@ -90,6 +90,24 @@ public:
             available.insert(parameter);
         }
 
+        for (const HiraValue *scratch : region_.scratches()) {
+            auto *pointer =
+                scratch
+                    ? dynamic_cast<PointerType *>(scratch->type())
+                    : nullptr;
+            if (!pointer ||
+                scratch->kind() != ValueKind::Scratch ||
+                !scratch->allocatedType() ||
+                pointer->contained_ != scratch->allocatedType() ||
+                scratch->definingNode())
+                return fail(HiraVerifyError::InvalidBoundary,
+                            "invalid-scratch");
+            if (!definedValues_.insert(scratch).second)
+                return fail(HiraVerifyError::InvalidBoundary,
+                            "duplicate-scratch");
+            available.insert(scratch);
+        }
+
         if (!verifySequence(region_.rootSequence(), available, nullptr))
             return failure_;
         for (const HiraValue *result : region_.results())

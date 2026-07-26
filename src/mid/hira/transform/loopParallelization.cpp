@@ -252,15 +252,20 @@ LoopParallelizationResult parallelizeOuterBand(
     for (const MemoryObject &object : model.memoryObjects()) {
         if (!object.taskPrivate)
             continue;
-        ::Value *source =
-            region.sourceMapping().sourceValue(object.base);
-        source =
-            ArgumentAliasAnalysis::underlyingObject(source);
-        auto *alloca = dynamic_cast<AllocaInst *>(source);
-        auto bytes =
-            alloca ? typeBytes(alloca->alloca_ty_)
-                   : std::nullopt;
-        if (!alloca || !bytes || *bytes > 64 * 1024 ||
+        std::optional<std::uint64_t> bytes;
+        if (object.base &&
+            object.base->kind() == ValueKind::Scratch) {
+            bytes = typeBytes(object.base->allocatedType());
+        } else {
+            ::Value *source =
+                region.sourceMapping().sourceValue(object.base);
+            source =
+                ArgumentAliasAnalysis::underlyingObject(source);
+            auto *alloca = dynamic_cast<AllocaInst *>(source);
+            if (alloca)
+                bytes = typeBytes(alloca->alloca_ty_);
+        }
+        if (!bytes || *bytes > 64 * 1024 ||
             privateBytes > 64 * 1024 - *bytes)
             return reject(
                 LoopParallelizationError::UnsupportedLoop,

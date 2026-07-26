@@ -5,10 +5,10 @@ BUILD_DIR="$PROJ_DIR/build"
 RESULT_DIR="$PROJ_DIR/test/results"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 PIPELINE="legacy"
-COMPILER_FLAGS=(-O1)
+COMPILER_FLAGS=(-O1 --enable-hira)
 if [ "${ENABLE_HIRA:-0}" = "1" ]; then
     PIPELINE="hira"
-    COMPILER_FLAGS+=(--enable-hira)
+    COMPILER_FLAGS=(-O1 --enable-hira)
 fi
 TEST_SUITE="${PERFORMANCE_SUITE:-performance}"
 RESULT_FILE="$PROJ_DIR/test/results/result_${TEST_SUITE}_${PIPELINE}_${TIMESTAMP}.txt"

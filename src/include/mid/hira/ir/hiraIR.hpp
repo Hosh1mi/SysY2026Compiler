@@ -26,6 +26,7 @@ using ValueId = std::uint32_t;
 enum class ValueKind {
     Temporary,
     Parameter,
+    Scratch,
     IntegerConstant,
     FloatConstant,
 };
@@ -38,6 +39,7 @@ public:
     ValueId id() const { return id_; }
     Type *type() const { return type_; }
     ValueKind kind() const { return kind_; }
+    Type *allocatedType() const { return allocatedType_; }
     std::int64_t integerValue() const { return integerValue_; }
     float floatValue() const { return floatValue_; }
     HiraNode *definingNode() const { return definingNode_; }
@@ -49,6 +51,7 @@ private:
     ValueId id_;
     Type *type_;
     ValueKind kind_;
+    Type *allocatedType_ = nullptr;
     std::int64_t integerValue_ = 0;
     float floatValue_ = 0.0f;
     HiraNode *definingNode_ = nullptr;
@@ -292,6 +295,7 @@ public:
     void mapNode(HiraNode *hiraNode, Instruction *llvmInstruction);
     void mapLoop(HiraLoop *hiraLoop, Loop *llvmLoop);
     void unmapNode(HiraNode *hiraNode);
+    void unmapLoop(HiraLoop *hiraLoop);
 
     ::Value *sourceValue(const HiraValue *value) const;
     HiraValue *hiraValue(const ::Value *value) const;
@@ -344,12 +348,14 @@ public:
 
     HiraValue *createValue(Type *type);
     HiraValue *createParameter(Type *type);
+    HiraValue *createScratch(Type *allocatedType);
     HiraValue *createIntegerConstant(Type *type, std::int64_t value);
     HiraValue *createFloatConstant(Type *type, float value);
     void addParameter(HiraValue *value);
     void addResult(HiraValue *value);
 
     const std::vector<HiraValue *> &parameters() const { return parameters_; }
+    const std::vector<HiraValue *> &scratches() const { return scratches_; }
     const std::vector<HiraValue *> &results() const { return results_; }
     HiraSequence &rootSequence() { return rootSequence_; }
     const HiraSequence &rootSequence() const { return rootSequence_; }
@@ -374,6 +380,7 @@ private:
     ValueId nextValueId_ = 0;
     std::vector<std::unique_ptr<HiraValue>> values_;
     std::vector<HiraValue *> parameters_;
+    std::vector<HiraValue *> scratches_;
     std::vector<HiraValue *> results_;
     HiraSequence rootSequence_;
     SourceMapping sourceMapping_;
