@@ -2,6 +2,22 @@
 
 #include <vector>
 
+static bool isFinalNonTerminator(CallInst *call, BasicBlock *block) {
+    if (!call || !block)
+        return false;
+    Instruction *terminator = block->get_terminator();
+    bool seenCall = false;
+    for (Instruction *instruction : block->instr_list_) {
+        if (instruction == call) {
+            seenCall = true;
+            continue;
+        }
+        if (seenCall && instruction != terminator)
+            return false;
+    }
+    return seenCall;
+}
+
 void TailRecursionEliminate::execute(Module *module) {
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
@@ -16,22 +32,12 @@ void TailRecursionEliminate::execute(Module *module) {
 //   phis in ret_block, and at least one phi is the ret operand.
 static bool isPattern2TailCall(CallInst *call, Function *func,
                                 BasicBlock *target, BasicBlock *term_bb) {
-    auto call_term = term_bb->get_terminator();
     // A tail call must be the final non-terminator instruction.  Merely
     // branching to a return block is not sufficient: instructions between the
     // recursive call and that branch execute while unwinding and cannot be
     // discarded (this is especially easy to miss for void calls, which have
     // no SSA uses).
-    bool seenCall = false;
-    for (auto *inst : term_bb->instr_list_) {
-        if (inst == call) {
-            seenCall = true;
-            continue;
-        }
-        if (seenCall && inst != call_term)
-            return false;
-    }
-    if (!seenCall)
+    if (!isFinalNonTerminator(call, term_bb))
         return false;
 
     auto targetTerm = target->get_terminator();
@@ -72,7 +78,8 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
             auto term = bb->get_terminator();
             // 模式 1：ret <call>
             if (term && term->is_ret() && term->num_ops_ > 0 &&
-                term->get_operand(0) == call) {
+                term->get_operand(0) == call &&
+                isFinalNonTerminator(call, bb)) {
                 hasTailCall = true;
                 continue;
             }
@@ -189,7 +196,10 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         if (term->is_ret() && term->num_ops_ > 0) {
             // 模式 1: ret <call>
             call = dynamic_cast<CallInst *>(term->get_operand(0));
-            if (call) ret_form = true;
+            if (call && isFinalNonTerminator(call, bb))
+                ret_form = true;
+            else
+                call = nullptr;
         } else if (term->is_br() && term->num_ops_ == 1) {
             // 模式 2: call + br ret_bb, verify with isPattern2TailCall
             target = static_cast<BasicBlock *>(term->get_operand(0));

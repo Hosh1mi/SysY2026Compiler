@@ -145,6 +145,8 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.dumpPreMachineInstr = true;
         } else if (arg == "--enable-hira") {
             options.enableHira = true;
+        } else if (arg == "--disable-hira") {
+            options.enableHira = false;
         } else if (arg == "--dump-hira") {
             options.enableHira = true;
             options.dumpHira = true;

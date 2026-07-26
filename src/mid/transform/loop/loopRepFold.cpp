@@ -387,6 +387,15 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         std::cerr << "[LoopRepFold] inspect header=" << loop.header->name_
                   << " blocks=" << loop.blocks.size() << "\n";
     if (!loop.preheader) return false;
+    // Every supported closed form summarizes the number of iterations implied
+    // by the header condition.  An additional exiting edge (for example a
+    // while-body break) can terminate earlier, so the summary is invalid even
+    // when all scalar updates otherwise match.  Check this before dispatching
+    // to any folding mode; individual realizers must never infer unique
+    // control flow merely from a single latch or a single destination block.
+    if (loop.exiting.size() != 1 || loop.exiting.front() != loop.header ||
+        loop.exits.size() != 1)
+        return debugReject("loop does not have a unique header exit");
     // 模式要求 header phi 恰好 (preheader, latch) 两对入边 → 单 latch
     BasicBlock *latch = loop.singleLatch();
     if (!latch) return false;

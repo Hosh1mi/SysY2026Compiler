@@ -110,10 +110,10 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
         AM && initialInstrCount <= kRangeAnalysisInstructionLimit;
     const size_t processBudget =
         std::max<size_t>(20000, initialInstrCount * 32);
-    const size_t createBudget =
+    const size_t rewriteBudget =
         std::max<size_t>(4000, initialInstrCount * 16);
     size_t processedCount = 0;
-    size_t createdCount = 0;
+    size_t rewrittenCount = 0;
     bool budgetHit = false;
     bool changed = false;
 
@@ -134,6 +134,10 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
 
         if (!inst->parent_) continue;
         if (inst->isTerminator()) continue;
+        if (rewrittenCount >= rewriteBudget) {
+            budgetHit = true;
+            break;
+        }
         if (++processedCount > processBudget) {
             budgetHit = true;
             break;
@@ -227,6 +231,11 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
         }
 
         if (replacement) {
+            // Bound every successful rewrite, including replacement by an
+            // existing value or a constant.  Counting only newly-created
+            // instructions leaves constant-rewrite cycles constrained solely
+            // by the much larger worklist budget.
+            ++rewrittenCount;
             changed = true;
             std::vector<Instruction*> users;
             for (auto &use : inst->use_list_) {
@@ -242,21 +251,21 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
 
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
-            if (useRangeAnalysis) {
+            if (useRangeAnalysis && gInstCombineRangeAnalysis) {
+                // The first rewrite can invalidate predicate operands and
+                // interprocedural summaries.  Drop all cached range analyses
+                // once, then finish this worklist with local combines.  A
+                // later InstCombine invocation may build one fresh analysis;
+                // rebuilding whole-function post-dominance after every local
+                // replacement is both unnecessary and a compile-time hazard.
                 AM->clearRangeAnalyses();
-                gInstCombineRangeAnalysis = &AM->getRangeAnalysis(func);
-            } else if (gInstCombineRangeAnalysis) {
-                gInstCombineRangeAnalysis->clearCache();
+                gInstCombineRangeAnalysis = nullptr;
             }
 
             for (auto *user : users)
                 enqueueIfAlive(user, worklist, inWorklist);
 
             if (replacementInst && replacementInst->parent_) {
-                if (++createdCount > createBudget) {
-                    budgetHit = true;
-                    break;
-                }
                 enqueueIfAlive(replacementInst, worklist, inWorklist);
             }
 
@@ -272,7 +281,7 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     if (budgetHit) {
         std::cerr << "[InstCombine] budget hit in @" << func->name_
                   << " processed=" << processedCount
-                  << " created=" << createdCount
+                  << " rewritten=" << rewrittenCount
                   << " initial_insts=" << initialInstrCount << "\n";
     }
     return changed;

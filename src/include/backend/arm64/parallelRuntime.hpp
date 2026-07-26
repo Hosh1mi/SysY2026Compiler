@@ -1,5 +1,6 @@
 #pragma once
-// 5.2 双核并行 runtime（由 .proto/par_runtime_only.c 经 gcc -O2 -S 生成，
+// 5.2 双核并行 runtime（由 .proto/par_runtime_only.c 经
+// gcc -O2 -fno-stack-protector -S 生成，
 // 验证见 .proto/par_runtime_proto.c 与 parallel-runtime-design 记忆）。
 // 模块含 __sysy_parallel_for 声明时由 main.cpp 追加到 .s 末尾。
 inline const char *kSysyParallelRuntimeAsm = R"ASM(
@@ -63,7 +64,6 @@ __sysy_bind_cpu.part.0:
 	.cfi_endproc
 .LFE3:
 	.size	__sysy_bind_cpu.part.0, .-__sysy_bind_cpu.part.0
-	.global	__aarch64_ldadd4_rel
 	.align	2
 	.p2align 4,,11
 	.type	__sysy_worker, %function
@@ -85,7 +85,7 @@ __sysy_worker:
 	.cfi_offset 22, -8
 	ldr	w0, [x0, 128]
 	cbz	w0, .L17
-	mov	w0, 3
+	mov	w0, 1
 	bl	__sysy_bind_cpu.part.0
 .L17:
 	add	x20, x20, :lo12:.LANCHOR0
@@ -103,9 +103,7 @@ __sysy_worker:
 	ldr	w1, [x20, 140]
 	ldr	w2, [x20, 144]
 	bl	__sysy_par_dispatch
-	mov	x1, x22
-	mov	w0, 1
-	bl	__aarch64_ldadd4_rel
+	stlr	w19, [x22]
 	ldar	w0, [x21]
 	cmp	w0, w19
 	beq	.L18
@@ -148,17 +146,15 @@ __sysy_parallel_for:
 .L29:
 	cbz	w0, .L33
 	add	x19, x19, :lo12:.LANCHOR0
-	add	w23, w21, w23, asr 1
-	mov	x1, x19
-	mov	w0, 1
+	add	w2, w21, w23, asr 1
+	mov	x0, x19
 	str	w22, [x19, 136]
-	str	w23, [x19, 140]
+	str	w2, [x19, 140]
 	str	w20, [x19, 144]
-	ldr	w20, [x1, 132]!
-	add	w20, w20, w0
-	bl	__aarch64_ldadd4_rel
+	ldr	w20, [x0, 132]!
+	add	w20, w20, 1
+	stlr	w20, [x0]
 	mov	w0, w22
-	mov	w2, w23
 	mov	w1, w21
 	bl	__sysy_par_dispatch
 	add	x0, x19, 148
@@ -217,7 +213,7 @@ __sysy_parallel_for:
 	cbnz	w0, .L30
 	str	w25, [x24, 128]
 .L31:
-	mov	w0, 2
+	mov	w0, 0
 	bl	__sysy_bind_cpu.part.0
 	b	.L32
 	.p2align 2,,3
