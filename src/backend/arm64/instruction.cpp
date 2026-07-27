@@ -47,6 +47,9 @@ struct VectorMlaMlsPattern {
     LoadInst *accLoad = nullptr;
     LoadInst *lhsLoad = nullptr;
     LoadInst *rhsLoad = nullptr;
+    // True when an accumulator load sits between mul and add; fused emission
+    // must rematerialize operands instead of trusting assigned NEON regs.
+    bool delayedMul = false;
     const char *opcode = nullptr;
 };
 
@@ -332,16 +335,38 @@ static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
         if (mul->use_list_.size() != 1) return false;
         if (acc->type_ != root->type_) return false;
 
-        // Instruction selection emits a matched multiply only when visiting
-        // the later add/sub.  If another instruction lies between them, the
-        // allocator is allowed to reuse a multiply operand's register after
-        // its original use, so delaying that use would be incorrect.
+        // Prefer adjacent mul/add.  Hira often lowers
+        //   t = mul c, a; b = load B; r = add t, b
+        // Allow only that intervening accumulator load (plus address
+        // arithmetic that does not read `mul`).  Broader gaps are unsafe:
+        // vector isel skips the mul and may later read clobbered assigned
+        // registers for the mul operands.
         auto mulPosition =
             std::find(bb->instr_list_.begin(),
                       bb->instr_list_.end(), mul);
-        if (mulPosition == bb->instr_list_.end() ||
-            ++mulPosition == bb->instr_list_.end() ||
-            *mulPosition != root)
+        if (mulPosition == bb->instr_list_.end())
+            return false;
+        auto cursor = std::next(mulPosition);
+        LoadInst *interveningAccLoad = nullptr;
+        while (cursor != bb->instr_list_.end() &&
+               *cursor != root) {
+            auto *between = *cursor;
+            for (unsigned oi = 0; oi < between->num_ops_; ++oi)
+                if (between->get_operand(oi) == mul)
+                    return false;
+            if (dynamic_cast<GetElementPtrInst *>(between) ||
+                dynamic_cast<Bitcast *>(between)) {
+                ++cursor;
+                continue;
+            }
+            auto *betweenLoad = dynamic_cast<LoadInst *>(between);
+            if (!betweenLoad || interveningAccLoad ||
+                betweenLoad != acc)
+                return false;
+            interveningAccLoad = betweenLoad;
+            ++cursor;
+        }
+        if (cursor == bb->instr_list_.end() || *cursor != root)
             return false;
 
         LoadInst *accLoad = nullptr;
@@ -368,6 +393,7 @@ static bool matchVectorMlaMls(Instruction *inst, VectorMlaMlsPattern &pattern) {
         pattern.accLoad = accLoad;
         pattern.lhsLoad = lhsLoad;
         pattern.rhsLoad = rhsLoad;
+        pattern.delayedMul = interveningAccLoad != nullptr;
         pattern.opcode = opcode;
         return true;
     };
@@ -524,6 +550,11 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
         if (!matchVectorMlaMls(candidate, pattern)) continue;
         vectorMlaMlsRoots[candidate] = pattern;
         vectorMlaMlsSkipped.insert(pattern.mul);
+        // Acc load between mul and add is folded into the fused emission;
+        // emitting it early would clobber mul operand regs and then be
+        // rematerialized again at the add.
+        if (pattern.delayedMul && pattern.accLoad)
+            vectorMlaMlsSkipped.insert(pattern.accLoad);
     }
 
     for (auto it = instrs.begin(); it != instrs.end(); ++it) {
@@ -611,15 +642,42 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
             if (hasAssignedReg(pattern.root) && rd.size() >= 2 && rd[0] == 'v')
                 usedNEONRegs_.insert(std::stoi(rd.substr(1)));
 
-            auto pinMulOperand = [&](Value *val) {
-                std::string reg = loadVector(val);
+            auto rematerializeLoad = [&](LoadInst *load) -> std::string {
+                Value *ptr = load->get_operand(0);
+                Value *foldedBase = nullptr;
+                int foldedOffset = 0;
+                std::string addr;
+                if (foldableVectorMemoryGep(ptr, foldedBase, foldedOffset))
+                    addr = loadAddr(foldedBase);
+                else
+                    addr = loadAddr(ptr);
+                std::string vd = allocNEONReg();
+                std::string mem = "[" + addr;
+                if (foldedOffset != 0)
+                    mem += ", #" + std::to_string(foldedOffset);
+                mem += "]";
+                MachineInstr ld = MachineInstr::make(
+                    "\tldr q" + vd.substr(1) + ", " + mem,
+                    MOpcode::Load, {vd}, {addr}, 4);
+                ld.mayLoad = true;
+                emitMachineInstr(std::move(ld));
+                return vd;
+            };
 
-                // An allocated SSA source is already pinned for the duration
-                // of this instruction.  Reuse it directly unless it aliases
-                // the destructive accumulator destination; the interference
-                // graph normally prevents that alias, while the explicit
-                // check keeps instruction selection correct independently of
-                // allocator details.
+            auto pinMulOperand = [&](Value *val, LoadInst *asLoad) {
+                // Delayed fusion: intervening emission may have clobbered the
+                // multiply operands' assigned NEON regs.  Rematerialize loads
+                // and always park the value in a fresh temp.
+                if (pattern.delayedMul) {
+                    std::string reg =
+                        asLoad ? rematerializeLoad(asLoad) : loadVector(val);
+                    std::string tmp = allocNEONReg();
+                    emitRawAluMachine("\tmov " + tmp + ".16b, " + reg + ".16b",
+                                      tmp, {reg}, MOpcode::Neon);
+                    return tmp;
+                }
+
+                std::string reg = loadVector(val);
                 if (hasAssignedReg(val) && reg != rd)
                     return reg;
 
@@ -628,10 +686,15 @@ void Arm64FuncContext::emitBlock(BasicBlock *bb) {
                                   tmp, {reg}, MOpcode::Neon);
                 return tmp;
             };
-            std::string lhsReg = pinMulOperand(pattern.lhs);
-            std::string rhsReg = pinMulOperand(pattern.rhs);
+            std::string lhsReg =
+                pinMulOperand(pattern.lhs, pattern.lhsLoad);
+            std::string rhsReg =
+                pinMulOperand(pattern.rhs, pattern.rhsLoad);
 
-            std::string accReg = loadVector(pattern.acc);
+            std::string accReg =
+                pattern.delayedMul && pattern.accLoad
+                    ? rematerializeLoad(pattern.accLoad)
+                    : loadVector(pattern.acc);
             if (rd != accReg) {
                 emitRawAluMachine("\tmov " + rd + ".16b, " + accReg + ".16b",
                                   rd, {accReg}, MOpcode::Neon);
