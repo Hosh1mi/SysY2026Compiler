@@ -1,5 +1,8 @@
 #include "../../../include/mid/hira/polyhedral/scheduleAnalysis.hpp"
+#include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
+#include "../../../include/mid/hira/ir/hiraIR.hpp"
 #include "../../../include/mid/hira/target/a53TargetModel.hpp"
+#include "../../../include/mid/hira/transform/bandLeadingDistribution.hpp"
 
 #include <algorithm>
 #include <map>
@@ -47,6 +50,15 @@ void printSchedule(
 std::vector<AffineVariable> iterationDimensions(
     const StatementSchedule &statement);
 
+bool statementUsesDimension(
+    const PolyhedralStatement &statement,
+    AffineVariable dimension) {
+    return std::find(statement.dimensions.begin(),
+                     statement.dimensions.end(),
+                     dimension) !=
+           statement.dimensions.end();
+}
+
 StatementSchedule makeStatementSchedule(
     const PolyhedralStatement &statement,
     const std::vector<AffineVariable> &original,
@@ -58,12 +70,19 @@ StatementSchedule makeStatementSchedule(
         original.size() != scheduled.size())
         return schedule;
 
-    for (AffineVariable dimension : original)
-        if (std::find(statement.dimensions.begin(),
-                      statement.dimensions.end(),
-                      dimension) ==
-            statement.dimensions.end())
-            return schedule;
+    bool usesBandDimension = false;
+    bool usesAllBandDimensions = true;
+    for (AffineVariable dimension : original) {
+        if (statementUsesDimension(statement, dimension))
+            usesBandDimension = true;
+        else
+            usesAllBandDimensions = false;
+    }
+    if (!usesBandDimension)
+        return schedule;
+
+    if (!usesAllBandDimensions)
+        return schedule;
 
     for (std::size_t index = 0;
          index < schedule.components.size(); ++index) {
@@ -139,7 +158,9 @@ using ScheduleKey =
 
 ScheduleKey keyFor(const ScheduleCandidate &candidate) {
     ScheduleKey key;
-    key.reserve(candidate.statements.size());
+    key.push_back(candidate.originalDimensions);
+    key.push_back(candidate.scheduledDimensions);
+    key.reserve(key.size() + candidate.statements.size());
     for (const StatementSchedule &statement :
          candidate.statements)
         key.push_back(iterationDimensions(statement));
@@ -181,6 +202,90 @@ std::vector<AffineVariable> iterationDimensions(
             ScheduleComponentKind::Iteration)
             dimensions.push_back(component.dimension);
     return dimensions;
+}
+
+const IterationDomain *findDomain(
+    const PolyhedralModel &model, AffineVariable dimension) {
+    for (const IterationDomain &domain : model.domains())
+        if (domain.dimension == dimension)
+            return &domain;
+    return nullptr;
+}
+
+bool loopsAreParentChild(const HiraLoop &outer,
+                         const HiraLoop &inner) {
+    return inner.parent() == &outer.body();
+}
+
+bool perfectOrDistributableAdjacentLoops(
+    const PolyhedralModel &model, const HiraLoop &first,
+    const HiraLoop &second) {
+    if (loopsAreParentChild(first, second)) {
+        if (isPerfectLoopNest(first, second))
+            return true;
+        return !leadingPayloadBlocksInterchange(
+            model, first, second);
+    }
+    if (loopsAreParentChild(second, first)) {
+        if (isPerfectLoopNest(second, first))
+            return true;
+        return !leadingPayloadBlocksInterchange(
+            model, second, first);
+    }
+    return false;
+}
+
+std::set<std::pair<AffineVariable, AffineVariable>>
+collectPerfectAdjacentPairs(const PolyhedralModel &model) {
+    std::set<std::pair<AffineVariable, AffineVariable>> pairs;
+    for (const IterationDomain &domain : model.domains()) {
+        if (domain.dimensions.size() < 2 || !domain.loop)
+            continue;
+        for (std::size_t index = 1;
+             index < domain.dimensions.size(); ++index) {
+            AffineVariable outer =
+                domain.dimensions[index - 1];
+            AffineVariable inner = domain.dimensions[index];
+            if (!(outer < inner))
+                std::swap(outer, inner);
+            const IterationDomain *outerDomain =
+                findDomain(model, outer);
+            const IterationDomain *innerDomain =
+                findDomain(model, inner);
+            if (!outerDomain || !innerDomain ||
+                !outerDomain->loop || !innerDomain->loop)
+                continue;
+            if (!perfectOrDistributableAdjacentLoops(
+                    model, *outerDomain->loop,
+                    *innerDomain->loop) &&
+                !perfectOrDistributableAdjacentLoops(
+                    model, *innerDomain->loop,
+                    *outerDomain->loop))
+                continue;
+            pairs.emplace(outer, inner);
+        }
+    }
+    return pairs;
+}
+
+bool bandAlreadyCovered(
+    const std::vector<AffineVariable> &band,
+    const std::set<std::vector<AffineVariable>> &bands) {
+    for (const auto &existing : bands) {
+        if (existing.size() < band.size())
+            continue;
+        bool prefix = true;
+        for (std::size_t index = 0; index < band.size();
+             ++index) {
+            if (!(existing[index] == band[index])) {
+                prefix = false;
+                break;
+            }
+        }
+        if (prefix)
+            return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -242,6 +347,12 @@ buildScheduleCandidates(const PolyhedralModel &model) {
         if (domain.dimensions.size() < 2)
             continue;
         bands.insert(domain.dimensions);
+    }
+    for (const auto &pair : collectPerfectAdjacentPairs(model)) {
+        std::vector<AffineVariable> localBand{
+            pair.first, pair.second};
+        if (!bandAlreadyCovered(localBand, bands))
+            bands.insert(std::move(localBand));
     }
 
     std::set<ScheduleKey> emitted;

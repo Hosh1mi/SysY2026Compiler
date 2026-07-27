@@ -283,6 +283,15 @@ const char *legalityName(ScheduleLegalityKind kind) {
     return "unknown";
 }
 
+bool statementUsesDimension(
+    const PolyhedralStatement &statement,
+    AffineVariable dimension) {
+    return std::find(statement.dimensions.begin(),
+                     statement.dimensions.end(),
+                     dimension) !=
+           statement.dimensions.end();
+}
+
 } // namespace
 
 ScheduleLegalityResult analyzeScheduleLegality(
@@ -362,6 +371,76 @@ ScheduleLegalityResult analyzeScheduleLegality(
                         scheduled.status =
                             ScheduledDependenceStatus::Preserved;
                     if (scheduled.status ==
+                            ScheduledDependenceStatus::Unknown &&
+                        relation.ordering ==
+                            DependenceOrdering::IdentityBefore &&
+                        relationFeasibility.kind ==
+                            DependenceFeasibilityKind::Required &&
+                        candidate.originalDimensions.size() >= 2 &&
+                        candidate.originalDimensions.size() ==
+                            candidate.scheduledDimensions.size()) {
+                        for (std::size_t swapIndex = 0;
+                             swapIndex + 1 <
+                             candidate.originalDimensions.size();
+                             ++swapIndex) {
+                            if (!(candidate.originalDimensions
+                                      [swapIndex] ==
+                                  candidate.scheduledDimensions
+                                      [swapIndex + 1] &&
+                                  candidate.originalDimensions
+                                      [swapIndex + 1] ==
+                                  candidate.scheduledDimensions
+                                      [swapIndex]))
+                                continue;
+                            bool onlyPairSwap = true;
+                            for (std::size_t index = 0;
+                                 index <
+                                 candidate.originalDimensions
+                                     .size();
+                                 ++index) {
+                                if (index == swapIndex ||
+                                    index == swapIndex + 1)
+                                    continue;
+                                if (!(candidate
+                                          .originalDimensions
+                                              [index] ==
+                                      candidate
+                                          .scheduledDimensions
+                                              [index])) {
+                                    onlyPairSwap = false;
+                                    break;
+                                }
+                            }
+                            if (!onlyPairSwap)
+                                continue;
+                            const PolyhedralStatement
+                                &sourceStmt =
+                                    model.statements()[
+                                        *relation
+                                             .sourceStatement];
+                            const PolyhedralStatement
+                                &sinkStmt =
+                                    model.statements()[
+                                        *relation
+                                             .sinkStatement];
+                            AffineVariable outerDim =
+                                candidate.originalDimensions
+                                    [swapIndex];
+                            AffineVariable innerDim =
+                                candidate.originalDimensions
+                                    [swapIndex + 1];
+                            if (statementUsesDimension(
+                                    sinkStmt, innerDim) &&
+                                !statementUsesDimension(
+                                    sourceStmt, innerDim)) {
+                                scheduled.status =
+                                    ScheduledDependenceStatus::
+                                        Preserved;
+                                break;
+                            }
+                        }
+                    }
+                    if (scheduled.status ==
                             ScheduledDependenceStatus::Violated &&
                         relationFeasibility.kind !=
                             DependenceFeasibilityKind::Required)
@@ -378,6 +457,53 @@ ScheduleLegalityResult analyzeScheduleLegality(
                          ScheduleLegalityKind::Legal)
                 legality.kind = ScheduleLegalityKind::Unknown;
             legality.dependences.push_back(scheduled);
+        }
+        // Permutation candidates that only leave may-exist dependences
+        // unresolved cannot violate a required ordering.
+        if (legality.kind == ScheduleLegalityKind::Unknown &&
+            (candidate.kind ==
+                 ScheduleCandidateKind::Interchange ||
+             candidate.kind ==
+                 ScheduleCandidateKind::Permutation)) {
+            bool mayExistOnly = true;
+            for (std::size_t dependenceIndex = 0;
+                 dependenceIndex <
+                 dependences.relations().size();
+                 ++dependenceIndex) {
+                const ScheduledDependence &scheduled =
+                    legality.dependences[dependenceIndex];
+                if (scheduled.status ==
+                    ScheduledDependenceStatus::Violated) {
+                    mayExistOnly = false;
+                    break;
+                }
+                if (scheduled.status ==
+                        ScheduledDependenceStatus::Unknown &&
+                    feasibility.relations()[dependenceIndex]
+                            .kind ==
+                        DependenceFeasibilityKind::Required) {
+                    mayExistOnly = false;
+                    break;
+                }
+            }
+            if (mayExistOnly) {
+                for (std::size_t dependenceIndex = 0;
+                     dependenceIndex <
+                     dependences.relations().size();
+                     ++dependenceIndex) {
+                    ScheduledDependence &scheduled =
+                        legality.dependences[dependenceIndex];
+                    if (scheduled.status ==
+                            ScheduledDependenceStatus::Unknown &&
+                        feasibility.relations()[dependenceIndex]
+                                .kind !=
+                            DependenceFeasibilityKind::Required)
+                        scheduled.status =
+                            ScheduledDependenceStatus::
+                                Irrelevant;
+                }
+                legality.kind = ScheduleLegalityKind::Legal;
+            }
         }
         result.schedules_.push_back(std::move(legality));
     }

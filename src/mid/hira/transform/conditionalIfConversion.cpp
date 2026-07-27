@@ -31,6 +31,7 @@ bool isSafeSpeculativeCompute(const HiraNode &node) {
     case ComputeKind::ZExt:
     case ComputeKind::BitCast:
     case ComputeKind::Splat:
+    case ComputeKind::InsertElement:
     case ComputeKind::ExtractElement:
         return true;
     default:

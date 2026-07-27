@@ -177,6 +177,9 @@ private:
         else if (compute.computeKind() ==
                  ComputeKind::ExtractElement)
             expectedOperands = 2;
+        else if (compute.computeKind() ==
+                 ComputeKind::InsertElement)
+            expectedOperands = 3;
         else if (compute.computeKind() == ComputeKind::GetElementPtr)
             expectedOperands = compute.operands().size();
         if (compute.operands().size() != expectedOperands ||
@@ -245,6 +248,22 @@ private:
                     compute.operands()[0]->type())
                 return reject(HiraVerifyError::InvalidNode,
                               "invalid-splat-types");
+        } else if (compute.computeKind() ==
+                   ComputeKind::InsertElement) {
+            auto *vector =
+                dynamic_cast<VectorType *>(
+                    compute.operands()[0]->type());
+            auto *resultVector =
+                dynamic_cast<VectorType *>(result->type());
+            if (!vector || !resultVector ||
+                result->type() !=
+                    compute.operands()[0]->type() ||
+                vector->contained_ !=
+                    compute.operands()[1]->type() ||
+                compute.operands()[2]->kind() !=
+                    ValueKind::IntegerConstant)
+                return reject(HiraVerifyError::InvalidNode,
+                              "invalid-insert-types");
         } else if (compute.computeKind() ==
                    ComputeKind::ExtractElement) {
             auto *vector =

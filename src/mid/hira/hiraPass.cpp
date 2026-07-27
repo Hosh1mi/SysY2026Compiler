@@ -7,7 +7,7 @@
 #include "../../include/mid/hira/conversion/importer.hpp"
 #include "../../include/mid/hira/ir/hiraPrinter.hpp"
 #include "../../include/mid/hira/ir/hiraVerifier.hpp"
-#include "../../include/mid/hira/polyhedral/dependenceAnalysis.hpp"
+#include "../../include/mid/hira/polyhedral/dimensionSemanticAnalysis.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceFeasibility.hpp"
 #include "../../include/mid/hira/polyhedral/dependenceVerifier.hpp"
 #include "../../include/mid/hira/polyhedral/cacheFootprintAnalysis.hpp"
@@ -30,6 +30,7 @@
 #include "../../include/mid/hira/transform/conditionalIfConversion.hpp"
 #include "../../include/mid/hira/transform/affineDomainSimplification.hpp"
 #include "../../include/mid/hira/transform/loopAddressRecurrence.hpp"
+#include "../../include/mid/hira/transform/loopNativeUnroll.hpp"
 #include "../../include/mid/hira/transform/loopRepetitionFolding.hpp"
 #include "../../include/mid/hira/transform/reductionInterchangeBuffering.hpp"
 #include "../../include/mid/hira/transform/statementPartitionRealization.hpp"
@@ -71,6 +72,78 @@ bool hasTemporalReuse(
         varyingAccess |= *stride > 0;
     }
     return invariantAccess && varyingAccess;
+}
+
+std::optional<std::size_t> findMatchingScheduleCandidate(
+    const polyhedral::ScheduleCandidateSet &candidates,
+    const polyhedral::ScheduleCandidate &selected) {
+    for (std::size_t index = 0;
+         index < candidates.candidates().size(); ++index) {
+        const polyhedral::ScheduleCandidate &candidate =
+            candidates.candidates()[index];
+        if (candidate.kind == selected.kind &&
+            candidate.originalDimensions ==
+                selected.originalDimensions &&
+            candidate.scheduledDimensions ==
+                selected.scheduledDimensions)
+            return index;
+    }
+    return std::nullopt;
+}
+
+std::optional<polyhedral::ScheduleVectorization>
+refreshVectorizationAfterSchedule(
+    const polyhedral::PolyhedralModel &transformModel,
+    const polyhedral::ScheduleCandidate &selectedSchedule) {
+    polyhedral::DependenceBuildResult dependences =
+        polyhedral::buildDependenceRelations(transformModel);
+    if (!dependences.succeeded())
+        return std::nullopt;
+    polyhedral::DependenceVerificationResult dependenceVerification =
+        polyhedral::verifyDependenceRelations(
+            transformModel, *dependences.dependences);
+    if (!dependenceVerification.succeeded())
+        return std::nullopt;
+    polyhedral::DependenceFeasibilityResult feasibility =
+        polyhedral::analyzeDependenceFeasibility(
+            transformModel, *dependences.dependences);
+    std::string feasibilityDetail;
+    if (!polyhedral::verifyDependenceFeasibility(
+            *dependences.dependences, feasibility,
+            feasibilityDetail))
+        return std::nullopt;
+    polyhedral::ScheduleCandidateSet schedules =
+        polyhedral::buildScheduleCandidates(transformModel);
+    std::string scheduleDetail;
+    if (!polyhedral::verifyScheduleCandidates(
+            transformModel, schedules, scheduleDetail))
+        return std::nullopt;
+    const std::optional<std::size_t> candidateIndex =
+        findMatchingScheduleCandidate(schedules, selectedSchedule);
+    if (!candidateIndex)
+        return std::nullopt;
+    const target::A53TargetModel targetModel =
+        target::cortexA53();
+    polyhedral::VectorizationAnalysisResult vectorization =
+        polyhedral::analyzeVectorization(
+            transformModel, *dependences.dependences,
+            feasibility, schedules, targetModel);
+    std::string vectorizationDetail;
+    if (!polyhedral::verifyVectorizationAnalysis(
+            transformModel, *dependences.dependences,
+            feasibility, schedules, targetModel,
+            vectorization, vectorizationDetail))
+        return std::nullopt;
+    return vectorization.schedules()[*candidateIndex];
+}
+
+std::optional<polyhedral::AffineVariable> mapVectorizationDimension(
+    const polyhedral::PolyhedralModel &fromModel,
+    const polyhedral::PolyhedralModel &toModel,
+    polyhedral::AffineVariable dimension) {
+    const HiraValue *source = fromModel.space().source(dimension);
+    return source ? toModel.space().variableFor(source)
+                  : std::nullopt;
 }
 
 void dumpResult(const Function &function, const Loop &loop,
@@ -181,6 +254,7 @@ bool selectRegions(Function &function, Loop &loop,
             std::cerr << printHiraRegion(*imported.region,
                                         function.name_);
         }
+        bool reductionBuffered = false;
         polyhedral::PolyhedralBuildResult polyhedralModel =
             polyhedral::buildPolyhedralModel(*imported.region,
                                              &aliasAnalysis);
@@ -195,6 +269,7 @@ bool selectRegions(Function &function, Loop &loop,
                 polyhedral::bufferReductionInterchange(
                     *imported.region, *polyhedralModel.model);
             if (buffering.changed) {
+                reductionBuffered = true;
                 // Buffering changes which values are invariant in the new
                 // compute inner loop.  Hoisting a GEP can expose its load only
                 // on the following round, so converge before rebuilding the
@@ -533,6 +608,8 @@ bool selectRegions(Function &function, Loop &loop,
                     << " header=" << blockName(loop.header) << "\n";
                 std::cerr << polyhedral::printPolyhedralModel(
                     *polyhedralModel.model);
+                std::cerr << polyhedral::printDimensionSemantics(
+                    *polyhedralModel.model);
                 if (reductionsValid)
                     std::cerr
                         << polyhedral::printReductionAnalysis(
@@ -784,6 +861,9 @@ bool selectRegions(Function &function, Loop &loop,
         const polyhedral::PolyhedralModel *
             transformModel = polyhedralModel.model.get();
         bool distributedRegion = false;
+        bool scheduleTransformed = false;
+        std::optional<polyhedral::ScheduleVectorization>
+            transformedVectorization;
         if (scheduleSelectionValid &&
             scheduleSelection.selected() != 0) {
             const polyhedral::ScheduleCandidate &selectedSchedule =
@@ -855,6 +935,10 @@ bool selectRegions(Function &function, Loop &loop,
             }
             transformModel =
                 realizedScheduleModel.model.get();
+            scheduleTransformed = true;
+            transformedVectorization =
+                refreshVectorizationAfterSchedule(
+                    *transformModel, selectedSchedule);
 
             if (debug || dumpPolyhedral)
                 std::cerr
@@ -883,7 +967,8 @@ bool selectRegions(Function &function, Loop &loop,
         if (statementPartitionsValid &&
             statementPartitions.kind() ==
                 polyhedral::
-                    StatementPartitionKind::Distributable) {
+                    StatementPartitionKind::Distributable &&
+            !reductionBuffered) {
             polyhedral::StatementPartitionRealizationResult
                 partitionRealization =
                     polyhedral::realizeStatementPartitions(
@@ -920,7 +1005,83 @@ bool selectRegions(Function &function, Loop &loop,
             }
         }
 
-        if (cacheFootprintsValid &&
+        if (!distributedRegion && vectorizationValid &&
+            scheduleSelectionValid && transformModel) {
+            const polyhedral::ScheduleVectorization
+                &selectedVectorization =
+                    vectorization.schedules()[
+                        scheduleSelection.selected()];
+            const bool selectedDimensionIsParallelOuter =
+                allowParallelization &&
+                scheduleParallelismValid &&
+                scheduleSelection.selected() <
+                    scheduleParallelism.schedules().size() &&
+                scheduleParallelism
+                    .schedules()[scheduleSelection.selected()]
+                    .outerParallel &&
+                scheduleParallelism
+                    .schedules()[scheduleSelection.selected()]
+                    .outerDimension ==
+                    selectedVectorization.dimension;
+            if (selectedVectorization.kind ==
+                    polyhedral::VectorizationKind::Scalar &&
+                selectedVectorization.dimension &&
+                !selectedDimensionIsParallelOuter) {
+                const HiraValue *source =
+                    polyhedralModel.model->space().source(
+                        *selectedVectorization.dimension);
+                auto transformedDimension =
+                    source
+                        ? transformModel->space()
+                              .variableFor(source)
+                        : std::nullopt;
+                if (transformedDimension) {
+                    polyhedral::LoopAddressRecurrenceResult
+                        recurrences =
+                            polyhedral::
+                                introduceLoopAddressRecurrences(
+                                    *imported.region,
+                                    *transformModel,
+                                    *transformedDimension);
+                    if (recurrences.changed) {
+                        if (!verifyRegion(
+                                "loop-address-recurrence"))
+                            return false;
+                        if (debug || dumpPolyhedral)
+                            std::cerr
+                                << "// polyhedral."
+                                   "loop_address_recurrence"
+                                << " count="
+                                << recurrences.recurrences
+                                << " = realized\n";
+                        if (dumpHira)
+                            std::cerr << printHiraRegion(
+                                *imported.region,
+                                function.name_);
+                    }
+                }
+            }
+        }
+
+        if (!distributedRegion && transformModel) {
+            LoopNativeUnrollResult unrolled =
+                unrollCountedLoops(*imported.region);
+            if (unrolled.changed) {
+                if (!verifyRegion("loop-native-unroll"))
+                    return false;
+                if (debug || dumpPolyhedral)
+                    std::cerr
+                        << "// polyhedral.loop_native_unroll"
+                        << " loops=" << unrolled.loops
+                        << " = realized\n";
+                if (dumpHira)
+                    std::cerr << printHiraRegion(
+                        *imported.region, function.name_);
+            }
+        }
+
+        if (!reductionBuffered &&
+            cacheFootprintsValid &&
             scheduleSelectionValid &&
             transformModel) {
             const polyhedral::CacheFootprint &footprint =
@@ -1021,18 +1182,62 @@ bool selectRegions(Function &function, Loop &loop,
             }
         }
 
+        bool pointExpanded = false;
         if (!distributedRegion &&
             vectorizationValid &&
             scheduleSelectionValid &&
             transformModel) {
             const polyhedral::ScheduleVectorization
                 &selectedVectorization =
-                    vectorization.schedules()[
-                        scheduleSelection.selected()];
+                    transformedVectorization &&
+                            transformedVectorization->kind ==
+                                polyhedral::
+                                    VectorizationKind::Vectorizable
+                        ? *transformedVectorization
+                        : vectorization.schedules()[
+                              scheduleSelection.selected()];
             if (selectedVectorization.kind ==
                     polyhedral::
                         VectorizationKind::Vectorizable &&
                 selectedVectorization.dimension) {
+                const polyhedral::ScheduleCandidate
+                    &selectedSchedule =
+                        schedules.candidates()[
+                            scheduleSelection.selected()];
+                const polyhedral::PolyhedralModel
+                    &vectorizationModel =
+                        scheduleTransformed ? *transformModel
+                                            : *polyhedralModel.model;
+                std::vector<polyhedral::AffineVariable> dimensions =
+                    polyhedral::vectorizationCandidateDimensions(
+                        vectorizationModel, selectedSchedule);
+                if (!scheduleTransformed &&
+                    selectedVectorization.dimension &&
+                    std::find(dimensions.begin(), dimensions.end(),
+                              *selectedVectorization.dimension) ==
+                        dimensions.end())
+                    dimensions.insert(
+                        dimensions.begin(),
+                        *selectedVectorization.dimension);
+                else if (
+                    transformedVectorization &&
+                    transformedVectorization->kind ==
+                        polyhedral::
+                            VectorizationKind::Vectorizable &&
+                    transformedVectorization->dimension) {
+                    auto position = std::find(
+                        dimensions.begin(), dimensions.end(),
+                        *transformedVectorization->dimension);
+                    if (position != dimensions.end())
+                        std::rotate(
+                            dimensions.begin(), position,
+                            position + 1);
+                    else
+                        dimensions.insert(
+                            dimensions.begin(),
+                            *transformedVectorization->dimension);
+                }
+
                 const bool selectedDimensionIsParallelOuter =
                     allowParallelization &&
                     scheduleParallelismValid &&
@@ -1045,79 +1250,95 @@ bool selectRegions(Function &function, Loop &loop,
                         .schedules()[scheduleSelection.selected()]
                         .outerDimension ==
                         selectedVectorization.dimension;
-                const HiraValue *source =
-                    polyhedralModel.model->space().source(
-                        *selectedVectorization.dimension);
-                auto transformedDimension =
-                    source
-                        ? transformModel->space()
-                              .variableFor(source)
-                        : std::nullopt;
                 bool profitableParallelBand = false;
-                if (selectedDimensionIsParallelOuter &&
-                    transformedDimension) {
-                    const HiraValue *transformedSource =
-                        transformModel->space().source(
-                            *transformedDimension);
-                    for (const auto &node :
-                         imported.region->rootSequence().nodes()) {
-                        auto *candidate =
-                            dynamic_cast<HiraLoop *>(node.get());
-                        if (candidate &&
-                            candidate->induction() ==
-                                transformedSource) {
-                            profitableParallelBand =
-                                polyhedral::
-                                    isParallelBandProfitable(
-                                        *candidate,
-                                        target::cortexA53());
-                            break;
+                if (selectedDimensionIsParallelOuter) {
+                    auto parallelDimension =
+                        scheduleTransformed
+                            ? selectedVectorization.dimension
+                            : mapVectorizationDimension(
+                                  *polyhedralModel.model,
+                                  *transformModel,
+                                  *selectedVectorization.dimension);
+                    if (parallelDimension) {
+                        const HiraValue *transformedSource =
+                            transformModel->space().source(
+                                *parallelDimension);
+                        for (const auto &node :
+                             imported.region->rootSequence()
+                                 .nodes()) {
+                            auto *candidate =
+                                dynamic_cast<HiraLoop *>(node.get());
+                            if (candidate &&
+                                candidate->induction() ==
+                                    transformedSource) {
+                                profitableParallelBand =
+                                    polyhedral::
+                                        isParallelBandProfitable(
+                                            *candidate,
+                                            target::cortexA53());
+                                break;
+                            }
                         }
                     }
                 }
-                if (transformedDimension &&
-                    !(selectedDimensionIsParallelOuter &&
-                      profitableParallelBand)) {
-                    polyhedral::LoopVectorizationResult
-                        vectorized =
-                            polyhedral::vectorizeLoop(
-                                *imported.region,
-                                *transformModel,
-                                *transformedDimension,
-                                selectedVectorization.lanes);
-                    if (!vectorized.succeeded()) {
-                        if (debug || dumpPolyhedral) {
-                            std::cerr
-                                << "// polyhedral."
-                                   "loop_vectorization"
-                                << " = rejected reason="
-                                << polyhedral::
-                                       loopVectorizationErrorName(
-                                           vectorized.error);
-                            if (!vectorized.detail.empty())
-                                std::cerr
-                                    << " detail="
-                                    << vectorized.detail;
-                            std::cerr << "\n";
-                        }
-                    } else if (!verifyRegion(
-                                   "loop-vectorization")) {
-                        return false;
-                    } else {
-                        if (debug || dumpPolyhedral)
-                            std::cerr
-                                << "// polyhedral."
-                                   "loop_vectorization"
-                                << " dimension=d"
-                                << transformedDimension->position
-                                << " lanes="
-                                << selectedVectorization.lanes
-                                << " = realized\n";
-                        if (dumpHira)
-                            std::cerr << printHiraRegion(
-                                *imported.region,
-                                function.name_);
+                if (selectedDimensionIsParallelOuter &&
+                    profitableParallelBand)
+                    dimensions.clear();
+
+                polyhedral::LoopVectorizationResult vectorized;
+                std::optional<polyhedral::AffineVariable>
+                    vectorizedDimension;
+                for (polyhedral::AffineVariable dimension :
+                     dimensions) {
+                    auto transformedDimension =
+                        scheduleTransformed
+                            ? std::optional<
+                                  polyhedral::AffineVariable>(
+                                  dimension)
+                            : mapVectorizationDimension(
+                                  *polyhedralModel.model,
+                                  *transformModel, dimension);
+                    if (!transformedDimension)
+                        continue;
+                    vectorized = polyhedral::vectorizeLoop(
+                        *imported.region, *transformModel,
+                        *transformedDimension,
+                        selectedVectorization.lanes);
+                    if (vectorized.succeeded()) {
+                        vectorizedDimension =
+                            transformedDimension;
+                        break;
                     }
+                    if (debug || dumpPolyhedral) {
+                        std::cerr
+                            << "// polyhedral."
+                               "loop_vectorization"
+                            << " = rejected reason="
+                            << polyhedral::
+                                   loopVectorizationErrorName(
+                                       vectorized.error);
+                        if (!vectorized.detail.empty())
+                            std::cerr << " detail="
+                                      << vectorized.detail;
+                        std::cerr << "\n";
+                    }
+                }
+                if (vectorizedDimension) {
+                    if (!verifyRegion("loop-vectorization"))
+                        return false;
+                    if (debug || dumpPolyhedral)
+                        std::cerr
+                            << "// polyhedral."
+                               "loop_vectorization"
+                            << " dimension=d"
+                            << vectorizedDimension->position
+                            << " lanes="
+                            << selectedVectorization.lanes
+                            << " = realized\n";
+                    if (dumpHira)
+                        std::cerr << printHiraRegion(
+                            *imported.region,
+                            function.name_);
                 }
             }
         }
@@ -1170,70 +1391,12 @@ bool selectRegions(Function &function, Loop &loop,
                             std::cerr << "\n";
                         }
                     } else {
+                        pointExpanded = true;
                         if (debug || dumpPolyhedral)
                             std::cerr
                                 << "// polyhedral."
                                    "point_loop_expansion"
                                 << " factor=4"
-                                << " = realized\n";
-                        if (dumpHira)
-                            std::cerr << printHiraRegion(
-                                *imported.region,
-                                function.name_);
-                    }
-                }
-            }
-        }
-
-        if (!distributedRegion &&
-            vectorizationValid &&
-            scheduleSelectionValid &&
-            transformModel) {
-            const polyhedral::ScheduleVectorization
-                &selectedVectorization =
-                    vectorization.schedules()[
-                        scheduleSelection.selected()];
-            const bool selectedDimensionIsParallelOuter =
-                scheduleParallelismValid &&
-                scheduleSelection.selected() <
-                    scheduleParallelism.schedules().size() &&
-                scheduleParallelism
-                    .schedules()[scheduleSelection.selected()]
-                    .outerParallel &&
-                scheduleParallelism
-                    .schedules()[scheduleSelection.selected()]
-                    .outerDimension ==
-                    selectedVectorization.dimension;
-            if (selectedVectorization.kind ==
-                    polyhedral::VectorizationKind::Scalar &&
-                selectedVectorization.dimension &&
-                !selectedDimensionIsParallelOuter) {
-                const HiraValue *source =
-                    polyhedralModel.model->space().source(
-                        *selectedVectorization.dimension);
-                auto transformedDimension =
-                    source
-                        ? transformModel->space()
-                              .variableFor(source)
-                        : std::nullopt;
-                if (transformedDimension) {
-                    polyhedral::LoopAddressRecurrenceResult
-                        recurrences =
-                            polyhedral::
-                                introduceLoopAddressRecurrences(
-                                    *imported.region,
-                                    *transformModel,
-                                    *transformedDimension);
-                    if (recurrences.changed) {
-                        if (!verifyRegion(
-                                "loop-address-recurrence"))
-                            return false;
-                        if (debug || dumpPolyhedral)
-                            std::cerr
-                                << "// polyhedral."
-                                   "loop_address_recurrence"
-                                << " count="
-                                << recurrences.recurrences
                                 << " = realized\n";
                         if (dumpHira)
                             std::cerr << printHiraRegion(

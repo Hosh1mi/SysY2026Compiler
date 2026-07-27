@@ -1,4 +1,5 @@
 #include "../../../include/mid/hira/transform/scheduleRealization.hpp"
+#include "../../../include/mid/hira/transform/bandLeadingDistribution.hpp"
 
 #include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
@@ -38,6 +39,53 @@ const IterationDomain *findDomain(
         if (domain.loop == loop)
             return &domain;
     return nullptr;
+}
+
+bool isPartialBandCandidate(
+    const PolyhedralModel &model,
+    const ScheduleCandidate &candidate) {
+    if (candidate.kind == ScheduleCandidateKind::Identity ||
+        candidate.originalDimensions.size() < 2)
+        return false;
+    for (const IterationDomain &domain : model.domains()) {
+        if (domain.dimensions == candidate.originalDimensions)
+            return false;
+        if (domain.dimensions.size() <=
+            candidate.originalDimensions.size())
+            continue;
+        bool subset = true;
+        for (AffineVariable dimension :
+             candidate.originalDimensions) {
+            if (std::find(domain.dimensions.begin(),
+                          domain.dimensions.end(),
+                          dimension) ==
+                domain.dimensions.end()) {
+                subset = false;
+                break;
+            }
+        }
+        if (subset)
+            return true;
+    }
+    return false;
+}
+
+bool statementUsesDimension(
+    const PolyhedralStatement &statement,
+    AffineVariable dimension) {
+    return std::find(statement.dimensions.begin(),
+                     statement.dimensions.end(),
+                     dimension) != statement.dimensions.end();
+}
+
+bool usesAllBandDimensions(
+    const PolyhedralStatement &statement,
+    const ScheduleCandidate &candidate) {
+    for (AffineVariable dimension :
+         candidate.originalDimensions)
+        if (!statementUsesDimension(statement, dimension))
+            return false;
+    return true;
 }
 
 std::optional<std::size_t> nodePosition(
@@ -157,6 +205,31 @@ bool interchangeAdjacent(HiraLoop &outer,
     return true;
 }
 
+bool loopsAreParentChild(const HiraLoop &outer,
+                         const HiraLoop &inner) {
+    return inner.parent() == &outer.body();
+}
+
+bool physicallyInterchange(
+    HiraRegion &region, const PolyhedralModel &model,
+    HiraLoop &first, HiraLoop &second) {
+    if (loopsAreParentChild(first, second)) {
+        if (!isPerfectLoopNest(first, second) &&
+            !distributeLeadingPayload(
+                region, model, first, second))
+            return false;
+        return interchangeAdjacent(first, second);
+    }
+    if (loopsAreParentChild(second, first)) {
+        if (!isPerfectLoopNest(second, first) &&
+            !distributeLeadingPayload(
+                region, model, second, first))
+            return false;
+        return interchangeAdjacent(second, first);
+    }
+    return false;
+}
+
 } // namespace
 
 ScheduleRealizationResult realizeSelectedSchedule(
@@ -216,6 +289,13 @@ ScheduleRealizationResult realizeSelectedSchedule(
             const_cast<HiraLoop *>(domain->loop));
     }
 
+    if (!normalizeBandForPermutation(
+            region, model, candidate.originalDimensions))
+        return reject(
+            selected,
+            ScheduleRealizationError::InvalidNest,
+            "band-normalization-failed");
+
     for (std::size_t target = 0;
          target < desired.size(); ++target) {
         auto position = std::find(
@@ -230,11 +310,12 @@ ScheduleRealizationResult realizeSelectedSchedule(
             static_cast<std::size_t>(
                 position - current.begin());
         while (currentPosition > target) {
-            HiraLoop *outer =
+            HiraLoop *left =
                 current[currentPosition - 1];
-            HiraLoop *inner =
+            HiraLoop *right =
                 current[currentPosition];
-            if (!interchangeAdjacent(*outer, *inner))
+            if (!physicallyInterchange(
+                    region, model, *left, *right))
                 return reject(
                     selected,
                     ScheduleRealizationError::InvalidNest,
@@ -262,28 +343,30 @@ bool verifyScheduleRealization(
         return false;
     }
 
-    std::vector<const HiraValue *> expected;
-    for (std::size_t index = 0;
-         index < candidate.scheduledDimensions.size();
-         ++index) {
-        const IterationDomain *beforeDomain =
-            findDomain(
-                before,
-                candidate.scheduledDimensions[index]);
-        if (!beforeDomain || !beforeDomain->loop) {
-            detail = "missing-original-loop-domain";
-            return false;
-        }
-        expected.push_back(
-            beforeDomain->loop->induction());
-        const IterationDomain *afterDomain =
-            findDomain(after, beforeDomain->loop);
-        if (!afterDomain ||
-            dimensionSources(after,
-                             afterDomain->dimensions) !=
-                expected) {
-            detail = "realized-loop-order-mismatch";
-            return false;
+    if (!isPartialBandCandidate(before, candidate)) {
+        std::vector<const HiraValue *> expected;
+        for (std::size_t index = 0;
+             index < candidate.scheduledDimensions.size();
+             ++index) {
+            const IterationDomain *beforeDomain =
+                findDomain(
+                    before,
+                    candidate.scheduledDimensions[index]);
+            if (!beforeDomain || !beforeDomain->loop) {
+                detail = "missing-original-loop-domain";
+                return false;
+            }
+            expected.push_back(
+                beforeDomain->loop->induction());
+            const IterationDomain *afterDomain =
+                findDomain(after, beforeDomain->loop);
+            if (!afterDomain ||
+                dimensionSources(after,
+                                 afterDomain->dimensions) !=
+                    expected) {
+                detail = "realized-loop-order-mismatch";
+                return false;
+            }
         }
     }
 
@@ -308,6 +391,8 @@ bool verifyScheduleRealization(
             detail = "missing-realized-statement";
             return false;
         }
+        if (isPartialBandCandidate(before, candidate))
+            continue;
         if (!sameSemanticSchedule(
                 before, expected.components, after,
                 realized->identitySchedule)) {
@@ -331,6 +416,12 @@ bool verifyScheduleRealization(
             findAccess(after, node);
         const PolyhedralStatement *realizedStatement =
             findStatement(after, node);
+        if (isPartialBandCandidate(before, candidate) &&
+            access.statement < before.statements().size() &&
+            !usesAllBandDimensions(
+                before.statements()[access.statement],
+                candidate))
+            continue;
         auto expectedDimension =
             innermostDimension(candidate, access.statement);
         if (!realized || !realizedStatement ||

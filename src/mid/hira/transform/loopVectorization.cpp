@@ -1,4 +1,5 @@
 #include "../../../include/mid/hira/transform/loopVectorization.hpp"
+#include "../../../include/mid/hira/transform/loopAddressRecurrence.hpp"
 
 #include "../../../include/mid/analysis/loopInfo.hpp"
 #include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
@@ -125,9 +126,80 @@ HiraComputeOp *insertCompute(
         sequence.insert(position, std::move(owner)));
 }
 
+bool canMaterializeAddress(ComputeKind kind) {
+    switch (kind) {
+    case ComputeKind::Add:
+    case ComputeKind::Sub:
+    case ComputeKind::Mul:
+    case ComputeKind::GetElementPtr:
+    case ComputeKind::ZExt:
+    case ComputeKind::BitCast:
+        return true;
+    default:
+        return false;
+    }
+}
+
+HiraValue *materializeAddressAtEntry(
+    HiraRegion &region, const HiraLoop &loop,
+    const std::set<const HiraNode *> &internal,
+    HiraSequence &parent, std::size_t &position,
+    const HiraValue *source,
+    std::map<const HiraValue *, HiraValue *> &cache) {
+    if (!source)
+        return nullptr;
+    auto cached = cache.find(source);
+    if (cached != cache.end())
+        return cached->second;
+    if (source == loop.induction())
+        return cache[source] = loop.lowerBound();
+
+    const HiraNode *definition = source->definingNode();
+    if (!definition || !internal.count(definition))
+        return cache[source] =
+                   const_cast<HiraValue *>(source);
+    auto *compute =
+        dynamic_cast<const HiraComputeOp *>(definition);
+    if (!compute || compute->results().size() != 1 ||
+        compute->results().front() != source ||
+        !canMaterializeAddress(compute->computeKind()))
+        return nullptr;
+
+    auto owner = std::make_unique<HiraComputeOp>(
+        compute->computeKind(), compute->predicate());
+    for (const HiraValue *operand : compute->operands()) {
+        HiraValue *materialized = materializeAddressAtEntry(
+            region, loop, internal, parent, position,
+            operand, cache);
+        if (!materialized)
+            return nullptr;
+        owner->addOperand(materialized);
+    }
+    HiraValue *result = region.createValue(source->type());
+    owner->addResult(result);
+    parent.insert(position++, std::move(owner));
+    cache[source] = result;
+    return result;
+}
+
+HiraComputeOp *appendPointerOffset(
+    HiraSequence &sequence, HiraValue *pointer,
+    HiraValue *offset, HiraValue *result) {
+    return appendCompute(
+        sequence, ComputeKind::GetElementPtr, result,
+        {pointer, offset});
+}
+
+
 struct AccessMode {
     bool varying = false;
     Type *elementType = nullptr;
+};
+
+struct PointerRecurrence {
+    HiraValue *scalarAddress = nullptr;
+    HiraValue *iteration = nullptr;
+    std::size_t binding = 0;
 };
 
 std::optional<AccessMode> analyzeAccess(
@@ -393,6 +465,28 @@ LoopVectorizationResult vectorizeLoop(
     }
 
     std::set<const HiraValue *> varyingData;
+    // Induction used as ordinary data produces consecutive lane values
+    // [i, i+1, ..., i+lanes-1] in the vector main loop.
+    bool inductionUsedAsData = false;
+    for (const HiraNode *node : payload) {
+        for (std::size_t operandIndex = 0;
+             operandIndex < node->operands().size();
+             ++operandIndex) {
+            const HiraValue *operand =
+                node->operands()[operandIndex];
+            bool addressUse =
+                (dynamic_cast<const HiraLoad *>(node) &&
+                 operandIndex == 0) ||
+                (dynamic_cast<const HiraStore *>(node) &&
+                 operandIndex == 1) ||
+                addressNodes.count(node);
+            if (operand == pointLoop->induction() && !addressUse)
+                inductionUsedAsData = true;
+        }
+    }
+    if (inductionUsedAsData)
+        varyingData.insert(pointLoop->induction());
+
     for (const HiraNode *node : payload) {
         if (auto *load =
                 dynamic_cast<const HiraLoad *>(node)) {
@@ -447,12 +541,6 @@ LoopVectorizationResult vectorizeLoop(
                     LoopVectorizationError::
                         UnsupportedBody,
                     "address-value-used-as-data");
-            if (operand == pointLoop->induction() &&
-                !addressUse)
-                return reject(
-                    LoopVectorizationError::
-                        UnsupportedBody,
-                    "induction-used-as-vector-data");
         }
     }
 
@@ -472,8 +560,12 @@ LoopVectorizationResult vectorizeLoop(
 
     HiraValue *oldLower = pointLoop->lowerBound();
     HiraValue *oldUpper = pointLoop->upperBound();
+    // Two contiguous vector parts halve loop-control overhead on A53.
+    const std::uint32_t unrollFactor =
+        addReduction ? 1U : 2U;
+    const std::uint32_t vectorTrip = lanes * unrollFactor;
     const std::int64_t laneOffset =
-        static_cast<std::int64_t>(lanes - 1);
+        static_cast<std::int64_t>(vectorTrip - 1);
     HiraValue *minimumSafeUpper =
         region.createIntegerConstant(
             indexType,
@@ -502,7 +594,7 @@ LoopVectorizationResult vectorizeLoop(
         {safeUpper, adjustedUpper, oldLower});
 
     HiraValue *vectorStep =
-        region.createIntegerConstant(indexType, lanes);
+        region.createIntegerConstant(indexType, vectorTrip);
     HiraValue *vectorInduction =
         region.createValue(indexType);
     auto vectorOwner = std::make_unique<HiraLoop>(
@@ -568,124 +660,306 @@ LoopVectorizationResult vectorizeLoop(
         auto found = splats.find(scalar);
         if (found != splats.end())
             return found->second;
+        const HiraNode *definition =
+            scalar ? scalar->definingNode() : nullptr;
+        const bool hoistInvariant =
+            definition && !payload.count(definition);
         HiraValue *packed =
             region.createValue(
                 vectorType(scalar->type()));
-        appendCompute(
-            vectorBody, ComputeKind::Splat,
-            packed, {scalar});
+        if (hoistInvariant)
+            insertCompute(
+                *parent, (*position)++,
+                ComputeKind::Splat, packed, {scalar});
+        else
+            appendCompute(
+                vectorBody, ComputeKind::Splat,
+                packed, {scalar});
         splats.emplace(scalar, packed);
         return packed;
     };
+    HiraValue *laneInduction = nullptr;
+    auto inductionDataValue = [&]() -> HiraValue * {
+        if (laneInduction)
+            return laneInduction;
+        HiraValue *base = splat(vectorInduction);
+        HiraValue *zero =
+            region.createIntegerConstant(indexType, 0);
+        HiraValue *offsets =
+            region.createValue(vectorType(indexType));
+        appendCompute(
+            vectorBody, ComputeKind::Splat, offsets, {zero});
+        for (std::uint32_t lane = 1; lane < lanes; ++lane) {
+            HiraValue *laneValue =
+                region.createIntegerConstant(
+                    indexType, static_cast<std::int64_t>(lane));
+            HiraValue *laneIndex =
+                region.createIntegerConstant(
+                    module->int32_ty_,
+                    static_cast<std::int64_t>(lane));
+            HiraValue *next =
+                region.createValue(vectorType(indexType));
+            appendCompute(
+                vectorBody, ComputeKind::InsertElement, next,
+                {offsets, laneValue, laneIndex});
+            offsets = next;
+        }
+        laneInduction =
+            region.createValue(vectorType(indexType));
+        appendCompute(
+            vectorBody, ComputeKind::Add, laneInduction,
+            {base, offsets});
+        return laneInduction;
+    };
+    auto mapOperand =
+        [&](const HiraValue *operand,
+            bool asData) -> HiraValue * {
+        if (asData && operand == pointLoop->induction() &&
+            inductionUsedAsData)
+            return inductionDataValue();
+        return mappedValue(operand);
+    };
 
+    std::set<const HiraNode *> addressInternal = payload;
+    addressInternal.insert(addressNodes.begin(),
+                           addressNodes.end());
+    std::vector<PointerRecurrence> pointerRecurrences;
+    std::map<HiraValue *, HiraValue *> pointerAtScalarAddress;
+    std::set<HiraValue *> varyingScalarAddresses;
     for (std::size_t index = 0;
          index < payloadCount; ++index) {
         const HiraNode *node =
             pointLoop->body().nodes()[index].get();
-        if (auto *compute =
-                dynamic_cast<const HiraComputeOp *>(node)) {
-            bool vectorResult =
-                !addressNodes.count(node);
-            if (vectorResult) {
-                vectorResult = false;
-                for (const HiraValue *operand :
-                     compute->operands())
-                    vectorResult |=
-                        vectorValues.count(operand);
-            }
-
-            std::vector<HiraValue *> operands;
-            for (const HiraValue *operand :
-                 compute->operands()) {
-                HiraValue *mappedOperand =
-                    mappedValue(operand);
-                if (vectorResult &&
-                    !vectorValues.count(operand))
-                    mappedOperand =
-                        splat(mappedOperand);
-                operands.push_back(mappedOperand);
-            }
-            Type *resultType =
-                vectorResult
-                    ? (compute->computeKind() ==
-                               ComputeKind::ICmp
-                           ? vectorType(module->int32_ty_)
-                           : vectorType(
-                                 compute->results().front()->type()))
-                    : compute->results().front()->type();
-            HiraValue *result =
-                region.createValue(resultType);
-            HiraComputeOp *clone = appendCompute(
-                vectorBody, compute->computeKind(),
-                result, operands, compute->predicate());
-            mapSourceNode(region, clone, compute);
-            mapped[compute->results().front()] = result;
-            if (vectorResult)
-                vectorValues.insert(
-                    compute->results().front());
-            continue;
-        }
-
+        const AccessMode *mode = nullptr;
         if (auto *load =
-                dynamic_cast<const HiraLoad *>(node)) {
-            const AccessMode &mode =
-                accessModes.at(node);
-            HiraValue *address =
-                mappedValue(load->address());
-            Type *resultType =
-                load->results().front()->type();
-            if (mode.varying) {
-                resultType = vectorType(resultType);
-                HiraValue *vectorAddress =
-                    region.createValue(
-                        module->get_pointer_type(
-                            resultType));
-                appendCompute(
-                    vectorBody, ComputeKind::BitCast,
-                    vectorAddress, {address});
-                address = vectorAddress;
+                dynamic_cast<const HiraLoad *>(node))
+            mode = &accessModes.at(node);
+        else if (auto *store =
+                     dynamic_cast<const HiraStore *>(node))
+            mode = &accessModes.at(node);
+        if (!mode || !mode->varying)
+            continue;
+        HiraValue *scalarAddress = nullptr;
+        if (auto *load =
+                dynamic_cast<const HiraLoad *>(node))
+            scalarAddress = load->address();
+        else
+            scalarAddress =
+                dynamic_cast<const HiraStore *>(node)
+                    ->address();
+        if (!scalarAddress ||
+            !varyingScalarAddresses.insert(scalarAddress)
+                 .second)
+            continue;
+        std::map<const HiraValue *, HiraValue *> entryCache;
+        std::size_t insertPosition = *position;
+        HiraValue *initial = materializeAddressAtEntry(
+            region, *pointLoop, addressInternal, *parent,
+            insertPosition, scalarAddress, entryCache);
+        *position = insertPosition;
+        if (!initial)
+            return reject(
+                LoopVectorizationError::UnsupportedAccess,
+                "unsupported-vector-address");
+        HiraValue *iteration =
+            region.createValue(scalarAddress->type());
+        HiraValue *exit =
+            region.createValue(scalarAddress->type());
+        std::size_t binding =
+            vectorLoop->addCarriedValue(
+                initial, iteration, exit);
+        pointerRecurrences.push_back(
+            {scalarAddress, iteration, binding});
+        pointerAtScalarAddress[scalarAddress] = iteration;
+    }
+
+    auto pointerForPart =
+        [&](HiraValue *scalarAddress,
+            std::uint32_t part) -> HiraValue * {
+        auto found = pointerAtScalarAddress.find(
+            scalarAddress);
+        if (found == pointerAtScalarAddress.end())
+            return nullptr;
+        if (part == 0)
+            return found->second;
+        HiraValue *offset =
+            region.createIntegerConstant(
+                indexType,
+                static_cast<std::int64_t>(lanes * part));
+        HiraValue *bumped =
+            region.createValue(found->second->type());
+        appendPointerOffset(
+            vectorBody, found->second, offset, bumped);
+        return bumped;
+    };
+
+    bool vectorPartOk = true;
+    for (std::uint32_t part = 0; part < unrollFactor;
+         ++part) {
+        std::map<const HiraValue *, HiraValue *> partMapped =
+            mapped;
+        std::set<const HiraValue *> partVectorValues;
+        auto partMappedValue =
+            [&](const HiraValue *value) -> HiraValue * {
+            auto found = partMapped.find(value);
+            return found == partMapped.end()
+                       ? const_cast<HiraValue *>(value)
+                       : found->second;
+        };
+        auto partMapOperand =
+            [&](const HiraValue *operand,
+                bool asData) -> HiraValue * {
+            if (asData && operand == pointLoop->induction() &&
+                inductionUsedAsData)
+                return inductionDataValue();
+            return partMappedValue(operand);
+        };
+        for (std::size_t index = 0;
+             index < payloadCount; ++index) {
+            if (!vectorPartOk)
+                break;
+            const HiraNode *node =
+                pointLoop->body().nodes()[index].get();
+            if (auto *compute =
+                    dynamic_cast<const HiraComputeOp *>(node)) {
+                if (addressNodes.count(node)) {
+                    const HiraValue *result =
+                        compute->results().front();
+                    if (pointerAtScalarAddress.count(
+                            const_cast<HiraValue *>(result)))
+                        continue;
+                }
+                const bool addressCompute =
+                    addressNodes.count(node);
+                bool vectorResult = !addressCompute;
+                if (vectorResult) {
+                    vectorResult = false;
+                    for (const HiraValue *operand :
+                         compute->operands())
+                        vectorResult |=
+                            partVectorValues.count(operand) ||
+                            (inductionUsedAsData &&
+                             operand ==
+                                 pointLoop->induction());
+                }
+
+                std::vector<HiraValue *> operands;
+                for (const HiraValue *operand :
+                     compute->operands()) {
+                    const bool operandIsVector =
+                        !addressCompute &&
+                        (partVectorValues.count(operand) ||
+                         (inductionUsedAsData &&
+                          operand ==
+                              pointLoop->induction()));
+                    HiraValue *mappedOperand =
+                        partMapOperand(operand, !addressCompute);
+                    if (vectorResult && !operandIsVector)
+                        mappedOperand = splat(mappedOperand);
+                    operands.push_back(mappedOperand);
+                }
+                Type *resultType =
+                    vectorResult
+                        ? (compute->computeKind() ==
+                                   ComputeKind::ICmp
+                               ? vectorType(
+                                     module->int32_ty_)
+                               : vectorType(
+                                     compute->results()
+                                         .front()
+                                         ->type()))
+                        : compute->results()
+                              .front()
+                              ->type();
+                HiraValue *result =
+                    region.createValue(resultType);
+                HiraComputeOp *clone = appendCompute(
+                    vectorBody, compute->computeKind(),
+                    result, operands, compute->predicate());
+                mapSourceNode(region, clone, compute);
+                partMapped[compute->results().front()] =
+                    result;
+                if (vectorResult)
+                    partVectorValues.insert(
+                        compute->results().front());
+                continue;
             }
-            HiraValue *result =
-                region.createValue(resultType);
+
+            if (auto *load =
+                    dynamic_cast<const HiraLoad *>(node)) {
+                const AccessMode &mode =
+                    accessModes.at(node);
+                HiraValue *address =
+                    pointerForPart(load->address(), part);
+                if (!address)
+                    address = partMapOperand(
+                        load->address(), false);
+                Type *resultType =
+                    load->results().front()->type();
+                if (mode.varying) {
+                    resultType = vectorType(resultType);
+                    HiraValue *vectorAddress =
+                        region.createValue(
+                            module->get_pointer_type(
+                                resultType));
+                    appendCompute(
+                        vectorBody, ComputeKind::BitCast,
+                        vectorAddress, {address});
+                    address = vectorAddress;
+                }
+                HiraValue *result =
+                    region.createValue(resultType);
+                auto owner =
+                    std::make_unique<HiraLoad>(address);
+                owner->addResult(result);
+                HiraNode *clone =
+                    vectorBody.append(std::move(owner));
+                mapSourceNode(region, clone, load);
+                partMapped[load->results().front()] =
+                    result;
+                if (mode.varying)
+                    partVectorValues.insert(
+                        load->results().front());
+                continue;
+            }
+
+            auto *store =
+                dynamic_cast<const HiraStore *>(node);
+            if (!store) {
+                vectorPartOk = false;
+                break;
+            }
+            const bool storedIsVector =
+                partVectorValues.count(store->value()) ||
+                (inductionUsedAsData &&
+                 store->value() == pointLoop->induction());
+            HiraValue *stored =
+                partMapOperand(store->value(), true);
+            if (!storedIsVector)
+                stored = splat(stored);
+            HiraValue *address =
+                pointerForPart(store->address(), part);
+            if (!address)
+                address = partMapOperand(store->address(), false);
+            HiraValue *vectorAddress =
+                region.createValue(
+                    module->get_pointer_type(
+                        stored->type()));
+            appendCompute(
+                vectorBody, ComputeKind::BitCast,
+                vectorAddress, {address});
             auto owner =
-                std::make_unique<HiraLoad>(address);
-            owner->addResult(result);
+                std::make_unique<HiraStore>(
+                    stored, vectorAddress);
             HiraNode *clone =
                 vectorBody.append(std::move(owner));
-            mapSourceNode(region, clone, load);
-            mapped[load->results().front()] = result;
-            if (mode.varying)
-                vectorValues.insert(
-                    load->results().front());
-            continue;
+            mapSourceNode(region, clone, store);
         }
-
-        auto *store =
-            dynamic_cast<const HiraStore *>(node);
-        if (!store)
-            return reject(
-                LoopVectorizationError::UnsupportedBody,
-                "unexpected-vector-node");
-        HiraValue *stored =
-            mappedValue(store->value());
-        if (!vectorValues.count(store->value()))
-            stored = splat(stored);
-        HiraValue *address =
-            mappedValue(store->address());
-        HiraValue *vectorAddress =
-            region.createValue(
-                module->get_pointer_type(
-                    stored->type()));
-        appendCompute(
-            vectorBody, ComputeKind::BitCast,
-            vectorAddress, {address});
-        auto owner =
-            std::make_unique<HiraStore>(
-                stored, vectorAddress);
-        HiraNode *clone =
-            vectorBody.append(std::move(owner));
-        mapSourceNode(region, clone, store);
     }
+    if (!vectorPartOk)
+        return reject(
+            LoopVectorizationError::UnsupportedBody,
+            "unexpected-vector-node");
 
     HiraValue *vectorNext =
         region.createValue(indexType);
@@ -703,6 +977,17 @@ LoopVectorizationResult vectorizeLoop(
         vectorLoop->setCarriedYield(
             *accBinding, vectorAccNext);
         bindingYields[*accBinding] = vectorAccNext;
+    }
+    for (const PointerRecurrence &recurrence :
+         pointerRecurrences) {
+        HiraValue *nextPointer =
+            region.createValue(recurrence.iteration->type());
+        appendPointerOffset(
+            vectorBody, recurrence.iteration, vectorStep,
+            nextPointer);
+        vectorLoop->setCarriedYield(
+            recurrence.binding, nextPointer);
+        bindingYields[recurrence.binding] = nextPointer;
     }
     vectorLoop->addYieldValue(vectorNext);
     for (HiraValue *yielded : bindingYields)

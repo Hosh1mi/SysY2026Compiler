@@ -19,9 +19,27 @@ bool sameComponent(const ScheduleComponent &left,
 bool isKnownBand(
     const PolyhedralModel &model,
     const std::vector<AffineVariable> &dimensions) {
-    for (const IterationDomain &domain : model.domains())
+    if (dimensions.size() < 2)
+        return false;
+    for (const IterationDomain &domain : model.domains()) {
         if (domain.dimensions == dimensions)
             return true;
+        if (domain.dimensions.size() < dimensions.size())
+            continue;
+        for (std::size_t index = 0;
+             index + dimensions.size() <=
+             domain.dimensions.size();
+             ++index) {
+            if (std::equal(
+                    domain.dimensions.begin() +
+                        static_cast<std::ptrdiff_t>(index),
+                    domain.dimensions.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            index + dimensions.size()),
+                    dimensions.begin()))
+                return true;
+        }
+    }
     return false;
 }
 

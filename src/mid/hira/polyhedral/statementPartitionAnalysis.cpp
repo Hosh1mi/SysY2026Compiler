@@ -101,6 +101,26 @@ std::string dimensionName(AffineVariable dimension) {
            std::to_string(dimension.position);
 }
 
+bool isPrefixDimensions(
+    const std::vector<AffineVariable> &prefix,
+    const std::vector<AffineVariable> &dimensions) {
+    if (prefix.size() > dimensions.size())
+        return false;
+    for (std::size_t index = 0; index < prefix.size();
+         ++index)
+        if (!(prefix[index] == dimensions[index]))
+            return false;
+    return true;
+}
+
+bool nestedCompatibleDimensions(
+    const std::vector<AffineVariable> &left,
+    const std::vector<AffineVariable> &right) {
+    return left.size() <= right.size()
+               ? isPrefixDimensions(left, right)
+               : isPrefixDimensions(right, left);
+}
+
 } // namespace
 
 StatementPartitionResult analyzeStatementPartitions(
@@ -120,10 +140,11 @@ StatementPartitionResult analyzeStatementPartitions(
             feasibility.relations()[index].kind ==
                 DependenceFeasibilityKind::ProvenEmpty)
             continue;
+        // Only scalar SSA and imprecise memory relations force fusion.
+        // Exact memory dependences across sequenced bands remain ordered by
+        // partition sequence and must not collapse incompatible domains.
         if (mustRemainTogether(
-                relation, feasibility.relations()[index]) ||
-            *relation.sourceStatement >
-                *relation.sinkStatement)
+                relation, feasibility.relations()[index]))
             sets.unite(
                 graph.componentByStatement()[
                     *relation.sourceStatement],
@@ -171,9 +192,18 @@ StatementPartitionResult analyzeStatementPartitions(
              partition.statements) {
             result.partitionByStatement_[statement] =
                 partition.id;
-            compatibleDomains &=
-                model.statements()[statement].dimensions ==
-                partition.dimensions;
+            const auto &statementDimensions =
+                model.statements()[statement].dimensions;
+            // Nested statements in one imperfect band share a common outer
+            // prefix but differ in depth after LICM.  Treat prefix nesting as
+            // compatible and keep the deepest domain as the partition band.
+            if (!nestedCompatibleDimensions(
+                    statementDimensions,
+                    partition.dimensions))
+                compatibleDomains = false;
+            else if (statementDimensions.size() >
+                     partition.dimensions.size())
+                partition.dimensions = statementDimensions;
         }
         result.partitions_.push_back(
             std::move(partition));
@@ -183,12 +213,6 @@ StatementPartitionResult analyzeStatementPartitions(
         result.partitions_[index].fusibleWithNext =
             result.partitions_[index].dimensions ==
             result.partitions_[index + 1].dimensions;
-    if (!result.partitions_.empty())
-        for (const StatementPartition &partition :
-             result.partitions_)
-            compatibleDomains &=
-                partition.dimensions ==
-                result.partitions_.front().dimensions;
 
     if (!compatibleDomains) {
         result.kind_ = StatementPartitionKind::Indivisible;
@@ -199,6 +223,9 @@ StatementPartitionResult analyzeStatementPartitions(
         result.reason_ =
             StatementPartitionReason::SingleGroup;
     } else {
+        // Distinct domains across partitions are expected for sequenced
+        // imperfect nests (clear / compute / storeback) and are distributed
+        // as ordered sibling loops rather than fused.
         result.kind_ =
             StatementPartitionKind::Distributable;
         result.reason_ = StatementPartitionReason::None;

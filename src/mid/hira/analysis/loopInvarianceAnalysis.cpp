@@ -32,6 +32,7 @@ bool isSafePureCompute(ComputeKind kind) {
     case ComputeKind::AShr:
     case ComputeKind::ZExt:
     case ComputeKind::Splat:
+    case ComputeKind::InsertElement:
     case ComputeKind::ExtractElement:
         return false;
     }

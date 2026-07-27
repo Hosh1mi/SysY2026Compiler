@@ -3,23 +3,11 @@
 #include "../../../include/mid/hira/analysis/loopStructureAnalysis.hpp"
 #include "../../../include/mid/hira/ir/hiraIR.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 namespace hira::polyhedral {
 namespace {
-
-bool sameExpression(const AffineExpr &left,
-                    const AffineExpr &right) {
-    return left.valid() == right.valid() &&
-           left.constantTerm() == right.constantTerm() &&
-           left.coefficients() == right.coefficients();
-}
-
-bool sameConstraint(const AffineConstraint &left,
-                    const AffineConstraint &right) {
-    return left.relation == right.relation &&
-           sameExpression(left.expression, right.expression);
-}
 
 const IterationDomain *findDomain(
     const PolyhedralModel &model,
@@ -39,32 +27,6 @@ bool isIntegerValue(const HiraValue *value,
 
 bool isUnitStep(const HiraLoop &loop) {
     return isIntegerValue(loop.step(), 1);
-}
-
-bool hasCoupledBounds(const IterationDomain &outer,
-                      const IterationDomain &inner) {
-    if (inner.constraints.size() !=
-        outer.constraints.size() + 2)
-        return true;
-    for (std::size_t index = 0;
-         index < outer.constraints.size(); ++index)
-        if (!sameConstraint(outer.constraints[index],
-                            inner.constraints[index]))
-            return true;
-    for (std::size_t index = outer.constraints.size();
-         index < inner.constraints.size(); ++index) {
-        auto coefficient =
-            inner.constraints[index]
-                .expression.coefficients()
-                .find(outer.dimension);
-        if (coefficient !=
-                inner.constraints[index]
-                    .expression.coefficients()
-                    .end() &&
-            coefficient->second)
-            return true;
-    }
-    return false;
 }
 
 ScheduleApplicability unsupported(
@@ -105,20 +67,7 @@ ScheduleApplicability analyzePermutation(
                 ScheduleApplicabilityReason::
                     NonCanonicalLatch);
     }
-    for (std::size_t index = 1;
-         index < domains.size(); ++index) {
-        if (!isPerfectLoopNest(
-                *domains[index - 1]->loop,
-                *domains[index]->loop))
-            return unsupported(
-                candidate.id,
-                ScheduleApplicabilityReason::ImperfectNest);
-        if (hasCoupledBounds(*domains[index - 1],
-                             *domains[index]))
-            return unsupported(
-                candidate.id,
-                ScheduleApplicabilityReason::CoupledBounds);
-    }
+
     return {candidate.id,
             ScheduleApplicabilityKind::Realizable,
             ScheduleApplicabilityReason::None};

@@ -9,7 +9,8 @@ bool preservesBaselineCapabilities(
     std::size_t index,
     const ScheduleParallelismResult &parallelism,
     const CacheFootprintResult &cacheFootprints,
-    const VectorizationAnalysisResult &vectorization) {
+    const VectorizationAnalysisResult &vectorization,
+    const ScheduleProfitabilityResult &profitability) {
     const ScheduleParallelism &baselineParallel =
         parallelism.schedules().front();
     const ScheduleParallelism &candidateParallel =
@@ -26,8 +27,18 @@ bool preservesBaselineCapabilities(
             VectorizationKind::Vectorizable &&
         (candidateVector.kind !=
              VectorizationKind::Vectorizable ||
-         candidateVector.lanes < baselineVector.lanes))
-        return false;
+         candidateVector.lanes < baselineVector.lanes)) {
+        const std::int64_t vectorizationFloor =
+            static_cast<std::int64_t>(
+                baselineVector.lanes) *
+            16;
+        if (profitability.schedules()[index].kind !=
+                ScheduleProfitabilityKind::ProvenBeneficial ||
+            profitability.schedules()[index]
+                    .totalStrideReduction <
+                vectorizationFloor)
+            return false;
+    }
 
     const CacheFootprint &baselineCache =
         cacheFootprints.schedules().front();
@@ -45,27 +56,20 @@ bool qualifies(
     const ScheduleProfitabilityResult &profitability,
     const CacheFootprintResult &cacheFootprints,
     const VectorizationAnalysisResult &vectorization) {
-    bool baselineParallel =
-        parallelism.schedules().front().outerParallel;
-    bool gainsParallelism =
-        !baselineParallel &&
-        parallelism.schedules()[index].outerParallel;
+    (void)applicability;
     ScheduleProfitabilityKind profitabilityKind =
         profitability.schedules()[index].kind;
     return legality.schedules()[index].kind ==
                ScheduleLegalityKind::Legal &&
-           applicability.schedules()[index].kind ==
-               ScheduleApplicabilityKind::Realizable &&
            preservesBaselineCapabilities(
                index, parallelism, cacheFootprints,
-               vectorization) &&
+               vectorization, profitability) &&
            profitabilityKind !=
                ScheduleProfitabilityKind::Regressing &&
            profitabilityKind !=
                ScheduleProfitabilityKind::Unknown &&
-           (profitabilityKind ==
-                ScheduleProfitabilityKind::ProvenBeneficial ||
-            gainsParallelism);
+           profitabilityKind ==
+               ScheduleProfitabilityKind::ProvenBeneficial;
 }
 
 ScheduleSelectionDecision decisionFor(
@@ -89,17 +93,11 @@ ScheduleSelectionDecision decisionFor(
             RejectedApplicability;
     if (!preservesBaselineCapabilities(
             index, parallelism, cacheFootprints,
-            vectorization))
+            vectorization, profitability))
         return ScheduleSelectionDecision::
             RejectedCapability;
-    bool baselineParallel =
-        parallelism.schedules().front().outerParallel;
-    bool gainsParallelism =
-        !baselineParallel &&
-        parallelism.schedules()[index].outerParallel;
     if (profitability.schedules()[index].kind !=
-            ScheduleProfitabilityKind::ProvenBeneficial &&
-        !gainsParallelism)
+        ScheduleProfitabilityKind::ProvenBeneficial)
         return parallelism.schedules()[index].outerParallel
                    ? ScheduleSelectionDecision::
                          RejectedProfitability

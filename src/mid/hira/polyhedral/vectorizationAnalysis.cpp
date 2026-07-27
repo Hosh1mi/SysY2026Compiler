@@ -11,7 +11,14 @@
 namespace hira::polyhedral {
 namespace {
 
-std::optional<AffineVariable> innermostDimension(
+bool containsDimension(const PolyhedralStatement &statement,
+                       AffineVariable dimension) {
+    return std::find(statement.dimensions.begin(),
+                     statement.dimensions.end(),
+                     dimension) != statement.dimensions.end();
+}
+
+std::optional<AffineVariable> innermostBandDimension(
     const ScheduleCandidate &candidate) {
     const ScheduleTreeNode *largest = nullptr;
     for (const ScheduleTreeNode &node :
@@ -24,6 +31,69 @@ std::optional<AffineVariable> innermostDimension(
     if (!largest || largest->band.dimensions.empty())
         return std::nullopt;
     return largest->band.dimensions.back();
+}
+
+std::size_t iterationDepth(
+    const StatementSchedule &statement) {
+    std::size_t depth = 0;
+    for (const ScheduleComponent &component :
+         statement.components)
+        depth += component.kind ==
+                 ScheduleComponentKind::Iteration;
+    return depth;
+}
+
+std::vector<AffineVariable> vectorizationDimensions(
+    const PolyhedralModel &model,
+    const ScheduleCandidate &candidate) {
+    std::vector<AffineVariable> dimensions;
+    const bool bandAware =
+        candidate.kind !=
+            ScheduleCandidateKind::Identity &&
+        !candidate.originalDimensions.empty();
+    const StatementSchedule *deepest = nullptr;
+    std::size_t bestDepth = 0;
+    for (const StatementSchedule &statement :
+         candidate.statements) {
+        if (statement.statement >= model.statements().size())
+            continue;
+        const PolyhedralStatement &polyhedral =
+            model.statements()[statement.statement];
+        if (bandAware) {
+            bool usesBand = false;
+            for (AffineVariable dimension :
+                 candidate.originalDimensions)
+                if (containsDimension(polyhedral, dimension)) {
+                    usesBand = true;
+                    break;
+                }
+            if (!usesBand)
+                continue;
+        }
+        const std::size_t depth = iterationDepth(statement);
+        if (!deepest || depth > bestDepth) {
+            deepest = &statement;
+            bestDepth = depth;
+        }
+    }
+    if (deepest) {
+        for (auto component = deepest->components.rbegin();
+             component != deepest->components.rend();
+             ++component)
+            if (component->kind ==
+                ScheduleComponentKind::Iteration) {
+                if (std::find(dimensions.begin(),
+                              dimensions.end(),
+                              component->dimension) ==
+                    dimensions.end())
+                    dimensions.push_back(
+                        component->dimension);
+            }
+        return dimensions;
+    }
+    if (auto fallback = innermostBandDimension(candidate))
+        dimensions.push_back(*fallback);
+    return dimensions;
 }
 
 Type *accessElementType(const PolyhedralModel &model,
@@ -53,13 +123,6 @@ std::uint32_t lanesFor(
     if (!integer || integer->num_bits_ != 32)
         return 1;
     return target.neonBits / 32;
-}
-
-bool containsDimension(const PolyhedralStatement &statement,
-                       AffineVariable dimension) {
-    return std::find(statement.dimensions.begin(),
-                     statement.dimensions.end(),
-                     dimension) != statement.dimensions.end();
 }
 
 bool provesEqual(const DependenceRelation &relation,
@@ -170,7 +233,160 @@ bool same(const ScheduleVectorization &left,
            left.blockers == right.blockers;
 }
 
+bool hasNestedChildLoop(const PolyhedralModel &model,
+                        AffineVariable dimension) {
+    const IterationDomain *domain = findDomain(model, dimension);
+    if (!domain)
+        return true;
+    const std::size_t depth = domain->dimensions.size();
+    for (const IterationDomain &other : model.domains()) {
+        if (other.dimension == dimension)
+            continue;
+        if (other.dimensions.size() <= depth)
+            continue;
+        if (std::find(other.dimensions.begin(),
+                      other.dimensions.end(),
+                      dimension) != other.dimensions.end())
+            return true;
+    }
+    return false;
+}
+
+ScheduleVectorization analyzeVectorizationForDimension(
+    const PolyhedralModel &model,
+    const DependenceSet &dependences,
+    const DependenceFeasibilityResult &feasibility,
+    const ScheduleCandidate &candidate,
+    AffineVariable dimension,
+    const target::A53TargetModel &target) {
+    ScheduleVectorization vectorization;
+    vectorization.schedule = candidate.id;
+    vectorization.dimension = dimension;
+
+    const IterationDomain *vectorDomain =
+        findDomain(model, dimension);
+    if (!vectorDomain || !vectorDomain->loop) {
+        vectorization.reason =
+            VectorizationReason::MissingInnerDimension;
+        return vectorization;
+    }
+    if (containsConditional(vectorDomain->loop->body())) {
+        vectorization.reason =
+            VectorizationReason::OpaqueControl;
+        return vectorization;
+    }
+    if (hasNestedChildLoop(model, dimension)) {
+        vectorization.reason =
+            VectorizationReason::OpaqueControl;
+        return vectorization;
+    }
+
+    const HiraComputeOp *inductionUpdate = nullptr;
+    if (auto control =
+            analyzeCanonicalLoopControl(*vectorDomain->loop))
+        inductionUpdate = control->inductionUpdate;
+    else if (vectorDomain->loop->carriedValues().size() == 1)
+        inductionUpdate =
+            findInductionUpdate(*vectorDomain->loop);
+    for (const PolyhedralStatement &statement :
+         model.statements()) {
+        if (!containsDimension(statement, dimension))
+            continue;
+        auto *compute = dynamic_cast<const HiraComputeOp *>(
+            statement.node);
+        if (compute && compute != inductionUpdate &&
+            !isSupportedVectorCompute(*compute)) {
+            vectorization.reason =
+                VectorizationReason::UnsupportedOperation;
+            return vectorization;
+        }
+    }
+
+    for (std::size_t index = 0;
+         index < dependences.relations().size(); ++index) {
+        if (feasibility.relations()[index].kind ==
+            DependenceFeasibilityKind::ProvenEmpty)
+            continue;
+        const DependenceRelation &relation =
+            dependences.relations()[index];
+        if (!relation.sourceStatement || !relation.sinkStatement)
+            continue;
+        const PolyhedralStatement &source =
+            model.statements()[*relation.sourceStatement];
+        const PolyhedralStatement &sink =
+            model.statements()[*relation.sinkStatement];
+        if (containsDimension(source, dimension) &&
+            containsDimension(sink, dimension) &&
+            !provesEqual(relation, dimension) &&
+            !isVectorizableReductionDependence(
+                model, relation, dimension))
+            vectorization.blockers.push_back(relation.id);
+    }
+    if (!vectorization.blockers.empty()) {
+        vectorization.reason =
+            VectorizationReason::LoopCarriedDependence;
+        return vectorization;
+    }
+
+    bool varying = false;
+    bool nonContiguous = false;
+    std::uint32_t lanes = target.neonBits;
+    for (const AccessRelation &access : model.accesses()) {
+        auto stride =
+            analyzeLinearAccessStride(model, access, dimension);
+        auto elementSize =
+            analyzeAccessElementSize(model, access);
+        if (!stride || !elementSize) {
+            nonContiguous = true;
+            break;
+        }
+        if (*stride == 0)
+            continue;
+        if (access.kind == MemoryAccessKind::Write) {
+            const HiraNode *node =
+                model.statements()[access.statement].node;
+            auto *store =
+                dynamic_cast<const HiraStore *>(node);
+            const HiraValue *value =
+                store ? store->value() : nullptr;
+            const bool invariantFill =
+                value &&
+                (value->kind() == ValueKind::IntegerConstant ||
+                 value->kind() == ValueKind::FloatConstant ||
+                 value->kind() == ValueKind::Parameter);
+            if (!invariantFill)
+                continue;
+        }
+        varying = true;
+        nonContiguous |= *stride != *elementSize;
+        lanes = std::min(
+            lanes,
+            lanesFor(accessElementType(model, access), target));
+    }
+    if (!varying) {
+        vectorization.reason =
+            VectorizationReason::NoVaryingAccess;
+    } else if (nonContiguous) {
+        vectorization.reason =
+            VectorizationReason::NonContiguousAccess;
+    } else if (lanes <= 1) {
+        vectorization.reason =
+            VectorizationReason::UnsupportedElementType;
+    } else {
+        vectorization.kind = VectorizationKind::Vectorizable;
+        vectorization.reason = VectorizationReason::None;
+        vectorization.lanes = lanes;
+    }
+    return vectorization;
+}
+
 } // namespace
+
+std::vector<AffineVariable> vectorizationCandidateDimensions(
+    const PolyhedralModel &model,
+    const ScheduleCandidate &candidate) {
+    return vectorizationDimensions(model, candidate);
+}
 
 VectorizationAnalysisResult analyzeVectorization(
     const PolyhedralModel &model,
@@ -181,142 +397,22 @@ VectorizationAnalysisResult analyzeVectorization(
     VectorizationAnalysisResult result;
     for (const ScheduleCandidate &candidate :
          schedules.candidates()) {
-        ScheduleVectorization vectorization;
-        vectorization.schedule = candidate.id;
-        vectorization.dimension =
-            innermostDimension(candidate);
-        if (!vectorization.dimension) {
+        const std::vector<AffineVariable> dimensions =
+            vectorizationDimensions(model, candidate);
+        if (dimensions.empty()) {
+            ScheduleVectorization vectorization;
+            vectorization.schedule = candidate.id;
             result.schedules_.push_back(vectorization);
             continue;
         }
 
-        const IterationDomain *vectorDomain =
-            findDomain(model, *vectorization.dimension);
-        if (!vectorDomain || !vectorDomain->loop) {
-            vectorization.reason =
-                VectorizationReason::MissingInnerDimension;
-            result.schedules_.push_back(vectorization);
-            continue;
-        }
-        if (containsConditional(
-                vectorDomain->loop->body())) {
-            vectorization.reason =
-                VectorizationReason::OpaqueControl;
-            result.schedules_.push_back(vectorization);
-            continue;
-        }
-
-        const HiraComputeOp *inductionUpdate = nullptr;
-        if (auto control =
-                analyzeCanonicalLoopControl(
-                    *vectorDomain->loop))
-            inductionUpdate = control->inductionUpdate;
-        else if (vectorDomain->loop->carriedValues().size() ==
-                 1)
-            inductionUpdate = findInductionUpdate(
-                *vectorDomain->loop);
-        bool unsupportedOperation = false;
-        for (const PolyhedralStatement &statement :
-             model.statements()) {
-            if (!containsDimension(
-                    statement,
-                    *vectorization.dimension))
-                continue;
-            auto *compute =
-                dynamic_cast<const HiraComputeOp *>(
-                    statement.node);
-            if (compute && compute != inductionUpdate &&
-                !isSupportedVectorCompute(*compute)) {
-                unsupportedOperation = true;
-                break;
-            }
-        }
-        if (unsupportedOperation) {
-            vectorization.reason =
-                VectorizationReason::UnsupportedOperation;
-            result.schedules_.push_back(vectorization);
-            continue;
-        }
-
-        for (std::size_t index = 0;
-             index < dependences.relations().size(); ++index) {
-            if (feasibility.relations()[index].kind ==
-                DependenceFeasibilityKind::ProvenEmpty)
-                continue;
-            const DependenceRelation &relation =
-                dependences.relations()[index];
-            if (!relation.sourceStatement ||
-                !relation.sinkStatement)
-                continue;
-            const PolyhedralStatement &source =
-                model.statements()[
-                    *relation.sourceStatement];
-            const PolyhedralStatement &sink =
-                model.statements()[
-                    *relation.sinkStatement];
-            if (containsDimension(
-                    source, *vectorization.dimension) &&
-                containsDimension(
-                    sink, *vectorization.dimension) &&
-                !provesEqual(
-                    relation,
-                    *vectorization.dimension) &&
-                !isVectorizableReductionDependence(
-                    model, relation,
-                    *vectorization.dimension))
-                vectorization.blockers.push_back(
-                    relation.id);
-        }
-        if (!vectorization.blockers.empty()) {
-            vectorization.reason =
-                VectorizationReason::
-                    LoopCarriedDependence;
-            result.schedules_.push_back(vectorization);
-            continue;
-        }
-
-        bool varying = false;
-        bool nonContiguous = false;
-        std::uint32_t lanes = target.neonBits;
-        for (const AccessRelation &access : model.accesses()) {
-            auto stride = analyzeLinearAccessStride(
-                model, access, *vectorization.dimension);
-            auto elementSize =
-                analyzeAccessElementSize(model, access);
-            if (!stride || !elementSize) {
-                nonContiguous = true;
-                break;
-            }
-            if (*stride == 0)
-                continue;
-            if (access.kind == MemoryAccessKind::Read) {
-                varying = true;
-                nonContiguous |= *stride != *elementSize;
-                lanes = std::min(
-                    lanes,
-                    lanesFor(accessElementType(model, access),
-                             target));
-            }
-        }
-        if (!varying) {
-            vectorization.reason =
-                VectorizationReason::NoVaryingAccess;
-        } else if (nonContiguous) {
-            vectorization.reason =
-                VectorizationReason::NonContiguousAccess;
-        } else if (lanes <= 1) {
-            vectorization.reason =
-                VectorizationReason::
-                    UnsupportedElementType;
-        } else {
-            vectorization.kind =
-                VectorizationKind::Vectorizable;
-            vectorization.reason =
-                VectorizationReason::None;
-            vectorization.lanes = lanes;
-        }
+        // Vectorization profitability depends on the candidate
+        // schedule's innermost dimension, not on any other
+        // dimension that remains vectorizable in the source IR.
         result.schedules_.push_back(
-            std::move(vectorization));
+            analyzeVectorizationForDimension(
+                model, dependences, feasibility, candidate,
+                dimensions.front(), target));
     }
     return result;
 }

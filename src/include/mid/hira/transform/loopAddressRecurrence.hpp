@@ -7,6 +7,7 @@
 
 namespace hira {
 
+class HiraLoop;
 class HiraRegion;
 
 namespace polyhedral {
@@ -22,6 +23,10 @@ struct LoopAddressRecurrenceResult {
 LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
     HiraRegion &region, const PolyhedralModel &model,
     AffineVariable dimension);
+
+LoopAddressRecurrenceResult introduceLoopAddressRecurrencesOnLoop(
+    HiraRegion &region, HiraLoop &loop,
+    const PolyhedralModel &model, AffineVariable dimension);
 
 } // namespace polyhedral
 } // namespace hira

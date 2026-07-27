@@ -137,6 +137,7 @@ enum class ComputeKind {
     ZExt,
     BitCast,
     Splat,
+    InsertElement,
     ExtractElement,
 };
 

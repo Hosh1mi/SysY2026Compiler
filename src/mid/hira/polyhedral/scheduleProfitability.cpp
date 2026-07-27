@@ -49,6 +49,35 @@ std::size_t iterationDepth(
     return depth;
 }
 
+bool isPartialBandCandidate(
+    const PolyhedralModel &model,
+    const ScheduleCandidate &candidate) {
+    if (candidate.kind == ScheduleCandidateKind::Identity ||
+        candidate.originalDimensions.size() < 2)
+        return false;
+    for (const IterationDomain &domain : model.domains()) {
+        if (domain.dimensions == candidate.originalDimensions)
+            return false;
+        if (domain.dimensions.size() <=
+            candidate.originalDimensions.size())
+            continue;
+        bool subset = true;
+        for (AffineVariable dimension :
+             candidate.originalDimensions) {
+            if (std::find(domain.dimensions.begin(),
+                          domain.dimensions.end(),
+                          dimension) ==
+                domain.dimensions.end()) {
+                subset = false;
+                break;
+            }
+        }
+        if (subset)
+            return true;
+    }
+    return false;
+}
+
 ScheduleProfitability unknown(
     ScheduleCandidateId schedule,
     ScheduleProfitabilityReason reason) {
@@ -84,6 +113,8 @@ const char *reasonName(ScheduleProfitabilityReason reason) {
         return "no-strict-improvement";
     case ScheduleProfitabilityReason::AccessStrideRegression:
         return "access-stride-regression";
+    case ScheduleProfitabilityReason::DestroysUnitStrideVectorization:
+        return "destroys-unit-stride-vectorization";
     }
     return "unknown";
 }
@@ -126,6 +157,9 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
         bool improvement = false;
         std::int64_t totalReduction = 0;
         bool reductionOverflow = false;
+        const bool partialBand =
+            candidate.id != identity.id &&
+            isPartialBandCandidate(model, candidate);
         for (std::uint32_t accessId = 0;
              accessId < model.accesses().size(); ++accessId) {
             const AccessRelation &access =
@@ -163,9 +197,20 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
             const bool highestOrder =
                 iterationDepth(identity, access.statement) ==
                 maximumAccessDepth;
-            if (highestOrder && *current > *baseline &&
-                access.kind == MemoryAccessKind::Read)
-                regression = true;
+            const bool taskPrivateScratch =
+                partialBand &&
+                model.memoryObjects()[access.object].taskPrivate;
+            auto elementSize =
+                analyzeAccessElementSize(model, access);
+            if (highestOrder &&
+                access.kind == MemoryAccessKind::Read &&
+                !taskPrivateScratch) {
+                if (*current > *baseline)
+                    regression = true;
+                if (elementSize && *baseline == *elementSize &&
+                    *current > *elementSize)
+                    regression = true;
+            }
             if (highestOrder && *current < *baseline) {
                 improvement = true;
                 std::int64_t reduction =
@@ -198,6 +243,29 @@ ScheduleProfitabilityResult analyzeScheduleProfitability(
             profitability.reason =
                 ScheduleProfitabilityReason::
                     AccessStrideRegression;
+            for (const AccessStrideChange &change :
+                 profitability.accesses) {
+                const AccessRelation &access =
+                    model.accesses()[change.access];
+                auto baselineDimension = innermostDimension(
+                    identity, access.statement);
+                auto candidateDimension = innermostDimension(
+                    candidate, access.statement);
+                if (!baselineDimension || !candidateDimension)
+                    continue;
+                auto elementSize =
+                    analyzeAccessElementSize(model, access);
+                if (!elementSize ||
+                    access.kind != MemoryAccessKind::Read)
+                    continue;
+                if (change.baselineBytes == *elementSize &&
+                    change.candidateBytes > *elementSize) {
+                    profitability.reason =
+                        ScheduleProfitabilityReason::
+                            DestroysUnitStrideVectorization;
+                    break;
+                }
+            }
         } else if (!improvement) {
             profitability.kind =
                 ScheduleProfitabilityKind::Neutral;
@@ -242,7 +310,10 @@ bool verifyScheduleProfitability(
                  ScheduleProfitabilityKind::Regressing &&
              profitability.reason !=
                  ScheduleProfitabilityReason::
-                     AccessStrideRegression) ||
+                     AccessStrideRegression &&
+             profitability.reason !=
+                 ScheduleProfitabilityReason::
+                     DestroysUnitStrideVectorization) ||
             (profitability.accesses.size() !=
                  model.accesses().size() &&
              profitability.kind !=

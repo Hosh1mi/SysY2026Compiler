@@ -132,6 +132,11 @@ StatementDependenceGraph buildStatementDependenceGraph(
     const DependenceSet &dependences,
     const DependenceFeasibilityResult &feasibility) {
     StatementDependenceGraph graph;
+    // Keep may-exist edges visible for diagnostics and legality, but only
+    // required dependences participate in SCC formation.  Speculative
+    // cross-band may-exist edges otherwise create false cycles that block
+    // distribution of sequenced imperfect nests.
+    std::vector<StatementDependenceEdge> requiredEdges;
     for (std::size_t index = 0;
          index < dependences.relations().size(); ++index) {
         if (feasibility.relations()[index].kind ==
@@ -142,13 +147,17 @@ StatementDependenceGraph buildStatementDependenceGraph(
         if (!relation.sourceStatement ||
             !relation.sinkStatement)
             continue;
-        graph.edges_.push_back(
-            {relation.id, *relation.sourceStatement,
-             *relation.sinkStatement});
+        StatementDependenceEdge edge{
+            relation.id, *relation.sourceStatement,
+            *relation.sinkStatement};
+        graph.edges_.push_back(edge);
+        if (feasibility.relations()[index].kind ==
+            DependenceFeasibilityKind::Required)
+            requiredEdges.push_back(edge);
     }
 
     StrongComponentBuilder builder(
-        model.statements().size(), graph.edges_);
+        model.statements().size(), requiredEdges);
     auto components = builder.run();
     graph.componentByStatement_.assign(
         model.statements().size(),
@@ -162,7 +171,7 @@ StatementDependenceGraph buildStatementDependenceGraph(
         component.cyclic =
             component.statements.size() > 1 ||
             hasSelfEdge(component.statements.front(),
-                        graph.edges_);
+                        requiredEdges);
         for (StatementId statement :
              component.statements)
             graph.componentByStatement_[statement] =

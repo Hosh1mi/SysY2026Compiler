@@ -118,6 +118,8 @@ const char *computeName(ComputeKind kind) {
         return "bitcast";
     case ComputeKind::Splat:
         return "splat";
+    case ComputeKind::InsertElement:
+        return "insertelement";
     case ComputeKind::ExtractElement:
         return "extract";
     }

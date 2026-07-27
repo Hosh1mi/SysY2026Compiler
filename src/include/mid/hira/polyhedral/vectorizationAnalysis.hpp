@@ -54,6 +54,10 @@ private:
     std::vector<ScheduleVectorization> schedules_;
 };
 
+std::vector<AffineVariable> vectorizationCandidateDimensions(
+    const PolyhedralModel &model,
+    const ScheduleCandidate &candidate);
+
 VectorizationAnalysisResult analyzeVectorization(
     const PolyhedralModel &model,
     const DependenceSet &dependences,

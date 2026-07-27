@@ -133,49 +133,138 @@ bool partitionIsSelfContained(
     return true;
 }
 
-} // namespace
+bool isPrefixDimensions(
+    const std::vector<AffineVariable> &prefix,
+    const std::vector<AffineVariable> &dimensions) {
+    if (prefix.size() > dimensions.size())
+        return false;
+    for (std::size_t index = 0; index < prefix.size();
+         ++index)
+        if (!(prefix[index] == dimensions[index]))
+            return false;
+    return true;
+}
 
-StatementPartitionRealizationResult realizeStatementPartitions(
-    HiraRegion &region, const PolyhedralModel &model,
+std::vector<AffineVariable> commonDimensionPrefix(
     const StatementPartitionResult &partitions) {
-    if (partitions.kind() !=
-            StatementPartitionKind::Distributable ||
-        partitions.partitions().size() < 2)
-        return reject(StatementPartitionRealizationError::Indivisible,
-                      "no-distribution-plan");
-    const auto &firstPartition =
-        partitions.partitions().front();
-    if (firstPartition.dimensions.size() != 1)
-        return reject(
-            StatementPartitionRealizationError::UnsupportedDomain,
-            "only-single-loop-distribution-is-realizable");
-
-    AffineVariable dimension =
-        firstPartition.dimensions.front();
-    const IterationDomain *domain = nullptr;
-    for (const IterationDomain &candidate :
-         model.domains())
-        if (candidate.dimension == dimension) {
-            domain = &candidate;
+    std::vector<AffineVariable> prefix =
+        partitions.partitions().front().dimensions;
+    for (const StatementPartition &partition :
+         partitions.partitions()) {
+        while (!prefix.empty() &&
+               !isPrefixDimensions(
+                   prefix, partition.dimensions))
+            prefix.pop_back();
+        if (prefix.empty())
             break;
+    }
+    return prefix;
+}
+
+void collectModelledNodes(
+    HiraNode &node,
+    const std::map<const HiraNode *, StatementPartitionId>
+        &nodePartitions,
+    std::vector<const HiraNode *> &nodes) {
+    if (nodePartitions.count(&node))
+        nodes.push_back(&node);
+    if (auto *loop = dynamic_cast<HiraLoop *>(&node)) {
+        for (const auto &owner : loop->body().nodes())
+            collectModelledNodes(
+                *owner, nodePartitions, nodes);
+        return;
+    }
+    if (auto *condition = dynamic_cast<HiraIf *>(&node)) {
+        for (const auto &owner :
+             condition->thenSequence().nodes())
+            collectModelledNodes(
+                *owner, nodePartitions, nodes);
+        for (const auto &owner :
+             condition->elseSequence().nodes())
+            collectModelledNodes(
+                *owner, nodePartitions, nodes);
+    }
+}
+
+std::optional<StatementPartitionId> subtreePartition(
+    HiraNode &node,
+    const std::map<const HiraNode *, StatementPartitionId>
+        &nodePartitions) {
+    std::vector<const HiraNode *> modelled;
+    collectModelledNodes(node, nodePartitions, modelled);
+    if (modelled.empty())
+        return std::nullopt;
+    StatementPartitionId id = nodePartitions.at(modelled.front());
+    for (const HiraNode *candidate : modelled)
+        if (nodePartitions.at(candidate) != id)
+            return std::nullopt;
+    return id;
+}
+
+bool replaceValue(HiraNode &node, HiraValue *from, HiraValue *to);
+
+bool replaceInSequence(
+    HiraSequence &sequence, HiraValue *from, HiraValue *to) {
+    for (const auto &owner : sequence.nodes())
+        if (!replaceValue(*owner, from, to))
+            return false;
+    return true;
+}
+
+bool replaceValue(HiraNode &node, HiraValue *from, HiraValue *to) {
+    if (auto *loop = dynamic_cast<HiraLoop *>(&node)) {
+        if (loop->induction() == from || loop->step() == from)
+            return false;
+        if (loop->lowerBound() == from)
+            loop->setLowerBound(to);
+        if (loop->upperBound() == from)
+            loop->setUpperBound(to);
+        for (std::size_t index = 0;
+             index < loop->carriedValues().size(); ++index) {
+            const auto &binding = loop->carriedValues()[index];
+            if (binding.iteration == from ||
+                binding.yielded == from ||
+                binding.result == from)
+                return false;
+            if (binding.initial == from)
+                loop->setCarriedInitial(index, to);
         }
-    if (!domain || !domain->loop ||
-        domain->dimensions.size() != 1)
-        return reject(
-            StatementPartitionRealizationError::UnsupportedDomain,
-            "missing-root-loop-domain");
-    auto *sourceLoop =
-        const_cast<HiraLoop *>(domain->loop);
-    if (!sourceLoop->carriedValues().empty())
-        return reject(
-            StatementPartitionRealizationError::LoopCarriedState,
-            "loop-carried-state");
-    HiraSequence *parent = sourceLoop->parent();
+        for (std::size_t index = 0;
+             index < loop->yieldValues().size(); ++index)
+            if (loop->yieldValues()[index] == from)
+                loop->setYieldValue(index, to);
+        return replaceInSequence(loop->body(), from, to);
+    }
+    if (auto *condition = dynamic_cast<HiraIf *>(&node)) {
+        for (const HiraIf::ResultBinding &binding :
+             condition->resultBindings())
+            if (binding.thenValue == from ||
+                binding.elseValue == from ||
+                binding.result == from)
+                return false;
+        return replaceInSequence(
+                   condition->thenSequence(), from, to) &&
+               replaceInSequence(
+                   condition->elseSequence(), from, to);
+    }
+    for (std::size_t index = 0;
+         index < node.operands().size(); ++index)
+        if (node.operands()[index] == from)
+            node.replaceOperand(index, to);
+    return true;
+}
+
+StatementPartitionRealizationResult
+realizeFlatSingleLoopDistribution(
+    HiraRegion &region, const PolyhedralModel &model,
+    const StatementPartitionResult &partitions,
+    HiraLoop &sourceLoop) {
+    HiraSequence *parent = sourceLoop.parent();
     auto sourcePosition =
-        parent ? nodePosition(*parent, sourceLoop)
+        parent ? nodePosition(*parent, &sourceLoop)
                : std::nullopt;
     if (!parent || !sourcePosition ||
-        sourceLoop->body().nodes().size() < 2)
+        sourceLoop.body().nodes().size() < 2)
         return reject(
             StatementPartitionRealizationError::InvalidLoopBody,
             "invalid-loop-owner");
@@ -191,18 +280,17 @@ StatementPartitionRealizationResult realizeStatementPartitions(
                 StatementPartitionRealizationError::InvalidLoopBody,
                 "invalid-statement-partition");
         nodePartitions[statement.node] =
-            partitions.partitionByStatement()[
-                statement.id];
+            partitions.partitionByStatement()[statement.id];
     }
 
     const std::size_t payloadCount =
-        sourceLoop->body().nodes().size() - 2;
+        sourceLoop.body().nodes().size() - 2;
     std::vector<HiraNode *> payload;
     payload.reserve(payloadCount);
     for (std::size_t index = 0;
          index < payloadCount; ++index) {
         HiraNode *node =
-            sourceLoop->body().nodes()[index].get();
+            sourceLoop.body().nodes()[index].get();
         if (!nodePartitions.count(node))
             return reject(
                 StatementPartitionRealizationError::InvalidLoopBody,
@@ -215,7 +303,7 @@ StatementPartitionRealizationResult realizeStatementPartitions(
     for (HiraNode *node : payload)
         nodesByPartition[nodePartitions[node]].push_back(node);
     for (const auto &nodes : nodesByPartition)
-        if (!partitionIsSelfContained(*sourceLoop, nodes))
+        if (!partitionIsSelfContained(sourceLoop, nodes))
             return reject(
                 StatementPartitionRealizationError::
                     CrossPartitionScalar,
@@ -226,23 +314,23 @@ StatementPartitionRealizationResult realizeStatementPartitions(
          partitionIndex < nodesByPartition.size();
          ++partitionIndex) {
         HiraValue *induction = region.createValue(
-            sourceLoop->induction()->type());
+            sourceLoop.induction()->type());
         auto loopOwner = std::make_unique<HiraLoop>(
-            induction, sourceLoop->lowerBound(),
-            sourceLoop->upperBound(), sourceLoop->step());
+            induction, sourceLoop.lowerBound(),
+            sourceLoop.upperBound(), sourceLoop.step());
         HiraLoop *distributedLoop = loopOwner.get();
         if (Loop *mappedSource =
-                region.sourceMapping().sourceLoop(sourceLoop))
+                region.sourceMapping().sourceLoop(&sourceLoop))
             region.sourceMapping().mapLoop(
                 distributedLoop, mappedSource);
 
         std::map<HiraValue *, HiraValue *> values;
-        values[sourceLoop->induction()] = induction;
+        values[sourceLoop.induction()] = induction;
         for (HiraNode *node :
              nodesByPartition[partitionIndex]) {
             std::unique_ptr<HiraNode> clone =
                 cloneOrdinaryNode(
-                    region, *sourceLoop, *node, values);
+                    region, sourceLoop, *node, values);
             if (!clone)
                 return reject(
                     StatementPartitionRealizationError::
@@ -253,8 +341,7 @@ StatementPartitionRealizationResult realizeStatementPartitions(
                         .sourceInstruction(node))
                 region.sourceMapping().mapNode(
                     clone.get(), source);
-            distributedLoop->body().append(
-                std::move(clone));
+            distributedLoop->body().append(std::move(clone));
         }
         appendLoopControl(region, *distributedLoop);
         parent->insert(insertionPosition++,
@@ -266,11 +353,165 @@ StatementPartitionRealizationResult realizeStatementPartitions(
         nodesByPartition.front().end());
     for (HiraNode *node : payload)
         if (!retained.count(node))
-            sourceLoop->body().remove(node);
+            sourceLoop.body().remove(node);
 
     region.markModified();
     return {
         true, StatementPartitionRealizationError::None, {}};
+}
+
+StatementPartitionRealizationResult
+realizeSharedOuterDistribution(
+    HiraRegion &region, const PolyhedralModel &model,
+    const StatementPartitionResult &partitions,
+    HiraLoop &outerLoop) {
+    if (!outerLoop.carriedValues().empty())
+        return reject(
+            StatementPartitionRealizationError::LoopCarriedState,
+            "loop-carried-state");
+    HiraSequence *parent = outerLoop.parent();
+    auto sourcePosition =
+        parent ? nodePosition(*parent, &outerLoop)
+               : std::nullopt;
+    if (!parent || !sourcePosition ||
+        outerLoop.body().nodes().size() < 3)
+        return reject(
+            StatementPartitionRealizationError::InvalidLoopBody,
+            "invalid-outer-loop-owner");
+
+    std::map<const HiraNode *, StatementPartitionId>
+        nodePartitions;
+    for (const PolyhedralStatement &statement :
+         model.statements()) {
+        if (!statement.node ||
+            statement.id >=
+                partitions.partitionByStatement().size())
+            return reject(
+                StatementPartitionRealizationError::InvalidLoopBody,
+                "invalid-statement-partition");
+        nodePartitions[statement.node] =
+            partitions.partitionByStatement()[statement.id];
+    }
+
+    const std::size_t payloadCount =
+        outerLoop.body().nodes().size() - 2;
+    std::vector<std::vector<HiraNode *>> childrenByPartition(
+        partitions.partitions().size());
+    for (std::size_t index = 0; index < payloadCount;
+         ++index) {
+        HiraNode *child =
+            outerLoop.body().nodes()[index].get();
+        auto partition = subtreePartition(
+            *child, nodePartitions);
+        if (!partition)
+            return reject(
+                StatementPartitionRealizationError::
+                    CrossPartitionScalar,
+                "outer-child-crosses-partitions");
+        childrenByPartition[*partition].push_back(child);
+    }
+    for (const auto &children : childrenByPartition)
+        if (children.empty())
+            return reject(
+                StatementPartitionRealizationError::InvalidLoopBody,
+                "empty-outer-partition");
+
+    std::vector<HiraNode *> desiredOrder;
+    desiredOrder.reserve(payloadCount);
+    for (const std::vector<HiraNode *> &children :
+         childrenByPartition)
+        for (HiraNode *child : children)
+            desiredOrder.push_back(child);
+    bool alreadyOrdered = true;
+    for (std::size_t index = 0; index < payloadCount; ++index) {
+        if (outerLoop.body().nodes()[index].get() !=
+            desiredOrder[index]) {
+            alreadyOrdered = false;
+            break;
+        }
+    }
+    if (alreadyOrdered)
+        return {
+            false, StatementPartitionRealizationError::None, {}};
+
+    std::size_t insertionPosition = 0;
+    std::vector<std::unique_ptr<HiraNode>> reordered;
+    reordered.reserve(payloadCount);
+    for (const std::vector<HiraNode *> &children :
+         childrenByPartition) {
+        for (HiraNode *child : children) {
+            std::unique_ptr<HiraNode> moved =
+                outerLoop.body().remove(child);
+            if (!moved)
+                return reject(
+                    StatementPartitionRealizationError::
+                        InvalidLoopBody,
+                    "missing-partition-child");
+            reordered.push_back(std::move(moved));
+        }
+    }
+    for (std::unique_ptr<HiraNode> &node : reordered)
+        outerLoop.body().insert(insertionPosition++,
+                                std::move(node));
+
+    region.markModified();
+    return {
+        true, StatementPartitionRealizationError::None, {}};
+}
+
+} // namespace
+
+StatementPartitionRealizationResult realizeStatementPartitions(
+    HiraRegion &region, const PolyhedralModel &model,
+    const StatementPartitionResult &partitions) {
+    if (partitions.kind() !=
+            StatementPartitionKind::Distributable ||
+        partitions.partitions().size() < 2)
+        return reject(StatementPartitionRealizationError::Indivisible,
+                      "no-distribution-plan");
+
+    const std::vector<AffineVariable> prefix =
+        commonDimensionPrefix(partitions);
+    if (prefix.empty())
+        return reject(
+            StatementPartitionRealizationError::UnsupportedDomain,
+            "no-shared-outer-dimension");
+
+    bool allSingleDimension = true;
+    for (const StatementPartition &partition :
+         partitions.partitions())
+        allSingleDimension &=
+            partition.dimensions.size() == 1 &&
+            partition.dimensions.front() == prefix.front();
+
+    AffineVariable dimension = prefix.front();
+    const IterationDomain *domain = nullptr;
+    for (const IterationDomain &candidate :
+         model.domains())
+        if (candidate.dimension == dimension) {
+            domain = &candidate;
+            break;
+        }
+    if (!domain || !domain->loop)
+        return reject(
+            StatementPartitionRealizationError::UnsupportedDomain,
+            "missing-shared-outer-loop-domain");
+    auto *sourceLoop =
+        const_cast<HiraLoop *>(domain->loop);
+
+    if (allSingleDimension)
+        return realizeFlatSingleLoopDistribution(
+            region, model, partitions, *sourceLoop);
+
+    // Imperfect bands that only share an outer dimension must stay
+    // inside one outer loop.  Reorder sibling sub-bands by partition
+    // instead of cloning the outer loop, which would change semantics.
+    if (prefix.size() != 1)
+        return reject(
+            StatementPartitionRealizationError::UnsupportedDomain,
+            "only-single-shared-outer-distribution-is-realizable");
+    return realizeSharedOuterDistribution(
+        region, model, partitions, *sourceLoop);
 }
 
 const char *statementPartitionRealizationErrorName(

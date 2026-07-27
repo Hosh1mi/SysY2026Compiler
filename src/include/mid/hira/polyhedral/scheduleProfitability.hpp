@@ -22,6 +22,7 @@ enum class ScheduleProfitabilityReason {
     UnknownStride,
     NoStrictImprovement,
     AccessStrideRegression,
+    DestroysUnitStrideVectorization,
 };
 
 struct AccessStrideChange {

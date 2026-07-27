@@ -356,9 +356,45 @@ private:
         return false;
     }
 
+    bool isBoundedColumn(
+        const AffineExpr &column, AffineVariable extent,
+        const std::vector<AffineConstraint> &constraints) const {
+        if (isCanonicalColumn(column, extent))
+            return true;
+        if (!column.valid() ||
+            extent.kind != AffineVariableKind::Symbol)
+            return false;
+        const AffineConstraint lower{
+            column, AffineRelation::GreaterEqualZero};
+        const AffineConstraint upper{
+            AffineExpr::variable(extent)
+                .subtract(column)
+                .add(AffineExpr::constant(-1)),
+            AffineRelation::GreaterEqualZero};
+        bool hasLower = false;
+        bool hasUpper = false;
+        auto matches =
+            [](const AffineConstraint &left,
+               const AffineConstraint &right) {
+                return left.relation == right.relation &&
+                       left.expression.valid() ==
+                           right.expression.valid() &&
+                       left.expression.constantTerm() ==
+                           right.expression.constantTerm() &&
+                       left.expression.coefficients() ==
+                           right.expression.coefficients();
+            };
+        for (const AffineConstraint &constraint : constraints) {
+            hasLower |= matches(constraint, lower);
+            hasUpper |= matches(constraint, upper);
+        }
+        return hasLower && hasUpper;
+    }
+
     bool matchRowMajorIndex(
         const HiraValue *value, AffineExpr &row,
-        AffineExpr &column, AffineVariable &extent) {
+        AffineExpr &column, AffineVariable &extent,
+        const std::vector<AffineConstraint> &constraints) {
         auto *sum = value
                         ? dynamic_cast<const HiraComputeOp *>(
                               value->definingNode())
@@ -398,8 +434,9 @@ private:
                         1 - extentOperand]);
                 if (!extentVariable ||
                     !candidateRow.valid() ||
-                    !isCanonicalColumn(
-                        candidateColumn, *extentVariable))
+                    !isBoundedColumn(
+                        candidateColumn, *extentVariable,
+                        constraints))
                     continue;
                 row = std::move(candidateRow);
                 column = std::move(candidateColumn);
@@ -492,7 +529,9 @@ private:
                         const HiraValue *&base,
                         std::vector<AffineExpr> &subscripts,
                         std::optional<AffineVariable>
-                            &linearizedExtent) {
+                            &linearizedExtent,
+                        const std::vector<AffineConstraint>
+                            &constraints) {
         if (!address)
             return reject(PolyhedralBuildError::UnsupportedAddress,
                           "null-address");
@@ -501,9 +540,16 @@ private:
             dynamic_cast<const HiraComputeOp *>(
                 address->definingNode());
         if (!addressCompute) {
-            if ((address->kind() != ValueKind::Parameter &&
-                 address->kind() != ValueKind::Scratch) ||
-                !dynamic_cast<PointerType *>(address->type()))
+            const HiraNode *definition =
+                address->definingNode();
+            const bool regionInvariant =
+                definition &&
+                definition->parent() ==
+                    &region_.rootSequence();
+            if (!dynamic_cast<PointerType *>(address->type()) ||
+                (address->kind() != ValueKind::Parameter &&
+                 address->kind() != ValueKind::Scratch &&
+                 !regionInvariant))
                 return reject(
                     PolyhedralBuildError::UnsupportedAddress,
                     "address-without-base");
@@ -513,9 +559,16 @@ private:
 
         if (addressCompute->computeKind() !=
                 ComputeKind::GetElementPtr ||
-            addressCompute->operands().size() < 2)
+            addressCompute->operands().size() < 2) {
+            if (dynamic_cast<PointerType *>(address->type()) &&
+                addressCompute->parent() ==
+                    &region_.rootSequence()) {
+                base = address;
+                return true;
+            }
             return reject(PolyhedralBuildError::UnsupportedAddress,
                           "unsupported-address-operation");
+        }
 
         const HiraValue *candidateBase =
             addressCompute->operands().front();
@@ -529,7 +582,7 @@ private:
         // recovering the original memory object so linear stride and
         // dependence reasoning see the complete affine address.
         if (!resolveAddress(candidateBase, base, subscripts,
-                            linearizedExtent))
+                            linearizedExtent, constraints))
             return false;
         for (std::size_t index = 1;
              index < addressCompute->operands().size(); ++index) {
@@ -545,7 +598,7 @@ private:
                         addressCompute->operands().size() ||
                     !matchRowMajorIndex(
                         addressCompute->operands()[index],
-                        row, column, extent))
+                        row, column, extent, constraints))
                     return reject(
                         PolyhedralBuildError::NonAffineAccess,
                         "non-affine-gep-index");
@@ -599,8 +652,10 @@ private:
         const HiraValue *base = nullptr;
         std::vector<AffineExpr> subscripts;
         std::optional<AffineVariable> linearizedExtent;
+        const std::vector<AffineConstraint> &constraints =
+            model_->statements_[statement].constraints;
         if (!resolveAddress(address, base, subscripts,
-                            linearizedExtent)) {
+                            linearizedExtent, constraints)) {
             if (failure_.detail.empty())
                 failure_.detail = statementDetail(statement);
             else

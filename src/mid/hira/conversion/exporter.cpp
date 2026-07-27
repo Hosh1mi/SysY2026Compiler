@@ -233,6 +233,7 @@ private:
             kind != ComputeKind::ZExt &&
             kind != ComputeKind::BitCast &&
             kind != ComputeKind::Splat &&
+            kind != ComputeKind::InsertElement &&
             kind != ComputeKind::ExtractElement)
             return fail(ExportRejectReason::UnsupportedNode);
         return true;
@@ -1117,6 +1118,11 @@ private:
                 }
                 instruction =
                     dynamic_cast<Instruction *>(packed);
+            } else if (kind == ComputeKind::InsertElement &&
+                       operands.size() == 3) {
+                instruction = new InsertElementInst(
+                    operands[0], operands[1], operands[2],
+                    destination);
             } else if (kind == ComputeKind::ExtractElement &&
                        operands.size() == 2) {
                 instruction = new ExtractElementInst(

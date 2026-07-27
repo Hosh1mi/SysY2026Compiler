@@ -169,28 +169,80 @@ struct Candidate {
 
 } // namespace
 
-LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
-    HiraRegion &region, const PolyhedralModel &model,
-    AffineVariable dimension) {
+LoopAddressRecurrenceResult introduceLoopAddressRecurrencesOnLoop(
+    HiraRegion &region, HiraLoop &loop,
+    const PolyhedralModel &model, AffineVariable dimension) {
     LoopAddressRecurrenceResult result;
-    const IterationDomain *domain =
-        findDomain(model, dimension);
-    HiraLoop *loop =
-        domain ? const_cast<HiraLoop *>(domain->loop) : nullptr;
-    HiraSequence *parent = loop ? loop->parent() : nullptr;
+    HiraSequence *parent = loop.parent();
     auto loopPosition =
-        parent ? nodePosition(*parent, loop) : std::nullopt;
-    if (!loop || !parent || !loopPosition ||
-        loop->role() != HiraLoop::Role::Ordinary) {
+        parent ? nodePosition(*parent, &loop) : std::nullopt;
+    if (!parent || !loopPosition ||
+        (loop.role() != HiraLoop::Role::Ordinary &&
+         loop.role() != HiraLoop::Role::VectorMain)) {
         result.detail = "unsupported-loop";
         return result;
     }
 
+    std::int64_t stepScale = 1;
+    if (loop.step() &&
+        loop.step()->kind() == ValueKind::IntegerConstant)
+        stepScale = loop.step()->integerValue();
+    if (stepScale <= 0)
+        stepScale = 1;
+
     std::map<HiraValue *, std::int64_t> strides;
     std::set<HiraValue *> ambiguous;
+  std::vector<HiraValue *> addressOrder;
+    std::vector<Candidate> candidates;
+    if (loop.role() == HiraLoop::Role::VectorMain) {
+        for (const auto &owner : loop.body().nodes()) {
+            HiraValue *address = nullptr;
+            if (auto *load =
+                    dynamic_cast<const HiraLoad *>(owner.get()))
+                address = load->address();
+            else if (auto *store =
+                         dynamic_cast<const HiraStore *>(owner.get()))
+                address = store->address();
+            if (!address)
+                continue;
+            if (auto *cast =
+                    dynamic_cast<HiraComputeOp *>(
+                        address->definingNode()))
+                if (cast->computeKind() ==
+                        ComputeKind::BitCast &&
+                    !cast->operands().empty())
+                    address = cast->operands().front();
+            auto *definition = dynamic_cast<HiraComputeOp *>(
+                address->definingNode());
+            if (!definition ||
+                definition->computeKind() !=
+                    ComputeKind::GetElementPtr ||
+                definition->parent() != &loop.body() ||
+                definition->operands().size() < 2 ||
+                definition->results().size() != 1 ||
+                !addressHasSupportedUses(loop.body(), address))
+                continue;
+            auto *offsetType = dynamic_cast<IntegerType *>(
+                definition->operands().back()->type());
+            if (!offsetType)
+                continue;
+            if (definition->operands().back() !=
+                loop.induction())
+                continue;
+            bool duplicate = false;
+            for (const Candidate &existing : candidates)
+                if (existing.address == address) {
+                    duplicate = true;
+                    break;
+                }
+            if (!duplicate)
+                candidates.push_back(
+                    {address, definition, offsetType,
+                     stepScale});
+        }
+    } else {
     // Pointer-keyed maps are lookup tables only.  Preserve model access order
     // for IR construction so allocator addresses cannot affect emitted code.
-    std::vector<HiraValue *> addressOrder;
     for (const AccessRelation &access : model.accesses()) {
         if (access.statement >= model.statements().size())
             continue;
@@ -226,7 +278,7 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
             ambiguous.insert(address);
     }
 
-    std::vector<Candidate> candidates;
+    std::vector<Candidate> modelCandidates;
     for (HiraValue *address : addressOrder) {
         if (ambiguous.count(address))
             continue;
@@ -238,17 +290,20 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
         if (!definition ||
             definition->computeKind() !=
                 ComputeKind::GetElementPtr ||
-            definition->parent() != &loop->body() ||
+            definition->parent() != &loop.body() ||
             definition->operands().size() < 2 ||
             definition->results().size() != 1 ||
-            !addressHasSupportedUses(loop->body(), address))
+            !addressHasSupportedUses(loop.body(), address))
             continue;
         auto *offsetType = dynamic_cast<IntegerType *>(
             definition->operands().back()->type());
         if (!offsetType)
             continue;
-        candidates.push_back(
-            {address, definition, offsetType, stride->second});
+        modelCandidates.push_back(
+            {address, definition, offsetType,
+             stride->second * stepScale});
+    }
+    candidates = std::move(modelCandidates);
     }
     if (candidates.empty()) {
         result.detail = "no-affine-point-address";
@@ -256,7 +311,7 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
     }
 
     std::set<const HiraNode *> internal;
-    collectNodes(loop->body(), internal);
+    collectNodes(loop.body(), internal);
     std::size_t insertion = *loopPosition;
     std::map<const HiraValue *, HiraValue *> entryValues;
     struct Realized {
@@ -268,7 +323,7 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
     std::vector<Realized> realized;
     for (const Candidate &candidate : candidates) {
         HiraValue *initial = materializeAtEntry(
-            region, *loop, internal, *parent, insertion,
+            region, loop, internal, *parent, insertion,
             candidate.address, entryValues);
         if (!initial)
             continue;
@@ -277,7 +332,7 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
         HiraValue *exit =
             region.createValue(candidate.address->type());
         std::size_t binding =
-            loop->addCarriedValue(initial, iteration, exit);
+            loop.addCarriedValue(initial, iteration, exit);
         realized.push_back(
             {candidate, initial, iteration, binding});
     }
@@ -288,19 +343,19 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
 
     for (const Realized &entry : realized) {
         replaceAddressUses(
-            loop->body(), entry.candidate.address,
+            loop.body(), entry.candidate.address,
             entry.iteration);
-        loop->body().remove(entry.candidate.definition);
+        loop.body().remove(entry.candidate.definition);
     }
 
     auto *yield = dynamic_cast<HiraYield *>(
-        loop->body().nodes().back().get());
+        loop.body().nodes().back().get());
     if (!yield) {
         result.detail = "missing-loop-yield";
         return result;
     }
     std::size_t updatePosition =
-        loop->body().nodes().size() - 1;
+        loop.body().nodes().size() - 1;
     for (const Realized &entry : realized) {
         HiraValue *increment =
             region.createIntegerConstant(
@@ -314,10 +369,10 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
         update->addOperand(entry.iteration);
         update->addOperand(increment);
         update->addResult(next);
-        loop->body().insert(
+        loop.body().insert(
             updatePosition++, std::move(update));
-        loop->setCarriedYield(entry.binding, next);
-        loop->addYieldValue(next);
+        loop.setCarriedYield(entry.binding, next);
+        loop.addYieldValue(next);
         yield->addOperand(next);
     }
 
@@ -325,6 +380,22 @@ LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
     result.recurrences = realized.size();
     region.markModified();
     return result;
+}
+
+LoopAddressRecurrenceResult introduceLoopAddressRecurrences(
+    HiraRegion &region, const PolyhedralModel &model,
+    AffineVariable dimension) {
+    LoopAddressRecurrenceResult result;
+    const IterationDomain *domain =
+        findDomain(model, dimension);
+    HiraLoop *loop =
+        domain ? const_cast<HiraLoop *>(domain->loop) : nullptr;
+    if (!loop || loop->role() != HiraLoop::Role::Ordinary) {
+        result.detail = "unsupported-loop";
+        return result;
+    }
+    return introduceLoopAddressRecurrencesOnLoop(
+        region, *loop, model, dimension);
 }
 
 } // namespace hira::polyhedral
