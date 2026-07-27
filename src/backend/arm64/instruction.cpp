@@ -1846,6 +1846,122 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         unsigned numArgs = call->num_ops_ - 1;
         auto *callee = static_cast<Function*>(call->get_operand(numArgs));
 
+        int abiIntArgs = 0;
+        int abiFloatArgs = 0;
+        int abiStackArgs = 0;
+        for (unsigned i = 0; i < numArgs; ++i) {
+            Value *arg = call->get_operand(i);
+            if (isFloat(arg->type_)) {
+                if (abiFloatArgs++ >= 8) ++abiStackArgs;
+            } else {
+                if (abiIntArgs++ >= 8) ++abiStackArgs;
+            }
+        }
+
+        // When more than one full register bank of arguments spills to the
+        // stack, stage every argument before defining x0-x7/s0-s7.  At that
+        // point the ordinary scratch bank cannot retain every pending source,
+        // so materializing a later stack argument could overwrite an earlier
+        // one.  The final stack-argument area remains at sp+0 as required by
+        // AAPCS64; staging lives above it.
+        if (abiStackArgs > 8) {
+            int stackBytes = align16(abiStackArgs * 8);
+            int stageBase = stackBytes;
+            int totalBytes = align16(stageBase + static_cast<int>(numArgs) * 8);
+            if (totalBytes <= 4095) {
+                emitStackAdjustMachine("sub", totalBytes);
+            } else {
+                emitIntConst(totalBytes, "x17");
+                emitStackAdjustMachine("sub", "x17");
+            }
+
+            auto stageArg = [&](unsigned i) {
+                Value *arg = call->get_operand(i);
+                std::string addr = "[sp, #" +
+                    std::to_string(stageBase + static_cast<int>(i) * 8) + "]";
+                if (isFloat(arg->type_)) {
+                    std::string reg = hasAssignedReg(arg) ? assignedReg(arg) : "s17";
+                    if (!hasAssignedReg(arg))
+                        materializeFloatInReg(arg, reg);
+                    emitStoreMemMachine(reg, addr, {reg, "sp"});
+                } else if (isPtr(arg->type_)) {
+                    std::string reg = hasAssignedReg(arg) ? assignedReg(arg, true) : "x16";
+                    if (!hasAssignedReg(arg))
+                        materializeAddrInReg(arg, reg);
+                    emitStoreMemMachine(reg, addr, {reg, "sp"});
+                } else {
+                    std::string reg = hasAssignedReg(arg) ? assignedReg(arg) : "w16";
+                    if (!hasAssignedReg(arg))
+                        materializeIntInReg(arg, reg);
+                    emitStoreMemMachine(reg, addr, {reg, "sp"});
+                }
+            };
+
+            // Preserve every register source before scratch materialization.
+            for (unsigned i = 0; i < numArgs; ++i)
+                if (hasAssignedReg(call->get_operand(i))) stageArg(i);
+            for (unsigned i = 0; i < numArgs; ++i)
+                if (!hasAssignedReg(call->get_operand(i))) stageArg(i);
+
+            int intArg = 0;
+            int floatArg = 0;
+            int stackIdx = 0;
+            for (unsigned i = 0; i < numArgs; ++i) {
+                Value *arg = call->get_operand(i);
+                std::string stagedAddr = "[sp, #" +
+                    std::to_string(stageBase + static_cast<int>(i) * 8) + "]";
+                if (isFloat(arg->type_)) {
+                    if (floatArg < 8) {
+                        emitLoadMemMachine("s" + std::to_string(floatArg++),
+                                           stagedAddr, {"sp"});
+                    } else {
+                        emitLoadMemMachine("s17", stagedAddr, {"sp"});
+                        emitStoreMemMachine("s17",
+                            "[sp, #" + std::to_string(stackIdx++ * 8) + "]",
+                            {"s17", "sp"});
+                    }
+                } else if (isPtr(arg->type_)) {
+                    if (intArg < 8) {
+                        emitLoadMemMachine("x" + std::to_string(intArg++),
+                                           stagedAddr, {"sp"});
+                    } else {
+                        emitLoadMemMachine("x16", stagedAddr, {"sp"});
+                        emitStoreMemMachine("x16",
+                            "[sp, #" + std::to_string(stackIdx++ * 8) + "]",
+                            {"x16", "sp"});
+                    }
+                } else {
+                    if (intArg < 8) {
+                        emitLoadMemMachine("w" + std::to_string(intArg++),
+                                           stagedAddr, {"sp"});
+                    } else {
+                        emitLoadMemMachine("w16", stagedAddr, {"sp"});
+                        emitStoreMemMachine("w16",
+                            "[sp, #" + std::to_string(stackIdx++ * 8) + "]",
+                            {"w16", "sp"});
+                    }
+                }
+            }
+
+            emitCallMachine(callee->name_, call);
+            if (totalBytes <= 4095) {
+                emitStackAdjustMachine("add", totalBytes);
+            } else {
+                emitIntConst(totalBytes, "x17");
+                emitStackAdjustMachine("add", "x17");
+            }
+
+            if (!isVoid(inst->type_)) {
+                if (isFloat(inst->type_))
+                    storeFloat(inst, "s0");
+                else if (isPtr(inst->type_))
+                    storeAddr(inst, "x0");
+                else
+                    storeInt(inst, "w0");
+            }
+            break;
+        }
+
         struct RegArg {
             unsigned index;
             Value *value;

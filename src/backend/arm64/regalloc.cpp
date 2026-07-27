@@ -50,6 +50,18 @@ std::string Arm64RegAlloc::assignedReg(Value *v, bool asAddress) const {
 
 bool Arm64RegAlloc::canAssignRegister(Value *v) const {
     if (!v || dynamic_cast<Constant*>(v) || dynamic_cast<GlobalVariable*>(v)) return false;
+    if (dynamic_cast<Argument*>(v) && isAllocatableFloatValue(v->type_)) {
+        int floatArgs = 0;
+        for (auto *arg : func_->arguments_)
+            if (isAllocatableFloatValue(arg->type_))
+                ++floatArgs;
+        // Stack-passed FP parameters share the function boundary with the
+        // s0-s7 bank.  Keep that parameter class memory-resident when the bank
+        // overflows so later scratch materialization cannot invalidate an
+        // eagerly moved incoming value.
+        if (floatArgs > 8)
+            return false;
+    }
     if (auto *inst = dynamic_cast<Instruction*>(v)) {
         if (inst->is_void() || inst->is_alloca()) {
             return false;

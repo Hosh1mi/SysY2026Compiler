@@ -67,6 +67,21 @@ static bool isPattern2TailCall(CallInst *call, Function *func,
 // 检查函数是否包含尾递归调用（允许 ret <call> 或 call + br + phi + ret 两种形式）
 // 现在支持部分转换：只要至少有一个尾调用即可，非尾调用的自调用保留不动。
 bool TailRecursionEliminate::isTailRecursive(Function *func) {
+    int intArgs = 0;
+    int floatArgs = 0;
+    for (auto *arg : func->arguments_) {
+        if (arg->type_->tid_ == Type::FloatTyID)
+            ++floatArgs;
+        else
+            ++intArgs;
+    }
+    // Turning stack-passed parameters into one large parallel PHI edge is not
+    // profitable on AArch64 and exceeds the backend's register-only tail-loop
+    // boundary.  Keep the ordinary tail call for such functions; calls with
+    // register-only parameter lists remain eligible.
+    if (intArgs > 8 || floatArgs > 8)
+        return false;
+
     bool hasTailCall = false;
     for (auto bb : func->basic_blocks_) {
         for (auto instr : bb->instr_list_) {
