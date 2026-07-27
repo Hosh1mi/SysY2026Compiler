@@ -359,6 +359,9 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         case Instruction::Add:
         case Instruction::Sub:
         case Instruction::Mul:
+        case Instruction::And:
+        case Instruction::Or:
+        case Instruction::Xor:
         case Instruction::FAdd:
         case Instruction::FSub:
         case Instruction::FMul:
@@ -366,7 +369,8 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         default:
             return reject(reason, "arithmetic operation has no A53 vector lowering");
         }
-        if (bin->type_->tid_ != Type::IntegerTyID &&
+        auto *integerType = dynamic_cast<IntegerType *>(bin->type_);
+        if ((!integerType || integerType->num_bits_ != 32) &&
             bin->type_->tid_ != Type::FloatTyID)
             return reject(reason, "arithmetic result is not i32 or float");
     }
@@ -435,11 +439,14 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
             dynamic_cast<BinaryInst *>(inst))
             ++work;
     }
-    // Cortex-A53 is an in-order, dual-issue core.  Two independent vector
-    // parts hide load/use latency and halve branch overhead for small bodies,
-    // while larger bodies are kept at UF=1 to avoid vector register pressure.
-    // This is a target cost decision based only on the planned operations.
-    if (work <= 8 && plan.memoryAccesses.size() <= 3)
+    // Cortex-A53 is an in-order, dual-issue core with 32 architectural SIMD
+    // registers.  Two independent vector parts hide load/use latency and halve
+    // branch overhead.  Keep the limit tied to the planned operation and
+    // memory-access counts: four memory values plus the arithmetic temporaries
+    // of a twelve-operation body still leave headroom for address generation
+    // and lowering scratch registers, while larger bodies stay at UF=1 to
+    // avoid spills.
+    if (work <= 12 && plan.memoryAccesses.size() <= 4)
         plan.unrollFactor = 2;
 
     int lanesPerIteration = plan.vectorWidth * plan.unrollFactor;

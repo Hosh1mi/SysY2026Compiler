@@ -53,8 +53,9 @@ struct VectorMlaMlsPattern {
 static bool isI32Vector4(Type *ty) {
     if (!ty || ty->tid_ != Type::VectorTyID) return false;
     auto *vecTy = static_cast<VectorType *>(ty);
+    auto *elemTy = dynamic_cast<IntegerType *>(vecTy->contained_);
     return vecTy->num_elements_ == 4 &&
-           vecTy->contained_->tid_ == Type::IntegerTyID;
+           elemTy && elemTy->num_bits_ == 32;
 }
 
 static bool isF32Vector4(Type *ty) {
@@ -1014,6 +1015,22 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
     case Instruction::Xor: {
         auto v1 = inst->get_operand(0);
         auto v2 = inst->get_operand(1);
+
+        if (isVector(inst->type_)) {
+            std::string r1 = loadVector(v1);
+            std::string r2 = loadVector(v2);
+            std::string rd =
+                hasAssignedReg(inst) ? assignedReg(inst) : allocNEONReg();
+            const char *opcode = inst->op_id_ == Instruction::And ? "and" :
+                                 inst->op_id_ == Instruction::Or  ? "orr" :
+                                                                   "eor";
+            emitRawAluMachine("\t" + std::string(opcode) + " " + rd +
+                                  ".16b, " + r1 + ".16b, " + r2 + ".16b",
+                              rd, {r1, r2}, MOpcode::Neon);
+            if (!hasAssignedReg(inst))
+                storeVector(inst, rd);
+            break;
+        }
 
         // 常量短路 + logical-immediate 折叠集中在 constStrengthReduce.cpp
         if (tryEmitLogicalConst(inst, v1, v2))

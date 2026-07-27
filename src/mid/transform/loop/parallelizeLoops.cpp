@@ -613,15 +613,23 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                              loopName(*loop) + ": " + shapeReason);
                     continue;
                 }
-                bool isNested = (loop->depth != 0);
                 std::set<Value *> privatize;
                 std::vector<Reduction> reductions;
                 if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize, &reductions))
                     continue;
-                // 仅含归约的嵌套循环才允许并行化（避免递归 worker 产生）
-                if (isNested && reductions.empty()) {
+                // A nested leaf loop would invoke the persistent-worker
+                // protocol once per parent iteration.  Besides overwhelming
+                // useful work with synchronization, rapidly publishing live-in
+                // contexts is a poor fit for this whole-region outliner.  Keep
+                // the existing reduction case, and otherwise require a nested
+                // loop *nest*: its child-loop work amortizes one dispatch and
+                // the complete region has already passed the same dependence
+                // and live-out checks as a top-level DOALL loop.
+                if (loop->depth != 0 && reductions.empty() &&
+                    loop->children.empty()) {
                     debugPar("skip func=" + func->name_ + " loop=" +
-                             loopName(*loop) + ": nested loop without reduction");
+                             loopName(*loop) +
+                             ": nested leaf loop without reduction");
                     continue;
                 }
                 transform(*loop, shape, func, module, privatize, reductions);
