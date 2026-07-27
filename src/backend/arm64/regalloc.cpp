@@ -976,11 +976,17 @@ void Arm64RegAlloc::promoteLoopConstants(
     }
     std::vector<int> freeRegs;
     int maxGepIndices = 0;
+    bool hasIntDivRem = false;
     for (auto *bb : blocksOrder) {
         for (auto *inst : bb->instr_list_) {
             if (inst->op_id_ == Instruction::GetElementPtr)
                 maxGepIndices = std::max(
                     maxGepIndices, static_cast<int>(inst->num_ops_) - 1);
+            if (inst->op_id_ == Instruction::SDiv ||
+                inst->op_id_ == Instruction::SRem ||
+                inst->op_id_ == Instruction::UDiv ||
+                inst->op_id_ == Instruction::URem)
+                hasIntDivRem = true;
         }
     }
     if (isLeaf) {
@@ -993,7 +999,15 @@ void Arm64RegAlloc::promoteLoopConstants(
         // force the selector onto its aliasing fallback register.
         // x16/x17 cover ordinary address formation.  A six-or-more-index GEP
         // can require the whole x10-x17 bank while accumulating scaled terms.
-        int scratchReserve = maxGepIndices >= 6 ? 6 : 0;
+        //
+        // Integer div/rem lowering needs up to three simultaneous scratch
+        // registers when both operands reach the selector through spill
+        // slots (dividend, divisor/magic, quotient temp).  x16/x17 alone are
+        // not enough then, so keep one more register of the x10-x15 bank
+        // unreserved.  Failure to provide the third scratch makes the
+        // selector's fallback return an already-live register and silently
+        // clobber it.
+        int scratchReserve = maxGepIndices >= 6 ? 6 : (hasIntDivRem ? 1 : 0);
         for (int r = 10; r <= 15 - scratchReserve; ++r)
             if (!usedRegs.count(r)) freeRegs.push_back(r);
         for (int r = 28; r >= 19; --r)

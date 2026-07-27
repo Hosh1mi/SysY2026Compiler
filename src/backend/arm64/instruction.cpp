@@ -1063,12 +1063,13 @@ void Arm64FuncContext::emitInstruction(Instruction *inst) {
         std::string ra = loadInt(v1);
         std::string rb = loadInt(v2);
         std::string rq = allocIntReg();
-        // 末条 msub 同时是 ra/rb 的最后一次读，直接写分配寄存器安全
-        std::string rr = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
+        // 末条 msub 同时是 rq/ra/rb 的最后一次读，同指令内读先于写，
+        // 结果直接写回 rq，避免峰值 scratch 占用再 +1（池保证可用的只有 w16/w17
+        // 及 promoteLoopConstants 预留的余量）。
         emitBinaryMachine("sdiv", rq, ra, rb, MOpcode::Div, 12);
-        emitRawAluMachine("\tmsub " + rr + ", " + rq + ", " + rb + ", " + ra,
-                          rr, {rq, rb, ra}, MOpcode::Mul, 3);
-        storeInt(inst, rr);
+        emitRawAluMachine("\tmsub " + rq + ", " + rq + ", " + rb + ", " + ra,
+                          rq, {rq, rb, ra}, MOpcode::Mul, 3);
+        storeInt(inst, rq);
         break;
     }
 

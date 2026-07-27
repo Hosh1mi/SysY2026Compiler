@@ -71,6 +71,11 @@ bool Arm64FuncContext::tryEmitSDivConst(Instruction *inst, Value *v1, Value *v2)
 
         emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
                           xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
+        // 魔数寄存器在 smull 后即死，立即归还 scratch 池。
+        // 整个序列的峰值 scratch 占用必须保持为 被除数 + 2：
+        // 池里保证可用的只有 w16/w17（regalloc 调色板与提升常量都不会占用），
+        // 超出的分配会静默拿到已在用的寄存器（见 allocIntReg 的硬检查）。
+        freeIntReg(wMagic);
 
         if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
             // 取高 32 位与 >>shift 合并为一条 64 位 asr
@@ -85,12 +90,12 @@ bool Arm64FuncContext::tryEmitSDivConst(Instruction *inst, Value *v1, Value *v2)
             emitRawAluMachine("\tasr " + wHi + ", " + wHi + ", #" + std::to_string(mag.shift),
                               wHi, {wHi});
         }
-        // 末条指令同时完成 wNum 的最后一次读，可直接写入分配寄存器
-        std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-        emitRawAluMachine("\tadd " + wResult + ", " + wHi + ", " + wNum + ", lsr #31",
-                          wResult, {wHi, wNum});
+        // 末条指令同时完成 wHi/wNum 的最后一次读，同指令内读先于写，
+        // 结果直接写回 wHi，不必再占一个 scratch。
+        emitRawAluMachine("\tadd " + wHi + ", " + wHi + ", " + wNum + ", lsr #31",
+                          wHi, {wHi, wNum});
 
-        storeInt(inst, wResult);
+        storeInt(inst, wHi);
         return true;
     }
 
@@ -297,6 +302,9 @@ bool Arm64FuncContext::tryEmitSRemConst(Instruction *inst, Value *v1, Value *v2)
 
         emitRawAluMachine("\tsmull " + xTemp + ", " + wNum + ", " + wMagic,
                           xTemp, {wNum, wMagic}, MOpcode::Mul, 3);
+        // 魔数寄存器在 smull 后即死，立即归还 scratch 池，wD 得以复用该槽位。
+        // 峰值 scratch 占用保持为 被除数 + 2（理由见 tryEmitSDivConst 注释）。
+        freeIntReg(wMagic);
 
         if (mag.strat == Magic::MagicStrat::MULTIPLY_SHIFT) {
             emitRawAluMachine("\tasr " + xTemp + ", " + xTemp + ", #" + std::to_string(32 + mag.shift),
@@ -314,10 +322,11 @@ bool Arm64FuncContext::tryEmitSRemConst(Instruction *inst, Value *v1, Value *v2)
                           wHi, {wHi, wNum});
 
         std::string wD = intConstReg(absDivisor);
-        std::string wResult = hasAssignedReg(inst) ? assignedReg(inst) : allocIntReg();
-        emitRawAluMachine("\tmsub " + wResult + ", " + wHi + ", " + wD + ", " + wNum,
-                          wResult, {wHi, wD, wNum}, MOpcode::Mul, 3);
-        storeInt(inst, wResult);
+        // msub 是 wHi/wD/wNum 的最后一次读，同指令内读先于写，
+        // 结果直接写回 wHi，不必再占一个 scratch。
+        emitRawAluMachine("\tmsub " + wHi + ", " + wHi + ", " + wD + ", " + wNum,
+                          wHi, {wHi, wD, wNum}, MOpcode::Mul, 3);
+        storeInt(inst, wHi);
         return true;
     }
 

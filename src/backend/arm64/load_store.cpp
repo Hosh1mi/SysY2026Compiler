@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -29,8 +30,9 @@ std::string Arm64FuncContext::allocNEONReg() {
             return "v" + std::to_string(r);
         }
     }
-    usedNEONRegs_.insert(0);
-    return "v0";
+    // 池已耗尽：返回仍在使用的寄存器会静默破坏其中的值。
+    // 宁可在编译期显式失败，也不生成错误的机器码。
+    throw std::logic_error("ARM64 NEON scratch register pool exhausted");
 }
 
 void Arm64FuncContext::freeNEONReg(const std::string &reg) {
@@ -249,6 +251,11 @@ std::string Arm64FuncContext::allocIntReg() {
         usedIntRegs_.insert(16);
         return "w16";
     }
+    // w17 是最后一个兜底 scratch。若它也在使用，说明本条指令的寄存器
+    // 需求超过了池容量（池设计余量见 promoteLoopConstants 的 scratchReserve）。
+    // 返回仍在使用的寄存器会静默破坏其中的值，必须显式失败。
+    if (usedIntRegs_.count(17))
+        throw std::logic_error("ARM64 integer scratch register pool exhausted");
     usedIntRegs_.insert(17);
     return "w17";
 }
@@ -275,6 +282,8 @@ std::string Arm64FuncContext::allocAddrReg() {
         usedIntRegs_.insert(16);
         return "x16";
     }
+    if (usedIntRegs_.count(17))
+        throw std::logic_error("ARM64 address scratch register pool exhausted");
     usedIntRegs_.insert(17);
     return "x17";
 }
