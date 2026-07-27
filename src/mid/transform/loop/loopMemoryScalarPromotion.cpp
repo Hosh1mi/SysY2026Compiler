@@ -49,6 +49,9 @@
 // nodes. This keeps the transformation local and avoids hand-rolling SSA repair
 // for arbitrary loop CFGs.
 
+// 位于 Unroll 之后、所有 CFG cleanup 之后：保留条件写的冷路径，
+// 避免 value phi 被折成无条件计算的 select。
+
 namespace {
 
 bool isScalarType(Type *ty) {

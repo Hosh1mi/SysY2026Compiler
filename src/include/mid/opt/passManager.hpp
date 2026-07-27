@@ -1,5 +1,6 @@
 #include "pass.hpp"
 #include "../analysis/analysisManager.hpp"
+#include <utility>
 #include <vector>
 #include <memory>
 
@@ -23,10 +24,20 @@ class PassManager {
     PreservedAnalyses runSinglePass(Pass &pass, Module *module);
     void verifyRepeatGroupExit(Module *module, bool completedNormally);
 
-public:
-    void addPass(std::unique_ptr<Pass> pass);
     void beginRepeatGroup(int maxRounds);
     void endRepeatGroup();
+
+public:
+    void addPass(std::unique_ptr<Pass> pass);
+
+    // Build a repeat group via a scoped callback so begin/end stay paired.
+    template <class F>
+    void addRepeatGroup(int maxRounds, F &&build) {
+        beginRepeatGroup(maxRounds);
+        std::forward<F>(build)(*this);
+        endRepeatGroup();
+    }
+
     void run(Module *module);
 
     void setDumpIR(bool v)   { dump_ir_   = v; }
