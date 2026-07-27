@@ -56,6 +56,26 @@ std::string blockName(const BasicBlock *block) {
     return block->name_.empty() ? "<anon>" : block->name_;
 }
 
+bool sequenceHasRepetitionFoldedLoop(const HiraSequence &sequence) {
+    for (const auto &owner : sequence.nodes()) {
+        if (auto *nested =
+                dynamic_cast<const HiraLoop *>(owner.get())) {
+            if (nested->role() == HiraLoop::Role::RepetitionFolded)
+                return true;
+            if (sequenceHasRepetitionFoldedLoop(nested->body()))
+                return true;
+        } else if (auto *condition =
+                       dynamic_cast<const HiraIf *>(owner.get())) {
+            if (sequenceHasRepetitionFoldedLoop(
+                    condition->thenSequence()) ||
+                sequenceHasRepetitionFoldedLoop(
+                    condition->elseSequence()))
+                return true;
+        }
+    }
+    return false;
+}
+
 bool hasTemporalReuse(
     const polyhedral::PolyhedralModel &model,
     polyhedral::AffineVariable dimension) {
@@ -1063,7 +1083,11 @@ bool selectRegions(Function &function, Loop &loop,
             }
         }
 
-        if (!distributedRegion && transformModel) {
+        // Native unroll is a local CFG expansion, not a schedule owner, but it
+        // must not invalidate an already-buffered nest: a verify reject here
+        // would abort the region and strand the buffering in Hira IR only.
+        if (!distributedRegion && !reductionBuffered &&
+            transformModel) {
             LoopNativeUnrollResult unrolled =
                 unrollCountedLoops(*imported.region);
             if (unrolled.changed) {
@@ -1183,7 +1207,15 @@ bool selectRegions(Function &function, Loop &loop,
         }
 
         bool pointExpanded = false;
+        // A region that already owns a RepetitionFolded loop must export
+        // that fold.  Further point-loop vectorization can fail verification
+        // and would otherwise abort the region, stranding the fold in Hira IR
+        // only.  Defer SIMD on this nest rather than lose the fold.
+        const bool deferVectorizationForRepetitionFold =
+            sequenceHasRepetitionFoldedLoop(
+                imported.region->rootSequence());
         if (!distributedRegion &&
+            !deferVectorizationForRepetitionFold &&
             vectorizationValid &&
             scheduleSelectionValid &&
             transformModel) {
@@ -1457,6 +1489,18 @@ bool selectRegions(Function &function, Loop &loop,
                         *imported.region,
                         function.name_);
             }
+        }
+
+        // Late fold catches nests that only become eligible after other
+        // Hira transforms, without relying on any legacy loop pass.
+        if (foldRepeatedAdditiveLoops(*imported.region)) {
+            if (!verifyRegion("repetition-folding"))
+                return false;
+            if (debug)
+                std::cerr << "[Hira] transformed function="
+                          << function.name_
+                          << " header=" << blockName(loop.header)
+                          << " passes=loop-repetition-folding\n";
         }
 
         if (!forceRoundtrip && !imported.region->modified()) {

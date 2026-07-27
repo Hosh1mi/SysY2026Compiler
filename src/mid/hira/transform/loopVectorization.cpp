@@ -726,51 +726,57 @@ LoopVectorizationResult vectorizeLoop(
     std::vector<PointerRecurrence> pointerRecurrences;
     std::map<HiraValue *, HiraValue *> pointerAtScalarAddress;
     std::set<HiraValue *> varyingScalarAddresses;
-    for (std::size_t index = 0;
-         index < payloadCount; ++index) {
-        const HiraNode *node =
-            pointLoop->body().nodes()[index].get();
-        const AccessMode *mode = nullptr;
-        if (auto *load =
-                dynamic_cast<const HiraLoad *>(node))
-            mode = &accessModes.at(node);
-        else if (auto *store =
-                     dynamic_cast<const HiraStore *>(node))
-            mode = &accessModes.at(node);
-        if (!mode || !mode->varying)
-            continue;
-        HiraValue *scalarAddress = nullptr;
-        if (auto *load =
-                dynamic_cast<const HiraLoad *>(node))
-            scalarAddress = load->address();
-        else
-            scalarAddress =
-                dynamic_cast<const HiraStore *>(node)
-                    ->address();
-        if (!scalarAddress ||
-            !varyingScalarAddresses.insert(scalarAddress)
-                 .second)
-            continue;
-        std::map<const HiraValue *, HiraValue *> entryCache;
-        std::size_t insertPosition = *position;
-        HiraValue *initial = materializeAddressAtEntry(
-            region, *pointLoop, addressInternal, *parent,
-            insertPosition, scalarAddress, entryCache);
-        *position = insertPosition;
-        if (!initial)
-            return reject(
-                LoopVectorizationError::UnsupportedAccess,
-                "unsupported-vector-address");
-        HiraValue *iteration =
-            region.createValue(scalarAddress->type());
-        HiraValue *exit =
-            region.createValue(scalarAddress->type());
-        std::size_t binding =
-            vectorLoop->addCarriedValue(
-                initial, iteration, exit);
-        pointerRecurrences.push_back(
-            {scalarAddress, iteration, binding});
-        pointerAtScalarAddress[scalarAddress] = iteration;
+    // Pointer phis are for the UF>=2 contiguous store/load path.  Reduction
+    // vectorization keeps cloned address GEPs so nested folded regions (e.g.
+    // repetition fold around a sum) stay verifiable and exportable.
+    const bool usePointerRecurrence = !addReduction;
+    if (usePointerRecurrence) {
+        for (std::size_t index = 0;
+             index < payloadCount; ++index) {
+            const HiraNode *node =
+                pointLoop->body().nodes()[index].get();
+            const AccessMode *mode = nullptr;
+            if (auto *load =
+                    dynamic_cast<const HiraLoad *>(node))
+                mode = &accessModes.at(node);
+            else if (auto *store =
+                         dynamic_cast<const HiraStore *>(node))
+                mode = &accessModes.at(node);
+            if (!mode || !mode->varying)
+                continue;
+            HiraValue *scalarAddress = nullptr;
+            if (auto *load =
+                    dynamic_cast<const HiraLoad *>(node))
+                scalarAddress = load->address();
+            else
+                scalarAddress =
+                    dynamic_cast<const HiraStore *>(node)
+                        ->address();
+            if (!scalarAddress ||
+                !varyingScalarAddresses.insert(scalarAddress)
+                     .second)
+                continue;
+            std::map<const HiraValue *, HiraValue *> entryCache;
+            std::size_t insertPosition = *position;
+            HiraValue *initial = materializeAddressAtEntry(
+                region, *pointLoop, addressInternal, *parent,
+                insertPosition, scalarAddress, entryCache);
+            *position = insertPosition;
+            if (!initial)
+                return reject(
+                    LoopVectorizationError::UnsupportedAccess,
+                    "unsupported-vector-address");
+            HiraValue *iteration =
+                region.createValue(scalarAddress->type());
+            HiraValue *exit =
+                region.createValue(scalarAddress->type());
+            std::size_t binding =
+                vectorLoop->addCarriedValue(
+                    initial, iteration, exit);
+            pointerRecurrences.push_back(
+                {scalarAddress, iteration, binding});
+            pointerAtScalarAddress[scalarAddress] = iteration;
+        }
     }
 
     auto pointerForPart =
@@ -794,6 +800,8 @@ LoopVectorizationResult vectorizeLoop(
     };
 
     bool vectorPartOk = true;
+    std::map<const HiraValue *, HiraValue *> lastPartMapped =
+        mapped;
     for (std::uint32_t part = 0; part < unrollFactor;
          ++part) {
         std::map<const HiraValue *, HiraValue *> partMapped =
@@ -955,11 +963,14 @@ LoopVectorizationResult vectorizeLoop(
                 vectorBody.append(std::move(owner));
             mapSourceNode(region, clone, store);
         }
+        lastPartMapped = std::move(partMapped);
     }
     if (!vectorPartOk)
         return reject(
             LoopVectorizationError::UnsupportedBody,
             "unexpected-vector-node");
+    // Reduction yields read through `mapped`; keep the last part's SSA.
+    mapped = std::move(lastPartMapped);
 
     HiraValue *vectorNext =
         region.createValue(indexType);

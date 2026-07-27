@@ -290,8 +290,14 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
         return;
 
     addSsaPreparation(pm);
+    // This Pipeline strictly PROHIBITS legacy loop passes!!!
+    // Scalar/CFG passes that do not own loop structure (IfConversion,
+    // SLP, SplitGEP, GVN, …) remain allowed around Hira.
     if (enableHira) {
         addScalarCleanup(pm);
+        // Flatten pure arithmetic diamonds to select before import so Hira
+        // buffering can see select-form reductions (loads may be speculated).
+        pm.addPass(std::make_unique<IfConversion>());
         addInterproceduralAndGlobals(pm);
         addCorrelatedCleanup(pm);
         pm.addPass(std::make_unique<SemanticMarkerStamp>());
@@ -303,9 +309,9 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
             std::make_unique<hira::HiraPass>(
                 forceHiraRoundtrip, dumpHira, dumpPolyhedral));
         addAnalysisDumpIfRequested(pm);
-        pm.addPass(std::make_unique<LoopSimplify>());
-        pm.addPass(std::make_unique<LCSSA>());
-        pm.addPass(std::make_unique<LoopRepFold>());
+        // Re-run after export: leftover diamonds from non-Hira regions or
+        // parallel bodies become selects for SLP / codegen.
+        pm.addPass(std::make_unique<IfConversion>());
         // SLP owns basic-block expression DAGs rather than loop structure.
         // Run it only after Hira has exported all selected loop regions.
         pm.addPass(std::make_unique<SLPVectorize>());
