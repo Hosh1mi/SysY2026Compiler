@@ -226,6 +226,15 @@ public:
         }
         set_operand(num_ops - 1, func);  // 最后一个操作数为被调用函数
     }
+    CallInst(Function* func, std::vector<Value*> args, BasicBlock* bb, bool no_insert)
+        : Instruction(static_cast<FunctionType*>(func->type_)->result_, Instruction::Call, args.size() + 1) {
+        int num_ops = args.size() + 1;
+        for (int i = 0; i < num_ops - 1; i++) {
+            set_operand(i, args[i]);
+        }
+        set_operand(num_ops - 1, func);
+        parent_ = bb;
+    }
     virtual std::string print() override;
 };
 
@@ -418,6 +427,11 @@ public:
 class Bitcast : public Instruction {
 public:
     Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
+    Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb, bool)
+        : Instruction(ty, op, 1), dest_ty_(ty) {
+        set_operand(0, val);
+        parent_ = bb;
+    }
     virtual std::string print() override;
     Type* dest_ty_;
 };

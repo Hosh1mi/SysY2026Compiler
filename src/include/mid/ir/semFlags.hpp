@@ -30,6 +30,7 @@ enum class SemFlag : uint32_t {
         // BasicBlock：循环已显式构造目标化指针递推，IVSR 不应重写
     HiraRepetitionFolded = 1u << 13,
         // BasicBlock：Hira 已将循环的重复加性递推折叠为单次执行
+    MemsetIdiomLoop = 1u << 14, // BasicBlock：preheader 已插入 memset 替换原循环
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {
