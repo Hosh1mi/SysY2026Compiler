@@ -182,7 +182,6 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
     }
 }
 
-// ARM64 mid-end pipeline (legacy loop transforms; Hira temporarily unused).
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     if (optLevel < 1)
         return;
