@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <vector>
 
@@ -181,7 +182,31 @@ RangeAnalysis::IntRange rangeOrI32(RangeAnalysis &RA, Value *v, BasicBlock *ctx)
     return RangeAnalysis::IntRange::top();
 }
 
+bool addNoOverflow(long long a, long long b, long long &out) {
+    if ((b > 0 && a > std::numeric_limits<long long>::max() - b) ||
+        (b < 0 && a < std::numeric_limits<long long>::min() - b))
+        return false;
+    out = a + b;
+    return true;
+}
+
+bool containsOuterCanonicalAddRec(const SCEV *s, const Loop &loop) {
+    if (!s) return false;
+    if (auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(s)) {
+        auto *addrecLoop = addrec->loop();
+        return addrecLoop && addrecLoop != &loop &&
+               addrecLoop->hasCanonicalIV() &&
+               addrec->phi() == addrecLoop->canonicalIV;
+    }
+    if (auto *nary = dynamic_cast<const SCEVNAryExpr *>(s)) {
+        for (auto *op : nary->operands())
+            if (containsOuterCanonicalAddRec(op, loop)) return true;
+    }
+    return false;
+}
+
 bool proveArithmeticSafe(const InductionMatch &match, RangeAnalysis &RA,
+                         ScalarEvolution &SE, const Loop &loop,
                          BasicBlock *ctx) {
     if (!match.strideIsConstant)
         return match.pred == ICmpInst::ICMP_SLT ||
@@ -199,26 +224,30 @@ bool proveArithmeticSafe(const InductionMatch &match, RangeAnalysis &RA,
     bool strict = match.pred == ICmpInst::ICMP_SLT ||
                   match.pred == ICmpInst::ICMP_SGT;
     long long bias = strict ? absStride - 1 : 0;
+    bool boundFromOuterCanonical =
+        containsOuterCanonicalAddRec(SE.getSCEV(match.bound), loop);
 
     long long maxDelta = 0;
     long long maxFinalOffset = 0;
     if (match.stride > 0) {
-        maxDelta = br.upper - sr.lower;
+        if (!addNoOverflow(br.upper, -sr.lower, maxDelta)) return false;
         if (maxDelta < 0) maxDelta = 0;
         if (maxDelta > static_cast<long long>(INT_MAX) - bias) return false;
         long long maxTrip = strict ? (maxDelta + absStride - 1) / absStride
                                    : (maxDelta / absStride) + 1;
         maxFinalOffset = maxTrip * absStride;
-        if (sr.upper > static_cast<long long>(INT_MAX) - maxFinalOffset)
+        if (sr.upper > static_cast<long long>(INT_MAX) - maxFinalOffset &&
+            !boundFromOuterCanonical)
             return false;
     } else {
-        maxDelta = sr.upper - br.lower;
+        if (!addNoOverflow(sr.upper, -br.lower, maxDelta)) return false;
         if (maxDelta < 0) maxDelta = 0;
         if (maxDelta > static_cast<long long>(INT_MAX) - bias) return false;
         long long maxTrip = strict ? (maxDelta + absStride - 1) / absStride
                                    : (maxDelta / absStride) + 1;
         maxFinalOffset = maxTrip * absStride;
-        if (sr.lower < static_cast<long long>(INT_MIN) + maxFinalOffset)
+        if (sr.lower < static_cast<long long>(INT_MIN) + maxFinalOffset &&
+            !boundFromOuterCanonical)
             return false;
     }
 
@@ -262,6 +291,20 @@ Value *materializeAffine(Module *m, BasicBlock *bb, Instruction *before,
                                bb, true);
     insertBefore(bb, before, add);
     return add;
+}
+
+Loop *innermostChildLoopContaining(const Loop &loop, BasicBlock *bb) {
+    Loop *best = nullptr;
+    std::vector<Loop *> work(loop.children.begin(), loop.children.end());
+    while (!work.empty()) {
+        Loop *child = work.back();
+        work.pop_back();
+        if (!child || !child->blocks.count(bb)) continue;
+        if (!best || child->depth > best->depth) best = child;
+        for (auto *grandchild : child->children)
+            work.push_back(grandchild);
+    }
+    return best;
 }
 
 Value *materializeTripCount(Module *m, BasicBlock *preheader,
@@ -420,7 +463,14 @@ void replacePhiUses(PhiInst *oldPhi, Value *iv, Value *outsideValue,
         if (!user || user == match.next || user == match.cmp) continue;
         Value *replacement = outsideValue;
         if (user->parent_ && loop.blocks.count(user->parent_)) {
-            replacement = materializeAffine(module, user->parent_, user,
+            BasicBlock *insertBB = user->parent_;
+            Instruction *before = user;
+            if (auto *nested = innermostChildLoopContaining(loop, user->parent_);
+                nested && nested->preheader) {
+                insertBB = nested->preheader;
+                before = nested->preheader->get_terminator();
+            }
+            replacement = materializeAffine(module, insertBB, before,
                                             match.start, iv, match.strideValue,
                                             match.stride,
                                             match.strideIsConstant);
@@ -442,7 +492,8 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
     if (!usesAreReplaceable(match, loop)) return false;
 
     auto &RA = AM.getRangeAnalysis(func);
-    if (!proveArithmeticSafe(match, RA, loop.preheader)) {
+    auto &SE = AM.getScalarEvolution(func);
+    if (!proveArithmeticSafe(match, RA, SE, loop, loop.preheader)) {
         if (debugEnabled())
             std::cerr << "[IndVarSimplify] reject header="
                       << loop.header->name_ << " reason=unsafe-arithmetic\n";
@@ -514,8 +565,9 @@ PreservedAnalyses IndVarSimplify::execute(Module *module, AnalysisManager &AM) {
 bool IndVarSimplify::runOnFunction(Function *func, AnalysisManager &AM) {
     if (!func || func->basic_blocks_.empty()) return false;
 
-    std::vector<BasicBlock *> headers;
-    {
+    bool changed = false;
+    while (true) {
+        std::vector<BasicBlock *> headers;
         LoopInfo &LI = AM.getLoopInfo(func);
         std::vector<Loop *> loops;
         for (auto &loop : LI.allLoops())
@@ -524,23 +576,26 @@ bool IndVarSimplify::runOnFunction(Function *func, AnalysisManager &AM) {
                   [](Loop *a, Loop *b) { return a->depth > b->depth; });
         for (auto *loop : loops)
             headers.push_back(loop->header);
-    }
 
-    bool changed = false;
-    for (auto *header : headers) {
-        LoopInfo &LI = AM.getLoopInfo(func);
-        Loop *loop = nullptr;
-        for (auto &candidate : LI.allLoops()) {
-            if (candidate->header == header) {
-                loop = candidate.get();
-                break;
+        bool changedThisIteration = false;
+        for (auto *header : headers) {
+            LoopInfo &currentLI = AM.getLoopInfo(func);
+            Loop *loop = nullptr;
+            for (auto &candidate : currentLI.allLoops()) {
+                if (candidate->header == header) {
+                    loop = candidate.get();
+                    break;
+                }
+            }
+            if (!loop) continue;
+            if (simplifyLoop(*loop, func, func->parent_, AM)) {
+                changed = true;
+                changedThisIteration = true;
+                AM.invalidateFunction(func, PreservedAnalyses::none());
             }
         }
-        if (!loop) continue;
-        if (simplifyLoop(*loop, func, func->parent_, AM)) {
-            changed = true;
-            AM.invalidateFunction(func, PreservedAnalyses::none());
-        }
+
+        if (!changedThisIteration) break;
     }
     return changed;
 }
