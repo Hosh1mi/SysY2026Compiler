@@ -540,34 +540,34 @@ RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBloc
     IntRange result = IntRange::bottom();
     bool found = false;
     auto *func = arg->parent_;
-    auto *module = func->parent_;
-    if (!module) return IntRange::top();
+    if (!func->parent_) return IntRange::top();
 
-    for (auto *caller : module->function_list_) {
-        if (caller->is_declaration()) continue;
+    // CallInst records its callee as the final operand, so the function use
+    // list is the precise, mutation-safe call-site index.  This avoids a
+    // complete module walk for every formal argument.
+    for (const Use &use : func->use_list_) {
+        auto *call = dynamic_cast<CallInst *>(use.val_);
+        if (!call || call->num_ops_ == 0 ||
+            call->get_operand(call->num_ops_ - 1) != func ||
+            arg->arg_no_ >= call->num_ops_ - 1)
+            continue;
+        auto *caller =
+            call->parent_ ? call->parent_->parent_ : nullptr;
+        if (!caller || caller->is_declaration())
+            continue;
+        Value *actual = call->get_operand(arg->arg_no_);
+        if (caller == func && actual == arg) {
+            // A self-recursive call forwarding the same formal does not add
+            // information; keep facts from non-recursive call sites visible.
+            continue;
+        }
         auto &callerRA = AM_->getRangeAnalysis(caller);
-        for (auto *bb : caller->basic_blocks_) {
-            for (auto *inst : bb->instr_list_) {
-                auto *call = dynamic_cast<CallInst *>(inst);
-                if (!call) continue;
-                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-                if (callee != func) continue;
-                if (arg->arg_no_ >= call->num_ops_ - 1) continue;
-                Value *actual = call->get_operand(arg->arg_no_);
-                if (caller == func && actual == arg) {
-                    // A self-recursive call forwarding the same formal does not
-                    // add information; treating it as top would hide facts from
-                    // non-recursive call sites.
-                    continue;
-                }
-                auto r = callerRA.getRange(actual, call->parent_);
-                if (!found) {
-                    result = r;
-                    found = true;
-                } else {
-                    result = result.join(r);
-                }
-            }
+        auto r = callerRA.getRange(actual, call->parent_);
+        if (!found) {
+            result = r;
+            found = true;
+        } else {
+            result = result.join(r);
         }
     }
     if (!found) result = IntRange::top();

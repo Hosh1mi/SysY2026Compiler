@@ -7,6 +7,17 @@
 #include <limits>
 #include <sstream>
 
+namespace {
+
+// ScalarEvolution is a proving analysis, so declining an excessively large
+// expression is always safe.  Bounding flattened commutative expressions
+// prevents a left-deep chain from repeatedly copying and sorting every prefix
+// (quadratic construction time).  Downstream clients treat CouldNotCompute as
+// unknown and fall back to their local reasoning.
+constexpr std::size_t kMaxSCEVNAryOperands = 64;
+
+} // namespace
+
 std::string SCEVConstant::print() const {
     return std::to_string(value_);
 }
@@ -356,6 +367,8 @@ const SCEV *ScalarEvolution::getAddExpr(std::vector<const SCEV*> operands, Type 
                 if (!self(self, nested)) return false;
             }
         } else {
+            if (flat.size() >= kMaxSCEVNAryOperands)
+                return false;
             flat.push_back(op);
         }
         return true;
@@ -370,7 +383,9 @@ const SCEV *ScalarEvolution::getAddExpr(std::vector<const SCEV*> operands, Type 
 
     std::sort(flat.begin(), flat.end(),
               [this](const SCEV *a, const SCEV *b) {
-                  return keyForSCEV(a) < keyForSCEV(b);
+                  if (a->kind() != b->kind())
+                      return a->kind() < b->kind();
+                  return scevOrder_.at(a) < scevOrder_.at(b);
               });
 
     std::vector<const SCEV*> cleaned;
@@ -411,6 +426,8 @@ const SCEV *ScalarEvolution::getMulExpr(std::vector<const SCEV*> operands, Type 
                 if (!self(self, nested)) return false;
             }
         } else {
+            if (flat.size() >= kMaxSCEVNAryOperands)
+                return false;
             flat.push_back(op);
         }
         return true;
@@ -426,7 +443,9 @@ const SCEV *ScalarEvolution::getMulExpr(std::vector<const SCEV*> operands, Type 
 
     std::sort(flat.begin(), flat.end(),
               [this](const SCEV *a, const SCEV *b) {
-                  return keyForSCEV(a) < keyForSCEV(b);
+                  if (a->kind() != b->kind())
+                      return a->kind() < b->kind();
+                  return scevOrder_.at(a) < scevOrder_.at(b);
               });
 
     std::vector<const SCEV*> cleaned;
