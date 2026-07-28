@@ -11,3 +11,5 @@
 
 src/backend/riscv_deprecated/
 src/mid/hira*
+
+.DS_STORE

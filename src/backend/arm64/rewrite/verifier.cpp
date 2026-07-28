@@ -51,6 +51,18 @@ unsigned pairMemoryWidth(Opcode opcode) {
     }
 }
 
+bool isGlobalMemoryOpcode(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWlo: case Opcode::STRWlo:
+    case Opcode::LDRSlo: case Opcode::STRSlo:
+    case Opcode::LDRQlo: case Opcode::STRQlo:
+    case Opcode::LDRXlo: case Opcode::STRXlo:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 std::vector<VerificationError>
@@ -203,6 +215,13 @@ MachineVerifier::verify(const MachineFunction &function) const {
             if (instruction.mayStore() && instruction.memoryOperands().empty())
                 report(block.get(), instructionIndex,
                        "store has no machine memory operand");
+            if (isGlobalMemoryOpcode(instruction.opcode()) &&
+                (instruction.operands().size() != 3 ||
+                 !instruction.operands()[1].isRegister() ||
+                 instruction.operands()[2].kind() !=
+                     MachineOperand::Kind::GlobalSymbol))
+                report(block.get(), instructionIndex,
+                       "malformed global memory addressing mode");
 
             if (function.hasProperty(MachineProperty::FrameFinalized)) {
                 unsigned width =

@@ -92,6 +92,22 @@ void emitMemory(std::ostream &output, const char *mnemonic,
     output << "]\n";
 }
 
+void emitGlobalMemory(std::ostream &output, const char *mnemonic,
+                      const MachineInstr &instruction) {
+    if (instruction.operands().size() != 3 ||
+        !instruction.operands()[0].isPhysicalRegister() ||
+        !instruction.operands()[1].isPhysicalRegister() ||
+        instruction.operands()[2].kind() !=
+            MachineOperand::Kind::GlobalSymbol)
+        throw std::logic_error("malformed global memory instruction");
+    std::string value = registerName(instruction.operands()[0]);
+    if (instruction.operands()[0].regClass() == RegClass::NEON128)
+        value = "q" + value.substr(1);
+    output << '\t' << mnemonic << ' ' << value << ", ["
+           << registerName(instruction.operands()[1]) << ", :lo12:"
+           << instruction.operands()[2].symbol() << "]\n";
+}
+
 void emitDMemory(std::ostream &output, const char *mnemonic,
                  const MachineInstr &instruction) {
     std::string value = registerName(instruction.operands()[0]);
@@ -361,12 +377,20 @@ void printInstruction(const MachineFunction &function,
     case Opcode::LDRXui:
         emitMemory(output, "ldr", instruction);
         break;
+    case Opcode::LDRWlo: case Opcode::LDRSlo: case Opcode::LDRQlo:
+    case Opcode::LDRXlo:
+        emitGlobalMemory(output, "ldr", instruction);
+        break;
     case Opcode::LDRDui:
         emitDMemory(output, "ldr", instruction);
         break;
     case Opcode::STRWui: case Opcode::STRSui: case Opcode::STRQui:
     case Opcode::STRXui:
         emitMemory(output, "str", instruction);
+        break;
+    case Opcode::STRWlo: case Opcode::STRSlo: case Opcode::STRQlo:
+    case Opcode::STRXlo:
+        emitGlobalMemory(output, "str", instruction);
         break;
     case Opcode::STRDui:
         emitDMemory(output, "str", instruction);
@@ -463,8 +487,11 @@ void printInstruction(const MachineFunction &function,
         break;
     case Opcode::INSv4i32:
     case Opcode::INSv4f32:
-        output << "\tmov " << registerName(operands[0]) << ".16b, "
-               << registerName(operands[1]) << ".16b\n";
+        if (!RegisterInfo::aliases(
+                operands[0].physicalRegister(),
+                operands[1].physicalRegister()))
+            throw std::logic_error(
+                "unexpanded vector insert reached assembly printer");
         output << "\tmov " << registerName(operands[0]) << ".s["
                << operands[3].immediate() << "], ";
         if (instruction.opcode() == Opcode::INSv4f32)

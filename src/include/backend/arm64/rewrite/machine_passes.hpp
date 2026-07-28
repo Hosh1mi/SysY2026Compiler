@@ -34,6 +34,11 @@ public:
     bool run(MachineFunction &function) const;
 };
 
+class PostRAInstructionExpansion {
+public:
+    bool run(MachineFunction &function) const;
+};
+
 class PostRAAddressingOptimizer {
 public:
     bool run(MachineFunction &function) const;

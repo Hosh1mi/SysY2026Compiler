@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace backend::aarch64 {
 namespace {
@@ -115,6 +116,29 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 
     auto &registerInfo = machineFunction->registerInfo();
     std::unordered_map<SDNode *, VReg> results;
+    std::unordered_map<SDNode *, bool> directGlobalMemory;
+    for (BasicBlock *block : functionDAG.blockOrder)
+        for (const auto &owned : functionDAG.blocks.at(block)->nodes())
+            if (owned->opcode() == SDOpcode::GlobalAddress)
+                directGlobalMemory.emplace(owned.get(), true);
+    for (BasicBlock *block : functionDAG.blockOrder) {
+        for (const auto &owned : functionDAG.blocks.at(block)->nodes()) {
+            SDNode &user = *owned;
+            for (unsigned index = 0; index < user.operands().size();
+                 ++index) {
+                SDNode *operand = user.operands()[index].node;
+                auto global = directGlobalMemory.find(operand);
+                if (global == directGlobalMemory.end())
+                    continue;
+                bool directLoad =
+                    user.opcode() == SDOpcode::Load && index == 1;
+                bool directStore =
+                    user.opcode() == SDOpcode::Store && index == 2;
+                if (!directLoad && !directStore)
+                    global->second = false;
+            }
+        }
+    }
     // Allocate result identities before emission so loop PHIs can reference
     // backedge definitions that are emitted later.
     for (BasicBlock *block : functionDAG.blockOrder) {
@@ -457,23 +481,14 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         regClass == RegClass::NEON128 ? 16 : 8,
                         argumentStackOffset.at(node.index),
                         regClass == RegClass::NEON128 ? 16 : 8);
-                    VReg address = createTemporary(ValueType::Ptr);
-                    MachineInstr lea(Opcode::LEA_FRAME);
-                    lea.addOperand(MachineOperand::vreg(
-                                       address, RegClass::GPR64, true))
-                        .addOperand(MachineOperand::frameIndex(fixed));
-                    MachineInstr &leaInst = append(block, std::move(lea));
-                    registerInfo.setDefinition(address, &leaInst);
-
-                    Opcode loadOpcode =
-                        regClass == RegClass::FPR32 ? Opcode::LDRSui
-                        : regClass == RegClass::NEON128 ? Opcode::LDRQui
-                                                       : Opcode::LDRWui;
-                    MachineInstr load(loadOpcode);
+                    // Preserve the fixed incoming-frame reference through
+                    // register allocation.  Frame lowering can then select
+                    // the x29-relative scaled addressing mode directly,
+                    // instead of materializing an address for every stack
+                    // argument before allocation.
+                    MachineInstr load(Opcode::SPILL_LOAD);
                     load.addOperand(define(node))
-                        .addOperand(MachineOperand::vreg(
-                            address, RegClass::GPR64))
-                        .addOperand(MachineOperand::immediate(0));
+                        .addOperand(MachineOperand::frameIndex(fixed));
                     load.addMemoryOperand(MachineMemOperand{
                         MachineMemOperand::Access::Load,
                         regClass == RegClass::NEON128 ? 16U : 4U,
@@ -526,6 +541,14 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::GlobalAddress: {
+                if (directGlobalMemory.at(&node)) {
+                    MachineInstr adrp(Opcode::ADRP);
+                    adrp.addOperand(define(node))
+                        .addOperand(
+                            MachineOperand::global(node.symbol));
+                    append(block, std::move(adrp), &node);
+                    break;
+                }
                 VReg page = createTemporary(ValueType::Ptr);
                 MachineInstr adrp(Opcode::ADRP);
                 adrp.addOperand(MachineOperand::vreg(
@@ -1148,15 +1171,31 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             case SDOpcode::Load: {
                 RegClass resultClass =
                     registerInfo.get(results.at(&node)).regClass;
+                SDNode *address = node.operands()[1].node;
+                bool directGlobal =
+                    address &&
+                    address->opcode() == SDOpcode::GlobalAddress &&
+                    directGlobalMemory.at(address);
                 Opcode opcode =
-                    resultClass == RegClass::FPR32 ? Opcode::LDRSui
-                    : resultClass == RegClass::NEON128 ? Opcode::LDRQui
-                    : resultClass == RegClass::GPR64 ? Opcode::LDRXui
-                                                       : Opcode::LDRWui;
+                    resultClass == RegClass::FPR32
+                        ? (directGlobal ? Opcode::LDRSlo
+                                        : Opcode::LDRSui)
+                    : resultClass == RegClass::NEON128
+                        ? (directGlobal ? Opcode::LDRQlo
+                                        : Opcode::LDRQui)
+                    : resultClass == RegClass::GPR64
+                        ? (directGlobal ? Opcode::LDRXlo
+                                        : Opcode::LDRXui)
+                        : (directGlobal ? Opcode::LDRWlo
+                                        : Opcode::LDRWui);
                 MachineInstr load(opcode);
                 load.addOperand(define(node))
-                    .addOperand(use(node.operands()[1]))
-                    .addOperand(MachineOperand::immediate(0));
+                    .addOperand(use(node.operands()[1]));
+                if (directGlobal)
+                    load.addOperand(
+                        MachineOperand::global(address->symbol));
+                else
+                    load.addOperand(MachineOperand::immediate(0));
                 load.addMemoryOperand(MachineMemOperand{
                     MachineMemOperand::Access::Load, node.memorySize,
                     node.alignment, node.origin, std::nullopt, 0, false});
@@ -1165,15 +1204,31 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             }
             case SDOpcode::Store: {
                 RegClass storedClass = valueClass(node.operands()[1]);
+                SDNode *address = node.operands()[2].node;
+                bool directGlobal =
+                    address &&
+                    address->opcode() == SDOpcode::GlobalAddress &&
+                    directGlobalMemory.at(address);
                 Opcode opcode =
-                    storedClass == RegClass::FPR32 ? Opcode::STRSui
-                    : storedClass == RegClass::NEON128 ? Opcode::STRQui
-                    : storedClass == RegClass::GPR64 ? Opcode::STRXui
-                                                       : Opcode::STRWui;
+                    storedClass == RegClass::FPR32
+                        ? (directGlobal ? Opcode::STRSlo
+                                        : Opcode::STRSui)
+                    : storedClass == RegClass::NEON128
+                        ? (directGlobal ? Opcode::STRQlo
+                                        : Opcode::STRQui)
+                    : storedClass == RegClass::GPR64
+                        ? (directGlobal ? Opcode::STRXlo
+                                        : Opcode::STRXui)
+                        : (directGlobal ? Opcode::STRWlo
+                                        : Opcode::STRWui);
                 MachineInstr store(opcode);
                 store.addOperand(use(node.operands()[1]))
-                    .addOperand(use(node.operands()[2]))
-                    .addOperand(MachineOperand::immediate(0));
+                    .addOperand(use(node.operands()[2]));
+                if (directGlobal)
+                    store.addOperand(
+                        MachineOperand::global(address->symbol));
+                else
+                    store.addOperand(MachineOperand::immediate(0));
                 store.addMemoryOperand(MachineMemOperand{
                     MachineMemOperand::Access::Store, node.memorySize,
                     node.alignment, node.origin, std::nullopt, 0, false});
