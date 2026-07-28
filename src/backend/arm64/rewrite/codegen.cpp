@@ -68,6 +68,8 @@ void AArch64Backend::generate() {
     output_ << "\t.arch armv8-a\n\t.text\n";
     const bool tracePhases =
         std::getenv("DEBUG_AARCH64_REWRITE_PHASES") != nullptr;
+    const bool verifyEachMachinePass =
+        std::getenv("DEBUG_AARCH64_REWRITE_VERIFY_EACH_PASS") != nullptr;
     auto trace = [&](const Function *function, const char *phase) {
         if (tracePhases)
             std::cerr << "[aarch64-rewrite] " << function->name_
@@ -88,13 +90,28 @@ void AArch64Backend::generate() {
         auto machineFunction = selector.select(*dag);
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "instruction-select");
+        if (std::getenv("DEBUG_AARCH64_REWRITE_BEFORE_MACHINE_SSA"))
+            std::cerr << printMachineIR(*machineFunction);
         if (options_.optimizationLevel >= 1) {
-            if (!options_.disablePeephole)
+            if (!options_.disablePeephole) {
                 preRAPeephole.run(*machineFunction);
+                if (options_.verifyMachineIR && verifyEachMachinePass)
+                    verifier.verifyOrThrow(*machineFunction,
+                                           "pre-ra-peephole");
+            }
             conditionOptimizer.run(*machineFunction);
-            for (unsigned iteration = 0; iteration < 4; ++iteration)
+            if (std::getenv("DEBUG_AARCH64_REWRITE_AFTER_CONDITION"))
+                std::cerr << printMachineIR(*machineFunction);
+            if (options_.verifyMachineIR && verifyEachMachinePass)
+                verifier.verifyOrThrow(*machineFunction,
+                                       "condition-optimization");
+            for (unsigned iteration = 0; iteration < 4; ++iteration) {
                 if (!machineDCE.run(*machineFunction))
                     break;
+                if (options_.verifyMachineIR && verifyEachMachinePass)
+                    verifier.verifyOrThrow(*machineFunction,
+                                           "machine-dce");
+            }
             if (options_.verifyMachineIR)
                 verifier.verifyOrThrow(
                     *machineFunction, "machine-ssa-optimization");
