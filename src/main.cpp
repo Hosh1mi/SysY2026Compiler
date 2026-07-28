@@ -5,8 +5,8 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
-#include "include/backend/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
+#include "include/backend/arm64/rewrite/codegen.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -202,6 +202,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addRepeatGroup(/*maxRounds=*/8, [](PassManager &pm) {
         pm.addPass(std::make_unique<LoopSimplify>());
+        // pm.addPass(std::make_unique<LCSSA>());
+        // pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
         pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
@@ -232,17 +234,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<SplitGEP>());
     addDeepCleanup(pm);
     addLateTargetIndependentPasses(pm, m);
-}
-
-template <class CodeGen>
-static void configureBackend(CodeGen &codegen, const DriverOptions &options) {
-    bool enableOptimizations = options.optLevel >= 1;
-    codegen.setEnableRegAlloc(enableOptimizations);
-    codegen.setNoPeephole(!enableOptimizations || options.disablePeephole);
-    codegen.setNoSchedule(!enableOptimizations || options.disableSchedule);
-    codegen.setNoPreSchedule(!enableOptimizations || options.disablePreSchedule);
-    codegen.setDumpMachineInstr(options.dumpMachineInstr);
-    codegen.setDumpPreMachineInstr(options.dumpPreMachineInstr);
 }
 
 static Function *calledFunction(Instruction *inst) {
@@ -331,8 +322,20 @@ int main(int argc, char **argv) {
         return -1;
 
     if (options.printAsm || options.dumpMachineInstr) {
-        Arm64CodeGen codegen(m.get(), *out);
-        configureBackend(codegen, options);
+        backend::aarch64::BackendOptions backendOptions;
+        backendOptions.optimizationLevel = options.optLevel;
+        backendOptions.verifyMachineIR = true;
+        backendOptions.dumpSelectionDAG =
+            options.dumpPreMachineInstr;
+        backendOptions.dumpMachineIR = options.dumpMachineInstr;
+        backendOptions.disablePeephole =
+            options.disablePeephole;
+        backendOptions.disableSchedule =
+            options.disableSchedule;
+        backendOptions.disablePreSchedule =
+            options.disablePreSchedule;
+        backend::aarch64::AArch64Backend codegen(
+            m.get(), *out, backendOptions);
         codegen.generate();
         // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
         bool hasParallel = hasParallelForCall(m.get());

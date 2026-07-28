@@ -137,6 +137,7 @@ struct MemsetMatch {
     Value *base = nullptr;
     GetElementPtrInst *inductionGeep = nullptr;
     unsigned inductionIndex = 0;
+    unsigned outerInductionIndex = 0;
     Value *elementCount = nullptr;
     Value *innerBound = nullptr;
     int fillByte = 0;
@@ -407,12 +408,12 @@ bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
     }
     if (!isLoopInvariant(gep->get_operand(0), outer.blocks)) return false;
     if (outerCount != 1 || innerCount != 1) return false;
-  (void)outerVarying;
     if (!varyingIndexHasUnitElementStride(gep, innerVarying, scalarType))
         return false;
 
     match.inductionGeep = gep;
     match.inductionIndex = innerVarying;
+    match.outerInductionIndex = outerVarying;
     match.elementStrideBytes = scalarBytes;
     return true;
 }
@@ -707,6 +708,7 @@ bool tryMatchNestedMemset2D(Loop &outer, Loop &inner, MemsetMatch &match) {
     match.base = local.base;
     match.inductionGeep = local.inductionGeep;
     match.inductionIndex = local.inductionIndex;
+    match.outerInductionIndex = local.outerInductionIndex;
     match.elementCount = outerIV.bound;
     match.innerBound = innerIV.bound;
     match.fillByte = fillByte;
@@ -861,12 +863,15 @@ bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
     return true;
 }
 
-Value *buildMemBase(Value *base, GetElementPtrInst *geep, unsigned inductionIndex,
-                    BasicBlock *preheader, Function *func, Module *module) {
+Value *buildMemBase(Value *base, GetElementPtrInst *geep,
+                    unsigned inductionIndex, unsigned outerInductionIndex,
+                    bool zeroOuterIndex, BasicBlock *preheader,
+                    Function *func, Module *module) {
     if (!base && geep) {
         std::vector<Value *> idxs;
         for (unsigned i = 1; i < geep->num_ops_; ++i) {
-            if (i == inductionIndex)
+            if (i == inductionIndex ||
+                (zeroOuterIndex && i == outerInductionIndex))
                 idxs.push_back(new ConstantInt(module->int32_ty_, 0));
             else
                 idxs.push_back(geep->get_operand(i));
@@ -924,10 +929,11 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
             return false;
     }
 
-    Value *dest = buildMemBase(match.destBase, match.destGeep, match.destIndex,
-                               preheader, func, module);
+    Value *dest = buildMemBase(match.destBase, match.destGeep,
+                               match.destIndex, 0, false, preheader, func,
+                               module);
     Value *src = buildMemBase(match.srcBase, match.srcGeep, match.srcIndex,
-                              preheader, func, module);
+                              0, false, preheader, func, module);
     if (!dest || !src) return false;
 
     std::vector<Value *> args{dest, src, byteCount};
@@ -1041,7 +1047,9 @@ bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
             return false;
     }
 
-    Value *base = buildMemBase(match.base, match.inductionGeep, match.inductionIndex,
+    Value *base = buildMemBase(match.base, match.inductionGeep,
+                               match.inductionIndex,
+                               match.outerInductionIndex, match.nested2D,
                                preheader, func, module);
     if (!base) return false;
 

@@ -6,6 +6,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -150,7 +151,7 @@ private:
 
     const LoopInfo *LI_;
     std::vector<std::unique_ptr<SCEV>> nodes_;
-    std::map<const SCEV*, size_t> scevOrder_;
+    std::unordered_map<const SCEV*, size_t> scevOrder_;
     std::map<std::string, const SCEV*> unique_;
     std::map<Value*, const SCEV*> value_cache_;
     std::set<Value*> visiting_;
