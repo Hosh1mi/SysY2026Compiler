@@ -129,6 +129,7 @@ private:
     IntRange getICmpRange(ICmpInst *icmp, BasicBlock *ctx);
     IntRange getSelectRange(SelectInst *sel, BasicBlock *ctx);
     IntRange getSCEVRange(Value *v, BasicBlock *ctx);
+    IntRange getSCEVRange(const SCEV *s, BasicBlock *ctx);
     IntRange getNormalizedReturnRange();
     IntRange getNormalizedReturnRangeForCall(CallInst *call, BasicBlock *ctx);
     void computeNormalizedReturnSummary();
