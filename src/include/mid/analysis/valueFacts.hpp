@@ -207,29 +207,28 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
 
     if (auto *arg = dynamic_cast<Argument *>(v)) {
         auto *func = arg->parent_;
-        auto *module = func ? func->parent_ : nullptr;
-        if (!func || !module)
+        if (!func || !func->parent_)
             return nonNegativeBranchImpl(v, ctx);
 
         bool foundCaller = false;
-        for (auto *caller : module->function_list_) {
-            if (!caller || caller->is_declaration() || caller == func)
+        // A Function is the final operand of every CallInst and therefore
+        // already owns an exact call-site index in its use list.  Scanning
+        // the whole module for each formal argument makes a function with N
+        // arguments and O(N) IR cost O(N^2), even when it has one call site.
+        for (const Use &use : func->use_list_) {
+            auto *call = dynamic_cast<CallInst *>(use.val_);
+            if (!call || call->num_ops_ == 0 ||
+                call->get_operand(call->num_ops_ - 1) != func ||
+                arg->arg_no_ >= call->num_ops_ - 1)
                 continue;
-            for (auto *bb : caller->basic_blocks_) {
-                for (auto *inst : bb->instr_list_) {
-                    auto *call = dynamic_cast<CallInst *>(inst);
-                    if (!call)
-                        continue;
-                    auto *callee =
-                        dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-                    if (callee != func || arg->arg_no_ >= call->num_ops_ - 1)
-                        continue;
-                    foundCaller = true;
-                    if (!isKnownNonNegativeImpl(call->get_operand(arg->arg_no_),
-                                                call->parent_, depth + 1))
-                        return false;
-                }
-            }
+            auto *caller =
+                call->parent_ ? call->parent_->parent_ : nullptr;
+            if (!caller || caller == func)
+                continue;
+            foundCaller = true;
+            if (!isKnownNonNegativeImpl(call->get_operand(arg->arg_no_),
+                                        call->parent_, depth + 1))
+                return false;
         }
         if (foundCaller)
             return true;
