@@ -5,8 +5,9 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
-#include "include/backend/arm64/codegen.hpp"
+#include "include/backend/backend_depre/arm64/codegen.hpp"
 #include "include/backend/arm64/parallelRuntime.hpp"
+#include "include/backend/arm64/rewrite/codegen.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -31,8 +32,10 @@ struct DriverOptions {
     bool disablePeephole = false;
     bool disableSchedule = false;
     bool disablePreSchedule = false;
+    bool disableParallelizeLoops = false;
     bool dumpMachineInstr = false;
     bool dumpPreMachineInstr = false;
+    bool legacyBackend = false;
 };
 
 static bool parseOptLevel(const std::string &arg, int argc, char **argv,
@@ -84,10 +87,14 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.disableSchedule = true;
         } else if (arg == "--fno-pre-schedule") {
             options.disablePreSchedule = true;
+        } else if (arg == "--fno-parallelize-loops") {
+            options.disableParallelizeLoops = true;
         } else if (arg == "--dump-machine-instr") {
             options.dumpMachineInstr = true;
         } else if (arg == "--dump-pre-machine-instr") {
             options.dumpPreMachineInstr = true;
+        } else if (arg == "--legacy-backend") {
+            options.legacyBackend = true;
         } else if (!arg.empty() && arg[0] == '-') {
             std::cerr << "Unknown option: " << arg << "\n";
             return false;
@@ -182,7 +189,8 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
     }
 }
 
-static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
+static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m,
+                               bool disableParallelizeLoops) {
     if (optLevel < 1)
         return;
 
@@ -214,7 +222,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     });
     addAnalysisDumpIfRequested(pm);
     pm.addPass(std::make_unique<LoopInterchange>());
-    pm.addPass(std::make_unique<ParallelizeLoops>());
+    if (!disableParallelizeLoops)
+        pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<LoopVectorize>());
@@ -320,7 +329,8 @@ int main(int argc, char **argv) {
     PassManager pm;
     pm.setDumpIR(options.dumpIR);
     pm.setVerifyIR(options.verifyIR);
-    buildArm64Pipeline(pm, options.optLevel, m.get());
+    buildArm64Pipeline(pm, options.optLevel, m.get(),
+                       options.disableParallelizeLoops);
     pm.run(m.get());
 
     std::ofstream fout;
@@ -329,9 +339,27 @@ int main(int argc, char **argv) {
         return -1;
 
     if (options.printAsm || options.dumpMachineInstr) {
-        Arm64CodeGen codegen(m.get(), *out);
-        configureBackend(codegen, options);
-        codegen.generate();
+        if (!options.legacyBackend) {
+            backend::aarch64::BackendOptions backendOptions;
+            backendOptions.optimizationLevel = options.optLevel;
+            backendOptions.verifyMachineIR = true;
+            backendOptions.dumpSelectionDAG =
+                options.dumpPreMachineInstr;
+            backendOptions.dumpMachineIR = options.dumpMachineInstr;
+            backendOptions.disablePeephole =
+                options.disablePeephole;
+            backendOptions.disableSchedule =
+                options.disableSchedule;
+            backendOptions.disablePreSchedule =
+                options.disablePreSchedule;
+            backend::aarch64::AArch64Backend codegen(
+                m.get(), *out, backendOptions);
+            codegen.generate();
+        } else {
+            DeprecatedArm64CodeGen codegen(m.get(), *out);
+            configureBackend(codegen, options);
+            codegen.generate();
+        }
         // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
         bool hasParallel = hasParallelForCall(m.get());
         std::vector<int> bodyIds = parallelBodyIds(m.get());
