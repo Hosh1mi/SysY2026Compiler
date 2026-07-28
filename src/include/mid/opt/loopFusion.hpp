@@ -24,6 +24,11 @@
 //       * 基址 MayAlias、非 GEP 的同址访问、维数不一致 → 拒绝。
 //   - 任一侧循环体内（含后代循环）出现 call → 拒绝。
 //
+// 收益保护：
+//   LoopInterchange 紧随本 pass；若任一侧已有依赖分析与 stride 代价模型
+//   认可的 parallel-sink / parallel-float 方案，融合加入的额外 payload
+//   会破坏其 single-child/perfect-nest 形态，因此拒绝融合并保留该方案。
+//
 // 变换（保留 L1 骨架）：
 //   L1.latch 改跳 L2.bodyEntry，L2.latch 改跳 L1.header，
 //   L1.header 的 exit 边改指 L2.exit；L2 的非 IV phi 迁入 L1.header
@@ -34,6 +39,7 @@
 
 #include "../analysis/affineAnalysis.hpp"
 #include "../analysis/argumentAliasAnalysis.hpp"
+#include "../analysis/loopInterchangeAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
 
@@ -80,6 +86,8 @@ private:
                            const Shape &s2,
                            const std::vector<BasicBlock *> &chain) const;
     bool memoryLegal(Loop *L1, Loop *L2, AffineAnalysis &AA) const;
+    const char *profitabilityRejection(
+        Loop *L1, Loop *L2, LoopInterchangeAnalysis &IA) const;
 
     void applyFusion(Function *func, const Shape &s1, const Shape &s2,
                      const std::vector<BasicBlock *> &chain);

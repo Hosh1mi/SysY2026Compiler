@@ -20,6 +20,15 @@ struct ParallelSinkAnalysisResult {
     LoopInterchangeCost cost;
 };
 
+struct ParallelFloatAnalysisResult {
+    bool accepted = false;
+    const char *reason = "not analyzed";
+    Loop *inner = nullptr;
+    Loop *cost_loop = nullptr;
+    LoopAccessInfo access_info;
+    LoopInterchangeCost cost;
+};
+
 class LoopInterchangeAnalysis {
 public:
     LoopInterchangeAnalysis(DependenceAnalysis &DA,
@@ -39,10 +48,12 @@ public:
     bool hasNonIVHeaderPhi(Loop *loop) const;
 
     ParallelSinkAnalysisResult analyzeParallelSink(Loop *loop) const;
+    // 分析“外层携带依赖、唯一内层可并行”的交换候选。该查询同时供
+    // LoopInterchange 实施变换和更早的 pass 保留已知有利形态。
+    ParallelFloatAnalysisResult analyzeParallelFloat(Loop *loop) const;
 
 private:
     DependenceAnalysis *DA_;
     LoopAccessAnalysis *LA_;
     CostModel *CM_;
 };
-

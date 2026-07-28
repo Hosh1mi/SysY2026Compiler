@@ -118,6 +118,11 @@ bool LoopFusion::runOnFunction(Function *func) {
         if (LI.allLoops().empty()) break;
 
         AffineAnalysis AA(LI);
+        DependenceAnalysis DA(LI, AA);
+        DA.setArgAlias(argAA_);
+        LoopAccessAnalysis LA(AA);
+        CostModel CM(AA);
+        LoopInterchangeAnalysis IA(DA, LA, CM);
 
         bool fused = false;
         for (auto &Lp : LI.allLoops()) {
@@ -146,6 +151,10 @@ bool LoopFusion::runOnFunction(Function *func) {
             if (!exitUsesAvailable(L1, s1, L2, s2, chain)) { dbg("exit phi use"); continue; }
             if (!noScalarCrossUse(L1, L2)) { dbg("scalar cross use"); continue; }
             if (!memoryLegal(L1, L2, AA)) { dbg("memory dependence"); continue; }
+            if (const char *why = profitabilityRejection(L1, L2, IA)) {
+                dbg(why);
+                continue;
+            }
 
             if (debugEnabled())
                 std::cerr << "[LoopFusion] fuse " << func->name_ << ": "
@@ -435,6 +444,23 @@ bool LoopFusion::memoryLegal(Loop *L1, Loop *L2, AffineAnalysis &AA) const {
         }
     }
     return true;
+}
+
+const char *LoopFusion::profitabilityRejection(
+    Loop *L1, Loop *L2, LoopInterchangeAnalysis &IA) const {
+    // LoopInterchange 紧随本 pass。若任一原循环已经有由依赖与 stride
+    // 分析证明有利的交换方案，融合会在其循环体中加入另一段 payload：
+    // perfect/single-child nest 随之消失，原方案无法再实施。这里保留已知
+    // 有利的粗粒度循环形态，而不按函数名、循环名或固定嵌套层数猜测。
+    if (IA.analyzeParallelSink(L1).accepted)
+        return "would block L1 parallel sink";
+    if (IA.analyzeParallelFloat(L1).accepted)
+        return "would block L1 parallel float";
+    if (IA.analyzeParallelSink(L2).accepted)
+        return "would block L2 parallel sink";
+    if (IA.analyzeParallelFloat(L2).accepted)
+        return "would block L2 parallel float";
+    return nullptr;
 }
 
 void LoopFusion::applyFusion(Function *func, const Shape &s1, const Shape &s2,
