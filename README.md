@@ -72,40 +72,226 @@ gcc out.s ../lib/libsysy.a -o out
 ./compiler -S test.sy --dump-machine-instr 2> dump.txt # 同时输出汇编
 ```
 
-## ARM64 后端流水线
+## 后端架构
 
-ARM64 后端接收中端已经完成优化的 `Module`，目标为 ARMv8-A/AArch64，调度模型面向 Cortex-A53。后端不会按函数名、测试名或输入模式选择优化，也不进行投机执行。当前流水线按以下顺序运行：
+### 总览
 
-1. **重建 IR CFG**：以每个基本块的 terminator 为事实来源，重新生成 `pre_bbs_` 和 `succ_bbs_`。寄存器分配、支配关系和后端控制流变换不使用中端可能遗留的陈旧边。
-2. **ARM64 IR 准备**：
-   - `-O1` 下，把只在条件分支单侧使用的全局 load 下沉到对应边；变换要求所有 use 都被同一后继支配，并在拆边时同步 PHI 入边。
-   - 把仅被本块条件分支使用的整数 compare 移到 terminator 前，使指令选择可以直接生成 compare + conditional branch。该移动要求 compare 单 use，且不会跨越其操作数定义。
-3. **pre-RA 调度（仅 `-O1`）**：将可调度的 IR 临时降低为带虚拟寄存器、defs/uses、latency 和内存属性的 MachineInstr，在基本块内建立依赖图。只调度含长延迟指令且没有 store 的安全片段；若调度后寄存器压力超过限制，则保留原顺序。
-4. **全局对象分类**：常量进入 `.rodata`，有非零初始化的可写对象进入 `.data`，零初始化对象进入 `.bss`；同时输出外部函数声明。
-5. **逐函数 ARM64 lowering**：各函数可以并行处理，但最终按 IR 中的函数顺序输出。
-   - 查找统一 epilogue，准备 PHI 边 copy。
-   - `-O1` 下计算 live interval、调用穿越信息和冲突图，分别为整数、标量浮点及合法 NEON 值着色；无法分配的值保留栈槽。调用穿越值只使用 ABI 允许的 callee-saved 寄存器。叶函数参数也进入同一套活跃区间和冲突图，ABI 入参寄存器只是偏好色而非全函数永久保留色，因此参数死亡后其寄存器可以被普通值复用。
-   - 选择有利于 fallthrough 的基本块布局。
-   - 对无调用函数，在基本块内识别重复访问最多的全局对象，并从第一次实际访问起用 `x8` 保留其页基址；后续 load/store/GEP 复用同一 `ADRP`，不把地址计算投机提升到未访问该对象的路径。
-   - 生成 prologue、参数搬运、标量/浮点/NEON 指令、地址计算、分支、调用、PHI copy 和 epilogue。ABI 固定返回寄存器由统一的目标寄存器物化接口处理，常量和栈值不再无条件经过 scratch copy；调用参数按并行复制边界处理，常量/静态地址直接写入 ABI 寄存器，内存驻留 SSA 值先物化再复制，避免把 ABI 固定寄存器定义跨过无关计算。常数强度削减只使用对全部输入成立的等价 ARM64 序列，并检查立即数编码范围。
-6. **Machine IR 优化（仅 `-O1`）**：`Arm64MachineOptimizationPipeline` 调度命名 pass，并重复到所有 pass 均无改动。MachineInstr 持久保存 opcode、顺序操作数、defs/uses 和内存属性，后 RA 分析与变换不重新解析汇编字符串。管线统一缓存活跃性；实际 rewrite 后失效，无改动的相邻 pass 复用。fixed point 不设静默迭代截断，若状态重复则报告 rewrite cycle。
-   - `arm64-copy-propagation`：copy forwarding、copy destination retarget 和受限 copy propagation；依赖物理寄存器别名和活跃性。
-   - `arm64-instruction-combine`：立即数、shifted add/sub 和 multiply-add 等 ARM64 合并；检查寄存器宽度及编码合法性。
-   - `arm64-code-motion`：在完整 CFG 活跃性证明下，把纯 add/sub 延迟到条件分支的 fallthrough 路径。
-   - `arm64-memory-optimization`：零值 store、store-load forwarding、死 store、pair load/store 和 post-index；无法证明地址、宽度和屏障安全时不变换。
-   - `arm64-cfg-optimization`：返回块折叠、fallthrough branch 删除、跳转穿透和无用 forwarder 清理。
-   - `arm64-bit-branch-optimization`：在完整活跃性证明下合并位测试分支；删除 NZCV 定义前必须证明 flags 在后继不活跃。
-   - `arm64-canonicalization`：把等价的单寄存器 NEON load/store 规范化为统一形式。
-   - `arm64-local-cse`：消除局部重复的 ADRP 和 frame-address 计算。
-   - `arm64-peephole`：只保留无需数据流或 CFG 分析的自搬移删除。
-   - `arm64-machine-dce`：依据 Machine liveness 删除结果不活跃且无内存、调用或控制流副作用的指令。
-7. **post-RA 调度（仅 `-O1`）**：在物理 MachineInstr 上按 RAW/WAR/WAW、NZCV、barrier 和保守内存依赖构图，以 Cortex-A53 延迟隐藏为目标重排基本块内指令。未知地址一律视为可能别名。调度是最后一个变换阶段；其后不再运行会改变依赖关系或指令延迟的完整 peephole pipeline。
-8. **汇编输出**：把结构化 MachineInstr 打印为 `.text`，再按 `.data`、`.bss`、`.rodata` 输出全局数据。
+后端接收中端已优化的 `Module`，按函数 lowering 为结构化机器 IR，经寄存器分配与栈帧物化后输出汇编。
 
-`-O0` 不运行寄存器分配、pre/post-RA 调度或 Machine IR 优化，使用栈槽和保守 lowering。`--fno-pre-schedule`、`--fno-peephole`、`--fno-schedule` 可分别关闭上述阶段；两个 dump 选项可观察 pre-RA 和最终 Machine IR。
+```
+中端 IR Module
+      │
+      ▼
+ SelectionDAG（按基本块）
+      │  legalize / combine
+      ▼
+ 指令选择 → SSA Machine IR（含 Machine PHI）
+      │
+      ├─ Pre-RA 机器优化 / 调度（-O1）
+      ▼
+ PHI 消除 → 图着色寄存器分配 → 并行拷贝解析
+      │
+      ▼
+ 栈帧 lowering（prologue / epilogue / FI 物化）
+      │
+      ├─ Post-RA 优化 / 块布局 / 调度（-O1）
+      ▼
+ 汇编打印（.text）+ 全局数据段（.data / .bss / .rodata）
+```
 
-NEON lowering 只对目标平台支持的向量类型启用。Cortex-A53 的双精度浮点使用标量 FP 指令，不生成双精度 NEON 向量运算。
+### 两层中间表示
 
-批量测试脚本在 `test/` 下，命名规则：
-- `arm_` 前缀：ARM 原生环境（容器内 `gcc` 直接编译运行）
-- `amd_` 前缀：交叉编译环境（`aarch64-linux-gnu-gcc` + `qemu-aarch64`）
+**SelectionDAG**  
+按基本块将中端 IR 降为目标无关节点：算术、内存、调用、分支、PHI、向量 insert/extract 等。随后做类型合法化；`-O1` 下再做有限 combine（如乘加合并、向量归约识别）。
+
+**Machine IR**  
+指令选择产物。主要结构：
+
+| 结构 | 作用 |
+|------|------|
+| MachineOperand | 虚拟/物理寄存器、立即数、符号、栈槽、条件码、regmask 等 |
+| MachineInstr | opcode + 有序操作数 + 可选内存操作数；可标记并行拷贝组与伪指令 |
+| MachineBasicBlock | 指令序列与 CFG 前驱/后继 |
+| MachineRegisterInfo | 虚拟寄存器及其寄存器类、类型、定义点 |
+| MachineFrameInfo | 局部对象、spill 槽、固定调用帧、callee-saved 集合 |
+| MachineFunction | 上述集合，并带阶段属性位（SSA、含 PHI、已选指令、无 vreg、栈帧已定稿等） |
+
+指令选择后 MIR 保持 **SSA + Machine PHI**；PHI 消除后再进入全局分配。伪指令（帧建立/销毁、帧地址、调用栈调整、spill load/store 等）延迟到栈帧阶段物化。
+
+### 指令选择与目标描述
+
+指令选择为 DAG 模式匹配，手写规则，产出虚拟寄存器与目标 opcode。目标描述集中提供：
+
+- 值类型：`i1` / `i32` / `f32` / 指针 / `v4i32` / `v4f32` / flags（无双精度向量）
+- 寄存器类：GPR32、GPR64、FPR32、NEON128、条件码
+- 指令描述：助记符、副作用、延迟、调度资源类别
+- ABI：整数/指针参数与返回走通用寄存器，浮点/向量走向量寄存器；调用带 clobber/regmask
+
+常量除法在选择阶段做强度削减（magic number），仅使用对全部输入成立的等价序列。NEON 仅覆盖平台支持的单精度/整型四路向量；双精度走标量浮点路径。
+
+DAG combine（`-O1`，指令选择前）另含：`mul+add/sub` → `madd/msub`；四路 `extract` 求和 → 向量归约。
+
+### 寄存器分配与调用约定
+
+PHI 消除将 Machine PHI 转为前驱边 COPY（必要时拆临界边）。随后做活跃区间分析，按寄存器类建立冲突图，使用 **Chaitin-Briggs 乐观图着色**：
+
+- COPY 亲和性影响偏色
+- 跨调用存活值倾向 callee-saved
+- 着色失败则插入 spill 伪指令并多轮重试
+- 参数寄存器是偏好色，而非全程保留色；死亡后可被复用
+
+分配后解析 ABI 并行拷贝，并展开仍依赖 tied COPY 的少量伪形态。`-O0` 仍跑图着色，但跳过多数机器级优化与调度。
+
+### 栈帧
+
+在无虚拟寄存器之后布局栈帧：确定 callee-saved、固定 outgoing 调用区、将 frame index 改为基于 SP/FP 的寻址，并插入 prologue / epilogue。固定 outgoing 区使传参时局部与 spill 地址仍有效，避免调用点抖动 SP。
+
+### 机器级优化
+
+`-O1` 下分 Pre-RA / Post-RA。`--fno-peephole` / `--fno-pre-schedule` / `--fno-schedule` 可分别关闭 peephole 与两段调度。
+
+#### Pre-RA
+
+**常量 CSE（块内）**  
+同一基本块内相同 `mov` 立即数合并；遇 call 清空表，避免凭空制造跨调用活跃区间。
+
+```
+mov  %v1, #42
+...
+mov  %v2, #42      →  删除后者，后续 use 改写为 %v1
+add  %v3, %v2, %v0
+```
+
+**零恒等 → COPY / 自搬移除**  
+`add/sub Rd, Rn, #0` 收成 `COPY`；物理寄存器自搬直接删。
+
+```
+add  %v1, %v0, #0   →  copy %v1, %v0
+mov  x9, x9         →  删除
+```
+
+**向量 pair load/store**  
+同基址、偏移相差 16、中间无内存屏障/call 的两条 `ldr q`/`str q`，且较低偏移 16 对齐且立即数可编码时，合成 `ldp q`/`stp q`。
+
+```
+ldr  q0, [%base, #0]
+ldr  q1, [%base, #16]   →  ldp q0, q1, [%base, #0]
+```
+
+**常量下沉**  
+PHI 消除后：单 use、无副作用的物化指令（`mov` 立即数、零向量、`fmov`、宽度扩展等），可沿**单前驱边**沉到 use 所在块、紧挨 use 之前。
+
+**条件/flags 折叠**  
+去掉「比较结果整数化后再测零」的中间层。
+
+```
+cmp  a, b
+cset %p, lt
+...（中间不改 NZCV）...
+cmp  %p, #0
+csel %r, %t, %f, ne     →  csel %r, %t, %f, lt
+                            （删掉 cset 与第二次 cmp）
+```
+
+```
+cmp  a, b
+cset %p, eq
+cbnz %p, L              →  b.eq L
+```
+
+**死指令删除**  
+SSA 上结果无 use、且无 load/store/call/控制流副作用的指令迭代删除。
+
+**常量 LICM**  
+有规范 preheader 时，把循环不变的 `mov` 立即数/`movi #0` 提到 preheader；嵌套环的 preheader 不再向外层反复提升，避免拉长活跃区间。
+
+**CFG：位测试分支**  
+`and %t, %x, #1` + `cmp %t, #0` + `b.eq/ne`，且 mask/结果均单 use → `tbz`/`tbnz`（测 bit 0）。
+
+```
+mov  %one, #1
+and  %t, %x, %one
+cmp  %t, #0
+b.eq L                  →  tbz %x, #0, L
+```
+
+**CFG：连续右移批处理**  
+结构匹配「按最低位分支；偶数边仅 `asr #1`；latch 仅 `count+=1` 并与奇数哨兵比较」时，用 `rbit`+`clz` 一次跳过多步偶数减半，并按步数累加计数；奇数边若可证下一步必偶，可同样批处理。只认该指令/CFG 形态。
+
+#### Post-RA
+
+**指令展开**  
+向量 `ins` 在目标≠源时先插 `COPY`，再把源改成 tied use，满足 destructive 语义。
+
+**拷贝传播（三类）**
+
+1. **结果回写消除**：运算写临时寄存器，紧接着拷回输入且中间不冲突 → 直接写输入并删 COPY。
+
+```
+add  w9, w0, #1
+mov  w0, w9             →  add w0, w0, #1
+```
+
+2. **前向替换（可证杀死）**：`COPY Rd, Rs` 后，局部 use 改写为 `Rs`，直到 `Rd` 被重定义或经 call/出口可证死亡；call 的参数寄存器与 caller-saved 按 ABI 保守处理。
+
+```
+mov  s16, s0
+fadd s17, s16, s1
+fmov s16, s2            →  fadd s17, s0, s1
+                            （删掉首条 mov；s16 已被重定义）
+```
+
+3. **自搬删除**：`mov xN, xN`（含别名视图）删除。
+
+**寻址：post-index**  
+`ldr/str` 偏移为 0，随后同基址 `add Xn, Xn, #imm`（imm∈[-256,255]，基址非 SP/FP）→ 合成 post-index 并删掉 `add`。
+
+```
+ldr  w0, [x1]
+add  x1, x1, #4         →  ldr w0, [x1], #4
+```
+
+**块布局**  
+先穿透「仅含无条件跳」的 forwarder；再按环深度与 fallthrough 偏好重排，使热路径少跳。
+
+**调度**  
+Pre-RA / Post-RA 共用 list scheduler：按指令延迟与资源，以及 RAW/WAR/WAW、条件码与保守内存依赖构图；未知地址按可能别名处理。Post-RA 调度为终端变换，其后只做校验与打印。
+
+### Peephole 规则表
+
+这里的 peephole 指 `--fno-peephole` 控制的局部/近邻变换（含 Pre-RA peephole 与 Post-RA 拷贝/寻址相关 pass），不含调度与块布局。DAG combine 与指令选择内的常量除法削减不在该开关范围内。
+
+| 阶段 | 规则 | 条件 / 边界 |
+|------|------|-------------|
+| Pre-RA | 常量 CSE | 同块；`MOVi32/64`、`MOVIv4Zero`；call 清表 |
+| Pre-RA | `±#0` → COPY | `ADD/SUB` 立即数为 0 |
+| Pre-RA | 物理自搬删除 | `COPY` 且 defs/uses 同物理寄存器（含别名） |
+| Pre-RA | `ldp`/`stp` 合成 | 同 root；偏移差 16；低偏移 16 对齐且 `#imm/16∈[-64,63]`；中间无 call/冲突访存；非 volatile |
+| Pre-RA | 物化下沉 | 仅 PHI 消除后；单 use；单前驱边；可下沉 opcode 白名单 |
+| Pre-RA（条件） | cset+cmp0+csel 折叠 | `%p` 单 use；中间不改 NZCV；csel 条件为 eq/ne |
+| Pre-RA（条件） | cset+cbz/cbnz → bcc | `%p` 单 use；中间不改 NZCV |
+| Pre-RA（CFG） | and1+cmp0+bcc → tbz/tbnz | mask 与结果均单 use；条件 eq/ne |
+| Pre-RA（CFG） | 连续 `asr #1` 批处理 | 偶数边/latch/continuation 指令形态严格匹配；用 `rbit+clz` |
+| Post-RA | 运算+回写 COPY 合并 | 窗口 ≤6；中间不碰临时/输入；无 call/terminator |
+| Post-RA | COPY 前向替换 | 物理寄存器；同寄存器类；可证 kill；保守处理 call/出口活跃 |
+| Post-RA | 自搬删除 | 同 Post-RA 物理 COPY |
+| Post-RA | post-index 合成 | 基址偏移先为 0；后续同基址 `add`；非 SP/FP |
+| 各阶段 | Machine DCE | SSA；无副作用且 defs 全死 |
+
+### 按优化等级的差异
+
+```
+                    -O0              -O1
+DAG → ISel           ✓                ✓
+Pre-RA 机器优化      ✗                ✓
+Pre-RA 调度          ✗             可关
+PHI 消除 + 图着色    ✓                ✓
+栈帧 lowering        ✓                ✓
+Post-RA 优化/布局    ✗                ✓
+Post-RA 调度         ✗             可关
+```
+
+### 模块级收尾
+
+各函数 `.text` 输出后，按属性将全局对象分到 `.data` / `.bss` / `.rodata`。若中端插入了并行循环入口，由驱动在汇编末尾追加并行 dispatch / runtime 片段（不在上述 per-function 管线内）。
+
