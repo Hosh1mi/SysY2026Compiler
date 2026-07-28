@@ -22,6 +22,8 @@ struct InductionMatch {
     Value *start = nullptr;
     Value *bound = nullptr;
     long long stride = 0;
+    Value *strideValue = nullptr;
+    bool strideIsConstant = true;
     ICmpInst::ICmpOp pred = ICmpInst::ICMP_SLT;
 };
 
@@ -72,36 +74,47 @@ bool getIncoming(PhiInst *phi, const Loop &loop, Value *&start,
     return start && latchValue;
 }
 
-bool matchConstantStride(Value *value, PhiInst *phi, BasicBlock *latch,
-                         BinaryInst *&update, long long &stride) {
+bool matchStride(Value *value, PhiInst *phi, const Loop &loop,
+                 BinaryInst *&update, Value *&strideValue,
+                 long long &stride, bool &strideIsConstant) {
     update = dynamic_cast<BinaryInst *>(value);
+    BasicBlock *latch = loop.singleLatch();
     if (!update || update->parent_ != latch) return false;
 
     Value *lhs = update->get_operand(0);
     Value *rhs = update->get_operand(1);
-    auto *lc = dynamic_cast<ConstantInt *>(lhs);
-    auto *rc = dynamic_cast<ConstantInt *>(rhs);
+
+    auto bindStride = [&](Value *value, bool negate) {
+        if (!isI32(value) || !isLoopInvariant(value, loop)) return false;
+        auto *constant = dynamic_cast<ConstantInt *>(value);
+        if (constant) {
+            stride = negate ? -static_cast<long long>(constant->value_)
+                            : static_cast<long long>(constant->value_);
+            if (stride == 0) return false;
+            strideValue = value;
+            strideIsConstant = true;
+            return true;
+        }
+        if (negate) return false;
+        stride = 0;
+        strideValue = value;
+        strideIsConstant = false;
+        return true;
+    };
 
     if (update->is_add()) {
-        if (lhs == phi && rc) {
-            stride = rc->value_;
-            return stride != 0;
-        }
-        if (rhs == phi && lc) {
-            stride = lc->value_;
-            return stride != 0;
-        }
+        if (lhs == phi) return bindStride(rhs, false);
+        if (rhs == phi) return bindStride(lhs, false);
     }
 
-    if (update->is_sub() && lhs == phi && rc) {
-        stride = -static_cast<long long>(rc->value_);
-        return stride != 0;
-    }
+    if (update->is_sub() && lhs == phi)
+        return bindStride(rhs, true);
 
     return false;
 }
 
-bool matchHeaderGuard(const Loop &loop, PhiInst *phi, long long stride,
+bool matchHeaderGuard(const Loop &loop, PhiInst *phi,
+                      const InductionMatch &match,
                       ICmpInst *&cmp, Value *&bound,
                       ICmpInst::ICmpOp &pred) {
     auto *term = loop.header->get_terminator();
@@ -118,7 +131,7 @@ bool matchHeaderGuard(const Loop &loop, PhiInst *phi, long long stride,
         return false;
 
     pred = cmp->icmp_op_;
-    if (stride > 0) {
+    if (!match.strideIsConstant || match.stride > 0) {
         if (pred != ICmpInst::ICMP_SLT && pred != ICmpInst::ICMP_SLE)
             return false;
     } else {
@@ -170,6 +183,10 @@ RangeAnalysis::IntRange rangeOrI32(RangeAnalysis &RA, Value *v, BasicBlock *ctx)
 
 bool proveArithmeticSafe(const InductionMatch &match, RangeAnalysis &RA,
                          BasicBlock *ctx) {
+    if (!match.strideIsConstant)
+        return match.pred == ICmpInst::ICMP_SLT ||
+               match.pred == ICmpInst::ICMP_SLE;
+
     auto sr = rangeOrI32(RA, match.start, ctx);
     auto br = rangeOrI32(RA, match.bound, ctx);
     if (!sr.valid || !br.valid || sr.isTop || br.isTop || sr.isBottom ||
@@ -216,9 +233,16 @@ void insertBefore(BasicBlock *bb, Instruction *before, Instruction *inst) {
 }
 
 Value *materializeAffine(Module *m, BasicBlock *bb, Instruction *before,
-                         Value *start, Value *iv, long long stride) {
+                         Value *start, Value *iv,
+                         Value *strideValue, long long stride,
+                         bool strideIsConstant) {
     Value *scaled = iv;
-    if (stride != 1) {
+    if (!strideIsConstant) {
+        auto *mul = new BinaryInst(m->int32_ty_, Instruction::Mul, iv,
+                                   strideValue, bb, true);
+        insertBefore(bb, before, mul);
+        scaled = mul;
+    } else if (stride != 1) {
         if (stride == -1) {
             auto *neg = new BinaryInst(m->int32_ty_, Instruction::Sub, i32c(m, 0),
                                        iv, bb, true);
@@ -243,7 +267,6 @@ Value *materializeAffine(Module *m, BasicBlock *bb, Instruction *before,
 Value *materializeTripCount(Module *m, BasicBlock *preheader,
                             const InductionMatch &match) {
     auto *term = preheader->get_terminator();
-    long long absStride = match.stride > 0 ? match.stride : -match.stride;
     bool strict = match.pred == ICmpInst::ICMP_SLT ||
                   match.pred == ICmpInst::ICMP_SGT;
 
@@ -262,7 +285,7 @@ Value *materializeTripCount(Module *m, BasicBlock *preheader,
     preheader->add_instruction_before_inst(noIter, term);
 
     Value *delta = nullptr;
-    if (match.stride > 0)
+    if (!match.strideIsConstant || match.stride > 0)
         delta = new BinaryInst(m->int32_ty_, Instruction::Sub, match.bound,
                                match.start, preheader, true);
     else
@@ -272,6 +295,39 @@ Value *materializeTripCount(Module *m, BasicBlock *preheader,
                                            term);
 
     Value *numerator = delta;
+    if (!match.strideIsConstant) {
+        auto *div = new BinaryInst(m->int32_ty_, Instruction::SDiv, delta,
+                                   match.strideValue, preheader, true);
+        preheader->add_instruction_before_inst(div, term);
+        Value *rawTrip = div;
+
+        if (strict) {
+            auto *rem = new BinaryInst(m->int32_ty_, Instruction::SRem, delta,
+                                       match.strideValue, preheader, true);
+            preheader->add_instruction_before_inst(rem, term);
+            auto *hasRem = new ICmpInst(ICmpInst::ICMP_NE, rem, i32c(m, 0),
+                                        preheader, true);
+            preheader->add_instruction_before_inst(hasRem, term);
+            auto *plusOne = new BinaryInst(m->int32_ty_, Instruction::Add,
+                                           rawTrip, i32c(m, 1), preheader, true);
+            preheader->add_instruction_before_inst(plusOne, term);
+            auto *ceilTrip = new SelectInst(hasRem, plusOne, rawTrip,
+                                            m->int32_ty_);
+            preheader->add_instruction_before_inst(ceilTrip, term);
+            rawTrip = ceilTrip;
+        } else {
+            auto *plusOne = new BinaryInst(m->int32_ty_, Instruction::Add,
+                                           rawTrip, i32c(m, 1), preheader, true);
+            preheader->add_instruction_before_inst(plusOne, term);
+            rawTrip = plusOne;
+        }
+
+        auto *trip = new SelectInst(noIter, i32c(m, 0), rawTrip, m->int32_ty_);
+        preheader->add_instruction_before_inst(trip, term);
+        return trip;
+    }
+
+    long long absStride = match.stride > 0 ? match.stride : -match.stride;
     if (strict && absStride != 1) {
         auto *addBias = new BinaryInst(m->int32_ty_, Instruction::Add, delta,
                                        i32c(m, absStride - 1), preheader, true);
@@ -318,17 +374,25 @@ bool findMatch(Loop &loop, InductionMatch &match) {
         if (!isI32(start) || !isLoopInvariant(start, loop)) continue;
 
         BinaryInst *update = nullptr;
+        Value *strideValue = nullptr;
         long long stride = 0;
-        if (!matchConstantStride(latchValue, phi, latch, update, stride))
+        bool strideIsConstant = true;
+        if (!matchStride(latchValue, phi, loop, update, strideValue, stride,
+                         strideIsConstant))
             continue;
+        InductionMatch candidate;
+        candidate.stride = stride;
+        candidate.strideValue = strideValue;
+        candidate.strideIsConstant = strideIsConstant;
 
         ICmpInst *cmp = nullptr;
         Value *bound = nullptr;
         ICmpInst::ICmpOp pred = ICmpInst::ICMP_SLT;
-        if (!matchHeaderGuard(loop, phi, stride, cmp, bound, pred))
+        if (!matchHeaderGuard(loop, phi, candidate, cmp, bound, pred))
             continue;
         if (!isLoopInvariant(bound, loop)) continue;
-        if (stride == 1 && pred == ICmpInst::ICMP_SLT && isZero(start))
+        if (strideIsConstant && stride == 1 && pred == ICmpInst::ICMP_SLT &&
+            isZero(start))
             continue;
 
         match.phi = phi;
@@ -338,6 +402,8 @@ bool findMatch(Loop &loop, InductionMatch &match) {
         match.start = start;
         match.bound = bound;
         match.stride = stride;
+        match.strideValue = strideValue;
+        match.strideIsConstant = strideIsConstant;
         match.pred = pred;
         return true;
     }
@@ -355,7 +421,9 @@ void replacePhiUses(PhiInst *oldPhi, Value *iv, Value *outsideValue,
         Value *replacement = outsideValue;
         if (user->parent_ && loop.blocks.count(user->parent_)) {
             replacement = materializeAffine(module, user->parent_, user,
-                                            match.start, iv, match.stride);
+                                            match.start, iv, match.strideValue,
+                                            match.stride,
+                                            match.strideIsConstant);
         }
         user->set_operand(use.arg_no_, replacement);
     }
@@ -397,7 +465,9 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
 
     Value *exitValue = materializeAffine(module, loop.preheader,
                                          loop.preheader->get_terminator(),
-                                         match.start, trip, match.stride);
+                                         match.start, trip, match.strideValue,
+                                         match.stride,
+                                         match.strideIsConstant);
 
     auto *newCmp = new ICmpInst(ICmpInst::ICMP_SLT, iv, trip, loop.header,
                                 true);
@@ -418,7 +488,10 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
     if (debugEnabled())
         std::cerr << "[IndVarSimplify] canonicalized func=" << func->name_
                   << " header=" << loop.header->name_
-                  << " stride=" << match.stride << "\n";
+                  << " stride="
+                  << (match.strideIsConstant ? std::to_string(match.stride)
+                                             : "<loop-invariant>")
+                  << "\n";
     return true;
 }
 
