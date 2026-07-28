@@ -42,8 +42,7 @@ bool LoopAccessAnalysis::isAffineOverAncestorIVs(
         for (auto &term : expr.coeffs) {
             bool isAncestor = false;
             for (Loop *loop = inner; loop; loop = loop->parent) {
-                if (loop->canonicalIV == term.first ||
-                    loop->inductionIV == term.first) {
+                if (loop->canonicalIV == term.first) {
                     isAncestor = true;
                     break;
                 }

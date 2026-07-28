@@ -203,6 +203,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addRepeatGroup(/*maxRounds=*/8, [](PassManager &pm) {
         pm.addPass(std::make_unique<LoopSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
+        pm.addPass(std::make_unique<IndVarSimplify>());
+        pm.addPass(std::make_unique<LCSSA>());
         pm.addPass(std::make_unique<SimpleLoopUnswitch>());
         pm.addPass(std::make_unique<LoopRotate>());
         pm.addPass(std::make_unique<PhiOpSink>());
