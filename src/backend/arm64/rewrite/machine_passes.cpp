@@ -755,7 +755,8 @@ bool AArch64ConditionOptimizer::run(
              set != instructions.end();) {
             if (set->opcode() != Opcode::CSETW ||
                 set->operands().size() < 2 ||
-                !set->operands()[0].isVirtualRegister()) {
+                !set->operands()[0].isVirtualRegister() ||
+                !set->operands()[0].isDef) {
                 ++set;
                 continue;
             }
@@ -767,19 +768,18 @@ bool AArch64ConditionOptimizer::run(
             }
 
             auto booleanCompare = std::next(set);
+            auto isBooleanCompare = [&](const MachineInstr &instruction) {
+                return instruction.opcode() == Opcode::CMPWri &&
+                       instruction.operands().size() >= 2 &&
+                       instruction.operands()[0].isVirtualRegister() &&
+                       instruction.operands()[0].virtualRegister() ==
+                           conditionReg &&
+                       instruction.operands()[1].kind() ==
+                           MachineOperand::Kind::Immediate &&
+                       instruction.operands()[1].immediate() == 0;
+            };
             while (booleanCompare != instructions.end()) {
-                bool candidate =
-                    booleanCompare->opcode() == Opcode::CMPWri &&
-                    booleanCompare->operands().size() >= 2 &&
-                    booleanCompare->operands()[0]
-                        .isVirtualRegister() &&
-                    booleanCompare->operands()[0]
-                            .virtualRegister() ==
-                        conditionReg &&
-                    booleanCompare->operands()[1].kind() ==
-                        MachineOperand::Kind::Immediate &&
-                    booleanCompare->operands()[1].immediate() == 0;
-                if (candidate)
+                if (isBooleanCompare(*booleanCompare))
                     break;
                 const InstrDesc &descriptor =
                     InstrInfo::get(booleanCompare->opcode());
@@ -799,7 +799,7 @@ bool AArch64ConditionOptimizer::run(
                 ++booleanCompare;
             }
             if (booleanCompare == instructions.end() ||
-                booleanCompare->opcode() != Opcode::CMPWri) {
+                !isBooleanCompare(*booleanCompare)) {
                 ++set;
                 continue;
             }
@@ -858,7 +858,8 @@ bool AArch64ConditionOptimizer::run(
         for (auto it = instructions.begin(); it != instructions.end();) {
             if (it->opcode() != Opcode::CSETW ||
                 it->operands().size() < 2 ||
-                !it->operands()[0].isVirtualRegister()) {
+                !it->operands()[0].isVirtualRegister() ||
+                !it->operands()[0].isDef) {
                 ++it;
                 continue;
             }

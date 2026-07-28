@@ -79,6 +79,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
                "frame was finalized before register allocation");
 
     std::unordered_map<VReg, const MachineInstr *> definitions;
+    std::unordered_set<const MachineInstr *> instructions;
     for (std::size_t blockIndex = 0;
          blockIndex < function.blocks().size(); ++blockIndex) {
         const auto &block = function.blocks()[blockIndex];
@@ -107,6 +108,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
         bool sawTerminator = false;
         unsigned instructionIndex = 0;
         for (const auto &instruction : block->instructions()) {
+            instructions.insert(&instruction);
             const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
             if (descriptor.opcode == Opcode::Invalid)
                 report(block.get(), instructionIndex,
@@ -264,6 +266,10 @@ MachineVerifier::verify(const MachineFunction &function) const {
                 info.definition != definition->second)
                 report(nullptr, 0,
                        "MachineRegisterInfo definition does not match MIR");
+            if (info.definition && !instructions.count(info.definition))
+                report(nullptr, 0,
+                       "MachineRegisterInfo definition for vreg %" +
+                           std::to_string(reg) + " is not in MIR");
         }
     }
 
