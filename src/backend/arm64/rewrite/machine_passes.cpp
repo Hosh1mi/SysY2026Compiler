@@ -3,6 +3,7 @@
 #include <deque>
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -33,6 +34,25 @@ bool sameRegister(const MachineOperand &lhs,
         return RegisterInfo::aliases(lhs.physicalRegister(),
                                      rhs.physicalRegister());
     return false;
+}
+
+bool isCallArgumentRegister(PhysReg reg) {
+    return (reg >= PhysReg::X0 && reg <= PhysReg::X7) ||
+           (reg >= PhysReg::V0 && reg <= PhysReg::V7);
+}
+
+bool isReturnRegister(PhysReg reg) {
+    return reg == PhysReg::X0 || reg == PhysReg::V0;
+}
+
+PhysReg integerArgumentRegister(unsigned index) {
+    return static_cast<PhysReg>(
+        static_cast<unsigned>(PhysReg::X0) + index);
+}
+
+PhysReg vectorArgumentRegister(unsigned index) {
+    return static_cast<PhysReg>(
+        static_cast<unsigned>(PhysReg::V0) + index);
 }
 
 bool removableInstruction(const MachineInstr &instruction) {
@@ -1507,6 +1527,183 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
         }
     }
 
+    using PhysSet = std::unordered_set<PhysReg>;
+    std::unordered_map<MachineBasicBlock *, PhysSet> physicalUses;
+    std::unordered_map<MachineBasicBlock *, PhysSet> physicalDefs;
+    std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveIn;
+    std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveOut;
+    auto addUse = [&](MachineBasicBlock *block, PhysReg reg) {
+        if (!physicalDefs[block].count(reg))
+            physicalUses[block].insert(reg);
+    };
+    for (auto &owned : function.blocks()) {
+        MachineBasicBlock *block = owned.get();
+        for (const MachineInstr &instruction :
+             block->instructions()) {
+            for (const MachineOperand &operand :
+                 instruction.operands()) {
+                if (operand.isPhysicalRegister() &&
+                    !operand.isDef)
+                    addUse(block, operand.physicalRegister());
+            }
+            if (instruction.isCall()) {
+                for (unsigned index = 0; index < 8; ++index) {
+                    addUse(block, integerArgumentRegister(index));
+                    addUse(block, vectorArgumentRegister(index));
+                }
+            } else if (instruction.opcode() == Opcode::RET) {
+                addUse(block, PhysReg::X0);
+                addUse(block, PhysReg::V0);
+                addUse(block, PhysReg::X30);
+            }
+            // Uses are collected before definitions so an allocated
+            // read/modify/write such as `add x9, x9, #1` contributes x9 to
+            // the block's live-in set when it is the first mention.
+            for (const MachineOperand &operand :
+                 instruction.operands())
+                if (operand.isPhysicalRegister() &&
+                    operand.isDef)
+                    physicalDefs[block].insert(
+                        operand.physicalRegister());
+            if (instruction.isCall()) {
+                for (unsigned raw =
+                         static_cast<unsigned>(PhysReg::X0);
+                     raw <= static_cast<unsigned>(PhysReg::V31);
+                     ++raw) {
+                    PhysReg reg = static_cast<PhysReg>(raw);
+                    if (RegisterInfo::isCallerSaved(reg))
+                        physicalDefs[block].insert(reg);
+                }
+            }
+        }
+    }
+    bool livenessChanged = true;
+    while (livenessChanged) {
+        livenessChanged = false;
+        for (auto block = function.blocks().rbegin();
+             block != function.blocks().rend(); ++block) {
+            MachineBasicBlock *current = block->get();
+            PhysSet nextOut;
+            for (MachineBasicBlock *successor :
+                 current->successors())
+                nextOut.insert(
+                    physicalLiveIn[successor].begin(),
+                    physicalLiveIn[successor].end());
+            PhysSet nextIn = physicalUses[current];
+            for (PhysReg reg : nextOut)
+                if (!physicalDefs[current].count(reg))
+                    nextIn.insert(reg);
+            if (nextOut != physicalLiveOut[current] ||
+                nextIn != physicalLiveIn[current]) {
+                physicalLiveOut[current] = std::move(nextOut);
+                physicalLiveIn[current] = std::move(nextIn);
+                livenessChanged = true;
+            }
+        }
+    }
+
+    // Forward a physical copy through its local uses until the copied value
+    // is provably killed.  This handles call results such as
+    // `COPY s16, s0` without treating calls as transparent: argument
+    // registers are implicit call uses, caller-saved temporaries are call
+    // clobbers, and branch edges remain conservatively live-out.
+    for (auto &block : function.blocks()) {
+        auto &instructions = block->instructions();
+        for (auto copy = instructions.begin();
+             copy != instructions.end();) {
+            if (copy->opcode() != Opcode::COPY ||
+                copy->operands().size() != 2 ||
+                !copy->operands()[0].isPhysicalRegister() ||
+                !copy->operands()[0].isDef ||
+                !copy->operands()[1].isPhysicalRegister() ||
+                copy->operands()[0].regClass() !=
+                    copy->operands()[1].regClass()) {
+                ++copy;
+                continue;
+            }
+            PhysReg destination =
+                copy->operands()[0].physicalRegister();
+            PhysReg source =
+                copy->operands()[1].physicalRegister();
+            if (RegisterInfo::aliases(destination, source)) {
+                ++copy;
+                continue;
+            }
+
+            bool sourceAvailable = true;
+            bool killed = false;
+            bool blocked = false;
+            std::vector<MachineOperand *> rewrites;
+            for (auto scan = std::next(copy);
+                 scan != instructions.end(); ++scan) {
+                if (scan->isCall()) {
+                    if (isCallArgumentRegister(destination)) {
+                        blocked = true;
+                    } else if (
+                        RegisterInfo::isCallerSaved(destination)) {
+                        killed = true;
+                    }
+                    break;
+                }
+                if (scan->isTerminator()) {
+                    if (!physicalLiveOut[block.get()].count(
+                            destination) &&
+                        (scan->opcode() != Opcode::RET ||
+                         (!isReturnRegister(destination) &&
+                          destination != PhysReg::X30)))
+                        killed = true;
+                    else
+                        blocked = true;
+                    break;
+                }
+
+                bool definesDestination = false;
+                bool definesSource = false;
+                for (MachineOperand &operand : scan->operands()) {
+                    if (!operand.isPhysicalRegister())
+                        continue;
+                    PhysReg reg = operand.physicalRegister();
+                    if (operand.isDef) {
+                        definesDestination |= RegisterInfo::aliases(
+                            reg, destination);
+                        definesSource |= RegisterInfo::aliases(
+                            reg, source);
+                        continue;
+                    }
+                    if (!RegisterInfo::aliases(reg, destination))
+                        continue;
+                    if (!sourceAvailable || operand.tiedTo >= 0 ||
+                        operand.regClass() !=
+                            copy->operands()[1].regClass()) {
+                        blocked = true;
+                        break;
+                    }
+                    rewrites.push_back(&operand);
+                }
+                if (blocked)
+                    break;
+                if (definesDestination) {
+                    killed = true;
+                    break;
+                }
+                if (definesSource)
+                    sourceAvailable = false;
+            }
+            if (blocked || !killed) {
+                ++copy;
+                continue;
+            }
+            for (MachineOperand *operand : rewrites) {
+                bool implicit = operand->isImplicit;
+                *operand = MachineOperand::physReg(
+                    source, copy->operands()[1].regClass(),
+                    false, implicit);
+            }
+            copy = instructions.erase(copy);
+            changed = true;
+        }
+    }
+
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         for (auto copy = instructions.begin();
@@ -1552,6 +1749,10 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
                             RegisterInfo::aliases(reg, source);
                     } else if (RegisterInfo::aliases(
                                    reg, destination)) {
+                        if (operand.tiedTo >= 0) {
+                            blocked = true;
+                            break;
+                        }
                         if (operand.regClass() != sourceClass) {
                             blocked = true;
                             break;
@@ -1581,6 +1782,46 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
                     source, sourceClass, isDef, implicit);
             }
             copy = instructions.erase(copy);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool PostRAInstructionExpansion::run(
+    MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+    bool changed = false;
+    for (auto &block : function.blocks()) {
+        auto &instructions = block->instructions();
+        for (auto insert = instructions.begin();
+             insert != instructions.end(); ++insert) {
+            if (insert->opcode() != Opcode::INSv4i32 &&
+                insert->opcode() != Opcode::INSv4f32)
+                continue;
+            if (insert->operands().size() != 4 ||
+                !insert->operands()[0].isPhysicalRegister() ||
+                !insert->operands()[0].isDef ||
+                !insert->operands()[1].isPhysicalRegister())
+                throw std::logic_error(
+                    "malformed vector insert after register allocation");
+            MachineOperand &destination = insert->operands()[0];
+            MachineOperand &source = insert->operands()[1];
+            if (!sameRegister(destination, source)) {
+                MachineInstr copy(Opcode::COPY);
+                copy.addOperand(MachineOperand::physReg(
+                                    destination.physicalRegister(),
+                                    RegClass::NEON128, true))
+                    .addOperand(MachineOperand::physReg(
+                        source.physicalRegister(),
+                        RegClass::NEON128));
+                instructions.insert(insert, std::move(copy));
+            }
+            MachineOperand tiedUse = MachineOperand::physReg(
+                destination.physicalRegister(), RegClass::NEON128);
+            tiedUse.tiedTo = 0;
+            source = std::move(tiedUse);
             changed = true;
         }
     }
@@ -1728,6 +1969,50 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         MachineBasicBlock *current = start;
         while (current && placed.insert(current).second) {
             order.push_back(current);
+            MachineBasicBlock *preferredFallthrough = nullptr;
+            unsigned deepestSuccessor = 0;
+            bool depthsDiffer = false;
+            if (!current->successors().empty()) {
+                deepestSuccessor =
+                    current->successors().front()->loopDepth;
+                unsigned shallowestSuccessor = deepestSuccessor;
+                for (MachineBasicBlock *successor :
+                     current->successors()) {
+                    deepestSuccessor =
+                        std::max(deepestSuccessor,
+                                 successor->loopDepth);
+                    shallowestSuccessor =
+                        std::min(shallowestSuccessor,
+                                 successor->loopDepth);
+                }
+                depthsDiffer =
+                    deepestSuccessor != shallowestSuccessor;
+            }
+
+            // In the absence of profile data, natural-loop membership is
+            // the strongest static frequency signal.  When both arms have
+            // the same loop depth, preserve the explicit conditional edge
+            // and lay out the unconditional successor as fallthrough.  This
+            // avoids arbitrarily inverting source CFG branches merely
+            // because the conditional target has a single predecessor.
+            if (!depthsDiffer &&
+                current->instructions().size() >= 2) {
+                auto unconditional =
+                    std::prev(current->instructions().end());
+                auto conditional = std::prev(unconditional);
+                bool hasConditional =
+                    conditional->opcode() == Opcode::Bcc ||
+                    conditional->opcode() == Opcode::CBZ ||
+                    conditional->opcode() == Opcode::CBNZ;
+                if (unconditional->opcode() == Opcode::B &&
+                    hasConditional &&
+                    unconditional->operands().size() == 1 &&
+                    unconditional->operands()[0].kind() ==
+                        MachineOperand::Kind::BasicBlock)
+                    preferredFallthrough =
+                        unconditional->operands()[0].basicBlock();
+            }
+
             MachineBasicBlock *best = nullptr;
             int bestScore = -1;
             for (unsigned i = 0;
@@ -1738,7 +2023,14 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                     continue;
                 int score =
                     successor->predecessors().size() == 1 ? 100 : 0;
-                score += i == 0 ? 10 : 0;
+                if (depthsDiffer &&
+                    successor->loopDepth == deepestSuccessor)
+                    score += 300;
+                else if (!depthsDiffer &&
+                         successor == preferredFallthrough)
+                    score += 200;
+                else if (!preferredFallthrough && i == 0)
+                    score += 10;
                 score += successor->number() > current->number()
                              ? 1 : 0;
                 if (score > bestScore) {

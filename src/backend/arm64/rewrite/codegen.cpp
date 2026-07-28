@@ -59,6 +59,7 @@ void AArch64Backend::generate() {
     A53MachineScheduler scheduler;
     GraphColoringRegisterAllocator registerAllocator;
     PostRAParallelCopyResolver parallelCopyResolver;
+    PostRAInstructionExpansion instructionExpansion;
     PostRACopyPropagation copyPropagation;
     PostRAAddressingOptimizer addressingOptimizer;
     MachineBlockPlacement blockPlacement;
@@ -138,6 +139,7 @@ void AArch64Backend::generate() {
         registerAllocator.run(*machineFunction);
         trace(function, "parallel-copies");
         parallelCopyResolver.run(*machineFunction);
+        instructionExpansion.run(*machineFunction);
         if (options_.optimizationLevel >= 1 &&
             !options_.disablePeephole)
             copyPropagation.run(*machineFunction);

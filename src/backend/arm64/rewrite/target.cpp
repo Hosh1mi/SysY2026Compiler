@@ -248,12 +248,12 @@ const InstrDesc &descriptor(Opcode opcode) {
     dynamic.latency = 1;
     dynamic.resource = SchedResource::ALU;
     switch (opcode) {
-    case Opcode::LDRWui: case Opcode::LDRWro:
+    case Opcode::LDRWui: case Opcode::LDRWlo: case Opcode::LDRWro:
     case Opcode::LDRWpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::LDRSui: case Opcode::LDRSro:
+    case Opcode::LDRSui: case Opcode::LDRSlo: case Opcode::LDRSro:
     case Opcode::LDRSpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
@@ -262,21 +262,21 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::LDRQui: case Opcode::LDRQpost:
+    case Opcode::LDRQui: case Opcode::LDRQlo: case Opcode::LDRQpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::LDRXui: case Opcode::LDRXpost:
+    case Opcode::LDRXui: case Opcode::LDRXlo: case Opcode::LDRXpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::STRWui: case Opcode::STRWro:
+    case Opcode::STRWui: case Opcode::STRWlo: case Opcode::STRWro:
     case Opcode::STRWpost:
-    case Opcode::STRSui: case Opcode::STRSro:
+    case Opcode::STRSui: case Opcode::STRSlo: case Opcode::STRSro:
     case Opcode::STRSpost:
     case Opcode::STRDui:
-    case Opcode::STRQui: case Opcode::STRQpost:
-    case Opcode::STRXui: case Opcode::STRXpost:
+    case Opcode::STRQui: case Opcode::STRQlo: case Opcode::STRQpost:
+    case Opcode::STRXui: case Opcode::STRXlo: case Opcode::STRXpost:
         dynamic.mnemonic = "str"; dynamic.explicitOperands = 3;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
         break;
