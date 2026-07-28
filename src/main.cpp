@@ -159,7 +159,12 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<EarlyCSE>());
     pm.addPass(std::make_unique<GlobalScalarPromotion>());
     pm.addPass(std::make_unique<Mem2Reg>());
+    pm.addPass(std::make_unique<Reassociate>());
     addDeepCleanup(pm);
+    // Inlining initially leaves arithmetic in small cloned blocks.  Run the
+    // linear combiner again after block merging exposes the complete DAG.
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
 }
 
 static void addAnalysisDumpIfRequested(PassManager &pm) {

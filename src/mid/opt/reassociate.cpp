@@ -1,12 +1,268 @@
 #include "../../include/mid/opt/reassociate.hpp"
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <iostream>
 #include <queue>
 
+namespace {
+
+constexpr unsigned kMaxLinearDepth = 16;
+constexpr unsigned kMaxLinearVisits = 128;
+constexpr unsigned kMaxLinearTerms = 48;
+
+struct LinearTerm {
+    Value *value;
+    std::uint32_t coefficient;
+};
+
+struct LinearForm {
+    std::uint32_t constant = 0;
+    std::vector<LinearTerm> terms;
+    std::unordered_map<Value *, size_t> termIndex;
+    std::unordered_set<BinaryInst *> expanded;
+    unsigned visits = 0;
+};
+
+static bool isI32(Value *value) {
+    auto *type = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
+    return type && type->num_bits_ == 32;
+}
+
+static int signedBits(std::uint32_t bits) {
+    std::int32_t value;
+    static_assert(sizeof(value) == sizeof(bits), "i32 bit width mismatch");
+    std::memcpy(&value, &bits, sizeof(value));
+    return static_cast<int>(value);
+}
+
+static bool addLinearTerm(LinearForm &form, Value *value,
+                          std::uint32_t coefficient) {
+    if (coefficient == 0)
+        return true;
+    auto found = form.termIndex.find(value);
+    if (found != form.termIndex.end()) {
+        auto &term = form.terms[found->second];
+        term.coefficient += coefficient;
+        return true;
+    }
+    if (form.terms.size() >= kMaxLinearTerms)
+        return false;
+    form.termIndex[value] = form.terms.size();
+    form.terms.push_back({value, coefficient});
+    return true;
+}
+
+static bool collectLinear(Value *value, std::uint32_t scale, BasicBlock *bb,
+                          unsigned depth, LinearForm &form) {
+    if (++form.visits > kMaxLinearVisits || depth > kMaxLinearDepth)
+        return false;
+
+    if (auto *constant = dynamic_cast<ConstantInt *>(value)) {
+        form.constant +=
+            scale * static_cast<std::uint32_t>(constant->value_);
+        return true;
+    }
+
+    auto *binary = dynamic_cast<BinaryInst *>(value);
+    if (!binary || binary->parent_ != bb || !isI32(binary))
+        return addLinearTerm(form, value, scale);
+
+    switch (binary->op_id_) {
+    case Instruction::Add:
+        form.expanded.insert(binary);
+        return collectLinear(binary->get_operand(0), scale, bb, depth + 1,
+                             form) &&
+               collectLinear(binary->get_operand(1), scale, bb, depth + 1,
+                             form);
+    case Instruction::Sub:
+        form.expanded.insert(binary);
+        return collectLinear(binary->get_operand(0), scale, bb, depth + 1,
+                             form) &&
+               collectLinear(binary->get_operand(1), 0u - scale, bb,
+                             depth + 1, form);
+    case Instruction::Mul: {
+        ConstantInt *constant =
+            dynamic_cast<ConstantInt *>(binary->get_operand(1));
+        Value *other = binary->get_operand(0);
+        if (!constant) {
+            constant = dynamic_cast<ConstantInt *>(binary->get_operand(0));
+            other = binary->get_operand(1);
+        }
+        if (!constant)
+            return addLinearTerm(form, value, scale);
+        form.expanded.insert(binary);
+        return collectLinear(
+            other,
+            scale * static_cast<std::uint32_t>(constant->value_), bb,
+            depth + 1, form);
+    }
+    default:
+        return addLinearTerm(form, value, scale);
+    }
+}
+
+static int arithmeticCost(BinaryInst *inst) {
+    if (!inst)
+        return 0;
+    return inst->op_id_ == Instruction::Mul ? 2 : 1;
+}
+
+static int removableCost(BinaryInst *root, const LinearForm &form) {
+    std::unordered_map<BinaryInst *, bool> memo;
+    std::unordered_set<BinaryInst *> active;
+    std::function<bool(BinaryInst *)> isRemovable =
+        [&](BinaryInst *inst) -> bool {
+        if (inst == root)
+            return true;
+        auto known = memo.find(inst);
+        if (known != memo.end())
+            return known->second;
+        if (!active.insert(inst).second)
+            return false;
+
+        bool removable = true;
+        for (auto &use : inst->use_list_) {
+            auto *user = dynamic_cast<BinaryInst *>(use.val_);
+            if (!user || !form.expanded.count(user) || !isRemovable(user)) {
+                removable = false;
+                break;
+            }
+        }
+        active.erase(inst);
+        memo[inst] = removable;
+        return removable;
+    };
+
+    int cost = 0;
+    for (auto *inst : form.expanded)
+        if (isRemovable(inst))
+            cost += arithmeticCost(inst);
+    return cost;
+}
+
+static int rebuiltCost(const LinearForm &form) {
+    int valueCount = form.constant != 0 ? 1 : 0;
+    int cost = 0;
+    bool hasNonNegativeSeed = form.constant != 0;
+
+    for (const auto &term : form.terms) {
+        if (term.coefficient == 0)
+            continue;
+        ++valueCount;
+        if (term.coefficient != 1 &&
+            term.coefficient != UINT32_MAX) {
+            cost += 2;
+            hasNonNegativeSeed = true;
+        } else if (term.coefficient == 1) {
+            hasNonNegativeSeed = true;
+        }
+    }
+
+    if (valueCount == 0)
+        return 0;
+    cost += valueCount - 1;
+    if (!hasNonNegativeSeed)
+        ++cost;
+    return cost;
+}
+
+static Value *buildLinear(const LinearForm &form, BinaryInst *root) {
+    BasicBlock *bb = root->parent_;
+    Type *type = root->type_;
+    std::vector<Value *> positive;
+    std::vector<Value *> negative;
+
+    for (const auto &term : form.terms) {
+        std::uint32_t coefficient = term.coefficient;
+        if (coefficient == 0)
+            continue;
+        if (coefficient == UINT32_MAX) {
+            negative.push_back(term.value);
+            continue;
+        }
+        if (coefficient == 1) {
+            positive.push_back(term.value);
+            continue;
+        }
+        auto *scaled = Reassociate::createBinary(
+            Instruction::Mul, term.value,
+            new ConstantInt(type, signedBits(coefficient)), bb, root);
+        positive.push_back(scaled);
+    }
+
+    Value *result = nullptr;
+    if (form.constant != 0)
+        result = new ConstantInt(type, signedBits(form.constant));
+
+    for (Value *term : positive) {
+        if (!result) {
+            result = term;
+            continue;
+        }
+        result = Reassociate::createBinary(Instruction::Add, result, term,
+                                           bb, root);
+    }
+    for (Value *term : negative) {
+        if (!result)
+            result = new ConstantInt(type, 0);
+        result = Reassociate::createBinary(Instruction::Sub, result, term,
+                                           bb, root);
+    }
+    if (!result)
+        result = new ConstantInt(type, 0);
+    return result;
+}
+
+static bool tryReassociateLinear(BinaryInst *root) {
+    if (!root || !root->parent_ || !isI32(root) ||
+        (root->op_id_ != Instruction::Add &&
+         root->op_id_ != Instruction::Sub))
+        return false;
+
+    LinearForm form;
+    if (!collectLinear(root, 1, root->parent_, 0, form))
+        return false;
+
+    form.terms.erase(
+        std::remove_if(form.terms.begin(), form.terms.end(),
+                       [](const LinearTerm &term) {
+                           return term.coefficient == 0;
+                       }),
+        form.terms.end());
+
+    int oldCost = removableCost(root, form);
+    int newCost = rebuiltCost(form);
+    if (std::getenv("DEBUG_REASSOCIATE_LINEAR")) {
+        std::cerr << "[ReassociateLinear] " << root->print()
+                  << " old=" << oldCost << " new=" << newCost
+                  << " terms=" << form.terms.size() << "\n";
+    }
+    if (newCost >= oldCost)
+        return false;
+
+    Value *replacement = buildLinear(form, root);
+    root->replace_all_use_with(replacement);
+    root->parent_->delete_instr(root);
+    return true;
+}
+
+} // namespace
+
 void Reassociate::execute(Module *module) {
+    changed_ = false;
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
         runOnFunction(func);
     }
+}
+
+PreservedAnalyses Reassociate::execute(Module *module, AnalysisManager &AM) {
+    (void)AM;
+    execute(module);
+    return changed_ ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 void Reassociate::runOnFunction(Function *func) {
@@ -69,6 +325,7 @@ void Reassociate::swapOperands(Instruction *inst) {
     Value *tmp = inst->get_operand(0);
     inst->set_operand(0, inst->get_operand(1));
     inst->set_operand(1, tmp);
+    changed_ = true;
 }
 
 BinaryInst *Reassociate::createBinary(Instruction::OpID op, Value *v1, Value *v2,
@@ -303,6 +560,11 @@ Value *Reassociate::optAddTree(BinaryInst *root, std::vector<ValueEntry> &ops) {
 // reassociate: main entry for a binary instruction
 // -----------------------------------------------------------------------
 void Reassociate::reassociate(BinaryInst *inst) {
+    if (tryReassociateLinear(inst)) {
+        changed_ = true;
+        return;
+    }
+
     Instruction::OpID op = inst->op_id_;
     if (op != Instruction::Add && op != Instruction::Mul) return;
 
@@ -331,6 +593,7 @@ void Reassociate::reassociate(BinaryInst *inst) {
     if (leafOps.size() == 1) {
         inst->replace_all_use_with(leafOps[0]);
         inst->parent_->delete_instr(inst);
+        changed_ = true;
         return;
     }
 
@@ -363,6 +626,7 @@ void Reassociate::reassociate(BinaryInst *inst) {
     if (optResult) {
         inst->replace_all_use_with(optResult);
         inst->parent_->delete_instr(inst);
+        changed_ = true;
         return;
     }
 
@@ -415,6 +679,7 @@ void Reassociate::reassociate(BinaryInst *inst) {
     if (optResult) {
         inst->replace_all_use_with(optResult);
         inst->parent_->delete_instr(inst);
+        changed_ = true;
         return;
     }
 
@@ -427,5 +692,6 @@ void Reassociate::reassociate(BinaryInst *inst) {
     if (newTree && newTree != inst) {
         inst->replace_all_use_with(newTree);
         inst->parent_->delete_instr(inst);
+        changed_ = true;
     }
 }
