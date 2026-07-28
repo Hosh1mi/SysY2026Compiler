@@ -32,6 +32,7 @@
 #include "idiomRecognize.hpp"
 #include "loopRepFold.hpp"
 #include "loopDistribution.hpp"
+#include "loopFusion.hpp"
 #include "loopUnroll.hpp"
 #include "reassociate.hpp"
 #include "loopVectorize.hpp"

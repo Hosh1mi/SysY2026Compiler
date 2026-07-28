@@ -202,8 +202,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addRepeatGroup(/*maxRounds=*/8, [](PassManager &pm) {
         pm.addPass(std::make_unique<LoopSimplify>());
-        // pm.addPass(std::make_unique<LCSSA>());
-        // pm.addPass(std::make_unique<IndVarSimplify>());
+        pm.addPass(std::make_unique<LCSSA>());
+        pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
         pm.addPass(std::make_unique<SimpleLoopUnswitch>());
         pm.addPass(std::make_unique<LoopRotate>());
@@ -215,6 +215,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
         pm.addPass(std::make_unique<LoopDeletion>());
     });
     addAnalysisDumpIfRequested(pm);
+    pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
