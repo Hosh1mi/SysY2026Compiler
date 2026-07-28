@@ -183,7 +183,7 @@ bool applyParallelSink(Function *func, Loop *K) {
     };
     Module  *module = func->parent_;
     Type    *i32    = module->int32_ty_;
-    PhiInst *kIV    = K->getInductionIV();
+    PhiInst *kIV    = K->canonicalIV;
     Value   *kBound = K->tripCount;
     BasicBlock *kHeader = K->header;
     BasicBlock *kPre    = K->preheader;
@@ -468,7 +468,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
             else                   mExitSucc = succ;
         }
     }
-    PhiInst *mIV = M->getInductionIV();
+    PhiInst *mIV = M->canonicalIV;
     if (!mIV || !mGuard ||
         mGuard->icmp_op_ != ICmpInst::ICMP_SLT ||
         mGuard->get_operand(0) != mIV ||
@@ -663,13 +663,13 @@ bool LoopInterchange::runOnFunction(Function *func) {
             for (auto &Lp : LI.allLoops()) {
                 Loop *K = Lp.get();
                 if (K->children.empty())  continue;
-                if (!K->hasInductionIV()) continue;
+                if (!K->hasCanonicalIV()) continue;
                 if (!K->preheader || !K->singleLatch() || !K->singleExit()) continue;
 
                 bool scalarCarried = false;
                 for (auto *inst : K->header->instr_list_) {
                     if (!inst->is_phi()) break;
-                    if (inst != K->getInductionIV()) { scalarCarried = true; break; }
+                    if (inst != K->canonicalIV) { scalarCarried = true; break; }
                 }
                 if (scalarCarried) continue;
 
@@ -691,8 +691,8 @@ bool LoopInterchange::runOnFunction(Function *func) {
                     Loop *deepest = IA.deepestCanonicalDescendant(K);
                     if (deepest && deepest != K) {
                         LoopInterchangeCost cost = IA.estimateCost(
-                            accessInfo.memory_geps, deepest->getInductionIV(),
-                            K->getInductionIV());
+                            accessInfo.memory_geps, deepest->canonicalIV,
+                            K->canonicalIV);
                         profitable = cost.profitable();
                     }
                 }
