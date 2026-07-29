@@ -1970,10 +1970,7 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         while (current && placed.insert(current).second) {
             order.push_back(current);
             MachineBasicBlock *preferredFallthrough = nullptr;
-<<<<<<< HEAD
-=======
             MachineBasicBlock *likelySuccessor = nullptr;
->>>>>>> main
             unsigned deepestSuccessor = 0;
             bool depthsDiffer = false;
             if (!current->successors().empty()) {
@@ -1994,17 +1991,9 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
             }
 
             // In the absence of profile data, natural-loop membership is
-<<<<<<< HEAD
-            // the strongest static frequency signal.  When both arms have
-            // the same loop depth, preserve the explicit conditional edge
-            // and lay out the unconditional successor as fallthrough.  This
-            // avoids arbitrarily inverting source CFG branches merely
-            // because the conditional target has a single predecessor.
-=======
             // the strongest static frequency signal.  Record the explicit
             // fallthrough as the final tie breaker, but do not let it hide a
             // successor that immediately enters a deeper forward region.
->>>>>>> main
             if (!depthsDiffer &&
                 current->instructions().size() >= 2) {
                 auto unconditional =
@@ -2018,13 +2007,6 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                     hasConditional &&
                     unconditional->operands().size() == 1 &&
                     unconditional->operands()[0].kind() ==
-<<<<<<< HEAD
-                        MachineOperand::Kind::BasicBlock)
-                    preferredFallthrough =
-                        unconditional->operands()[0].basicBlock();
-            }
-
-=======
                         MachineOperand::Kind::BasicBlock) {
                     preferredFallthrough =
                         unconditional->operands()[0].basicBlock();
@@ -2123,7 +2105,6 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                     return visit(visit, traceStart);
                 };
 
->>>>>>> main
             MachineBasicBlock *best = nullptr;
             int bestScore = -1;
             for (unsigned i = 0;
@@ -2137,11 +2118,6 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                 if (depthsDiffer &&
                     successor->loopDepth == deepestSuccessor)
                     score += 300;
-<<<<<<< HEAD
-                else if (!depthsDiffer &&
-                         successor == preferredFallthrough)
-                    score += 200;
-=======
                 else if (!depthsDiffer) {
                     ForwardTraceScore trace =
                         scoreForwardTrace(successor);
@@ -2154,7 +2130,6 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                     if (successor == preferredFallthrough)
                         ++score;
                 }
->>>>>>> main
                 else if (!preferredFallthrough && i == 0)
                     score += 10;
                 score += successor->number() > current->number()
