@@ -1,6 +1,7 @@
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/constant.hpp"
+#include "../../include/mid/ir/globalVariable.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -18,6 +19,187 @@ bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
     auto *term = bb->get_terminator();
     return term && term->is_br() && term->num_ops_ == 1 &&
            term->get_operand(0) == header;
+}
+
+bool isLoopInvariant(Value *value, const Loop *loop) {
+    if (!value || !loop) return false;
+    if (dynamic_cast<Constant *>(value) ||
+        dynamic_cast<Argument *>(value) ||
+        dynamic_cast<GlobalVariable *>(value))
+        return true;
+    auto *inst = dynamic_cast<Instruction *>(value);
+    return inst && !loop->blocks.count(inst->parent_);
+}
+
+ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp pred) {
+    switch (pred) {
+    case ICmpInst::ICMP_UGT: return ICmpInst::ICMP_ULT;
+    case ICmpInst::ICMP_UGE: return ICmpInst::ICMP_ULE;
+    case ICmpInst::ICMP_ULT: return ICmpInst::ICMP_UGT;
+    case ICmpInst::ICMP_ULE: return ICmpInst::ICMP_UGE;
+    case ICmpInst::ICMP_SGT: return ICmpInst::ICMP_SLT;
+    case ICmpInst::ICMP_SGE: return ICmpInst::ICMP_SLE;
+    case ICmpInst::ICMP_SLT: return ICmpInst::ICMP_SGT;
+    case ICmpInst::ICMP_SLE: return ICmpInst::ICMP_SGE;
+    default: return pred;
+    }
+}
+
+ICmpInst::ICmpOp invertPredicate(ICmpInst::ICmpOp pred) {
+    switch (pred) {
+    case ICmpInst::ICMP_EQ: return ICmpInst::ICMP_NE;
+    case ICmpInst::ICMP_NE: return ICmpInst::ICMP_EQ;
+    case ICmpInst::ICMP_UGT: return ICmpInst::ICMP_ULE;
+    case ICmpInst::ICMP_UGE: return ICmpInst::ICMP_ULT;
+    case ICmpInst::ICMP_ULT: return ICmpInst::ICMP_UGE;
+    case ICmpInst::ICMP_ULE: return ICmpInst::ICMP_UGT;
+    case ICmpInst::ICMP_SGT: return ICmpInst::ICMP_SLE;
+    case ICmpInst::ICMP_SGE: return ICmpInst::ICMP_SLT;
+    case ICmpInst::ICMP_SLT: return ICmpInst::ICMP_SGE;
+    case ICmpInst::ICMP_SLE: return ICmpInst::ICMP_SGT;
+    }
+    return pred;
+}
+
+bool isOrderedPredicate(ICmpInst::ICmpOp pred) {
+    switch (pred) {
+    case ICmpInst::ICMP_UGT:
+    case ICmpInst::ICMP_UGE:
+    case ICmpInst::ICMP_ULT:
+    case ICmpInst::ICMP_ULE:
+    case ICmpInst::ICMP_SGT:
+    case ICmpInst::ICMP_SGE:
+    case ICmpInst::ICMP_SLT:
+    case ICmpInst::ICMP_SLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool matchInductionUpdate(Value *value, PhiInst *phi, const Loop *loop,
+                          BinaryInst *&update, Value *&step,
+                          bool &stepNegated,
+                          std::optional<long long> &constantStep) {
+    update = dynamic_cast<BinaryInst *>(value);
+    BasicBlock *latch = loop ? loop->singleLatch() : nullptr;
+    if (!update || !latch || update->parent_ != latch)
+        return false;
+
+    Value *lhs = update->get_operand(0);
+    Value *rhs = update->get_operand(1);
+    if (update->is_add()) {
+        if (lhs == phi)
+            step = rhs;
+        else if (rhs == phi)
+            step = lhs;
+        else
+            return false;
+    } else if (update->is_sub() && lhs == phi) {
+        step = rhs;
+        stepNegated = true;
+    } else {
+        return false;
+    }
+
+    if (!isLoopInvariant(step, loop))
+        return false;
+
+    if (auto *constant = dynamic_cast<ConstantInt *>(step)) {
+        long long value = constant->value_;
+        if (stepNegated) value = -value;
+        if (value == 0) return false;
+        constantStep = value;
+    }
+    return true;
+}
+
+bool normalizeCompare(ICmpInst *compare, Value *inductionValue,
+                      Value *&bound, ICmpInst::ICmpOp &predicate) {
+    if (!compare || !inductionValue) return false;
+    if (compare->get_operand(0) == inductionValue) {
+        bound = compare->get_operand(1);
+        predicate = compare->icmp_op_;
+    } else if (compare->get_operand(1) == inductionValue) {
+        bound = compare->get_operand(0);
+        predicate = swapPredicate(compare->icmp_op_);
+    } else {
+        return false;
+    }
+    return isOrderedPredicate(predicate);
+}
+
+bool continuationSense(BranchInst *branch, const Loop *loop,
+                       bool &continuesWhenTrue) {
+    if (!branch || branch->num_ops_ != 3 || !loop) return false;
+    auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
+    auto *falseBlock = dynamic_cast<BasicBlock *>(branch->get_operand(2));
+    if (!trueBlock || !falseBlock) return false;
+    bool trueInside = loop->blocks.count(trueBlock);
+    bool falseInside = loop->blocks.count(falseBlock);
+    if (trueInside == falseInside) return false;
+    continuesWhenTrue = trueInside;
+    return true;
+}
+
+bool matchGuard(BasicBlock *guardBlock, Value *inductionValue,
+                const Loop *loop, ICmpInst *&compare, Value *&bound,
+                ICmpInst::ICmpOp &predicate) {
+    auto *branch = guardBlock
+                       ? dynamic_cast<BranchInst *>(guardBlock->get_terminator())
+                       : nullptr;
+    if (!branch || branch->num_ops_ != 3) return false;
+    compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
+    if (!compare || compare->parent_ != guardBlock ||
+        !normalizeCompare(compare, inductionValue, bound, predicate) ||
+        !isLoopInvariant(bound, loop))
+        return false;
+
+    bool continuesWhenTrue = false;
+    if (!continuationSense(branch, loop, continuesWhenTrue))
+        return false;
+    if (!continuesWhenTrue)
+        predicate = invertPredicate(predicate);
+    return true;
+}
+
+bool describeControlInduction(Loop *loop, PhiInst *phi, Value *start,
+                              Value *latchValue,
+                              InductionDescriptor &descriptor) {
+    BinaryInst *update = nullptr;
+    Value *step = nullptr;
+    bool stepNegated = false;
+    std::optional<long long> constantStep;
+    if (!matchInductionUpdate(latchValue, phi, loop, update, step,
+                              stepNegated, constantStep))
+        return false;
+
+    ICmpInst *compare = nullptr;
+    Value *bound = nullptr;
+    ICmpInst::ICmpOp predicate = ICmpInst::ICMP_SLT;
+    InductionGuardPosition guardPosition = InductionGuardPosition::Header;
+    bool comparesUpdate = false;
+
+    if (!matchGuard(loop->header, phi, loop, compare, bound, predicate)) {
+        BasicBlock *latch = loop->singleLatch();
+        if (!matchGuard(latch, update, loop, compare, bound, predicate))
+            return false;
+        guardPosition = InductionGuardPosition::Latch;
+        comparesUpdate = true;
+    }
+
+    descriptor.phi = phi;
+    descriptor.start = start;
+    descriptor.update = update;
+    descriptor.step = step;
+    descriptor.stepNegated = stepNegated;
+    descriptor.constantStep = constantStep;
+    descriptor.compare = compare;
+    descriptor.bound = bound;
+    descriptor.predicate = predicate;
+    descriptor.guardPosition = guardPosition;
+    descriptor.comparesUpdate = comparesUpdate;
+    return true;
 }
 
 bool isAddOneOf(Value *value, PhiInst *phi) {
@@ -338,6 +520,37 @@ Loop *LoopInfo::getLoopFor(BasicBlock *bb) const {
 
 void LoopInfo::analyzeIV(Loop *loop) {
     if (!loop->preheader) return;
+
+    // Record a general control recurrence first.  This descriptor is
+    // analysis-only and does not change the legacy +1 fields consumed by
+    // existing loop transforms.
+    for (auto *inst : loop->header->instr_list_) {
+        if (!inst->is_phi()) break;
+        if (inst->type_->tid_ != Type::IntegerTyID) continue;
+
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi->num_ops_ != 4) continue;
+
+        Value *start = nullptr;
+        Value *latchValue = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            auto *source =
+                dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (source == loop->preheader)
+                start = phi->get_operand(i);
+            else if (source == loop->singleLatch())
+                latchValue = phi->get_operand(i);
+        }
+        if (!start || !latchValue || !isLoopInvariant(start, loop))
+            continue;
+
+        InductionDescriptor descriptor;
+        if (!describeControlInduction(loop, phi, start, latchValue,
+                                      descriptor))
+            continue;
+        loop->controlInduction = descriptor;
+        break;
+    }
 
     // 1. 找 header 中步长为 +1 的归纳 phi。初值只需在本循环外可用；
     //    零初值形式另记为 canonicalIV，供依赖分析中 tripCount 的旧语义使用。

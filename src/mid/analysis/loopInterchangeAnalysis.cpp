@@ -113,3 +113,77 @@ LoopInterchangeAnalysis::analyzeParallelSink(Loop *loop) const {
     result.reason = "accepted";
     return result;
 }
+
+ParallelFloatAnalysisResult
+LoopInterchangeAnalysis::analyzeParallelFloat(Loop *loop) const {
+    ParallelFloatAnalysisResult result;
+
+    if (!loop) {
+        result.reason = "null loop";
+        return result;
+    }
+    if (loop->children.empty()) {
+        result.reason = "no child loop";
+        return result;
+    }
+    if (!loop->hasCanonicalIV()) {
+        result.reason = "no canonical IV";
+        return result;
+    }
+    if (!loop->preheader || !loop->singleLatch() || !loop->singleExit()) {
+        result.reason = "not single pre/latch/exit";
+        return result;
+    }
+    if (hasNonIVHeaderPhi(loop)) {
+        result.reason = "carries scalar reduction";
+        return result;
+    }
+
+    result.access_info = LA_->collect(loop);
+    if (DA_->isLoopParallel(loop, result.access_info.memory_instructions)) {
+        result.reason = "already parallel";
+        return result;
+    }
+
+    if (loop->children.size() != 1) {
+        result.reason = "not a single-child nest";
+        return result;
+    }
+    result.inner = loop->children[0];
+    if (!result.inner->preheader || !result.inner->singleLatch()) {
+        result.reason = "inner not single pre/latch";
+        return result;
+    }
+    if (!isInterchangeLegal(loop, result.inner,
+                            result.access_info.memory_instructions)) {
+        result.reason = "not legal";
+        return result;
+    }
+
+    if (!result.inner->children.empty()) {
+        result.accepted = true;
+        result.reason = "accepted";
+        return result;
+    }
+
+    result.cost_loop = deepestCanonicalDescendant(loop);
+    if (!result.cost_loop || result.cost_loop == loop) {
+        result.reason = "no canonical descendant";
+        return result;
+    }
+    result.cost = estimateCost(result.access_info.memory_geps,
+                               result.cost_loop->canonicalIV,
+                               loop->canonicalIV);
+    if (!result.cost.known()) {
+        result.reason = "stride unknown";
+        return result;
+    }
+    if (!result.cost.profitable()) {
+        result.reason = "not profitable";
+        return result;
+    }
+
+    result.accepted = true;
+    result.reason = "accepted";
+    return result;
+}

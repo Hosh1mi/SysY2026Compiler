@@ -12,9 +12,43 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+enum class InductionGuardPosition {
+    Header,
+    Latch,
+};
+
+// A read-only description of the recurrence that controls a loop.
+//
+// This is intentionally independent from Loop::canonicalIV and
+// Loop::inductionIV.  Those fields retain their existing +1 semantics for
+// current transform clients, while this descriptor can represent constant or
+// loop-invariant non-unit steps without first rewriting the IR.
+struct InductionDescriptor {
+    PhiInst *phi = nullptr;
+    Value *start = nullptr;
+    BinaryInst *update = nullptr;
+    Value *step = nullptr;
+    bool stepNegated = false;
+    std::optional<long long> constantStep;
+
+    ICmpInst *compare = nullptr;
+    Value *bound = nullptr;
+    ICmpInst::ICmpOp predicate = ICmpInst::ICMP_SLT;
+    InductionGuardPosition guardPosition = InductionGuardPosition::Header;
+    bool comparesUpdate = false;
+
+    bool valid() const {
+        return phi && start && update && step && compare && bound;
+    }
+    bool isUnitStride() const {
+        return constantStep && *constantStep == 1;
+    }
+};
 
 class Loop {
 public:
@@ -47,6 +81,7 @@ public:
     PhiInst *inductionIV = nullptr;
     Value   *inductionInit = nullptr;
     ICmpInst::ICmpOp predicate = ICmpInst::ICMP_SLT;  // <, <=（暂只识别 SLT）
+    InductionDescriptor controlInduction;
 
     // 查询
     bool isInLoop(BasicBlock *bb) const { return blocks.count(bb) > 0; }
@@ -55,6 +90,12 @@ public:
     BasicBlock *singleExit()  const { return exits.size()   == 1 ? exits[0]   : nullptr; }
     bool hasCanonicalIV() const { return canonicalIV != nullptr; }
     bool hasInductionIV() const { return inductionIV != nullptr; }
+    bool hasInductionDescriptor() const {
+        return controlInduction.valid();
+    }
+    const InductionDescriptor *getInductionDescriptor() const {
+        return hasInductionDescriptor() ? &controlInduction : nullptr;
+    }
     PhiInst *getInductionIV() const {
         return inductionIV ? inductionIV : canonicalIV;
     }

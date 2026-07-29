@@ -4,6 +4,7 @@
 #include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../include/mid/analysis/dependenceAnalysis.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
+#include "../../include/mid/analysis/scalarEvolution.hpp"
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/module.hpp"
@@ -31,6 +32,28 @@ std::string blockName(BasicBlock *bb) {
     return bb ? valueName(bb) : "<null>";
 }
 
+std::string valueDescription(Value *value) {
+    if (auto *constant = dynamic_cast<ConstantInt *>(value))
+        return std::to_string(constant->value_);
+    return valueName(value);
+}
+
+const char *predicateName(ICmpInst::ICmpOp predicate) {
+    switch (predicate) {
+    case ICmpInst::ICMP_UGT: return "ugt";
+    case ICmpInst::ICMP_UGE: return "uge";
+    case ICmpInst::ICMP_ULT: return "ult";
+    case ICmpInst::ICMP_ULE: return "ule";
+    case ICmpInst::ICMP_SGT: return "sgt";
+    case ICmpInst::ICMP_SGE: return "sge";
+    case ICmpInst::ICMP_SLT: return "slt";
+    case ICmpInst::ICMP_SLE: return "sle";
+    case ICmpInst::ICMP_EQ: return "eq";
+    case ICmpInst::ICMP_NE: return "ne";
+    }
+    return "unknown";
+}
+
 char dirChar(DependenceAnalysis::Dir dir) {
     return static_cast<char>(dir);
 }
@@ -54,6 +77,42 @@ void collectLoopAccesses(Loop *loop, std::vector<Instruction *> &accesses) {
     }
 }
 
+void dumpLiveOutRecurrences(Function *func, Loop *loop,
+                            ScalarEvolution &scalarEvolution) {
+    if (!func || !loop || !loop->header) return;
+    for (auto *inst : loop->header->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi) break;
+
+        size_t outsideUses = 0;
+        size_t insideUses = 0;
+        for (const Use &use : phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_) continue;
+            if (loop->blocks.count(user->parent_))
+                ++insideUses;
+            else
+                ++outsideUses;
+        }
+        if (outsideUses == 0) continue;
+
+        const SCEV *scev = scalarEvolution.getSCEV(phi);
+        auto *addRec = dynamic_cast<const SCEVAddRecExpr *>(scev);
+        if (!addRec || addRec->loop() != loop) continue;
+
+        std::cerr << "[AnalysisDump] liveout-addrec function=" << func->name_
+                  << " header=" << blockName(loop->header)
+                  << " phi=" << valueName(phi)
+                  << " start=" << addRec->start()->print()
+                  << " step=" << addRec->step()->print()
+                  << " insideUses=" << insideUses
+                  << " outsideUses=" << outsideUses
+                  << " control="
+                  << (loop->controlInduction.phi == phi ? "yes" : "no")
+                  << "\n";
+    }
+}
+
 void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
     LoopInfo LI;
     LI.analyze(func);
@@ -61,6 +120,7 @@ void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
     AffineAnalysis AA(LI);
     DependenceAnalysis DA(LI, AA);
     DA.setArgAlias(argAA);
+    ScalarEvolution scalarEvolution(LI);
 
     std::cerr << "[AnalysisDump] function=" << func->name_
               << " loops=" << LI.allLoops().size() << "\n";
@@ -74,6 +134,7 @@ void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
                   << " header=" << blockName(loop->header)
                   << " depth=" << loop->depth
                   << " canonicalIV=" << valueName(loop->canonicalIV)
+                  << " inductionIV=" << valueName(loop->inductionIV)
                   << " preheader=" << blockName(loop->preheader)
                   << " latches=" << loop->latches.size()
                   << " exits=" << loop->exits.size()
@@ -81,6 +142,41 @@ void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
                   << " carries="
                   << (DA.loopCarriesDependence(loop, accesses) ? "yes" : "no")
                   << "\n";
+
+        if (const auto *induction = loop->getInductionDescriptor()) {
+            std::cerr << "[AnalysisDump] induction function=" << func->name_
+                      << " header=" << blockName(loop->header)
+                      << " phi=" << valueName(induction->phi)
+                      << " start=" << valueDescription(induction->start)
+                      << " step="
+                      << (induction->stepNegated ? "-" : "")
+                      << valueDescription(induction->step)
+                      << " constantStep=";
+            if (induction->constantStep)
+                std::cerr << *induction->constantStep;
+            else
+                std::cerr << "unknown";
+            std::cerr << " predicate="
+                      << predicateName(induction->predicate)
+                      << " bound=" << valueDescription(induction->bound)
+                      << " guard="
+                      << (induction->guardPosition ==
+                                  InductionGuardPosition::Header
+                              ? "header"
+                              : "latch")
+                      << " compares="
+                      << (induction->comparesUpdate ? "update" : "phi")
+                      << " exactConstantTrips=";
+            if (auto trips =
+                    scalarEvolution.getConstantTripCount(loop))
+                std::cerr << *trips;
+            else
+                std::cerr << "unknown";
+            std::cerr
+                      << "\n";
+        }
+
+        dumpLiveOutRecurrences(func, loop, scalarEvolution);
 
         for (size_t i = 0; i < accesses.size(); i++) {
             for (size_t j = i; j < accesses.size(); j++) {
@@ -120,4 +216,3 @@ PreservedAnalyses AnalysisDump::execute(Module *module, AnalysisManager &AM) {
     execute(module);
     return PreservedAnalyses::all();
 }
-

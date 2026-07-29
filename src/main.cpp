@@ -159,7 +159,12 @@ static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<EarlyCSE>());
     pm.addPass(std::make_unique<GlobalScalarPromotion>());
     pm.addPass(std::make_unique<Mem2Reg>());
+    pm.addPass(std::make_unique<Reassociate>());
     addDeepCleanup(pm);
+    // Inlining initially leaves arithmetic in small cloned blocks.  Run the
+    // linear combiner again after block merging exposes the complete DAG.
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
 }
 
 static void addAnalysisDumpIfRequested(PassManager &pm) {
@@ -205,6 +210,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
         // pm.addPass(std::make_unique<LCSSA>());
         // pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
+        pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<SimpleLoopUnswitch>());
         pm.addPass(std::make_unique<LoopRotate>());
         pm.addPass(std::make_unique<PhiOpSink>());
@@ -215,6 +221,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
         pm.addPass(std::make_unique<LoopDeletion>());
     });
     addAnalysisDumpIfRequested(pm);
+    pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());

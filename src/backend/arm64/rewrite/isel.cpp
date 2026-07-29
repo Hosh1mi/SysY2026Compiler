@@ -810,6 +810,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(instruction), &node);
                 break;
             }
+<<<<<<< HEAD
             case SDOpcode::SMin:
             case SDOpcode::SMax: {
                 ValueType resultType = node.resultTypes().front();
@@ -845,6 +846,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(select), &node);
                 break;
             }
+=======
+>>>>>>> main
             case SDOpcode::SRem:
             case SDOpcode::URem: {
                 SDNode *rhs = node.operands()[1].node;

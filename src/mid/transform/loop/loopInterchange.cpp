@@ -662,47 +662,19 @@ bool LoopInterchange::runOnFunction(Function *func) {
             Loop *floatM = nullptr;
             for (auto &Lp : LI.allLoops()) {
                 Loop *K = Lp.get();
-                if (K->children.empty())  continue;
-                if (!K->hasInductionIV()) continue;
-                if (!K->preheader || !K->singleLatch() || !K->singleExit()) continue;
-
-                bool scalarCarried = false;
-                for (auto *inst : K->header->instr_list_) {
-                    if (!inst->is_phi()) break;
-                    if (inst != K->getInductionIV()) { scalarCarried = true; break; }
-                }
-                if (scalarCarried) continue;
-
-                LoopAccessInfo accessInfo = LA.collect(K);
-
-                if (DA.isLoopParallel(K, accessInfo.memory_instructions)) continue;
-
-                if (K->children.size() != 1) continue;
-                Loop *M = K->children[0];
-                if (!M->preheader || !M->singleLatch()) continue;
-
-                if (!IA.isInterchangeLegal(K, M, accessInfo.memory_instructions)) {
-                    dbg(K, "float: not legal");
+                ParallelFloatAnalysisResult analysis =
+                    IA.analyzeParallelFloat(K);
+                if (!analysis.accepted) {
+                    if (!K->children.empty()) dbg(K, analysis.reason);
                     continue;
                 }
 
-                bool profitable = !M->children.empty();
-                if (!profitable) {
-                    Loop *deepest = IA.deepestCanonicalDescendant(K);
-                    if (deepest && deepest != K) {
-                        LoopInterchangeCost cost = IA.estimateCost(
-                            accessInfo.memory_geps, deepest->getInductionIV(),
-                            K->getInductionIV());
-                        profitable = cost.profitable();
-                    }
-                }
-                if (!profitable) { dbg(K, "float: not profitable"); continue; }
-
                 if (debugEnabled())
                     std::cerr << "[LoopInterchange] float candidate K=" << func->name_ << "/"
-                              << K->header->name_ << " M=" << M->header->name_ << "\n";
+                              << K->header->name_ << " M="
+                              << analysis.inner->header->name_ << "\n";
                 floatK = K;
-                floatM = M;
+                floatM = analysis.inner;
                 break;
             }
 

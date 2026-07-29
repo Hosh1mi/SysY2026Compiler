@@ -1,11 +1,15 @@
 #include "../../include/mid/opt/CFGSimplify.hpp"
+#include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include <queue>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // 辅助函数：在 succ 的所有 phi 中删除 deadBlock 对应的入边
@@ -523,6 +527,110 @@ static std::vector<Instruction*> getInstrs(BasicBlock *b) {
     return v;
 }
 
+static bool isCloneableForSelect(Instruction *inst) {
+    return dynamic_cast<BinaryInst *>(inst) ||
+           dynamic_cast<ICmpInst *>(inst) ||
+           dynamic_cast<FCmpInst *>(inst) ||
+           dynamic_cast<SelectInst *>(inst);
+}
+
+static bool canCloneBlock(const std::vector<Instruction *> &instrs) {
+    std::unordered_set<Instruction *> available;
+    for (auto *inst : instrs) {
+        if (!isSafeToSpeculate(inst) || !isCloneableForSelect(inst))
+            return false;
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            auto *def = dynamic_cast<Instruction *>(inst->get_operand(i));
+            if (def && def->parent_ == inst->parent_ &&
+                !available.count(def))
+                return false;
+        }
+        available.insert(inst);
+    }
+    return true;
+}
+
+static int speculationCost(Instruction *inst) {
+    switch (inst->op_id_) {
+    case Instruction::Mul:
+    case Instruction::FAdd:
+    case Instruction::FSub:
+    case Instruction::FMul:
+        return 3;
+    case Instruction::Load:
+        return 4;
+    case Instruction::SDiv:
+    case Instruction::SRem:
+    case Instruction::FDiv:
+        return 8;
+    default:
+        return 1;
+    }
+}
+
+static bool isOrderedPredicate(ICmpInst::ICmpOp predicate) {
+    switch (predicate) {
+    case ICmpInst::ICMP_SLT:
+    case ICmpInst::ICMP_SLE:
+    case ICmpInst::ICMP_SGT:
+    case ICmpInst::ICMP_SGE:
+    case ICmpInst::ICMP_ULT:
+    case ICmpInst::ICMP_ULE:
+    case ICmpInst::ICMP_UGT:
+    case ICmpInst::ICMP_UGE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool isMonotonicInductionCondition(ICmpInst *compare, BasicBlock *bb,
+                                          const LoopInfo &loopInfo) {
+    Loop *loop = loopInfo.getLoopFor(bb);
+    PhiInst *iv = loop ? loop->getInductionIV() : nullptr;
+    if (!compare || !loop || !iv || !isOrderedPredicate(compare->icmp_op_))
+        return false;
+
+    auto isInvariant = [&](Value *value) {
+        auto *inst = dynamic_cast<Instruction *>(value);
+        return !inst || !loop->isInLoop(inst);
+    };
+    if (compare->get_operand(0) == iv)
+        return isInvariant(compare->get_operand(1));
+    if (compare->get_operand(1) == iv)
+        return isInvariant(compare->get_operand(0));
+    return false;
+}
+
+static bool isProfitableDiamondToSelect(
+    ICmpInst *compare, BasicBlock *bb,
+    const std::vector<Instruction *> &trueInstrs,
+    const std::vector<Instruction *> &falseInstrs, size_t selectCount,
+    const LoopInfo &loopInfo) {
+    int cost = static_cast<int>(selectCount);
+    for (auto *inst : trueInstrs)
+        cost += speculationCost(inst);
+    for (auto *inst : falseInstrs)
+        cost += speculationCost(inst);
+
+    // A unit-step IV threshold changes direction at most once and is highly
+    // predictable, so give it a smaller speculation budget than a branch
+    // whose direction is not known structurally.
+    bool monotonic = isMonotonicInductionCondition(compare, bb, loopInfo);
+    constexpr int kMaxPredictableCost = 8;
+    constexpr int kMaxUnpredictableCost = 12;
+    bool profitable = cost <= (monotonic ? kMaxPredictableCost
+                                         : kMaxUnpredictableCost);
+
+    if (std::getenv("DEBUG_CFG_SELECT_COST")) {
+        std::cerr << "[CFGSelectCost] block=" << bb->name_
+                  << " cost=" << cost
+                  << " monotonic=" << (monotonic ? "yes" : "no")
+                  << " convert=" << (profitable ? "yes" : "no") << "\n";
+    }
+    return profitable;
+}
+
 // Clone inst into newBB with operand remapping via vm.
 // Supports BinaryInst, ICmpInst, FCmpInst, SelectInst; returns nullptr otherwise.
 static Instruction *cloneWithRemap(
@@ -587,7 +695,8 @@ static bool tryCloneBlock(
 // The phi in mergeBB may have extra predecessors (&&/|| patterns with
 // 3-predecessor phis); handled via in-place phi update in that case.
 bool CFGSimplify::convertDiamondsToSelect(Function *func) {
-    bool changed = false;
+    LoopInfo loopInfo;
+    bool hasLoopInfo = false;
 
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
@@ -674,6 +783,17 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         auto trueInstrs  = interTrueBB  ? getInstrs(interTrueBB)  : std::vector<Instruction*>{};
         auto falseInstrs = interFalseBB ? getInstrs(interFalseBB) : std::vector<Instruction*>{};
 
+        if (!canCloneBlock(trueInstrs) || !canCloneBlock(falseInstrs))
+            continue;
+        if (!hasLoopInfo) {
+            loopInfo.analyze(func);
+            hasLoopInfo = true;
+        }
+        if (!isProfitableDiamondToSelect(
+                dynamic_cast<ICmpInst *>(cmp), bb, trueInstrs, falseInstrs,
+                phis.size(), loopInfo))
+            continue;
+
         if (!tryCloneBlock(trueInstrs,  bb, term, valMapT)) continue;
         if (!tryCloneBlock(falseInstrs, bb, term, valMapF)) continue;
 
@@ -741,10 +861,12 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         }
         if (!sinkMerge) { bb->succ_bbs_.push_back(mergeBB); new BranchInst(mergeBB, bb); }
 
-        changed = true;
+        // LoopInfo and the block iterator are invalid after this CFG rewrite.
+        // The caller repeats CFGSimplify to discover the next diamond.
+        return true;
     }
 
-    return changed;
+    return false;
 }
 
 bool CFGSimplify::runOnModule(Module *module) {
