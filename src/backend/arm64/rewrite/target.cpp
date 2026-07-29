@@ -18,6 +18,43 @@ bool isV(PhysReg reg) {
     return reg >= PhysReg::V0 && reg <= PhysReg::V31;
 }
 
+bool isLogicalImmediate32(std::uint32_t value) {
+    if (value == 0 || value == UINT32_MAX)
+        return false;
+
+    for (unsigned elementBits = 2; elementBits <= 32;
+         elementBits *= 2) {
+        std::uint32_t elementMask =
+            elementBits == 32
+                ? UINT32_MAX
+                : (std::uint32_t{1} << elementBits) - 1;
+        std::uint32_t element = value & elementMask;
+        std::uint32_t replicated = 0;
+        for (unsigned offset = 0; offset < 32;
+             offset += elementBits)
+            replicated |= element << offset;
+        if (replicated != value)
+            continue;
+
+        for (unsigned ones = 1; ones < elementBits; ++ones) {
+            std::uint32_t run =
+                (std::uint32_t{1} << ones) - 1;
+            for (unsigned rotate = 0; rotate < elementBits;
+                 ++rotate) {
+                std::uint32_t rotated =
+                    rotate == 0
+                        ? run
+                        : ((run >> rotate) |
+                           (run << (elementBits - rotate))) &
+                              elementMask;
+                if (rotated == element)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 const InstrDesc kInvalid{};
 
 #define DESC(OP, MNEMONIC, DEFS, OPS, LATENCY, RESOURCE) \
@@ -195,7 +232,8 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(ASRWri, "asr", 1, 3, 1, SchedResource::ALU)
     case Opcode::CMPWrr:
     case Opcode::CMPWri:
-    case Opcode::TSTWrr: {
+    case Opcode::TSTWrr:
+    case Opcode::TSTWri: {
         static const InstrDesc cmp{
             Opcode::CMPWrr, "cmp", 0, 2, false, false, false, false,
             false, false, false, false, true, false, 1,
@@ -208,8 +246,13 @@ const InstrDesc &descriptor(Opcode opcode) {
             Opcode::TSTWrr, "tst", 0, 2, false, false, false, false,
             false, false, false, false, true, false, 1,
             SchedResource::ALU};
+        static const InstrDesc tsti{
+            Opcode::TSTWri, "tst", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
         return opcode == Opcode::CMPWrr ? cmp
-             : opcode == Opcode::CMPWri ? cmpi : tst;
+             : opcode == Opcode::CMPWri ? cmpi
+             : opcode == Opcode::TSTWrr ? tst : tsti;
     }
     SIMPLE_CASE(CLZW, "clz", 1, 2, 1, SchedResource::ALU)
     SIMPLE_CASE(RBITW, "rbit", 1, 2, 1, SchedResource::ALU)
@@ -561,6 +604,11 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
     case Opcode::LSRWri:
     case Opcode::ASRWri:
         return immediate >= 0 && immediate <= 31;
+    case Opcode::TSTWri:
+        return immediate >= 0 &&
+               immediate <= UINT32_MAX &&
+               isLogicalImmediate32(
+                   static_cast<std::uint32_t>(immediate));
     default:
         return false;
     }

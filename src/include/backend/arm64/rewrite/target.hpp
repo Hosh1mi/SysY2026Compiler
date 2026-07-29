@@ -96,6 +96,7 @@ enum class Opcode : std::uint16_t {
     CMPWrr,
     CMPWri,
     TSTWrr,
+    TSTWri,
     CLZW,
     RBITW,
     FADDS,

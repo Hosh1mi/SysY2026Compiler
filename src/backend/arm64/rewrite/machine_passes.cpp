@@ -90,6 +90,70 @@ CondCode inverseCondition(CondCode condition) {
     return CondCode::AL;
 }
 
+bool usesNZCV(const MachineInstr &instruction) {
+    if (InstrInfo::get(instruction.opcode()).usesFlags)
+        return true;
+    for (const MachineOperand &operand : instruction.operands())
+        if (operand.isPhysicalRegister() && !operand.isDef &&
+            operand.physicalRegister() == PhysReg::NZCV)
+            return true;
+    return false;
+}
+
+bool definesNZCV(const MachineInstr &instruction) {
+    if (InstrInfo::get(instruction.opcode()).setsFlags ||
+        instruction.isCall())
+        return true;
+    for (const MachineOperand &operand : instruction.operands())
+        if (operand.isPhysicalRegister() && operand.isDef &&
+            operand.physicalRegister() == PhysReg::NZCV)
+            return true;
+    return false;
+}
+
+bool flagsUsedAfter(
+    MachineBasicBlock *block,
+    MachineBasicBlock::InstrList::const_iterator begin) {
+    auto inspectRange = [](auto first, auto last) {
+        for (; first != last; ++first) {
+            // An instruction that both reads and writes flags consumes the
+            // incoming value before defining the outgoing one.
+            if (usesNZCV(*first))
+                return 1;
+            if (definesNZCV(*first))
+                return -1;
+        }
+        return 0;
+    };
+
+    int local = inspectRange(begin, block->instructions().end());
+    if (local != 0)
+        return local > 0;
+
+    std::deque<MachineBasicBlock *> worklist;
+    std::unordered_set<MachineBasicBlock *> visited;
+    for (MachineBasicBlock *successor : block->successors())
+        if (successor && visited.insert(successor).second)
+            worklist.push_back(successor);
+
+    while (!worklist.empty()) {
+        MachineBasicBlock *current = worklist.front();
+        worklist.pop_front();
+        int access = inspectRange(
+            current->instructions().begin(),
+            current->instructions().end());
+        if (access > 0)
+            return true;
+        if (access < 0)
+            continue;
+        for (MachineBasicBlock *successor :
+             current->successors())
+            if (successor && visited.insert(successor).second)
+                worklist.push_back(successor);
+    }
+    return false;
+}
+
 } // namespace
 
 bool PreRAMachinePeephole::run(MachineFunction &function) const {
@@ -963,19 +1027,81 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
 
     bool changed = false;
 
-    // Fold a selected low-bit extraction and its sole compare into the
-    // architectural bit-test branch.  This is deliberately pre-RA: the
-    // source remains a virtual register and no physical scratch is invented.
+    struct MaterializedI32 {
+        MachineInstr *instruction = nullptr;
+        VReg reg = 0;
+        std::uint32_t value = 0;
+    };
+    auto materializedI32 =
+        [&](const MachineOperand &operand)
+            -> std::optional<MaterializedI32> {
+        if (!operand.isVirtualRegister() ||
+            !function.registerInfo().contains(
+                operand.virtualRegister()))
+            return std::nullopt;
+        const VRegInfo &info = function.registerInfo().get(
+            operand.virtualRegister());
+        MachineInstr *definition = info.definition;
+        if (!definition ||
+            definition->opcode() != Opcode::MOVi32 ||
+            definition->operands().size() != 2 ||
+            !sameVReg(definition->operands()[0], operand) ||
+            definition->operands()[1].kind() !=
+                MachineOperand::Kind::Immediate)
+            return std::nullopt;
+        return MaterializedI32{
+            definition, operand.virtualRegister(),
+            static_cast<std::uint32_t>(
+                definition->operands()[1].immediate())};
+    };
+    auto eraseInstruction = [&](MachineInstr *target) {
+        if (!target)
+            return;
+        for (auto &owned : function.blocks()) {
+            auto &instructions = owned->instructions();
+            auto found = std::find_if(
+                instructions.begin(), instructions.end(),
+                [&](const MachineInstr &instruction) {
+                    return &instruction == target;
+                });
+            if (found != instructions.end()) {
+                instructions.erase(found);
+                return;
+            }
+        }
+    };
+
+    // Fold an AND whose result only feeds an equality-to-zero branch.
+    // One-bit masks use TBZ/TBNZ; encodable constants use TST-immediate;
+    // all other masks use TST-register.  The transformation is restricted to
+    // EQ/NE and rejects live-out flags because TST does not reproduce every
+    // CMP flag.
     for (auto &owned : function.blocks()) {
         auto &instructions = owned->instructions();
         bool localChange = true;
         while (localChange) {
             localChange = false;
+            std::unordered_map<VReg, unsigned> useCount;
+            for (const auto &useBlock : function.blocks())
+                for (const MachineInstr &instruction :
+                     useBlock->instructions())
+                    for (const MachineOperand &operand :
+                         instruction.operands())
+                        if (operand.isVirtualRegister() &&
+                            !operand.isDef)
+                            ++useCount[operand.virtualRegister()];
+
             for (auto bitAnd = instructions.begin();
                  bitAnd != instructions.end(); ++bitAnd) {
-                if (bitAnd->opcode() != Opcode::ANDWrr ||
+                if ((bitAnd->opcode() != Opcode::ANDWrr &&
+                     bitAnd->opcode() != Opcode::ANDWri) ||
                     bitAnd->operands().size() != 3 ||
                     !bitAnd->operands()[0].isVirtualRegister())
+                    continue;
+
+                VReg extracted =
+                    bitAnd->operands()[0].virtualRegister();
+                if (useCount[extracted] != 1)
                     continue;
 
                 auto compare = std::next(bitAnd);
@@ -1002,94 +1128,164 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                 if (condition != CondCode::EQ &&
                     condition != CondCode::NE)
                     continue;
-
-                auto findOne = [&](const MachineOperand &candidate)
-                    -> MachineInstr * {
-                    if (!candidate.isVirtualRegister())
-                        return nullptr;
-                    const VRegInfo &info =
-                        function.registerInfo().get(
-                            candidate.virtualRegister());
-                    MachineInstr *definition = info.definition;
-                    if (definition &&
-                        definition->opcode() == Opcode::MOVi32 &&
-                        definition->operands().size() == 2 &&
-                        sameVReg(definition->operands()[0],
-                                 candidate) &&
-                        definition->operands()[1].kind() ==
-                            MachineOperand::Kind::Immediate &&
-                        definition->operands()[1].immediate() == 1)
-                        return definition;
-                    return nullptr;
-                };
-                MachineInstr *constant =
-                    findOne(bitAnd->operands()[2]);
-                std::size_t sourceIndex = 1;
-                if (!constant) {
-                    constant = findOne(bitAnd->operands()[1]);
-                    sourceIndex = 2;
-                }
-                if (!constant ||
-                    !bitAnd->operands()[sourceIndex]
-                         .isVirtualRegister())
+                if (flagsUsedAfter(
+                        owned.get(), std::next(branch)))
                     continue;
 
-                VReg mask =
-                    constant->operands()[0].virtualRegister();
-                VReg extracted =
-                    bitAnd->operands()[0].virtualRegister();
-                unsigned maskUses = 0;
-                unsigned extractedUses = 0;
-                for (const auto &block : function.blocks())
-                    for (const MachineInstr &instruction :
-                         block->instructions())
-                        for (const MachineOperand &operand :
-                             instruction.operands()) {
-                            if (!operand.isVirtualRegister() ||
-                                operand.isDef)
-                                continue;
-                            maskUses +=
-                                operand.virtualRegister() == mask;
-                            extractedUses +=
-                                operand.virtualRegister() == extracted;
-                        }
-                if (maskUses != 1 || extractedUses != 1)
-                    continue;
-
-                MachineBasicBlock *target =
-                    branch->operands()[1].basicBlock();
-                MachineOperand source =
-                    bitAnd->operands()[sourceIndex];
-                branch->setOpcode(condition == CondCode::EQ
-                                      ? Opcode::TBZ
-                                      : Opcode::TBNZ);
-                branch->operands().clear();
-                branch->addOperand(std::move(source))
-                    .addOperand(MachineOperand::immediate(0))
-                    .addOperand(MachineOperand::block(target));
-                instructions.erase(compare);
-                instructions.erase(bitAnd);
-                for (auto &definitionBlock : function.blocks()) {
-                    auto &definitionInstructions =
-                        definitionBlock->instructions();
-                    auto definition = std::find_if(
-                        definitionInstructions.begin(),
-                        definitionInstructions.end(),
-                        [&](const MachineInstr &instruction) {
-                            return &instruction == constant;
-                        });
-                    if (definition !=
-                        definitionInstructions.end()) {
-                        definitionInstructions.erase(definition);
-                        break;
+                MachineOperand source;
+                MachineOperand maskOperand;
+                std::optional<MaterializedI32> constantMask;
+                if (bitAnd->opcode() == Opcode::ANDWri) {
+                    if (!bitAnd->operands()[1]
+                             .isVirtualRegister() ||
+                        bitAnd->operands()[2].kind() !=
+                            MachineOperand::Kind::Immediate)
+                        continue;
+                    source = bitAnd->operands()[1];
+                    constantMask = MaterializedI32{
+                        nullptr, 0,
+                        static_cast<std::uint32_t>(
+                            bitAnd->operands()[2].immediate())};
+                } else {
+                    auto rhsConstant =
+                        materializedI32(bitAnd->operands()[2]);
+                    auto lhsConstant =
+                        materializedI32(bitAnd->operands()[1]);
+                    if (rhsConstant) {
+                        source = bitAnd->operands()[1];
+                        maskOperand = bitAnd->operands()[2];
+                        constantMask = rhsConstant;
+                    } else if (lhsConstant) {
+                        source = bitAnd->operands()[2];
+                        maskOperand = bitAnd->operands()[1];
+                        constantMask = lhsConstant;
+                    } else {
+                        source = bitAnd->operands()[1];
+                        maskOperand = bitAnd->operands()[2];
                     }
                 }
-                function.registerInfo().eraseVirtualRegister(mask);
-                function.registerInfo().eraseVirtualRegister(extracted);
+                if (!source.isVirtualRegister())
+                    continue;
+
+                bool oneBitMask =
+                    constantMask &&
+                    constantMask->value != 0 &&
+                    (constantMask->value &
+                     (constantMask->value - 1)) == 0;
+                std::int64_t maskImmediate =
+                    constantMask
+                        ? static_cast<std::int64_t>(
+                              constantMask->value)
+                        : 0;
+                bool immediateTest =
+                    constantMask && !oneBitMask &&
+                    InstrInfo::acceptsImmediate(
+                        Opcode::TSTWri, maskImmediate);
+
+                if (oneBitMask) {
+                    unsigned bit = 0;
+                    while (((constantMask->value >> bit) & 1U) ==
+                           0)
+                        ++bit;
+                    MachineBasicBlock *target =
+                        branch->operands()[1].basicBlock();
+                    branch->setOpcode(condition == CondCode::EQ
+                                          ? Opcode::TBZ
+                                          : Opcode::TBNZ);
+                    branch->operands().clear();
+                    branch->addOperand(source)
+                        .addOperand(
+                            MachineOperand::immediate(bit))
+                        .addOperand(
+                            MachineOperand::block(target));
+                    instructions.erase(compare);
+                } else {
+                    MachineInstr test(
+                        immediateTest ? Opcode::TSTWri
+                                      : Opcode::TSTWrr);
+                    test.addOperand(source);
+                    if (immediateTest) {
+                        test.addOperand(
+                            MachineOperand::immediate(
+                                maskImmediate));
+                    } else {
+                        if (!maskOperand.isVirtualRegister())
+                            continue;
+                        test.addOperand(maskOperand);
+                    }
+                    test.addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, true,
+                        true));
+                    *compare = std::move(test);
+                }
+                instructions.erase(bitAnd);
+                if (constantMask &&
+                    constantMask->instruction &&
+                    useCount[constantMask->reg] == 1 &&
+                    (oneBitMask || immediateTest)) {
+                    eraseInstruction(
+                        constantMask->instruction);
+                    function.registerInfo().eraseVirtualRegister(
+                        constantMask->reg);
+                }
+                function.registerInfo().eraseVirtualRegister(
+                    extracted);
                 localChange = true;
                 changed = true;
                 break;
             }
+        }
+    }
+
+    // A standalone equality comparison against zero is redundant when the
+    // branch is its only flag consumer.  CBZ/CBNZ performs the same test
+    // without creating an NZCV dependency.
+    for (auto &owned : function.blocks()) {
+        auto &instructions = owned->instructions();
+        for (auto compare = instructions.begin();
+             compare != instructions.end();) {
+            if (compare->opcode() != Opcode::CMPWri ||
+                compare->operands().size() < 2 ||
+                !compare->operands()[0].isVirtualRegister() ||
+                compare->operands()[1].kind() !=
+                    MachineOperand::Kind::Immediate ||
+                compare->operands()[1].immediate() != 0) {
+                ++compare;
+                continue;
+            }
+            auto branch = std::next(compare);
+            if (branch == instructions.end() ||
+                branch->opcode() != Opcode::Bcc ||
+                branch->operands().size() < 2 ||
+                branch->operands()[0].kind() !=
+                    MachineOperand::Kind::ConditionCode ||
+                branch->operands()[1].kind() !=
+                    MachineOperand::Kind::BasicBlock) {
+                ++compare;
+                continue;
+            }
+            CondCode condition =
+                branch->operands()[0].condition();
+            if ((condition != CondCode::EQ &&
+                 condition != CondCode::NE) ||
+                flagsUsedAfter(owned.get(),
+                               std::next(branch))) {
+                ++compare;
+                continue;
+            }
+
+            MachineOperand tested = compare->operands()[0];
+            MachineBasicBlock *target =
+                branch->operands()[1].basicBlock();
+            branch->setOpcode(condition == CondCode::EQ
+                                  ? Opcode::CBZ
+                                  : Opcode::CBNZ);
+            branch->operands().clear();
+            branch->addOperand(std::move(tested))
+                .addOperand(MachineOperand::block(target));
+            compare = instructions.erase(compare);
+            ++compare;
+            changed = true;
         }
     }
 
@@ -1425,6 +1621,9 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
             break;
         }
     }
+    if (changed)
+        function.clearProperty(
+            MachineProperty::TracksLiveness);
     return changed;
 }
 

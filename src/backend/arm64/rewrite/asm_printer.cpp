@@ -311,6 +311,10 @@ void printInstruction(const MachineFunction &function,
         output << "\ttst " << registerName(operands[0]) << ", "
                << registerName(operands[1]) << '\n';
         break;
+    case Opcode::TSTWri:
+        output << "\ttst " << registerName(operands[0]) << ", #"
+               << operands[1].immediate() << '\n';
+        break;
     case Opcode::CSETW:
         output << "\tcset " << registerName(operands[0]) << ", "
                << conditionName(operands[1].condition()) << '\n';
