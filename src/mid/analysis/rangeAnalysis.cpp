@@ -379,13 +379,6 @@ RangeAnalysis::IntRange RangeAnalysis::getRangeImpl(Value *v, BasicBlock *ctx) {
 RangeAnalysis::IntRange RangeAnalysis::getBinaryRange(BinaryInst *bin, BasicBlock *ctx) {
     if (!bin || !isIntegerValue(bin)) return IntRange::top();
 
-    if (bin->op_id_ == Instruction::Add || bin->op_id_ == Instruction::Sub ||
-        bin->op_id_ == Instruction::Mul) {
-        auto scevRange = getSCEVRange(bin, ctx);
-        if (scevRange.valid && !scevRange.isTop && !scevRange.isBottom)
-            return scevRange;
-    }
-
     auto lhs = getRange(bin->get_operand(0), ctx ? ctx : bin->parent_);
     auto rhs = getRange(bin->get_operand(1), ctx ? ctx : bin->parent_);
     if (!lhs.valid || !rhs.valid) return IntRange::top();
@@ -476,10 +469,6 @@ RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *
 
 RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx) {
     if (!phi) return IntRange::top();
-
-    auto scevRange = getSCEVRange(phi, ctx);
-    if (scevRange.valid && !scevRange.isTop && !scevRange.isBottom)
-        return scevRange;
 
     IntRange result = IntRange::bottom();
     for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
