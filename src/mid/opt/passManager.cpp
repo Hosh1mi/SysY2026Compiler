@@ -38,6 +38,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "LoopDistribution",
         "LoopSimplify",
         "LCSSA",
+        "IndVarSimplify",
         "SimpleLoopUnswitch",
         "LoopRotate",
         "PhiOpSink",
