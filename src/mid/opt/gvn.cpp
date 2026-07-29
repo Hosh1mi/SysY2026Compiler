@@ -106,18 +106,16 @@ void invalidateLoads(Instruction *modInst, GvnState &st,
 }
 
 bool isPureCall(Function *callee, const BasicAliasAnalysis &BAA) {
-    return callee &&
-           !callee->is_declaration() &&
-           (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee));
+    return callee && BAA.isPure(callee);
 }
 
 bool isReadOnlyCall(Function *callee, const BasicAliasAnalysis &BAA) {
-    if (!callee || callee->is_declaration())
-        return false;
-    if (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee))
+    if (!callee || BAA.isPure(callee))
         return false;
     if (callee->hasSemFlag(SemFlag::FnReadOnly))
         return true;
+    if (callee->is_declaration())
+        return false;
 
     ModRefInfo mr = BAA.getFunctionModRef(callee);
     return isRefSet(mr) && !isModSet(mr);

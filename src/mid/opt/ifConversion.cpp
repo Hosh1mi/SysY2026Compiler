@@ -1,7 +1,6 @@
 #include "../../include/mid/opt/ifConversion.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/instruction.hpp"
-#include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <set>
@@ -140,31 +139,6 @@ static Value *tryCreateMaskedConditionalAdd(Value *condition, Value *trueValue,
     bb->add_instruction_before_inst(result, before);
     deadSum = sum;
     return result;
-}
-
-static Value *tryCreateSignedMinMax(Value *condition, Value *trueValue,
-                                    Value *falseValue, BasicBlock *bb,
-                                    Instruction *before) {
-    auto *select = new SelectInst(condition, trueValue, falseValue,
-                                  trueValue->type_);
-    SignedMinMaxIntrinsic kind;
-    Value *lhs = nullptr;
-    Value *rhs = nullptr;
-    if (!matchSignedMinMaxSelect(select, kind, lhs, rhs)) {
-        select->remove_use_of_ops();
-        delete select;
-        return nullptr;
-    }
-    select->remove_use_of_ops();
-    delete select;
-
-    auto *function = getOrInsertSignedMinMaxIntrinsic(bb->parent_->parent_,
-                                                      kind, trueValue->type_);
-    if (!function)
-        return nullptr;
-    auto *call = new CallInst(function, {lhs, rhs}, bb, true);
-    bb->add_instruction_before_inst(call, before);
-    return call;
 }
 
 // Convert a store-only diamond by selecting its destination address.  Both
@@ -478,12 +452,9 @@ static bool tryConvert(Loop &loop, Function *func) {
         Value *replacement = tryCreateMaskedConditionalAdd(
             B_cond, tv, fv, B, B_br, deadSum);
         if (!replacement) {
-            replacement = tryCreateSignedMinMax(B_cond, tv, fv, B, B_br);
-            if (!replacement) {
-                auto *sel = new SelectInst(B_cond, tv, fv, phi->type_);
-                B->add_instruction_before_inst(sel, B_br);
-                replacement = sel;
-            }
+            auto *sel = new SelectInst(B_cond, tv, fv, phi->type_);
+            B->add_instruction_before_inst(sel, B_br);
+            replacement = sel;
         } else if (deadSum) {
             maybeDead.push_back(deadSum);
         }

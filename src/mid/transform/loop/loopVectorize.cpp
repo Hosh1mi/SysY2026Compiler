@@ -1086,14 +1086,13 @@ void LoopVectorize::emitReductionVectorizedLoop(
     for (int lane = 1; lane < vecWidth; ++lane) {
         if (group.kind == ReductionGroup::SMin ||
             group.kind == ReductionGroup::SMax) {
-            auto intrinsicKind =
-                group.kind == ReductionGroup::SMin
-                    ? SignedMinMaxIntrinsic::SMin
-                    : SignedMinMaxIntrinsic::SMax;
-            auto *function = getOrInsertSignedMinMaxIntrinsic(
-                module, intrinsicKind, module->int32_ty_);
-            foldedAcc = new CallInst(function, {foldedAcc, laneVals[lane]},
+            auto predicate = group.kind == ReductionGroup::SMin
+                                 ? ICmpInst::ICMP_SLT
+                                 : ICmpInst::ICMP_SGT;
+            auto *cmp = new ICmpInst(predicate, foldedAcc, laneVals[lane],
                                      vecExit);
+            foldedAcc = new SelectInst(cmp, foldedAcc, laneVals[lane],
+                                       vecExit);
         } else {
             foldedAcc = new BinaryInst(module->int32_ty_, Instruction::Add,
                                        foldedAcc, laneVals[lane], vecExit);

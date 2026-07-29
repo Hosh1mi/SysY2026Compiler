@@ -317,7 +317,8 @@ Value* visitSelect(SelectInst *inst) {
     SignedMinMaxIntrinsic minMaxKind;
     Value *minMaxLHS = nullptr;
     Value *minMaxRHS = nullptr;
-    if (matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS)) {
+    if (dynamic_cast<VectorType *>(ty) &&
+        matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS)) {
         auto *function = getOrInsertSignedMinMaxIntrinsic(
             bb->parent_->parent_, minMaxKind, ty);
         if (function) {
