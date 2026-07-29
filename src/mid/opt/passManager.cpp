@@ -49,7 +49,6 @@ static bool isLoopTransformPass(const std::string &name) {
         "LoopInterchange",
         "ParallelizeLoops",
         "LoopVectorize",
-        "IndVarSimplify",
         "IndVarStrengthReduce",
         "LoopRepFold",
         "LoopUnroll",

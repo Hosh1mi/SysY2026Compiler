@@ -1,17 +1,7 @@
 #include "instCombineInternal.hpp"
 
-#include <limits>
-
 // ═══════════════════════════════════════════════════════════════════════
-// visitMul — integer Mul
-//
-// Capabilities:
-//   - Constant fold; canonicalize constant to RHS
-//   - Identities: x*1 → x, x*0 → 0, x*(-1) → 0-x
-//   - Reassoc: (x*C1)*C2 → x*(C1*C2)
-//   - A53 fuse before strength-reduce:
-//       mul x,2^k with sole user add/sub of same x → mul x, 2^k±1
-//   - Strength reduce: mul x, 2^k → shl x, k
+// visitMul  —  integer Mul simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitMul(BinaryInst *inst) {
@@ -26,6 +16,7 @@ Value* visitMul(BinaryInst *inst) {
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
+    // 1. Constant fold: C1 * C2 → C3
     if (cx && cy) {
         int result;
         if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
@@ -34,6 +25,7 @@ Value* visitMul(BinaryInst *inst) {
         return nullptr;
     }
 
+    // 2. Canonicalize: constant to RHS  (mul C, x → mul x, C)
     if (cx && !cy) {
         if (inst->get_operand(1) == x)
             return nullptr;
@@ -44,20 +36,19 @@ Value* visitMul(BinaryInst *inst) {
         return new_inst;
     }
 
-    if (cy && cy->value_ == 1)
+    // After canonicalization, any constant is on the RHS.
+
+    // 3. Identity: x * 1 → x
+    if (cy && cy->value_ == 1) {
         return x;
-
-    if (cy && cy->value_ == 0)
-        return make_const_int(ty, 0);
-
-    if (cy && cy->value_ == -1) {
-        auto *neg = new BinaryInst(ty, Instruction::Sub,
-            make_const_int(ty, 0), x, bb, true);
-        stampIntegerFacts(neg);
-        bb->add_instruction_before_inst(neg, inst);
-        return neg;
     }
 
+    // 4. Zero: x * 0 → 0
+    if (cy && cy->value_ == 0) {
+        return make_const_int(ty, 0);
+    }
+
+    // 5. Reassociation: (mul x, C1) * C2 → mul x, C1*C2
     if (cy) {
         auto *x_inst = dynamic_cast<Instruction*>(x);
         if (x_inst && x_inst->is_mul()) {
@@ -79,6 +70,11 @@ Value* visitMul(BinaryInst *inst) {
 
     if (!cy) return nullptr;
 
+    // 6. Fold  mul x, 2^k  whose sole user is  add/sub  with the same x.
+    //    add x, (mul x, 2^k)   →  mul x, 2^k + 1
+    //    sub (mul x, 2^k), x   →  mul x, 2^k - 1
+    //    Done *before* mul→shl so the backend sees a single mul and can
+    //    emit one fused instruction (e.g. add w0, w0, w0, lsl #k).
     if (isPowerOfTwo(cy->value_) && cy->value_ > 1 &&
         inst->use_list_.size() == 1) {
         auto *user = dynamic_cast<Instruction*>((*inst->use_list_.begin()).val_);
@@ -94,9 +90,10 @@ Value* visitMul(BinaryInst *inst) {
                     user->replace_all_use_with(new_mul);
                     user->parent_->delete_instr(user);
                     bb->delete_instr(inst);
-                    return nullptr;
+                    return nullptr;  // inst already deleted above
                 }
             } else if (user->op_id_ == Instruction::Sub) {
+                // sub (mul x, 2^k), x
                 if (user->get_operand(0) == inst && user->get_operand(1) == x) {
                     auto *new_mul = new BinaryInst(ty, Instruction::Mul,
                         x, make_const_int(ty, cy->value_ - 1), bb, true);
@@ -111,6 +108,8 @@ Value* visitMul(BinaryInst *inst) {
         }
     }
 
+    // 7. Strength reduction: mul x, 2^k  →  shl x, k
+    //    Only reached when no add/sub fusion fired (rule 6).
     if (isPowerOfTwo(cy->value_) && cy->value_ > 1) {
         int shift = log2Int(cy->value_);
         auto *shl = new BinaryInst(ty, Instruction::Shl, x,
@@ -124,14 +123,7 @@ Value* visitMul(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitSDiv — integer SDiv
-//
-// Capabilities:
-//   - Constant fold (div0 / INT_MIN/-1 rejected by evaluator)
-//   - Identities: x/1 → x; x/(-1) → 0-x
-//   - Range: |x| < |C| → 0
-//   - Power-of-two: sdiv x, 2^k → ashr when x≥0 or exact multiple
-//   - Variable pow2 divisor via isKnownPowerOfTwo, same ashr rule
+// visitSDiv  —  integer SDiv simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitSDiv(BinaryInst *inst) {
@@ -146,6 +138,7 @@ Value* visitSDiv(BinaryInst *inst) {
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
+    // 1. Constant fold: C1 / C2 → C3  (guard division by zero)
     if (cx && cy) {
         int result;
         if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
@@ -154,9 +147,12 @@ Value* visitSDiv(BinaryInst *inst) {
         return nullptr;
     }
 
-    if (cy && cy->value_ == 1)
+    // 2. Identity: x / 1 → x
+    if (cy && cy->value_ == 1) {
         return x;
+    }
 
+    // 3. x / -1  →  sub 0, x
     if (cy && cy->value_ == -1) {
         auto *neg = new BinaryInst(ty, Instruction::Sub,
             make_const_int(ty, 0), x, bb, true);
@@ -165,6 +161,7 @@ Value* visitSDiv(BinaryInst *inst) {
         return neg;
     }
 
+    // 3b. |x| < |C|  ⇒  x / C == 0  (截断向零，被除数幅值小于除数则商为 0)
     if (cy && cy->value_ != 0) {
         uint32_t b;
         int64_t cmag = cy->value_ < 0 ? -static_cast<int64_t>(cy->value_)
@@ -173,6 +170,9 @@ Value* visitSDiv(BinaryInst *inst) {
             return make_const_int(ty, 0);
     }
 
+    // 4. sdiv x, 2^k  →  ashr x, k   (constant power-of-2 divisor)
+    //    Exact when x ≥ 0 (no sign issue) or x is a multiple of 2^k
+    //    (no remainder to lose — ashr matches sdiv even for negative x).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
         bool exact = isKnownMultipleOf(x, k, bb);
@@ -186,6 +186,7 @@ Value* visitSDiv(BinaryInst *inst) {
         }
     }
 
+    // 5. sdiv x, pow2_var  →  ashr x, k   (variable divisor proven = 2^k)
     if (!cy) {
         int k;
         if (isKnownPowerOfTwo(y, k) && k > 0) {
@@ -205,14 +206,7 @@ Value* visitSDiv(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitSRem — integer SRem
-//
-// Capabilities:
-//   - Constant fold; x%1 → 0; |x|<|C| → x
-//   - RangeAnalysis: identity / x-C / select(sge, x-C, x) when range tight
-//   - Power-of-two → and mask when:
-//       sole user is icmp eq/ne …,0  (sign-safe zero test), or
-//       x proven non-negative / exact multiple of 2^k
+// visitSRem  —  integer SRem simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitSRem(BinaryInst *inst) {
@@ -227,6 +221,7 @@ Value* visitSRem(BinaryInst *inst) {
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
+    // 1. Constant fold: C1 % C2 → C3  (guard division by zero)
     if (cx && cy) {
         int result;
         if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
@@ -235,13 +230,13 @@ Value* visitSRem(BinaryInst *inst) {
         return nullptr;
     }
 
-    if (cy && cy->value_ == 1)
+    // 2. Identity: x % 1 → 0
+    if (cy && cy->value_ == 1) {
         return make_const_int(ty, 0);
+    }
 
-    // x % (-1) → 0  (same as %1 for two's complement remainder toward zero)
-    if (cy && cy->value_ == -1)
-        return make_const_int(ty, 0);
-
+    // 2b. |x| < |C|  ⇒  x % C == x  (被除数幅值已小于除数，取余即其自身)
+    //     关键收益：内联产生的 (x % C) % C —— 内层 srem 保证 |·| < |C| —— 折回 x。
     if (cy && cy->value_ != 0) {
         uint32_t b;
         int64_t cmag = cy->value_ < 0 ? -static_cast<int64_t>(cy->value_)
@@ -255,11 +250,13 @@ Value* visitSRem(BinaryInst *inst) {
         auto range = gInstCombineRangeAnalysis->getRange(x, bb);
         if (range.valid && !range.isTop && !range.isBottom) {
             long long mod = cy->value_;
-            if (range.lower > -mod && range.upper < mod)
+            if (range.lower > -mod && range.upper < mod) {
                 return x;
+            }
 
-            if (range.lower >= 0 && range.upper < mod)
+            if (range.lower >= 0 && range.upper < mod) {
                 return x;
+            }
 
             long long doubleMod = 0;
             if (mod <= std::numeric_limits<long long>::max() / 2) {
@@ -292,6 +289,11 @@ Value* visitSRem(BinaryInst *inst) {
         }
     }
 
+    // 3. srem x, 2^k  →  and x, 2^k-1
+    //
+    // (a) When the sole user is  icmp eq/ne …, 0  the transform is always
+    //     safe: we only care about zero / non-zero, and  (x & mask) == 0
+    //     iff  srem(x, 2^k) == 0  for all x (positive or negative).
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         if (inst->use_list_.size() == 1) {
             auto *cmp = dynamic_cast<ICmpInst*>((*inst->use_list_.begin()).val_);
@@ -311,6 +313,8 @@ Value* visitSRem(BinaryInst *inst) {
             }
         }
     }
+    // (b) No icmp-zero pattern, but still safe if we can prove x ≥ 0
+    //     or x is an exact multiple of 2^k.
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
         bool nonNegative = isKnownNonNegative(x);
@@ -329,11 +333,7 @@ Value* visitSRem(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFMul — floating-point FMul
-//
-// Capabilities:
-//   - Constant fold; canonicalize constant to RHS
-//   - Identity: x*1.0 → x; x*(-1.0) → fneg x
+// visitFMul  —  floating-point FMul simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFMul(BinaryInst *inst) {
@@ -347,6 +347,7 @@ Value* visitFMul(BinaryInst *inst) {
     ConstantFloat *cx = as_const_float(x);
     ConstantFloat *cy = as_const_float(y);
 
+    // 1. Constant fold: C1 * C2 → C3
     if (cx && cy) {
         float result;
         if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
@@ -355,30 +356,23 @@ Value* visitFMul(BinaryInst *inst) {
         return nullptr;
     }
 
+    // 2. Canonicalize: constant to RHS  (fmul C, x → fmul x, C)
     if (cx && !cy) {
         auto *new_inst = new BinaryInst(ty, Instruction::FMul, y, x, bb, true);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
 
-    if (cy && cy->value_ == 1.0f)
+    // 3. Identity: x * 1.0 → x
+    if (cy && cy->value_ == 1.0f) {
         return x;
-
-    if (cy && cy->value_ == -1.0f) {
-        auto *fneg = new UnaryInst(ty, Instruction::FNeg, x, bb, true);
-        bb->add_instruction_before_inst(fneg, inst);
-        return fneg;
     }
 
     return nullptr;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFDiv — floating-point FDiv
-//
-// Capabilities:
-//   - Constant fold (div0 guarded by evaluator)
-//   - Identity: x/1.0 → x; x/(-1.0) → fneg x
+// visitFDiv  —  floating-point FDiv simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFDiv(BinaryInst *inst) {
@@ -387,11 +381,11 @@ Value* visitFDiv(BinaryInst *inst) {
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
     Type *ty = inst->type_;
-    BasicBlock *bb = inst->parent_;
 
     ConstantFloat *cx = as_const_float(x);
     ConstantFloat *cy = as_const_float(y);
 
+    // 1. Constant fold: C1 / C2 → C3  (guard division by zero)
     if (cx && cy) {
         float result;
         if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
@@ -400,13 +394,9 @@ Value* visitFDiv(BinaryInst *inst) {
         return nullptr;
     }
 
-    if (cy && cy->value_ == 1.0f)
+    // 2. Identity: x / 1.0 → x
+    if (cy && cy->value_ == 1.0f) {
         return x;
-
-    if (cy && cy->value_ == -1.0f) {
-        auto *fneg = new UnaryInst(ty, Instruction::FNeg, x, bb, true);
-        bb->add_instruction_before_inst(fneg, inst);
-        return fneg;
     }
 
     return nullptr;

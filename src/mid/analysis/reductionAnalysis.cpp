@@ -35,14 +35,14 @@ bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
                              Loop *inner, Loop *parent,
                              AffineAnalysis *AA) {
     if (!bodyGEP || !storeGEP || !inner || !parent || !AA ||
-        !inner->hasCanonicalIV() || !parent->hasCanonicalIV() ||
         !inner->tripCount || !parent->inductionInit ||
         inner->tripCount != parent->inductionInit ||
         bodyGEP->num_ops_ != storeGEP->num_ops_)
         return false;
 
-    PhiInst *innerIV = inner->canonicalIV;
-    PhiInst *parentIV = parent->canonicalIV;
+    PhiInst *innerIV = inner->getInductionIV();
+    PhiInst *parentIV = parent->getInductionIV();
+    if (!innerIV || !parentIV) return false;
     AffineExpr innerIVExpr = AA->analyze(innerIV);
     AffineExpr parentIVExpr = AA->analyze(parentIV);
     if (!innerIVExpr.valid || !parentIVExpr.valid) return false;
@@ -79,13 +79,11 @@ bool ReductionAnalysis::detectScalarExpandableNest(
 
     Loop *parent = inner->parent;
     if (!parent) return false;
-    if (!inner->hasCanonicalIV() || !parent->hasCanonicalIV()) return false;
-    if (!inner->tripCount || !parent->tripCount || !parent->inductionInit)
-        return false;
+    if (!inner->hasInductionIV() || !parent->hasInductionIV()) return false;
     if (!provablyNonNegative(parent->inductionInit, parent)) return false;
 
-    PhiInst *innerIV = inner->canonicalIV;
-    PhiInst *parentIV = parent->canonicalIV;
+    PhiInst *innerIV = inner->getInductionIV();
+    PhiInst *parentIV = parent->getInductionIV();
     Value *innerBound = inner->tripCount;
     Value *parentBound = parent->tripCount;
 
@@ -234,8 +232,8 @@ bool ReductionAnalysis::detectScalarExpandableNest(
 
 bool ReductionAnalysis::isScalarExpansionMemoryLegal(
     const ScalarReductionNestInfo &info) const {
-    if (!info.parent_loop || !info.parent_loop->hasCanonicalIV()) return false;
-    PhiInst *parentIV = info.parent_loop->canonicalIV;
+    if (!info.parent_loop || !info.parent_loop->getInductionIV()) return false;
+    PhiInst *parentIV = info.parent_loop->getInductionIV();
 
     auto exactParentCoordinate = [&](Value *index) {
         AffineExpr expr = AA_->analyze(index);

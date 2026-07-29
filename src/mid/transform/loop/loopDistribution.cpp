@@ -297,12 +297,8 @@ void LoopDistribution::runOnFunction(Function *func) {
 
 bool LoopDistribution::isLegalAndProfitable(const ScalarReductionNestInfo &info,
                                             LoopInterchangeAnalysis &IA) {
-    if (!info.inner_loop || !info.parent_loop ||
-        !info.inner_loop->hasCanonicalIV() ||
-        !info.parent_loop->hasCanonicalIV())
-        return false;
-    PhiInst *L_iv = info.inner_loop->canonicalIV;
-    PhiInst *P_iv = info.parent_loop->canonicalIV;
+    PhiInst *L_iv = info.inner_loop->getInductionIV();
+    PhiInst *P_iv = info.parent_loop->getInductionIV();
     std::vector<GetElementPtrInst *> geps = info.body_geps;
     for (auto &r : info.reductions) geps.push_back(r.gep_store);
     return IA.estimateCost(geps, L_iv, P_iv).profitable();
@@ -311,16 +307,14 @@ bool LoopDistribution::isLegalAndProfitable(const ScalarReductionNestInfo &info,
 bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module) {
     Loop *P = info.parent_loop;
     Loop *L = info.inner_loop;
-    if (!P || !L || !P->hasCanonicalIV() || !L->hasCanonicalIV())
-        return false;
     Function *func = P->header->parent_;
     Type *i32 = module->int32_ty_;
     BasicBlock *P_preheader = P->preheader;
     BasicBlock *P_exit = P->singleExit();
     BasicBlock *L_header = L->header;
     BasicBlock *L_latch = L->singleLatch();
-    PhiInst *P_iv = P->canonicalIV;
-    PhiInst *L_iv = L->canonicalIV;
+    PhiInst *P_iv = P->getInductionIV();
+    PhiInst *L_iv = L->getInductionIV();
     if (!P_preheader || !P_exit || !L_header || !L_latch ||
         !P_iv || !L_iv || !info.parent_bound || !info.inner_bound)
         return false;

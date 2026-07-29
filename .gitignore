@@ -13,8 +13,3 @@ src/backend/riscv_deprecated/
 src/mid/hira*
 
 .DS_STORE
-*.md
-*.txt
-*.td
-*.pdf
-*.json*

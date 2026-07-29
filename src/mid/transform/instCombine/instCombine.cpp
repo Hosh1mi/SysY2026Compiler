@@ -212,7 +212,6 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
         case Instruction::ZExt:
         case Instruction::SItoFP:
         case Instruction::FPtoSI:
-        case Instruction::BitCast:
         case Instruction::Clz:
             replacement = visitCast(inst);
             break;

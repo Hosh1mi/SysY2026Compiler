@@ -469,7 +469,6 @@ RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *
 
 RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx) {
     if (!phi) return IntRange::top();
-
     IntRange result = IntRange::bottom();
     for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
         auto *incoming = phi->get_operand(i);
@@ -582,21 +581,6 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(Value *v, BasicBlock *ctx) {
     const SCEV *s = SE_->getSCEV(v);
     if (!s) return IntRange::top();
 
-    auto result = getSCEVRange(s, ctx);
-    if (ctx) result = applyFacts(v, result, ctx);
-    return result;
-}
-
-RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(const SCEV *s, BasicBlock *ctx) {
-    (void)ctx;
-    if (!s) return IntRange::top();
-
-    auto clampToType = [&](IntRange r, Type *ty) -> IntRange {
-        if (!r.valid || r.isTop || r.isBottom) return r;
-        auto [lo, hi] = typeBounds(ty);
-        return r.intersect(IntRange::bounded(lo, hi));
-    };
-
     switch (s->kind()) {
     case SCEVKind::Constant: {
         auto *c = static_cast<const SCEVConstant *>(s);
@@ -641,12 +625,8 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(const SCEV *s, BasicBlock *c
         }
         return IntRange::constant(startC->value());
     }
-    case SCEVKind::AddExpr: {
-        return IntRange::top();
-    }
-    case SCEVKind::MulExpr: {
-        return IntRange::top();
-    }
+    case SCEVKind::AddExpr:
+    case SCEVKind::MulExpr:
     case SCEVKind::Unknown:
     case SCEVKind::CouldNotCompute:
         return IntRange::top();

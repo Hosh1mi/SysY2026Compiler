@@ -183,7 +183,7 @@ bool applyParallelSink(Function *func, Loop *K) {
     };
     Module  *module = func->parent_;
     Type    *i32    = module->int32_ty_;
-    PhiInst *kIV    = K->canonicalIV;
+    PhiInst *kIV    = K->getInductionIV();
     Value   *kBound = K->tripCount;
     BasicBlock *kHeader = K->header;
     BasicBlock *kPre    = K->preheader;
@@ -468,7 +468,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
             else                   mExitSucc = succ;
         }
     }
-    PhiInst *mIV = M->canonicalIV;
+    PhiInst *mIV = M->getInductionIV();
     if (!mIV || !mGuard ||
         mGuard->icmp_op_ != ICmpInst::ICMP_SLT ||
         mGuard->get_operand(0) != mIV ||

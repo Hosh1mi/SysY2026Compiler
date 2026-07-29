@@ -1,18 +1,8 @@
+// NOTE: If bugs are met, delete fneg
 #include "instCombineInternal.hpp"
 
-#include <cmath>
-
 // ═══════════════════════════════════════════════════════════════════════
-// visitAdd — integer Add
-//
-// Capabilities (SysY int / LLVM-aligned, no UB):
-//   - Constant fold C1+C2; canonicalize constant to RHS
-//   - Identities: x+0 → x; x+x → shl x,1
-//   - Reassoc: (x+C1)+C2 → x+(C1+C2)
-//   - Neg cancel: x+(0-y) / (0-y)+x → x-y
-//   - A53-friendly: x+(x<<k) / (x<<k)+x → mul x, 2^k+1
-//   - Disjoint add: add x,C → or x,C when low bits of x proven zero
-//   - Side effect: stamp NSW/NUW on add x,1 when dominated by x<bound
+// visitAdd  —  integer Add simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitAdd(BinaryInst *inst) {
@@ -27,6 +17,7 @@ Value* visitAdd(BinaryInst *inst) {
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
+    // 1. Constant fold: C1 + C2 → C3
     if (cx && cy) {
         int result;
         if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
@@ -35,6 +26,7 @@ Value* visitAdd(BinaryInst *inst) {
         return nullptr;
     }
 
+    // 2. Canonicalize: constant to RHS  (add C, x → add x, C)
     if (cx && !cy) {
         if (inst->get_operand(1) == x)
             return nullptr;
@@ -45,17 +37,14 @@ Value* visitAdd(BinaryInst *inst) {
         return new_inst;
     }
 
-    if (cy && cy->value_ == 0)
-        return x;
+    // After canonicalization, any constant (if present) is on the RHS.
 
-    if (x == y) {
-        auto *shl = new BinaryInst(ty, Instruction::Shl, x,
-                                   make_const_int(ty, 1), bb, true);
-        stampIntegerFacts(shl);
-        bb->add_instruction_before_inst(shl, inst);
-        return shl;
+    // 3. Identity: x + 0 → x
+    if (cy && cy->value_ == 0) {
+        return x;
     }
 
+    // 4. Reassociation: (add x, C1) + C2 → add x, C1+C2
     if (cy) {
         auto *x_inst = dynamic_cast<Instruction*>(x);
         if (x_inst && x_inst->is_add()) {
@@ -77,23 +66,9 @@ Value* visitAdd(BinaryInst *inst) {
         }
     }
 
-    // x + (0 - y)  /  (0 - y) + x  →  x - y
-    {
-        auto tryNeg = [&](Value *negCandidate, Value *other) -> Value* {
-            auto *neg = dynamic_cast<Instruction*>(negCandidate);
-            if (!neg || !neg->is_sub()) return nullptr;
-            auto *zero = as_const_int(neg->get_operand(0));
-            if (!zero || zero->value_ != 0) return nullptr;
-            auto *sub = new BinaryInst(ty, Instruction::Sub, other,
-                                       neg->get_operand(1), bb, true);
-            stampIntegerFacts(sub);
-            bb->add_instruction_before_inst(sub, inst);
-            return sub;
-        };
-        if (auto *r = tryNeg(y, x)) return r;
-        if (auto *r = tryNeg(x, y)) return r;
-    }
-
+    // 5. Fold  x + (x << k)  →  mul x, 2^k+1
+    //    Canonical form for the backend: a single mul lets the backend
+    //    emit one fused  add x, x, lsl #k  on AArch64.
     {
         auto *xi = dynamic_cast<Instruction*>(x);
         auto *yi = dynamic_cast<Instruction*>(y);
@@ -101,6 +76,7 @@ Value* visitAdd(BinaryInst *inst) {
             auto *amt = as_const_int(xi->get_operand(1));
             if (amt && amt->value_ >= 0 && amt->value_ < 31 &&
                 xi->get_operand(0) == y) {
+                // (x << k) + x
                 auto *mul = new BinaryInst(ty, Instruction::Mul,
                     y, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
                 stampIntegerFacts(mul);
@@ -112,6 +88,7 @@ Value* visitAdd(BinaryInst *inst) {
             auto *amt = as_const_int(yi->get_operand(1));
             if (amt && amt->value_ >= 0 && amt->value_ < 31 &&
                 yi->get_operand(0) == x) {
+                // x + (x << k)
                 auto *mul = new BinaryInst(ty, Instruction::Mul,
                     x, make_const_int(ty, (1 << amt->value_) + 1), bb, true);
                 stampIntegerFacts(mul);
@@ -121,9 +98,17 @@ Value* visitAdd(BinaryInst *inst) {
         }
     }
 
+    // 6. add x, C  →  or x, C   when  x & C == 0  (no carry possible)
+    //    If x has k trailing zeros and C fits in k bits, addition is just bitwise OR.
     if (cy && cy->value_ > 0) {
+        // k = ⌈log₂(C+1)⌉ — the number of bits needed to represent C.
+        // Cap k at 31: a positive i32 constant is < 2^31, so k never needs to
+        // exceed 31, and stopping there keeps 1<<k from overflowing signed int
+        // (1<<31 is UB and made the loop spin forever on e.g. C = 2^30).
         int k = 1;
         while (k < 31 && (1 << k) <= cy->value_) k++;
+        // C < 2^k, so all set bits of C are in positions 0..k-1.
+        // If x is a multiple of 2^k, its low k bits are zero → x & C == 0.
         if (isKnownMultipleOf(x, k, bb)) {
             auto *or_inst = new BinaryInst(ty, Instruction::Or, x, y, bb, true);
             stampIntegerFacts(or_inst);
@@ -136,14 +121,7 @@ Value* visitAdd(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitSub — integer Sub
-//
-// Capabilities:
-//   - Constant fold C1-C2; identities x-0 → x, x-x → 0
-//   - Reassoc: (x+C1)-C2 → x+(C1-C2); (x-C1)-C2 → x-(C1+C2)
-//   - Neg cancel: x-(0-y) → x+y
-//   - Algebra: x-(x+y) → 0-y; x-(x-y) → y; (x+y)-x → y; (x+y)-y → x
-//   - A53-friendly: (x<<k)-x → mul x, 2^k-1
+// visitSub  —  integer Sub simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitSub(BinaryInst *inst) {
@@ -158,6 +136,7 @@ Value* visitSub(BinaryInst *inst) {
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
+    // 1. Constant fold: C1 - C2 → C3
     if (cx && cy) {
         int result;
         if (ConstantEvaluator::foldIntegerBinary(inst->op_id_, cx->value_,
@@ -166,12 +145,17 @@ Value* visitSub(BinaryInst *inst) {
         return nullptr;
     }
 
-    if (cy && cy->value_ == 0)
+    // 2. Identity: x - 0 → x
+    if (cy && cy->value_ == 0) {
         return x;
+    }
 
-    if (x == y)
+    // 3. Self-cancel: x - x → 0
+    if (x == y) {
         return make_const_int(ty, 0);
+    }
 
+    // 4. Reassociation: (add x, C1) - C2 → add x, C1-C2
     if (cy) {
         auto *x_inst = dynamic_cast<Instruction*>(x);
         if (x_inst && x_inst->is_add()) {
@@ -191,6 +175,7 @@ Value* visitSub(BinaryInst *inst) {
         }
     }
 
+    // 5. Reassociation: (sub x, C1) - C2 → sub x, C1+C2
     if (cy) {
         auto *x_inst = dynamic_cast<Instruction*>(x);
         if (x_inst && x_inst->is_sub()) {
@@ -210,48 +195,7 @@ Value* visitSub(BinaryInst *inst) {
         }
     }
 
-    // x - (0 - y) → x + y
-    {
-        auto *yi = dynamic_cast<Instruction*>(y);
-        if (yi && yi->is_sub()) {
-            auto *zero = as_const_int(yi->get_operand(0));
-            if (zero && zero->value_ == 0) {
-                auto *add = new BinaryInst(ty, Instruction::Add, x,
-                                           yi->get_operand(1), bb, true);
-                stampIntegerFacts(add);
-                bb->add_instruction_before_inst(add, inst);
-                return add;
-            }
-        }
-    }
-
-    // x - (x + y) → 0 - y ;  x - (y + x) → 0 - y
-    // x - (x - y) → y
-    // (x + y) - x → y ;  (y + x) - x → y
-    {
-        auto *yi = dynamic_cast<Instruction*>(y);
-        if (yi && yi->is_add()) {
-            Value *a = yi->get_operand(0), *b = yi->get_operand(1);
-            if (a == x || b == x) {
-                Value *other = (a == x) ? b : a;
-                auto *neg = new BinaryInst(ty, Instruction::Sub,
-                    make_const_int(ty, 0), other, bb, true);
-                stampIntegerFacts(neg);
-                bb->add_instruction_before_inst(neg, inst);
-                return neg;
-            }
-        }
-        if (yi && yi->is_sub() && yi->get_operand(0) == x)
-            return yi->get_operand(1);
-
-        auto *xi = dynamic_cast<Instruction*>(x);
-        if (xi && xi->is_add()) {
-            Value *a = xi->get_operand(0), *b = xi->get_operand(1);
-            if (a == y) return b;
-            if (b == y) return a;
-        }
-    }
-
+    // 6. Fold  (x << k) - x  →  mul x, 2^k-1
     {
         auto *xi = dynamic_cast<Instruction*>(x);
         if (xi && xi->op_id_ == Instruction::Shl) {
@@ -271,12 +215,7 @@ Value* visitSub(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFAdd — floating-point FAdd
-//
-// Capabilities (finite SysY float; signed-zero–safe where noted):
-//   - Constant fold; canonicalize constant to RHS
-//   - Identity: x + (-0.0) → x  (IEEE-safe; +0.0 is not folded)
-//   - fneg(x) + fneg(y) → fneg(x + y)
+// visitFAdd  —  floating-point FAdd simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFAdd(BinaryInst *inst) {
@@ -290,6 +229,7 @@ Value* visitFAdd(BinaryInst *inst) {
     ConstantFloat *cx = as_const_float(x);
     ConstantFloat *cy = as_const_float(y);
 
+    // 1. Constant fold: C1 + C2 → C3
     if (cx && cy) {
         float result;
         if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
@@ -298,16 +238,14 @@ Value* visitFAdd(BinaryInst *inst) {
         return nullptr;
     }
 
+    // 2. Canonicalize: constant to RHS  (fadd C, x → fadd x, C)
     if (cx && !cy) {
         auto *new_inst = new BinaryInst(ty, Instruction::FAdd, y, x, bb, true);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
 
-    // fadd x, -0.0 → x  (adding -0 never changes a finite/NaN value)
-    if (cy && cy->value_ == 0.0f && std::signbit(cy->value_))
-        return x;
-
+    // 3. fneg(x) + fneg(y) → fneg(x + y)
     {
         auto *x_inst = dynamic_cast<Instruction*>(x);
         auto *y_inst = dynamic_cast<Instruction*>(y);
@@ -315,9 +253,10 @@ Value* visitFAdd(BinaryInst *inst) {
             y_inst && y_inst->op_id_ == Instruction::FNeg) {
             Value *inner_x = x_inst->get_operand(0);
             Value *inner_y = y_inst->get_operand(0);
-            auto *inner_add = new BinaryInst(ty, Instruction::FAdd,
-                                             inner_x, inner_y, bb, true);
+            // inner add
+            auto *inner_add = new BinaryInst(ty, Instruction::FAdd, inner_x, inner_y, bb, true);
             bb->add_instruction_before_inst(inner_add, inst);
+            // outer fneg
             auto *fneg = new UnaryInst(ty, Instruction::FNeg, inner_add, bb, true);
             bb->add_instruction_before_inst(fneg, inst);
             return fneg;
@@ -328,13 +267,7 @@ Value* visitFAdd(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFSub — floating-point FSub
-//
-// Capabilities:
-//   - Constant fold
-//   - Identity: x - (+0.0) → x
-//   - Neg form: (-0.0) - x → fneg x
-//   - fsub x, fneg(y) → fadd x, y
+// visitFSub  —  floating-point FSub simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFSub(BinaryInst *inst) {
@@ -348,6 +281,7 @@ Value* visitFSub(BinaryInst *inst) {
     ConstantFloat *cx = as_const_float(x);
     ConstantFloat *cy = as_const_float(y);
 
+    // 1. Constant fold: C1 - C2 → C3
     if (cx && cy) {
         float result;
         if (ConstantEvaluator::foldFloatBinary(inst->op_id_, cx->value_,
@@ -356,21 +290,12 @@ Value* visitFSub(BinaryInst *inst) {
         return nullptr;
     }
 
-    if (cy && cy->value_ == 0.0f && !std::signbit(cy->value_))
-        return x;
-
-    if (cx && cx->value_ == 0.0f && std::signbit(cx->value_)) {
-        auto *fneg = new UnaryInst(ty, Instruction::FNeg, y, bb, true);
-        bb->add_instruction_before_inst(fneg, inst);
-        return fneg;
-    }
-
+    // 2. fsub x, fneg(y) → fadd x, y
     {
         auto *y_inst = dynamic_cast<Instruction*>(y);
         if (y_inst && y_inst->op_id_ == Instruction::FNeg) {
             Value *inner_y = y_inst->get_operand(0);
-            auto *new_inst = new BinaryInst(ty, Instruction::FAdd,
-                                            x, inner_y, bb, true);
+            auto *new_inst = new BinaryInst(ty, Instruction::FAdd, x, inner_y, bb, true);
             bb->add_instruction_before_inst(new_inst, inst);
             return new_inst;
         }
@@ -380,12 +305,7 @@ Value* visitFSub(BinaryInst *inst) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFNeg — floating-point FNeg
-//
-// Capabilities:
-//   - Constant fold fneg C → -C
-//   - Double negate: fneg(fneg(x)) → x
-//   - fneg(fsub(x, y)) → fsub(y, x)
+// visitFNeg  —  floating-point FNeg simplifications
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFNeg(UnaryInst *inst) {
@@ -395,20 +315,24 @@ Value* visitFNeg(UnaryInst *inst) {
     Type *ty = inst->type_;
     BasicBlock *bb = inst->parent_;
 
+    // 1. Constant fold: fneg C → -C
     auto *cx = as_const_float(x);
-    if (cx)
+    if (cx) {
         return make_const_float(ty, -cx->value_);
+    }
 
     auto *x_inst = dynamic_cast<Instruction*>(x);
 
-    if (x_inst && x_inst->op_id_ == Instruction::FNeg)
+    // 2. Double negate: fneg(fneg(x)) → x
+    if (x_inst && x_inst->op_id_ == Instruction::FNeg) {
         return x_inst->get_operand(0);
+    }
 
+    // 3. fneg(fsub(x, y)) → fsub(y, x)
     if (x_inst && x_inst->is_fsub()) {
         Value *inner_x = x_inst->get_operand(0);
         Value *inner_y = x_inst->get_operand(1);
-        auto *new_inst = new BinaryInst(ty, Instruction::FSub,
-                                        inner_y, inner_x, bb, true);
+        auto *new_inst = new BinaryInst(ty, Instruction::FSub, inner_y, inner_x, bb, true);
         bb->add_instruction_before_inst(new_inst, inst);
         return new_inst;
     }
