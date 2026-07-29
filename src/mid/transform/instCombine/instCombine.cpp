@@ -66,7 +66,8 @@ static void trySinkInstruction(Instruction *inst) {
 }
 
 void InstCombine::execute(Module *module) {
-    for (auto func : module->function_list_) {
+    auto functions = module->function_list_;
+    for (auto func : functions) {
         if (func->is_declaration()) continue;
         runOnFunction(func, nullptr);
     }
@@ -74,7 +75,8 @@ void InstCombine::execute(Module *module) {
 
 PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
-    for (auto func : module->function_list_) {
+    auto functions = module->function_list_;
+    for (auto func : functions) {
         if (func->is_declaration()) continue;
         changed |= runOnFunction(func, &AM);
     }

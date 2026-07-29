@@ -169,6 +169,8 @@ enum class Opcode : std::uint16_t {
     ADDv4i32,
     SUBv4i32,
     MULv4i32,
+    SMINv4i32,
+    SMAXv4i32,
     NEGv4i32,
     SSHLv4i32,
     USHLv4i32,

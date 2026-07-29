@@ -810,6 +810,41 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(instruction), &node);
                 break;
             }
+            case SDOpcode::SMin:
+            case SDOpcode::SMax: {
+                ValueType resultType = node.resultTypes().front();
+                if (resultType == ValueType::V4I32) {
+                    MachineInstr instruction(
+                        node.opcode() == SDOpcode::SMin ? Opcode::SMINv4i32
+                                                        : Opcode::SMAXv4i32);
+                    instruction.addOperand(define(node))
+                        .addOperand(use(node.operands()[0]))
+                        .addOperand(use(node.operands()[1]));
+                    append(block, std::move(instruction), &node);
+                    break;
+                }
+                if (resultType != ValueType::I32)
+                    throw std::logic_error("unsupported signed min/max type");
+
+                MachineInstr compare(Opcode::CMPWrr);
+                compare.addOperand(use(node.operands()[0]))
+                    .addOperand(use(node.operands()[1]))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, true, true));
+                append(block, std::move(compare));
+
+                MachineInstr select(Opcode::CSELW);
+                select.addOperand(define(node))
+                    .addOperand(use(node.operands()[0]))
+                    .addOperand(use(node.operands()[1]))
+                    .addOperand(MachineOperand::condition(
+                        node.opcode() == SDOpcode::SMin ? CondCode::LT
+                                                        : CondCode::GT))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, false, true));
+                append(block, std::move(select), &node);
+                break;
+            }
             case SDOpcode::SRem:
             case SDOpcode::URem: {
                 SDNode *rhs = node.operands()[1].node;

@@ -1,4 +1,5 @@
 #include "instCombineInternal.hpp"
+#include "../../../include/mid/ir/intrinsics.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════
 // getSwappedPredicate — icmp predicate after swapping operands
@@ -312,6 +313,20 @@ Value* visitSelect(SelectInst *inst) {
 
     if (tval == fval)
         return tval;
+
+    SignedMinMaxIntrinsic minMaxKind;
+    Value *minMaxLHS = nullptr;
+    Value *minMaxRHS = nullptr;
+    if (matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS)) {
+        auto *function = getOrInsertSignedMinMaxIntrinsic(
+            bb->parent_->parent_, minMaxKind, ty);
+        if (function) {
+            auto *call = new CallInst(function, {minMaxLHS, minMaxRHS}, bb,
+                                      true);
+            bb->add_instruction_before_inst(call, inst);
+            return call;
+        }
+    }
 
     if (ty->tid_ == Type::IntegerTyID) {
         auto *ct = as_const_int(tval);

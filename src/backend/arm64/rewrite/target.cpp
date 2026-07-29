@@ -340,10 +340,13 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "umov"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDv4i32: case Opcode::SUBv4i32:
+    case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
     case Opcode::ADDv4f32: case Opcode::SUBv4f32:
     case Opcode::ANDv16i8: case Opcode::ORRv16i8: case Opcode::EORv16i8:
         dynamic.mnemonic = opcode == Opcode::ADDv4i32 || opcode == Opcode::ADDv4f32 ? "add"
                            : opcode == Opcode::SUBv4i32 || opcode == Opcode::SUBv4f32 ? "sub"
+                           : opcode == Opcode::SMINv4i32 ? "smin"
+                           : opcode == Opcode::SMAXv4i32 ? "smax"
                            : opcode == Opcode::ANDv16i8 ? "and"
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
@@ -577,6 +580,8 @@ bool InstrInfo::isCommutable(Opcode opcode) {
     case Opcode::FMULS:
     case Opcode::ADDv4i32:
     case Opcode::MULv4i32:
+    case Opcode::SMINv4i32:
+    case Opcode::SMAXv4i32:
     case Opcode::ADDv4f32:
     case Opcode::MULv4f32:
         return true;
