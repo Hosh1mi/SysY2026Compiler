@@ -391,6 +391,11 @@ const InstrDesc &descriptor(Opcode opcode) {
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
         dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
+        dynamic.mnemonic =
+            opcode == Opcode::SMINv4i32 ? "smin" : "smax";
+        dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::MULv4i32: case Opcode::MLAv4i32: case Opcode::MLSv4i32:
     case Opcode::MULv4f32: case Opcode::DIVv4f32:
     case Opcode::FMLAv4f32: case Opcode::FMLSv4f32:
@@ -625,6 +630,8 @@ bool InstrInfo::isCommutable(Opcode opcode) {
     case Opcode::FMULS:
     case Opcode::ADDv4i32:
     case Opcode::MULv4i32:
+    case Opcode::SMINv4i32:
+    case Opcode::SMAXv4i32:
     case Opcode::ADDv4f32:
     case Opcode::MULv4f32:
         return true;

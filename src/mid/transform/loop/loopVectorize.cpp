@@ -1,5 +1,6 @@
 #include "../../../include/mid/opt/loopVectorize.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/ir/intrinsics.hpp"
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -18,7 +19,8 @@ void LoopVectorize::execute(Module *module) {
 
 PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
     BasicAliasAnalysis &BAA = AM.getBasicAA(module);
-    for (auto func : module->function_list_) {
+    auto functions = module->function_list_;
+    for (auto func : functions) {
         if (!func->is_declaration())
             runOnFunction(func, BAA);
     }
@@ -304,43 +306,94 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     //   acc = acc - (a*b) - (a*b) ...   乘-减链（原有，stride 可 >1）
     //   acc = acc + (a*b)               点积（stride==1）
     //   acc = acc + load                求和（stride==1）
-    auto *topBin = dynamic_cast<BinaryInst*>(accLatch);
-    if (!topBin || !(topBin->is_add() || topBin->is_sub()))
-        return reject("reduction-not-add-or-sub");
-    bool isAdd = topBin->is_add();
-    bool noMul = false;
-
     std::vector<std::pair<Value*, Value*>> mulInputsRev;
-    Value *cursor = accLatch;
-    while (cursor != accPhi) {
-        auto *bin = dynamic_cast<BinaryInst*>(cursor);
-        if (!bin || (isAdd ? !bin->is_add() : !bin->is_sub()))
-            return reject("reduction-chain-op");
-
-        Value *recur, *newVal;
-        if (isAdd) {
-            // 加法可交换：递归项是直接等于 accPhi 的一侧（仅支持单步 add ⇒ stride==1）
-            if (bin->get_operand(0) == accPhi) { recur = bin->get_operand(0); newVal = bin->get_operand(1); }
-            else if (bin->get_operand(1) == accPhi) { recur = bin->get_operand(1); newVal = bin->get_operand(0); }
-            else return reject("reduction-add-recurrence");
-        } else {
-            recur = bin->get_operand(0);   // a - b：递归项是 a，被减项是 b
-            newVal = bin->get_operand(1);
+    bool isAdd = true;
+    bool noMul = false;
+    ReductionGroup::Kind reductionKind = ReductionGroup::Add;
+    auto matchMinMaxUpdate = [&](Value *value, Value *&laneValue,
+                                 ReductionGroup::Kind &kind) -> bool {
+        laneValue = nullptr;
+        if (auto *call = dynamic_cast<CallInst *>(value)) {
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            SignedMinMaxIntrinsic intrinsicKind;
+            if (!isSignedMinMaxIntrinsic(callee, &intrinsicKind) ||
+                call->num_ops_ != 3)
+                return false;
+            if (call->get_operand(0) == accPhi)
+                laneValue = call->get_operand(1);
+            else if (call->get_operand(1) == accPhi)
+                laneValue = call->get_operand(0);
+            else
+                return false;
+            kind = intrinsicKind == SignedMinMaxIntrinsic::SMin
+                       ? ReductionGroup::SMin
+                       : ReductionGroup::SMax;
+            return true;
         }
 
-        auto *mul = dynamic_cast<BinaryInst*>(newVal);
-        if (mul && mul->is_mul() && mul->type_->tid_ == Type::IntegerTyID) {
-            if (noMul) return reject("reduction-mixed-kind");
-            mulInputsRev.push_back({mul->get_operand(0), mul->get_operand(1)});
-        } else {
-            if (!isAdd) return reject("reduction-not-mul");       // 减法链仍只接受乘积
-            if (!mulInputsRev.empty()) return reject("reduction-mixed-kind");
-            noMul = true;
-            mulInputsRev.push_back({newVal, nullptr});            // 求和：单操作数
+        auto *select = dynamic_cast<SelectInst *>(value);
+        SignedMinMaxIntrinsic intrinsicKind;
+        Value *lhs = nullptr;
+        Value *rhs = nullptr;
+        if (!matchSignedMinMaxSelect(select, intrinsicKind, lhs, rhs))
+            return false;
+        if (lhs == accPhi)
+            laneValue = rhs;
+        else if (rhs == accPhi)
+            laneValue = lhs;
+        else
+            return false;
+        kind = intrinsicKind == SignedMinMaxIntrinsic::SMin
+                   ? ReductionGroup::SMin
+                   : ReductionGroup::SMax;
+        return true;
+    };
+
+    Value *minMaxLaneValue = nullptr;
+    if (matchMinMaxUpdate(accLatch, minMaxLaneValue, reductionKind)) {
+        if (iv.stride != 1)
+            return reject("minmax-reduction-step");
+        noMul = true;
+        mulInputsRev.push_back({minMaxLaneValue, nullptr});
+    } else {
+        auto *topBin = dynamic_cast<BinaryInst*>(accLatch);
+        if (!topBin || !(topBin->is_add() || topBin->is_sub()))
+            return reject("reduction-not-add-or-sub");
+        isAdd = topBin->is_add();
+        reductionKind = isAdd ? ReductionGroup::Add : ReductionGroup::Sub;
+
+        Value *cursor = accLatch;
+        while (cursor != accPhi) {
+            auto *bin = dynamic_cast<BinaryInst*>(cursor);
+            if (!bin || (isAdd ? !bin->is_add() : !bin->is_sub()))
+                return reject("reduction-chain-op");
+
+            Value *recur, *newVal;
+            if (isAdd) {
+                // 加法可交换：递归项是直接等于 accPhi 的一侧（仅支持单步 add ⇒ stride==1）
+                if (bin->get_operand(0) == accPhi) { recur = bin->get_operand(0); newVal = bin->get_operand(1); }
+                else if (bin->get_operand(1) == accPhi) { recur = bin->get_operand(1); newVal = bin->get_operand(0); }
+                else return reject("reduction-add-recurrence");
+            } else {
+                recur = bin->get_operand(0);   // a - b：递归项是 a，被减项是 b
+                newVal = bin->get_operand(1);
+            }
+
+            auto *mul = dynamic_cast<BinaryInst*>(newVal);
+            if (mul && mul->is_mul() && mul->type_->tid_ == Type::IntegerTyID) {
+                if (noMul) return reject("reduction-mixed-kind");
+                mulInputsRev.push_back({mul->get_operand(0), mul->get_operand(1)});
+            } else {
+                if (!isAdd) return reject("reduction-not-mul");       // 减法链仍只接受乘积
+                if (!mulInputsRev.empty()) return reject("reduction-mixed-kind");
+                noMul = true;
+                mulInputsRev.push_back({newVal, nullptr});            // 求和：单操作数
+            }
+            cursor = recur;
+            if (mulInputsRev.size() > static_cast<size_t>(VECTORIZE_FACTOR))
+                return reject("reduction-too-wide");
         }
-        cursor = recur;
-        if (mulInputsRev.size() > static_cast<size_t>(VECTORIZE_FACTOR))
-            return reject("reduction-too-wide");
     }
 
     if (mulInputsRev.size() != static_cast<size_t>(iv.stride))
@@ -537,6 +590,10 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     for (auto *bb : loop.blocks) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() || inst->isTerminator()) continue;
+            if (inst == accLatch &&
+                (reductionKind == ReductionGroup::SMin ||
+                 reductionKind == ReductionGroup::SMax))
+                continue;
             if (inst->is_store() || inst->is_call() || inst->is_alloca())
                 return reject("unsupported-side-effect");
             if (inst->is_load() || inst->is_gep() || inst->is_mul() ||
@@ -591,6 +648,7 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
     group.lhs = lhs;
     group.rhs = rhs;
     group.scalarStep = iv.stride;
+    group.kind = reductionKind;
     group.isAdd = isAdd;
     group.noMul = noMul;
     return true;
@@ -678,12 +736,18 @@ void LoopVectorize::emitReductionVectorizedLoop(
     vecHeader->setSemFlag(SemFlag::TargetPointerRecurrenceLoop);
 
     // Two contiguous vector parts halve loop-control overhead on the A53.
-    // Keep a single accumulator chain: it also keeps one logical address
-    // stream and has materially lower register pressure in the ARM64 backend.
-    // Scalarized gathers already have a large body and stay at UF=1.
+    // Min/max uses one accumulator per part because the A53 has a long
+    // dependency latency for vector signed min/max. Duplicating the initial
+    // value is valid because min/max is idempotent; the accumulators are
+    // combined once at vector-loop exit. Scalarized gathers already have a
+    // large body and stay at UF=1.
     const bool hasGather = group.lhs.kind == PackedOperand::GATHER ||
                            group.rhs.kind == PackedOperand::GATHER;
     const int reductionUF = hasGather ? 1 : 2;
+    const bool isMinMaxReduction =
+        group.kind == ReductionGroup::SMin ||
+        group.kind == ReductionGroup::SMax;
+    const int accumulatorCount = isMinMaxReduction ? reductionUF : 1;
     const int vectorTrip = vecWidth * reductionUF;
 
     auto *vecIVPhi = PhiInst::create_phi(module->int32_ty_, vecHeader);
@@ -694,16 +758,27 @@ void LoopVectorize::emitReductionVectorizedLoop(
     for (int lane = 0; lane < vecWidth; ++lane)
         zeroElems.push_back(new ConstantInt(module->int32_ty_, 0));
     auto *zeroVec = new ConstantVector(vecTyCast, zeroElems);
-    auto *zeroLane = new ConstantInt(module->int32_ty_, 0);
-    auto *initAccVec = new InsertElementInst(zeroVec, group.initVal, zeroLane, preheader);
-    insertBeforeTerm(initAccVec, preheader);
+    Value *initAccVec = nullptr;
+    if (isMinMaxReduction) {
+        initAccVec = emitSplat(group.initVal, preheader);
+    } else {
+        auto *zeroLane = new ConstantInt(module->int32_ty_, 0);
+        auto *initInsert = new InsertElementInst(zeroVec, group.initVal,
+                                                 zeroLane, preheader);
+        insertBeforeTerm(initInsert, preheader);
+        initAccVec = initInsert;
+    }
     if (debugReduction)
         std::cerr << "[LoopVectorize:reduction] emit-init header="
                   << origHeader->name_ << "\n";
 
-    auto *vecAccPhi = PhiInst::create_phi(vecTy, vecHeader);
-    vecHeader->add_instruction_front(vecAccPhi);
-    vecAccPhi->addIncoming(initAccVec, preheader);
+    std::vector<PhiInst *> vecAccPhis;
+    for (int index = 0; index < accumulatorCount; ++index) {
+        auto *vecAccPhi = PhiInst::create_phi(vecTy, vecHeader);
+        vecHeader->add_instruction_front(vecAccPhi);
+        vecAccPhi->addIncoming(initAccVec, preheader);
+        vecAccPhis.push_back(vecAccPhi);
+    }
 
     std::unordered_map<PhiInst*, Value*> vecPtrPhis;
     std::unordered_map<PhiInst*, int> laneStrides;
@@ -859,6 +934,17 @@ void LoopVectorize::emitReductionVectorizedLoop(
         if (!group.expressionReduction) {
             Value *lhsVec = emitPackedOperand(group.lhs, part);
             if (!lhsVec) return nullptr;
+            if (group.kind == ReductionGroup::SMin ||
+                group.kind == ReductionGroup::SMax) {
+                auto intrinsicKind =
+                    group.kind == ReductionGroup::SMin
+                        ? SignedMinMaxIntrinsic::SMin
+                        : SignedMinMaxIntrinsic::SMax;
+                auto *function = getOrInsertSignedMinMaxIntrinsic(
+                    module, intrinsicKind, vecTy);
+                if (!function) return nullptr;
+                return new CallInst(function, {accumulator, lhsVec}, vecBody);
+            }
             Value *perLaneVec = lhsVec;
             if (!group.noMul) {
                 Value *rhsVec = emitPackedOperand(group.rhs, part);
@@ -945,17 +1031,27 @@ void LoopVectorize::emitReductionVectorizedLoop(
                               contribution, vecBody);
     };
 
-    Value *vecAccNext = emitReductionPart(vecAccPhi, 0);
-    if (!vecAccNext) return;
-    if (reductionUF == 2) {
-        vecAccNext = emitReductionPart(vecAccNext, 1);
-        if (!vecAccNext) return;
+    std::vector<Value *> vecAccNexts;
+    if (isMinMaxReduction) {
+        for (int part = 0; part < reductionUF; ++part) {
+            Value *next = emitReductionPart(vecAccPhis[part], part);
+            if (!next) return;
+            vecAccNexts.push_back(next);
+        }
+    } else {
+        Value *next = vecAccPhis[0];
+        for (int part = 0; part < reductionUF; ++part) {
+            next = emitReductionPart(next, part);
+            if (!next) return;
+        }
+        vecAccNexts.push_back(next);
     }
     if (debugReduction)
         std::cerr << "[LoopVectorize:reduction] emit-operands header="
                   << origHeader->name_ << "\n";
 
-    vecAccPhi->addIncoming(vecAccNext, vecBody);
+    for (int index = 0; index < accumulatorCount; ++index)
+        vecAccPhis[index]->addIncoming(vecAccNexts[index], vecBody);
 
     auto *vecStep = new ConstantInt(module->int32_ty_, vectorTrip);
     auto *vecIVNext = new BinaryInst(module->int32_ty_, Instruction::Add,
@@ -999,16 +1095,41 @@ void LoopVectorize::emitReductionVectorizedLoop(
         std::cerr << "[LoopVectorize:reduction] emit-body header="
                   << origHeader->name_ << "\n";
 
+    Value *exitAccVec = vecAccPhis[0];
+    if (isMinMaxReduction && accumulatorCount > 1) {
+        auto intrinsicKind =
+            group.kind == ReductionGroup::SMin
+                ? SignedMinMaxIntrinsic::SMin
+                : SignedMinMaxIntrinsic::SMax;
+        auto *function = getOrInsertSignedMinMaxIntrinsic(
+            module, intrinsicKind, vecTy);
+        for (int index = 1; index < accumulatorCount; ++index)
+            exitAccVec = new CallInst(
+                function, {exitAccVec, vecAccPhis[index]}, vecExit);
+    }
+
     std::vector<Value*> laneVals;
     for (int lane = 0; lane < vecWidth; ++lane) {
         auto *index = new ConstantInt(module->int32_ty_, lane);
-        laneVals.push_back(new ExtractElementInst(vecAccPhi, index, vecExit));
+        laneVals.push_back(new ExtractElementInst(exitAccVec, index, vecExit));
     }
 
     Value *foldedAcc = laneVals[0];
-    for (int lane = 1; lane < vecWidth; ++lane)
-        foldedAcc = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                   foldedAcc, laneVals[lane], vecExit);
+    for (int lane = 1; lane < vecWidth; ++lane) {
+        if (group.kind == ReductionGroup::SMin ||
+            group.kind == ReductionGroup::SMax) {
+            auto predicate = group.kind == ReductionGroup::SMin
+                                 ? ICmpInst::ICMP_SLT
+                                 : ICmpInst::ICMP_SGT;
+            auto *cmp = new ICmpInst(predicate, foldedAcc, laneVals[lane],
+                                     vecExit);
+            foldedAcc = new SelectInst(cmp, foldedAcc, laneVals[lane],
+                                       vecExit);
+        } else {
+            foldedAcc = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                       foldedAcc, laneVals[lane], vecExit);
+        }
+    }
     new BranchInst(origHeader, vecExit);
     if (debugReduction)
         std::cerr << "[LoopVectorize:reduction] emit-exit header="
@@ -1513,13 +1634,31 @@ bool LoopVectorize::emitVectorizedLoop(
             }
 
             auto *binary = dynamic_cast<BinaryInst *>(inst);
-            if (!binary) return false;
-            Value *lhs = getVectorOperand(binary->get_operand(0));
-            Value *rhs = getVectorOperand(binary->get_operand(1));
+            if (binary) {
+                Value *lhs = getVectorOperand(binary->get_operand(0));
+                Value *rhs = getVectorOperand(binary->get_operand(1));
+                if (!lhs || !rhs) return false;
+                vectorValues[inst] = new BinaryInst(vectorType(binary->type_),
+                                                    binary->op_id_, lhs, rhs,
+                                                    vecBody);
+                continue;
+            }
+
+            auto *call = dynamic_cast<CallInst *>(inst);
+            auto *callee = call ? dynamic_cast<Function *>(
+                                      call->get_operand(call->num_ops_ - 1))
+                                : nullptr;
+            SignedMinMaxIntrinsic intrinsicKind;
+            if (!call || !isSignedMinMaxIntrinsic(callee, &intrinsicKind) ||
+                call->num_ops_ != 3)
+                return false;
+            Value *lhs = getVectorOperand(call->get_operand(0));
+            Value *rhs = getVectorOperand(call->get_operand(1));
             if (!lhs || !rhs) return false;
-            vectorValues[inst] = new BinaryInst(vectorType(binary->type_),
-                                                binary->op_id_, lhs, rhs,
-                                                vecBody);
+            auto *function = getOrInsertSignedMinMaxIntrinsic(
+                module, intrinsicKind, vectorType(call->type_));
+            if (!function) return false;
+            vectorValues[inst] = new CallInst(function, {lhs, rhs}, vecBody);
         }
     }
 

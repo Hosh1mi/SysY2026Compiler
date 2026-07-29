@@ -1,13 +1,14 @@
 #include "instCombineInternal.hpp"
+#include "../../../include/mid/ir/intrinsics.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════
-// Helper: swap predicate when moving a constant from LHS to RHS
+// getSwappedPredicate — icmp predicate after swapping operands
 // ═══════════════════════════════════════════════════════════════════════
 
 ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
     switch (op) {
-        case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_EQ;   // symmetric
-        case ICmpInst::ICMP_NE:  return ICmpInst::ICMP_NE;   // symmetric
+        case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_EQ;
+        case ICmpInst::ICMP_NE:  return ICmpInst::ICMP_NE;
         case ICmpInst::ICMP_SGT: return ICmpInst::ICMP_SLT;
         case ICmpInst::ICMP_SGE: return ICmpInst::ICMP_SLE;
         case ICmpInst::ICMP_SLT: return ICmpInst::ICMP_SGT;
@@ -23,6 +24,22 @@ ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
 }
 
 namespace {
+
+FCmpInst::FCmpOp getSwappedFPredicate(FCmpInst::FCmpOp op) {
+    switch (op) {
+        case FCmpInst::FCMP_OEQ: case FCmpInst::FCMP_UEQ: return op;
+        case FCmpInst::FCMP_ONE: case FCmpInst::FCMP_UNE: return op;
+        case FCmpInst::FCMP_OGT: return FCmpInst::FCMP_OLT;
+        case FCmpInst::FCMP_OGE: return FCmpInst::FCMP_OLE;
+        case FCmpInst::FCMP_OLT: return FCmpInst::FCMP_OGT;
+        case FCmpInst::FCMP_OLE: return FCmpInst::FCMP_OGE;
+        case FCmpInst::FCMP_UGT: return FCmpInst::FCMP_ULT;
+        case FCmpInst::FCMP_UGE: return FCmpInst::FCMP_ULE;
+        case FCmpInst::FCMP_ULT: return FCmpInst::FCMP_UGT;
+        case FCmpInst::FCMP_ULE: return FCmpInst::FCMP_UGE;
+        default: return op;
+    }
+}
 
 struct ScaledValue {
     Value *base = nullptr;
@@ -124,6 +141,8 @@ bool isSourceNonNegative(Value *v, BasicBlock *ctx) {
     return isSourceNonNegative(v, ctx, assuming, 0);
 }
 
+// Dominated false-edge: if k1*x < B failed and x≥0 and k2≥k1, then k2*x < B is false.
+// Relies on signed overflow being undefined at source level (SysY / C signed arith).
 Value *foldScaledCompareFromPred(ICmpInst *inst) {
     if (!inst || inst->icmp_op_ != ICmpInst::ICMP_SLT || !inst->parent_)
         return nullptr;
@@ -147,14 +166,7 @@ Value *foldScaledCompareFromPred(ICmpInst *inst) {
         if (!parsePositiveScale(prevCmp->get_operand(0), prev)) continue;
         if (prev.base != cur.base) continue;
 
-        auto *trueSucc = dynamic_cast<BasicBlock *>(br->get_operand(1));
         auto *falseSucc = dynamic_cast<BasicBlock *>(br->get_operand(2));
-
-        // Source-level signed arithmetic has undefined overflow. Under that
-        // precondition, if k1*x >= bound and x >= 0, then k2*x >= bound for
-        // any k2 >= k1.  Keep only the false-edge direction needed by h-1;
-        // the true-edge form is too easy to misapply in loop exit tests.
-        (void)trueSucc;
         if (falseSucc == bb && cur.scale >= prev.scale)
             return make_const_int(inst->type_, 0);
     }
@@ -165,20 +177,25 @@ Value *foldScaledCompareFromPred(ICmpInst *inst) {
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitICmp  —  integer comparison simplifications
+// visitICmp — integer comparison
+//
+// Capabilities:
+//   - Constant fold all predicates; canonicalize constant to RHS
+//   - Self-compare: eq/ge/le → true, ne/gt/lt → false
+//   - Dominated scaled SLT fold (non-negative base, larger scale → false)
+//   - foldICmpAddSub: fold add/sub±C into predicate / RHS constant
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitICmp(ICmpInst *inst) {
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
-    Type *ty = inst->type_;  // i1
+    Type *ty = inst->type_;
     BasicBlock *bb = inst->parent_;
     ICmpInst::ICmpOp pred = inst->icmp_op_;
 
     ConstantInt *cx = as_const_int(x);
     ConstantInt *cy = as_const_int(y);
 
-    // 1. Constant fold: evaluate at compile time
     if (cx && cy) {
         bool result = false;
         switch (pred) {
@@ -197,7 +214,6 @@ Value* visitICmp(ICmpInst *inst) {
         return make_const_int(ty, result ? 1 : 0);
     }
 
-    // 2. Canonicalize: constant to RHS, swap predicate
     if (cx && !cy) {
         ICmpInst::ICmpOp swapped = getSwappedPredicate(pred);
         auto *new_inst = new ICmpInst(swapped, y, x, bb, true);
@@ -205,7 +221,6 @@ Value* visitICmp(ICmpInst *inst) {
         return new_inst;
     }
 
-    // 3. Self-comparisons
     if (x == y) {
         switch (pred) {
             case ICmpInst::ICMP_EQ:
@@ -213,13 +228,13 @@ Value* visitICmp(ICmpInst *inst) {
             case ICmpInst::ICMP_SLE:
             case ICmpInst::ICMP_UGE:
             case ICmpInst::ICMP_ULE:
-                return make_const_int(ty, 1);  // true
+                return make_const_int(ty, 1);
             case ICmpInst::ICMP_NE:
             case ICmpInst::ICMP_SGT:
             case ICmpInst::ICMP_SLT:
             case ICmpInst::ICMP_UGT:
             case ICmpInst::ICMP_ULT:
-                return make_const_int(ty, 0);  // false
+                return make_const_int(ty, 0);
             default:
                 return nullptr;
         }
@@ -228,60 +243,27 @@ Value* visitICmp(ICmpInst *inst) {
     if (auto *folded = foldScaledCompareFromPred(inst))
         return folded;
 
-    // // 4. icmp eq/ne (srem x, 2), 1  ->  (x > 0) && ((x & 1) == 1)
-    // if (cy && cy->value_ == 1 &&
-    //     (pred == ICmpInst::ICMP_EQ || pred == ICmpInst::ICMP_NE)) {
-    //     auto *srem = dynamic_cast<BinaryInst *>(x);
-    //     auto *divisor = srem ? as_const_int(srem->get_operand(1)) : nullptr;
-    //     if (srem && srem->op_id_ == Instruction::SRem && divisor &&
-    //         divisor->value_ == 2) {
-    //         Value *src = srem->get_operand(0);
-    //         auto *mask = new BinaryInst(src->type_, Instruction::And, src,
-    //                                     make_const_int(src->type_, 1), bb, true);
-    //         stampIntegerFacts(mask);
-    //         bb->add_instruction_before_inst(mask, inst);
-
-    //         auto *odd = new ICmpInst(ICmpInst::ICMP_EQ, mask,
-    //                                  make_const_int(src->type_, 1), bb, true);
-    //         bb->add_instruction_before_inst(odd, inst);
-
-    //         auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, src,
-    //                                       make_const_int(src->type_, 0), bb, true);
-    //         bb->add_instruction_before_inst(positive, inst);
-
-    //         auto *match = new BinaryInst(ty, Instruction::And, positive, odd, bb, true);
-    //         stampIntegerFacts(match);
-    //         bb->add_instruction_before_inst(match, inst);
-
-    //         if (pred == ICmpInst::ICMP_EQ)
-    //             return match;
-
-    //         auto *negated = new BinaryInst(ty, Instruction::Xor, match,
-    //                                        make_const_int(ty, 1), bb, true);
-    //         stampIntegerFacts(negated);
-    //         bb->add_instruction_before_inst(negated, inst);
-    //         return negated;
-    //     }
-    // }
-
-    // 5. Fold add/sub with constant into the comparison
     return foldICmpAddSub(inst);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitFCmp  —  floating-point comparison simplifications
+// visitFCmp — floating-point comparison
+//
+// Capabilities:
+//   - Constant fold ordered/unordered predicates on finite constants
+//   - Canonicalize constant to RHS (swap predicate)
+//   - No self-compare fold: NaN makes x==x false under ordered predicates
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitFCmp(FCmpInst *inst) {
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
-    Type *ty = inst->type_;  // i1
+    Type *ty = inst->type_;
+    BasicBlock *bb = inst->parent_;
 
     ConstantFloat *cx = as_const_float(x);
     ConstantFloat *cy = as_const_float(y);
 
-    // Constant fold: evaluate at compile time (ordered/unordered share the
-    // same result for finite constants; NaN-producing constants do not occur).
     if (cx && cy) {
         float a = cx->value_, b = cy->value_;
         bool result;
@@ -297,11 +279,23 @@ Value* visitFCmp(FCmpInst *inst) {
         return make_const_int(ty, result ? 1 : 0);
     }
 
+    if (cx && !cy) {
+        FCmpInst::FCmpOp swapped = getSwappedFPredicate(inst->fcmp_op_);
+        auto *new_inst = new FCmpInst(swapped, y, x, bb, true);
+        bb->add_instruction_before_inst(new_inst, inst);
+        return new_inst;
+    }
+
     return nullptr;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// visitSelect  —  select instruction simplifications
+// visitSelect — select
+//
+// Capabilities:
+//   - Constant cond → chosen arm; identical arms → that value
+//   - Boolean canonicalize (i32): select c,1,0 → zext c
+//                                 select c,0,1 → zext (xor c,1)
 // ═══════════════════════════════════════════════════════════════════════
 
 Value* visitSelect(SelectInst *inst) {
@@ -311,25 +305,44 @@ Value* visitSelect(SelectInst *inst) {
     Type  *ty    = inst->type_;
     BasicBlock *bb = inst->parent_;
 
-    // 1. Constant condition: select true, x, y → x
     auto *cc = as_const_int(cond);
     if (cc) {
-        if (cc->value_ != 0) return tval;  // true
-        return fval;                        // false
+        if (cc->value_ != 0) return tval;
+        return fval;
     }
 
-    // 2. Same value on both arms: select c, x, x → x
-    if (tval == fval) {
+    if (tval == fval)
         return tval;
+
+    SignedMinMaxIntrinsic minMaxKind;
+    Value *minMaxLHS = nullptr;
+    Value *minMaxRHS = nullptr;
+    if (dynamic_cast<VectorType *>(ty) &&
+        matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS)) {
+        auto *function = getOrInsertSignedMinMaxIntrinsic(
+            bb->parent_->parent_, minMaxKind, ty);
+        if (function) {
+            auto *call = new CallInst(function, {minMaxLHS, minMaxRHS}, bb,
+                                      true);
+            bb->add_instruction_before_inst(call, inst);
+            return call;
+        }
     }
 
-    // 3. Boolean canonicalization: select c, 1, 0 → zext c
-    //    Only for i32 result (the common case in SysY).
     if (ty->tid_ == Type::IntegerTyID) {
         auto *ct = as_const_int(tval);
         auto *cf = as_const_int(fval);
         if (ct && cf && ct->value_ == 1 && cf->value_ == 0) {
             auto *zext = new ZextInst(Instruction::ZExt, cond, ty, bb, true);
+            bb->add_instruction_before_inst(zext, inst);
+            return zext;
+        }
+        if (ct && cf && ct->value_ == 0 && cf->value_ == 1) {
+            auto *xored = new BinaryInst(cond->type_, Instruction::Xor, cond,
+                                         make_const_int(cond->type_, 1), bb, true);
+            stampIntegerFacts(xored);
+            bb->add_instruction_before_inst(xored, inst);
+            auto *zext = new ZextInst(Instruction::ZExt, xored, ty, bb, true);
             bb->add_instruction_before_inst(zext, inst);
             return zext;
         }

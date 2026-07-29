@@ -1,4 +1,5 @@
 #include "../../../include/backend/arm64/rewrite/selection_dag.hpp"
+#include "../../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -47,7 +48,7 @@ const char *opcodeName(SDOpcode opcode) {
     NAME(FPToSI); NAME(SIToFP); NAME(Bitcast); NAME(Clz);
     NAME(InsertElement); NAME(ExtractElement); NAME(ShuffleVector); NAME(Phi);
     NAME(Call); NAME(Branch); NAME(BranchCond); NAME(Return); NAME(MAdd);
-    NAME(MSub); NAME(VectorReduceAdd);
+    NAME(MSub); NAME(VectorReduceAdd); NAME(SMin); NAME(SMax);
 #undef NAME
     }
     return "Invalid";
@@ -411,11 +412,24 @@ SelectionDAGBuilder::build(Function *function) const {
                     break;
                 }
                 case Instruction::Call: {
+                    auto *callee = dynamic_cast<Function *>(
+                        instruction->get_operand(instruction->num_ops_ - 1));
+                    SignedMinMaxIntrinsic minMaxKind;
+                    if (isSignedMinMaxIntrinsic(callee, &minMaxKind)) {
+                        if (instruction->num_ops_ != 3)
+                            throw std::logic_error(
+                                "signed min/max intrinsic must have two operands");
+                        created = &dag.createNode(
+                            minMaxKind == SignedMinMaxIntrinsic::SMin
+                                ? SDOpcode::SMin
+                                : SDOpcode::SMax,
+                            {valueType(instruction->type_)},
+                            {operand(0), operand(1)});
+                        break;
+                    }
                     std::vector<SDValue> operands = {chain};
                     for (unsigned i = 0; i + 1 < instruction->num_ops_; ++i)
                         operands.push_back(operand(i));
-                    auto *callee = dynamic_cast<Function *>(
-                        instruction->get_operand(instruction->num_ops_ - 1));
                     std::vector<ValueType> results;
                     if (!instruction->is_void())
                         results.push_back(valueType(instruction->type_));
@@ -519,6 +533,11 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
                 node->resultTypes().front() != ValueType::V4F32 &&
                 node->opcode() != SDOpcode::ExtractElement)
                 throw std::logic_error("unsupported vector legalization");
+            if ((node->opcode() == SDOpcode::SMin ||
+                 node->opcode() == SDOpcode::SMax) &&
+                node->resultTypes().front() != ValueType::I32 &&
+                node->resultTypes().front() != ValueType::V4I32)
+                throw std::logic_error("unsupported signed min/max type");
         }
     }
 }

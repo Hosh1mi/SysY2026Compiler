@@ -489,7 +489,8 @@ static bool tryConvert(Loop &loop, Function *func) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void IfConversion::execute(Module *module) {
-    for (auto *func : module->function_list_) {
+    auto functions = module->function_list_;
+    for (auto *func : functions) {
         if (!func->is_declaration())
             runOnFunction(func);
     }
@@ -498,7 +499,8 @@ void IfConversion::execute(Module *module) {
 PreservedAnalyses IfConversion::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;
-    for (auto *func : module->function_list_) {
+    auto functions = module->function_list_;
+    for (auto *func : functions) {
         if (!func->is_declaration())
             changed |= runOnFunction(func);
     }

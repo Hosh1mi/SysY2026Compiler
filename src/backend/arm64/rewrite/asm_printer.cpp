@@ -517,6 +517,7 @@ void printInstruction(const MachineFunction &function,
         break;
     case Opcode::ADDv4i32: case Opcode::ADDv4f32:
     case Opcode::SUBv4i32: case Opcode::SUBv4f32:
+    case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
     case Opcode::MULv4i32: case Opcode::MULv4f32:
     case Opcode::DIVv4f32:
         output << '\t'
@@ -524,6 +525,8 @@ void printInstruction(const MachineFunction &function,
                    : instruction.opcode() == Opcode::ADDv4f32 ? "fadd"
                    : instruction.opcode() == Opcode::SUBv4i32 ? "sub"
                    : instruction.opcode() == Opcode::SUBv4f32 ? "fsub"
+                   : instruction.opcode() == Opcode::SMINv4i32 ? "smin"
+                   : instruction.opcode() == Opcode::SMAXv4i32 ? "smax"
                    : instruction.opcode() == Opcode::MULv4i32 ? "mul"
                    : instruction.opcode() == Opcode::MULv4f32 ? "fmul"
                                                                : "fdiv")

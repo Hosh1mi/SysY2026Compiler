@@ -1,4 +1,5 @@
 #include "../../include/mid/analysis/loopVectorizationAnalysis.hpp"
+#include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -351,6 +352,20 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
             sawStore = true;
             continue;
         }
+        auto *call = dynamic_cast<CallInst *>(inst);
+        auto *callee = call ? dynamic_cast<Function *>(
+                                  call->get_operand(call->num_ops_ - 1))
+                            : nullptr;
+        if (call && isSignedMinMaxIntrinsic(callee)) {
+            if (call->num_ops_ != 3 ||
+                call->get_operand(0)->type_ != call->type_ ||
+                call->get_operand(1)->type_ != call->type_ ||
+                !isSupportedSignedMinMaxType(call->type_))
+                return reject(reason, "min/max intrinsic has unsupported type");
+            if (sawStore) storesAreTerminal = false;
+            continue;
+        }
+
         auto *bin = dynamic_cast<BinaryInst *>(inst);
         if (!bin)
             return reject(reason, "loop contains an unsupported instruction");
@@ -436,7 +451,8 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
     int work = 0;
     for (auto *inst : plan.recipes) {
         if (inst->is_load() || inst->is_store() ||
-            dynamic_cast<BinaryInst *>(inst))
+            dynamic_cast<BinaryInst *>(inst) ||
+            dynamic_cast<CallInst *>(inst))
             ++work;
     }
     // Cortex-A53 is an in-order, dual-issue core with 32 architectural SIMD

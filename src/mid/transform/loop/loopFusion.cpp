@@ -144,7 +144,7 @@ bool LoopFusion::runOnFunction(Function *func) {
             };
 
             if (!boundsEqual(s1, s2)) { dbg("bounds differ"); continue; }
-            if (!noCalls(L1, L2)) { dbg("call in loop"); continue; }
+            if (!callsArePure(L1, L2)) { dbg("impure call in loop"); continue; }
             if (!chainHoistable(L1, L2, chain)) { dbg("intervening code"); continue; }
             if (!headerContentSimple(s2)) { dbg("L2 header content"); continue; }
             if (!phiInitsAvailable(L1, s1, L2, s2, chain)) { dbg("L2 phi init"); continue; }
@@ -295,11 +295,17 @@ bool LoopFusion::chainHoistable(Loop *L1, Loop *L2,
     return true;
 }
 
-bool LoopFusion::noCalls(Loop *L1, Loop *L2) const {
+bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
     for (auto *L : {L1, L2})
         for (auto *bb : L->blocksOrdered)
-            for (auto *inst : bb->instr_list_)
-                if (inst->is_call()) return false;
+            for (auto *inst : bb->instr_list_) {
+                auto *call = dynamic_cast<CallInst *>(inst);
+                if (!call) continue;
+                auto *callee = dynamic_cast<Function *>(
+                    call->get_operand(call->num_ops_ - 1));
+                if (!callee || !callee->hasSemFlag(SemFlag::FnPure))
+                    return false;
+            }
     return true;
 }
 

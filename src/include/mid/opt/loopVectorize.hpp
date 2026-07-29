@@ -32,6 +32,7 @@ private:
     };
 
     struct ReductionGroup {
+        enum Kind { Add, Sub, SMin, SMax };
         PhiInst *accPhi;
         Value *initVal;
         Value *latchValue;
@@ -43,6 +44,7 @@ private:
         std::vector<Value *> expressionTerms;
         bool expressionReduction = false;
         int scalarStep;
+        Kind kind = Add;
         bool isAdd = false;
         bool noMul = false;
     };
