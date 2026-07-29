@@ -26,6 +26,15 @@ struct InductionMatch {
     Value *strideValue = nullptr;
     bool strideIsConstant = true;
     ICmpInst::ICmpOp pred = ICmpInst::ICMP_SLT;
+    Value *exitExpr = nullptr;
+    Value *exitBound = nullptr;
+    long long exitStep = 0;
+    bool alreadyCanonical = false;
+};
+
+struct LinearExpr {
+    bool valid = false;
+    long long coeff = 0;
 };
 
 bool debugEnabled() {
@@ -42,6 +51,13 @@ bool isZero(Value *v) {
     return c && c->value_ == 0;
 }
 
+bool getConstInt(Value *v, long long &out) {
+    auto *c = dynamic_cast<ConstantInt *>(v);
+    if (!c) return false;
+    out = c->value_;
+    return true;
+}
+
 ConstantInt *i32c(Module *m, long long v) {
     return new ConstantInt(m->int32_ty_, static_cast<int>(v));
 }
@@ -52,6 +68,102 @@ bool isLoopInvariant(Value *v, const Loop &loop) {
     if (dynamic_cast<GlobalVariable *>(v)) return true;
     auto *inst = dynamic_cast<Instruction *>(v);
     return inst && !loop.blocks.count(inst->parent_);
+}
+
+ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp pred) {
+    switch (pred) {
+    case ICmpInst::ICMP_SLT: return ICmpInst::ICMP_SGT;
+    case ICmpInst::ICMP_SLE: return ICmpInst::ICMP_SGE;
+    case ICmpInst::ICMP_SGT: return ICmpInst::ICMP_SLT;
+    case ICmpInst::ICMP_SGE: return ICmpInst::ICMP_SLE;
+    case ICmpInst::ICMP_ULT: return ICmpInst::ICMP_UGT;
+    case ICmpInst::ICMP_ULE: return ICmpInst::ICMP_UGE;
+    case ICmpInst::ICMP_UGT: return ICmpInst::ICMP_ULT;
+    case ICmpInst::ICMP_UGE: return ICmpInst::ICMP_ULE;
+    default: return pred;
+    }
+}
+
+bool addNoOverflow(long long a, long long b, long long &out);
+bool multiplyNoOverflow(long long a, long long b, long long &out) {
+    if (a == 0 || b == 0) {
+        out = 0;
+        return true;
+    }
+    if (a == -1 && b == std::numeric_limits<long long>::min()) return false;
+    if (b == -1 && a == std::numeric_limits<long long>::min()) return false;
+    if (a > 0) {
+        if (b > 0 && a > std::numeric_limits<long long>::max() / b) return false;
+        if (b < 0 && b < std::numeric_limits<long long>::min() / a) return false;
+    } else {
+        if (b > 0 && a < std::numeric_limits<long long>::min() / b) return false;
+        if (b < 0 && a != 0 && b < std::numeric_limits<long long>::max() / a) return false;
+    }
+    out = a * b;
+    return true;
+}
+
+bool analyzeLinear(Value *v, PhiInst *phi, const Loop &loop, LinearExpr &out) {
+    if (!v || !isI32(v)) return false;
+    if (v == phi) {
+        out = {true, 1};
+        return true;
+    }
+    if (isLoopInvariant(v, loop)) {
+        out = {true, 0};
+        return true;
+    }
+
+    auto *bin = dynamic_cast<BinaryInst *>(v);
+    if (!bin || !bin->parent_ || !loop.blocks.count(bin->parent_) ||
+        bin->type_->tid_ != Type::IntegerTyID)
+        return false;
+
+    LinearExpr lhs, rhs;
+    switch (bin->op_id_) {
+    case Instruction::Add:
+        if (!analyzeLinear(bin->get_operand(0), phi, loop, lhs) ||
+            !analyzeLinear(bin->get_operand(1), phi, loop, rhs))
+            return false;
+        out.valid = true;
+        return addNoOverflow(lhs.coeff, rhs.coeff, out.coeff);
+    case Instruction::Sub:
+        if (!analyzeLinear(bin->get_operand(0), phi, loop, lhs) ||
+            !analyzeLinear(bin->get_operand(1), phi, loop, rhs))
+            return false;
+        out.valid = true;
+        return addNoOverflow(lhs.coeff, -rhs.coeff, out.coeff);
+    case Instruction::Mul: {
+        long long c = 0;
+        if (getConstInt(bin->get_operand(0), c) &&
+            analyzeLinear(bin->get_operand(1), phi, loop, rhs)) {
+            out.valid = true;
+            return multiplyNoOverflow(c, rhs.coeff, out.coeff);
+        }
+        if (getConstInt(bin->get_operand(1), c) &&
+            analyzeLinear(bin->get_operand(0), phi, loop, lhs)) {
+            out.valid = true;
+            return multiplyNoOverflow(c, lhs.coeff, out.coeff);
+        }
+        return false;
+    }
+    case Instruction::Shl: {
+        long long shift = 0;
+        if (!getConstInt(bin->get_operand(1), shift) || shift < 0 ||
+            shift >= 31 ||
+            !analyzeLinear(bin->get_operand(0), phi, loop, lhs))
+            return false;
+        out.valid = true;
+        return multiplyNoOverflow(1LL << shift, lhs.coeff, out.coeff);
+    }
+    default:
+        return false;
+    }
+}
+
+bool isSupportedDerived(Value *v, PhiInst *phi, const Loop &loop) {
+    LinearExpr expr;
+    return analyzeLinear(v, phi, loop, expr);
 }
 
 bool getIncoming(PhiInst *phi, const Loop &loop, Value *&start,
@@ -115,14 +227,14 @@ bool matchStride(Value *value, PhiInst *phi, const Loop &loop,
 }
 
 bool matchHeaderGuard(const Loop &loop, PhiInst *phi,
-                      const InductionMatch &match,
+                      InductionMatch &match,
                       ICmpInst *&cmp, Value *&bound,
                       ICmpInst::ICmpOp &pred) {
     auto *term = loop.header->get_terminator();
     if (!term || !term->is_br() || term->num_ops_ != 3) return false;
 
     cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
-    if (!cmp || cmp->parent_ != loop.header || cmp->get_operand(0) != phi)
+    if (!cmp || cmp->parent_ != loop.header)
         return false;
 
     auto *trueBB = dynamic_cast<BasicBlock *>(term->get_operand(1));
@@ -131,8 +243,42 @@ bool matchHeaderGuard(const Loop &loop, PhiInst *phi,
         loop.blocks.count(falseBB))
         return false;
 
-    pred = cmp->icmp_op_;
-    if (!match.strideIsConstant || match.stride > 0) {
+    Value *lhs = cmp->get_operand(0);
+    Value *rhs = cmp->get_operand(1);
+    LinearExpr lhsExpr, rhsExpr;
+    bool lhsLinear = analyzeLinear(lhs, phi, loop, lhsExpr) && lhsExpr.coeff != 0;
+    bool rhsLinear = analyzeLinear(rhs, phi, loop, rhsExpr) && rhsExpr.coeff != 0;
+
+    Value *exitExpr = nullptr;
+    if (lhsLinear && !rhsLinear && isLoopInvariant(rhs, loop)) {
+        pred = cmp->icmp_op_;
+        bound = rhs;
+        exitExpr = lhs;
+    } else if (rhsLinear && !lhsLinear && isLoopInvariant(lhs, loop)) {
+        pred = swapPredicate(cmp->icmp_op_);
+        bound = lhs;
+        exitExpr = rhs;
+        lhsExpr = rhsExpr;
+    } else {
+        return false;
+    }
+
+    if (!match.strideIsConstant) {
+        if (exitExpr != phi || lhsExpr.coeff != 1 ||
+            (pred != ICmpInst::ICMP_SLT && pred != ICmpInst::ICMP_SLE))
+            return false;
+        match.exitExpr = exitExpr;
+        match.exitBound = bound;
+        match.exitStep = 0;
+        return bound && isI32(bound);
+    }
+
+    long long exitStep = 0;
+    if (!multiplyNoOverflow(lhsExpr.coeff, match.stride, exitStep) ||
+        exitStep == 0)
+        return false;
+
+    if (exitStep > 0) {
         if (pred != ICmpInst::ICMP_SLT && pred != ICmpInst::ICMP_SLE)
             return false;
     } else {
@@ -140,7 +286,9 @@ bool matchHeaderGuard(const Loop &loop, PhiInst *phi,
             return false;
     }
 
-    bound = cmp->get_operand(1);
+    match.exitExpr = exitExpr;
+    match.exitBound = bound;
+    match.exitStep = exitStep;
     return bound && isI32(bound);
 }
 
@@ -162,6 +310,15 @@ bool usesAreReplaceable(const InductionMatch &match, const Loop &loop) {
         if (user == match.next || user == match.cmp) continue;
         if (user->parent_ && loop.blocks.count(user->parent_) && user->is_phi())
             return false;
+        if (user->parent_ && loop.blocks.count(user->parent_) &&
+            !isSupportedDerived(user, match.phi, loop)) {
+            for (auto &nestedUse : user->use_list_) {
+                auto *nestedUser = dynamic_cast<Instruction *>(nestedUse.val_);
+                if (!nestedUser || !nestedUser->parent_ ||
+                    !loop.blocks.count(nestedUser->parent_))
+                    return false;
+            }
+        }
     }
 
     for (auto &use : match.next->use_list_) {
@@ -293,6 +450,177 @@ Value *materializeAffine(Module *m, BasicBlock *bb, Instruction *before,
     return add;
 }
 
+Value *materializeWithReplacement(Module *m, BasicBlock *bb,
+                                  Instruction *before, Value *expr,
+                                  PhiInst *phi, Value *replacement,
+                                  const Loop &loop) {
+    if (expr == phi) return replacement;
+    if (isLoopInvariant(expr, loop)) return expr;
+
+    auto *bin = dynamic_cast<BinaryInst *>(expr);
+    if (!bin || !bin->parent_ || !loop.blocks.count(bin->parent_))
+        return nullptr;
+
+    switch (bin->op_id_) {
+    case Instruction::Add:
+    case Instruction::Sub:
+    case Instruction::Mul:
+    case Instruction::Shl:
+        break;
+    default:
+        return nullptr;
+    }
+
+    if (bin->op_id_ == Instruction::Mul) {
+        long long ignored = 0;
+        if (!getConstInt(bin->get_operand(0), ignored) &&
+            !getConstInt(bin->get_operand(1), ignored))
+            return nullptr;
+    }
+    if (bin->op_id_ == Instruction::Shl) {
+        long long shift = 0;
+        if (!getConstInt(bin->get_operand(1), shift) || shift < 0 ||
+            shift >= 31)
+            return nullptr;
+    }
+
+    Value *lhs = materializeWithReplacement(m, bb, before, bin->get_operand(0),
+                                            phi, replacement, loop);
+    Value *rhs = materializeWithReplacement(m, bb, before, bin->get_operand(1),
+                                            phi, replacement, loop);
+    if (!lhs || !rhs) return nullptr;
+
+    if (bin->op_id_ == Instruction::Add && isZero(lhs)) return rhs;
+    if (bin->op_id_ == Instruction::Add && isZero(rhs)) return lhs;
+    if (bin->op_id_ == Instruction::Sub && isZero(rhs)) return lhs;
+    if (bin->op_id_ == Instruction::Mul) {
+        long long c = 0;
+        if (getConstInt(lhs, c)) {
+            if (c == 0) return lhs;
+            if (c == 1) return rhs;
+        }
+        if (getConstInt(rhs, c)) {
+            if (c == 0) return rhs;
+            if (c == 1) return lhs;
+        }
+    }
+
+    auto *clone = new BinaryInst(m->int32_ty_, bin->op_id_, lhs, rhs, bb, true);
+    insertBefore(bb, before, clone);
+    return clone;
+}
+
+Value *materializeSCEV(Module *m, BasicBlock *bb, Instruction *before,
+                       const SCEV *s, const Loop &loop) {
+    if (!s) return nullptr;
+
+    if (auto *c = dynamic_cast<const SCEVConstant *>(s))
+        return i32c(m, c->value());
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s)) {
+        Value *v = unknown->value();
+        if (!v || !isI32(v)) return nullptr;
+        auto *inst = dynamic_cast<Instruction *>(v);
+        if (inst && loop.blocks.count(inst->parent_))
+            return nullptr;
+        return v;
+    }
+
+    if (auto *add = dynamic_cast<const SCEVAddExpr *>(s)) {
+        Value *result = i32c(m, 0);
+        for (auto *op : add->operands()) {
+            Value *term = materializeSCEV(m, bb, before, op, loop);
+            if (!term) return nullptr;
+            if (isZero(term)) continue;
+            if (isZero(result)) {
+                result = term;
+                continue;
+            }
+            auto *inst = new BinaryInst(m->int32_ty_, Instruction::Add,
+                                        result, term, bb, true);
+            insertBefore(bb, before, inst);
+            result = inst;
+        }
+        return result;
+    }
+
+    if (auto *mul = dynamic_cast<const SCEVMulExpr *>(s)) {
+        Value *result = i32c(m, 1);
+        for (auto *op : mul->operands()) {
+            Value *factor = materializeSCEV(m, bb, before, op, loop);
+            if (!factor) return nullptr;
+            long long c = 0;
+            if (getConstInt(factor, c)) {
+                if (c == 0) return factor;
+                if (c == 1) continue;
+            }
+            if (getConstInt(result, c) && c == 1) {
+                result = factor;
+                continue;
+            }
+            auto *inst = new BinaryInst(m->int32_ty_, Instruction::Mul,
+                                        result, factor, bb, true);
+            insertBefore(bb, before, inst);
+            result = inst;
+        }
+        return result;
+    }
+
+    return nullptr;
+}
+
+bool canMaterializeSCEV(const SCEV *s, const Loop &loop) {
+    if (!s) return false;
+    if (dynamic_cast<const SCEVConstant *>(s)) return true;
+
+    if (auto *unknown = dynamic_cast<const SCEVUnknown *>(s)) {
+        Value *v = unknown->value();
+        if (!v || !isI32(v)) return false;
+        auto *inst = dynamic_cast<Instruction *>(v);
+        return !inst || !loop.blocks.count(inst->parent_);
+    }
+
+    if (auto *nary = dynamic_cast<const SCEVNAryExpr *>(s)) {
+        for (auto *op : nary->operands())
+            if (!canMaterializeSCEV(op, loop)) return false;
+        return true;
+    }
+
+    return false;
+}
+
+Value *materializeAddRecExitValue(Module *m, BasicBlock *bb,
+                                  Instruction *before,
+                                  const SCEVAddRecExpr *addrec,
+                                  Value *trip, const Loop &loop) {
+    if (!addrec || !trip) return nullptr;
+    Value *start = materializeSCEV(m, bb, before, addrec->start(), loop);
+    Value *step = materializeSCEV(m, bb, before, addrec->step(), loop);
+    if (!start || !step) return nullptr;
+
+    Value *scaled = nullptr;
+    if (isZero(trip) || isZero(step)) {
+        scaled = i32c(m, 0);
+    } else {
+        long long c = 0;
+        if (getConstInt(step, c) && c == 1) {
+            scaled = trip;
+        } else {
+            auto *mul = new BinaryInst(m->int32_ty_, Instruction::Mul,
+                                       step, trip, bb, true);
+            insertBefore(bb, before, mul);
+            scaled = mul;
+        }
+    }
+
+    if (isZero(start)) return scaled;
+    if (isZero(scaled)) return start;
+    auto *add = new BinaryInst(m->int32_ty_, Instruction::Add, start, scaled,
+                               bb, true);
+    insertBefore(bb, before, add);
+    return add;
+}
+
 Loop *innermostChildLoopContaining(const Loop &loop, BasicBlock *bb) {
     Loop *best = nullptr;
     std::vector<Loop *> work(loop.children.begin(), loop.children.end());
@@ -308,7 +636,8 @@ Loop *innermostChildLoopContaining(const Loop &loop, BasicBlock *bb) {
 }
 
 Value *materializeTripCount(Module *m, BasicBlock *preheader,
-                            const InductionMatch &match) {
+                            const InductionMatch &match,
+                            Value *exitStart) {
     auto *term = preheader->get_terminator();
     bool strict = match.pred == ICmpInst::ICMP_SLT ||
                   match.pred == ICmpInst::ICMP_SGT;
@@ -323,17 +652,18 @@ Value *materializeTripCount(Module *m, BasicBlock *preheader,
     else
         noIterPred = ICmpInst::ICMP_SLT;
 
-    auto *noIter = new ICmpInst(noIterPred, match.start, match.bound, preheader,
+    Value *bound = match.exitBound ? match.exitBound : match.bound;
+    auto *noIter = new ICmpInst(noIterPred, exitStart, bound, preheader,
                                 true);
     preheader->add_instruction_before_inst(noIter, term);
 
     Value *delta = nullptr;
-    if (!match.strideIsConstant || match.stride > 0)
-        delta = new BinaryInst(m->int32_ty_, Instruction::Sub, match.bound,
-                               match.start, preheader, true);
+    if (!match.strideIsConstant || match.exitStep > 0)
+        delta = new BinaryInst(m->int32_ty_, Instruction::Sub, bound,
+                               exitStart, preheader, true);
     else
-        delta = new BinaryInst(m->int32_ty_, Instruction::Sub, match.start,
-                               match.bound, preheader, true);
+        delta = new BinaryInst(m->int32_ty_, Instruction::Sub, exitStart,
+                               bound, preheader, true);
     preheader->add_instruction_before_inst(static_cast<Instruction *>(delta),
                                            term);
 
@@ -370,7 +700,7 @@ Value *materializeTripCount(Module *m, BasicBlock *preheader,
         return trip;
     }
 
-    long long absStride = match.stride > 0 ? match.stride : -match.stride;
+    long long absStride = match.exitStep > 0 ? match.exitStep : -match.exitStep;
     if (strict && absStride != 1) {
         auto *addBias = new BinaryInst(m->int32_ty_, Instruction::Add, delta,
                                        i32c(m, absStride - 1), preheader, true);
@@ -434,10 +764,6 @@ bool findMatch(Loop &loop, InductionMatch &match) {
         if (!matchHeaderGuard(loop, phi, candidate, cmp, bound, pred))
             continue;
         if (!isLoopInvariant(bound, loop)) continue;
-        if (strideIsConstant && stride == 1 && pred == ICmpInst::ICMP_SLT &&
-            isZero(start))
-            continue;
-
         match.phi = phi;
         match.next = update;
         match.cmp = cmp;
@@ -448,6 +774,12 @@ bool findMatch(Loop &loop, InductionMatch &match) {
         match.strideValue = strideValue;
         match.strideIsConstant = strideIsConstant;
         match.pred = pred;
+        match.exitExpr = candidate.exitExpr;
+        match.exitBound = candidate.exitBound;
+        match.exitStep = candidate.exitStep;
+        match.alreadyCanonical =
+            strideIsConstant && stride == 1 && pred == ICmpInst::ICMP_SLT &&
+            isZero(start) && candidate.exitExpr == phi;
         return true;
     }
 
@@ -479,6 +811,113 @@ void replacePhiUses(PhiInst *oldPhi, Value *iv, Value *outsideValue,
     }
 }
 
+void collectDerivedInsts(Value *value, PhiInst *phi, const Loop &loop,
+                         std::set<Instruction *> &seen,
+                         std::vector<Instruction *> &derived) {
+    auto uses = value->use_list_;
+    for (auto &use : uses) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user || !user->parent_ || !loop.blocks.count(user->parent_))
+            continue;
+        if (!isSupportedDerived(user, phi, loop))
+            continue;
+        if (!seen.insert(user).second)
+            continue;
+        derived.push_back(user);
+        collectDerivedInsts(user, phi, loop, seen, derived);
+    }
+}
+
+bool rewriteOutsideDerivedUses(PhiInst *oldPhi, Value *exitValue,
+                               const InductionMatch &match,
+                               const Loop &loop, Module *module) {
+    std::set<Instruction *> seen;
+    std::vector<Instruction *> derived;
+    collectDerivedInsts(oldPhi, oldPhi, loop, seen, derived);
+
+    for (auto *inst : derived) {
+        if (inst == match.next || inst == match.cmp) continue;
+        auto uses = inst->use_list_;
+        for (auto &use : uses) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || loop.blocks.count(user->parent_))
+                continue;
+            Value *replacement = materializeWithReplacement(
+                module, loop.preheader, loop.preheader->get_terminator(),
+                inst, oldPhi, exitValue, loop);
+            if (!replacement)
+                return false;
+            user->set_operand(use.arg_no_, replacement);
+        }
+    }
+    return true;
+}
+
+bool rewriteLoopExitAddRecUses(const Loop &loop, const InductionMatch &match,
+                               ScalarEvolution &SE, Module *module,
+                               Value *trip) {
+    if (!loop.preheader || !trip) return false;
+
+    bool changed = false;
+    Instruction *insertBefore = loop.preheader->get_terminator();
+    for (auto *inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi == match.phi) continue;
+        if (!isI32(phi)) continue;
+
+        std::vector<std::pair<Instruction *, unsigned>> outsideUses;
+        for (auto &use : phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_) continue;
+            if (!loop.blocks.count(user->parent_))
+                outsideUses.push_back({user, use.arg_no_});
+        }
+        if (outsideUses.empty()) continue;
+
+        auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(SE.getSCEV(phi));
+        if (!addrec || addrec->loop() != &loop || addrec->phi() != phi)
+            continue;
+
+        Value *exitValue = materializeAddRecExitValue(
+            module, loop.preheader, insertBefore, addrec, trip, loop);
+        if (!exitValue)
+            continue;
+
+        for (auto &[user, argNo] : outsideUses)
+            user->set_operand(argNo, exitValue);
+        changed = true;
+    }
+
+    return changed;
+}
+
+bool hasLoopExitAddRecUses(const Loop &loop, const InductionMatch &match,
+                           ScalarEvolution &SE) {
+    for (auto *inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi == match.phi || !isI32(phi)) continue;
+
+        bool hasOutsideUse = false;
+        for (auto &use : phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
+                hasOutsideUse = true;
+                break;
+            }
+        }
+        if (!hasOutsideUse) continue;
+
+        auto *addrec = dynamic_cast<const SCEVAddRecExpr *>(SE.getSCEV(phi));
+        if (addrec && addrec->loop() == &loop && addrec->phi() == phi &&
+            canMaterializeSCEV(addrec->start(), loop) &&
+            canMaterializeSCEV(addrec->step(), loop))
+            return true;
+    }
+    return false;
+}
+
 bool allUsesAre(Value *value, Instruction *onlyUser) {
     for (auto &use : value->use_list_)
         if (use.val_ != onlyUser) return false;
@@ -490,6 +929,13 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
     InductionMatch match;
     if (!findMatch(loop, match)) return false;
     if (!usesAreReplaceable(match, loop)) return false;
+    if (!match.strideIsConstant) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject header="
+                      << loop.header->name_
+                      << " reason=variable-stride-not-profitable\n";
+        return false;
+    }
 
     auto &RA = AM.getRangeAnalysis(func);
     auto &SE = AM.getScalarEvolution(func);
@@ -501,7 +947,35 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
     }
 
     auto *i32 = module->int32_ty_;
-    Value *trip = materializeTripCount(module, loop.preheader, match);
+    if (match.alreadyCanonical &&
+        !hasLoopExitAddRecUses(loop, match, SE))
+        return false;
+
+    Value *exitStart = materializeWithReplacement(
+        module, loop.preheader, loop.preheader->get_terminator(),
+        match.exitExpr ? match.exitExpr : match.phi, match.phi, match.start,
+        loop);
+    if (!exitStart) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject header="
+                      << loop.header->name_
+                      << " reason=unsupported-exit-expression\n";
+        return false;
+    }
+
+    Value *trip = materializeTripCount(module, loop.preheader, match,
+                                       exitStart);
+    bool rewroteAddRecExits =
+        rewriteLoopExitAddRecUses(loop, match, SE, module, trip);
+
+    if (match.alreadyCanonical) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] rewrote addrec exits func="
+                      << func->name_ << " header=" << loop.header->name_
+                      << " addrecExits=" << (rewroteAddRecExits ? 1 : 0)
+                      << "\n";
+        return rewroteAddRecExits;
+    }
 
     std::vector<Value *> vals = {i32c(module, 0), i32c(module, 0)};
     std::vector<BasicBlock *> bbs = {loop.preheader, match.latch};
@@ -526,6 +1000,14 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
                                              loop.header->get_terminator());
     loop.header->get_terminator()->set_operand(0, newCmp);
 
+    if (!rewriteOutsideDerivedUses(match.phi, exitValue, match, loop, module)) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject header="
+                      << loop.header->name_
+                      << " reason=unsupported-derived-use\n";
+        return false;
+    }
+
     replacePhiUses(match.phi, iv, exitValue, match, loop, module);
 
     if (match.cmp->use_list_.empty())
@@ -542,6 +1024,7 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
                   << " stride="
                   << (match.strideIsConstant ? std::to_string(match.stride)
                                              : "<loop-invariant>")
+                  << " addrecExits=" << (rewroteAddRecExits ? 1 : 0)
                   << "\n";
     return true;
 }

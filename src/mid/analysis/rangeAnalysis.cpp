@@ -379,13 +379,6 @@ RangeAnalysis::IntRange RangeAnalysis::getRangeImpl(Value *v, BasicBlock *ctx) {
 RangeAnalysis::IntRange RangeAnalysis::getBinaryRange(BinaryInst *bin, BasicBlock *ctx) {
     if (!bin || !isIntegerValue(bin)) return IntRange::top();
 
-    if (bin->op_id_ == Instruction::Add || bin->op_id_ == Instruction::Sub ||
-        bin->op_id_ == Instruction::Mul) {
-        auto scevRange = getSCEVRange(bin, ctx);
-        if (scevRange.valid && !scevRange.isTop && !scevRange.isBottom)
-            return scevRange;
-    }
-
     auto lhs = getRange(bin->get_operand(0), ctx ? ctx : bin->parent_);
     auto rhs = getRange(bin->get_operand(1), ctx ? ctx : bin->parent_);
     if (!lhs.valid || !rhs.valid) return IntRange::top();
@@ -477,10 +470,6 @@ RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *
 RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx) {
     if (!phi) return IntRange::top();
 
-    auto scevRange = getSCEVRange(phi, ctx);
-    if (scevRange.valid && !scevRange.isTop && !scevRange.isBottom)
-        return scevRange;
-
     IntRange result = IntRange::bottom();
     for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
         auto *incoming = phi->get_operand(i);
@@ -540,34 +529,34 @@ RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBloc
     IntRange result = IntRange::bottom();
     bool found = false;
     auto *func = arg->parent_;
-    if (!func->parent_) return IntRange::top();
+    auto *module = func->parent_;
+    if (!module) return IntRange::top();
 
-    // CallInst records its callee as the final operand, so the function use
-    // list is the precise, mutation-safe call-site index.  This avoids a
-    // complete module walk for every formal argument.
-    for (const Use &use : func->use_list_) {
-        auto *call = dynamic_cast<CallInst *>(use.val_);
-        if (!call || call->num_ops_ == 0 ||
-            call->get_operand(call->num_ops_ - 1) != func ||
-            arg->arg_no_ >= call->num_ops_ - 1)
-            continue;
-        auto *caller =
-            call->parent_ ? call->parent_->parent_ : nullptr;
-        if (!caller || caller->is_declaration())
-            continue;
-        Value *actual = call->get_operand(arg->arg_no_);
-        if (caller == func && actual == arg) {
-            // A self-recursive call forwarding the same formal does not add
-            // information; keep facts from non-recursive call sites visible.
-            continue;
-        }
+    for (auto *caller : module->function_list_) {
+        if (caller->is_declaration()) continue;
         auto &callerRA = AM_->getRangeAnalysis(caller);
-        auto r = callerRA.getRange(actual, call->parent_);
-        if (!found) {
-            result = r;
-            found = true;
-        } else {
-            result = result.join(r);
+        for (auto *bb : caller->basic_blocks_) {
+            for (auto *inst : bb->instr_list_) {
+                auto *call = dynamic_cast<CallInst *>(inst);
+                if (!call) continue;
+                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                if (callee != func) continue;
+                if (arg->arg_no_ >= call->num_ops_ - 1) continue;
+                Value *actual = call->get_operand(arg->arg_no_);
+                if (caller == func && actual == arg) {
+                    // A self-recursive call forwarding the same formal does not
+                    // add information; treating it as top would hide facts from
+                    // non-recursive call sites.
+                    continue;
+                }
+                auto r = callerRA.getRange(actual, call->parent_);
+                if (!found) {
+                    result = r;
+                    found = true;
+                } else {
+                    result = result.join(r);
+                }
+            }
         }
     }
     if (!found) result = IntRange::top();
@@ -611,7 +600,7 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(const SCEV *s, BasicBlock *c
     switch (s->kind()) {
     case SCEVKind::Constant: {
         auto *c = static_cast<const SCEVConstant *>(s);
-        return clampToType(IntRange::constant(c->value()), s->type());
+        return IntRange::constant(c->value());
     }
     case SCEVKind::AddRecExpr: {
         auto *ar = static_cast<const SCEVAddRecExpr *>(s);
@@ -625,70 +614,38 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(const SCEV *s, BasicBlock *c
 
         auto trip = SE_->getTripCount(loop);
         auto *tripC = dynamic_cast<const SCEVConstant *>(trip);
-        auto [typeLo, typeHi] = typeBounds(s->type());
         if (stepC->value() > 0) {
+            if (startC->value() < 0) return IntRange::top();
             if (tripC) {
-                if (tripC->value() <= 0)
-                    return clampToType(IntRange::constant(startC->value()), s->type());
                 long long delta = 0;
                 if (!multiplyBounds(stepC->value(), tripC->value() - 1, delta))
                     return IntRange::top();
                 long long upper = 0;
                 if (!addBounds(startC->value(), delta, upper))
                     return IntRange::top();
-                return clampToType(IntRange::bounded(startC->value(), upper), s->type());
+                return IntRange::bounded(startC->value(), upper);
             }
-            return IntRange::bounded(std::max(startC->value(), typeLo), typeHi);
+            return IntRange::bounded(startC->value(), std::numeric_limits<long long>::max());
         }
         if (stepC->value() < 0) {
             if (tripC) {
-                if (tripC->value() <= 0)
-                    return clampToType(IntRange::constant(startC->value()), s->type());
                 long long delta = 0;
                 if (!multiplyBounds(stepC->value(), tripC->value() - 1, delta))
                     return IntRange::top();
                 long long lower = 0;
                 if (!addBounds(startC->value(), delta, lower))
                     return IntRange::top();
-                return clampToType(IntRange::bounded(lower, startC->value()), s->type());
+                return IntRange::bounded(lower, startC->value());
             }
-            return IntRange::bounded(typeLo, std::min(startC->value(), typeHi));
+            return IntRange::bounded(std::numeric_limits<long long>::min(), startC->value());
         }
-        return clampToType(IntRange::constant(startC->value()), s->type());
+        return IntRange::constant(startC->value());
     }
     case SCEVKind::AddExpr: {
-        auto *add = static_cast<const SCEVAddExpr *>(s);
-        IntRange result = IntRange::constant(0);
-        for (auto *op : add->operands()) {
-            auto opRange = getSCEVRange(op, ctx);
-            if (!opRange.valid || opRange.isTop) return IntRange::top();
-            if (opRange.isBottom) return IntRange::bottom();
-            long long lo = 0;
-            long long hi = 0;
-            if (!addBounds(result.lower, opRange.lower, lo)) return IntRange::top();
-            if (!addBounds(result.upper, opRange.upper, hi)) return IntRange::top();
-            result = IntRange::bounded(lo, hi);
-        }
-        return clampToType(result, s->type());
+        return IntRange::top();
     }
     case SCEVKind::MulExpr: {
-        auto *mul = static_cast<const SCEVMulExpr *>(s);
-        IntRange result = IntRange::constant(1);
-        for (auto *op : mul->operands()) {
-            auto opRange = getSCEVRange(op, ctx);
-            if (!opRange.valid || opRange.isTop) return IntRange::top();
-            if (opRange.isBottom) return IntRange::bottom();
-
-            long long products[4] = {};
-            if (!multiplyBounds(result.lower, opRange.lower, products[0]) ||
-                !multiplyBounds(result.lower, opRange.upper, products[1]) ||
-                !multiplyBounds(result.upper, opRange.lower, products[2]) ||
-                !multiplyBounds(result.upper, opRange.upper, products[3]))
-                return IntRange::top();
-            auto mm = std::minmax_element(products, products + 4);
-            result = IntRange::bounded(*mm.first, *mm.second);
-        }
-        return clampToType(result, s->type());
+        return IntRange::top();
     }
     case SCEVKind::Unknown:
     case SCEVKind::CouldNotCompute:
