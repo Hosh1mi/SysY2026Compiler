@@ -49,6 +49,7 @@ enum class SDOpcode : std::uint16_t {
     SIToFP,
     Bitcast,
     Clz,
+    Splat,
     InsertElement,
     ExtractElement,
     ShuffleVector,

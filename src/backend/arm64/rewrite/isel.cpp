@@ -1295,6 +1295,16 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(clz), &node);
                 break;
             }
+            case SDOpcode::Splat: {
+                MachineInstr duplicate(
+                    node.resultTypes().front() == ValueType::V4F32
+                        ? Opcode::DUPv4f32
+                        : Opcode::DUPv4i32);
+                duplicate.addOperand(define(node))
+                    .addOperand(use(node.operands()[0]));
+                append(block, std::move(duplicate), &node);
+                break;
+            }
             case SDOpcode::InsertElement: {
                 SDNode *index = node.operands()[2].node;
                 if (!index || index->opcode() != SDOpcode::Constant ||

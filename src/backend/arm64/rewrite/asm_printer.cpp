@@ -487,7 +487,11 @@ void printInstruction(const MachineFunction &function,
     case Opcode::DUPv4i32:
     case Opcode::DUPv4f32:
         output << "\tdup " << vectorView(operands[0]) << ", "
-               << registerName(operands[1]) << '\n';
+               << (instruction.opcode() == Opcode::DUPv4f32
+                       ? registerNameAs(operands[1], RegClass::NEON128) +
+                             ".s[0]"
+                       : registerName(operands[1]))
+               << '\n';
         break;
     case Opcode::INSv4i32:
     case Opcode::INSv4f32:

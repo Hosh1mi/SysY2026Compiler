@@ -380,6 +380,7 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         case Instruction::FAdd:
         case Instruction::FSub:
         case Instruction::FMul:
+        case Instruction::FDiv:
             break;
         default:
             return reject(reason, "arithmetic operation has no A53 vector lowering");

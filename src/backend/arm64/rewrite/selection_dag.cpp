@@ -46,9 +46,10 @@ const char *opcodeName(SDOpcode opcode) {
     NAME(LShr); NAME(AShr); NAME(And); NAME(Or); NAME(Xor); NAME(ICmp);
     NAME(FCmp); NAME(Select); NAME(GEP); NAME(Load); NAME(Store); NAME(ZExt);
     NAME(FPToSI); NAME(SIToFP); NAME(Bitcast); NAME(Clz);
-    NAME(InsertElement); NAME(ExtractElement); NAME(ShuffleVector); NAME(Phi);
-    NAME(Call); NAME(Branch); NAME(BranchCond); NAME(Return); NAME(MAdd);
-    NAME(MSub); NAME(VectorReduceAdd); NAME(SMin); NAME(SMax);
+    NAME(Splat); NAME(InsertElement); NAME(ExtractElement);
+    NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(Branch);
+    NAME(BranchCond); NAME(Return); NAME(MAdd); NAME(MSub);
+    NAME(VectorReduceAdd); NAME(SMin); NAME(SMax);
 #undef NAME
     }
     return "Invalid";
@@ -72,6 +73,96 @@ bool isSupportedValueType(ValueType type) {
            type == ValueType::F32 || type == ValueType::Ptr ||
            type == ValueType::V4I32 || type == ValueType::V4F32 ||
            type == ValueType::Flags;
+}
+
+bool sameSplatScalar(SDValue lhs, SDValue rhs) {
+    if (lhs == rhs)
+        return true;
+    if (!lhs.node || !rhs.node ||
+        lhs.result >= lhs.node->resultTypes().size() ||
+        rhs.result >= rhs.node->resultTypes().size() ||
+        lhs.node->resultTypes()[lhs.result] !=
+            rhs.node->resultTypes()[rhs.result] ||
+        lhs.node->opcode() != rhs.node->opcode())
+        return false;
+    if (lhs.node->opcode() == SDOpcode::Constant)
+        return lhs.node->integer == rhs.node->integer;
+    if (lhs.node->opcode() == SDOpcode::FPConstant)
+        return lhs.node->floatingBits == rhs.node->floatingBits;
+    return false;
+}
+
+struct FullSplatMatch {
+    SDValue scalar;
+    SDNode *base = nullptr;
+    std::vector<SDNode *> inserts;
+    std::vector<SDNode *> indices;
+    std::vector<SDNode *> redundantScalars;
+};
+
+bool matchFullSplat(
+    SDNode &root,
+    const std::unordered_map<SDNode *, unsigned> &useCount,
+    FullSplatMatch &match) {
+    if (root.opcode() != SDOpcode::InsertElement ||
+        root.resultTypes().empty() ||
+        (root.resultTypes().front() != ValueType::V4I32 &&
+         root.resultTypes().front() != ValueType::V4F32))
+        return false;
+
+    auto hasOneUse = [&](SDNode *node) {
+        auto found = useCount.find(node);
+        return found != useCount.end() && found->second == 1;
+    };
+
+    SDNode *current = &root;
+    unsigned laneMask = 0;
+    for (unsigned depth = 0; depth < 4; ++depth) {
+        if (!current ||
+            current->opcode() != SDOpcode::InsertElement ||
+            current->operands().size() != 3 ||
+            current->resultTypes().empty() ||
+            current->resultTypes().front() != root.resultTypes().front())
+            return false;
+
+        SDValue inserted = current->operands()[1];
+        if (depth == 0)
+            match.scalar = inserted;
+        else if (!sameSplatScalar(inserted, match.scalar))
+            return false;
+        else if (inserted.node != match.scalar.node)
+            match.redundantScalars.push_back(inserted.node);
+
+        SDNode *index = current->operands()[2].node;
+        if (!index || index->opcode() != SDOpcode::Constant ||
+            index->integer < 0 || index->integer >= 4)
+            return false;
+        unsigned laneBit = 1U << index->integer;
+        if (laneMask & laneBit)
+            return false;
+        laneMask |= laneBit;
+        match.inserts.push_back(current);
+        match.indices.push_back(index);
+
+        SDNode *previous = current->operands()[0].node;
+        if (depth != 3 && (!previous || !hasOneUse(previous)))
+            return false;
+        current = previous;
+    }
+
+    if (laneMask != 0xf || !match.scalar.node ||
+        match.scalar.result >= match.scalar.node->resultTypes().size())
+        return false;
+    ValueType scalarType =
+        match.scalar.node->resultTypes()[match.scalar.result];
+    if ((root.resultTypes().front() == ValueType::V4I32 &&
+         scalarType != ValueType::I32) ||
+        (root.resultTypes().front() == ValueType::V4F32 &&
+         scalarType != ValueType::F32))
+        return false;
+
+    match.base = current;
+    return true;
 }
 
 unsigned naturalAlignment(Type *type) {
@@ -589,6 +680,36 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
                     changed = true;
                 }
             }
+        }
+    }
+
+    // A complete chain that overwrites all four lanes with the same scalar
+    // does not depend on its original vector value.  Keep this combine at DAG
+    // level so every vector-producing mid-end pass benefits from the target's
+    // native scalar-to-vector DUP instruction.
+    for (BasicBlock *block : functionDAG.blockOrder) {
+        for (const auto &owned : functionDAG.blocks.at(block)->nodes()) {
+            SDNode &root = *owned;
+            FullSplatMatch match;
+            if (!matchFullSplat(root, useCount, match))
+                continue;
+
+            root.setOpcode(SDOpcode::Splat);
+            root.operands() = {match.scalar};
+            for (SDNode *insert : match.inserts)
+                if (insert != &root)
+                    insert->setOpcode(SDOpcode::Invalid);
+            for (SDNode *index : match.indices)
+                if (useCount[index] == 1)
+                    index->setOpcode(SDOpcode::Invalid);
+            for (SDNode *redundant : match.redundantScalars)
+                if (useCount[redundant] == 1)
+                    redundant->setOpcode(SDOpcode::Invalid);
+            if (match.base &&
+                match.base->opcode() == SDOpcode::Constant &&
+                useCount[match.base] == 1)
+                match.base->setOpcode(SDOpcode::Invalid);
+            changed = true;
         }
     }
 
