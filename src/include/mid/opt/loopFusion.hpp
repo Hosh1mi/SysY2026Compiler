@@ -7,10 +7,10 @@
 //
 // 相邻性：
 //   L1 的唯一 exit 经一串中间块到达 L2 的 preheader。中间块只允许
-//   无内存副作用、非 phi 的纯指令，且其操作数在两个循环之外定义；
-//   这些指令执行次数与 L1.preheader 一致，融合前整体提到 L1.preheader
-//   末尾，语义不变。中间块出现 phi（如 LCSSA 转发）或有内存副作用
-//   指令时拒绝——融合会改变其求值时机。
+//   无内存副作用的纯指令与单前驱 LCSSA phi。只依赖循环外值的指令
+//   上提到 L1.preheader；传递 L1 最终状态的 phi 被旁路，依赖该状态的
+//   纯计算下沉到融合循环的出口。下沉值不得作为 L2 的循环输入，也不得
+//   出现在出口 phi 的入边上；这两种情况都要求完整 L1 先执行，不能融合。
 //
 // 合法性：
 //   - 标量 SSA：L2 内任何指令不得使用 L1 内定义的值（融合后 L2 看到的
@@ -72,8 +72,12 @@ private:
     Loop *walkToSibling(const Shape &s1, Loop *L1, LoopInfo &LI,
                         std::vector<BasicBlock *> &chain) const;
     bool boundsEqual(const Shape &s1, const Shape &s2) const;
-    bool chainHoistable(Loop *L1, Loop *L2,
-                        const std::vector<BasicBlock *> &chain) const;
+    bool planChainMotion(
+        Loop *L1, Loop *L2, const Shape &s2,
+        const std::vector<BasicBlock *> &chain,
+        std::vector<PhiInst *> &bypassPhis,
+        std::vector<Instruction *> &hoist,
+        std::vector<Instruction *> &sink) const;
     bool callsArePure(Loop *L1, Loop *L2) const;
     bool noScalarCrossUse(Loop *L1, Loop *L2) const;
     bool headerContentSimple(const Shape &s2) const;
@@ -90,7 +94,10 @@ private:
         Loop *L1, Loop *L2, LoopInterchangeAnalysis &IA) const;
 
     void applyFusion(Function *func, const Shape &s1, const Shape &s2,
-                     const std::vector<BasicBlock *> &chain);
+                     const std::vector<BasicBlock *> &chain,
+                     const std::vector<PhiInst *> &bypassPhis,
+                     const std::vector<Instruction *> &hoist,
+                     const std::vector<Instruction *> &sink);
 
     const ArgumentAliasAnalysis *argAA_ = nullptr;
 };

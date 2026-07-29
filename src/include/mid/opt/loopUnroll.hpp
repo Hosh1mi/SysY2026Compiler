@@ -5,7 +5,7 @@
 #include "pass.hpp"
 #include <unordered_map>
 
-// LoopUnroll：对计数循环做 4×（高压力时 2×）展开。
+// LoopUnroll：根据循环体积、访存和寄存器压力对计数循环做 2×/4×/8×展开。
 // 两种形态（plan 3.1.5）：
 //   - while 形：header（phi+cmp+条件跳）+ latch（body+无条件回跳）两块；
 //   - do-while 形（LoopRotate 之后的单块循环）：body+iv 更新+cmp（测更新

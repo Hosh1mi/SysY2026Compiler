@@ -8,6 +8,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -135,6 +136,9 @@ bool LoopFusion::runOnFunction(Function *func) {
             if (!L2) continue;
             Shape s2 = analyzeShape(L2);
             if (!s2.ok) continue;
+            std::vector<PhiInst *> bypassPhis;
+            std::vector<Instruction *> hoist;
+            std::vector<Instruction *> sink;
 
             auto dbg = [&](const char *why) {
                 if (debugEnabled())
@@ -145,7 +149,11 @@ bool LoopFusion::runOnFunction(Function *func) {
 
             if (!boundsEqual(s1, s2)) { dbg("bounds differ"); continue; }
             if (!callsArePure(L1, L2)) { dbg("impure call in loop"); continue; }
-            if (!chainHoistable(L1, L2, chain)) { dbg("intervening code"); continue; }
+            if (!planChainMotion(L1, L2, s2, chain, bypassPhis,
+                                 hoist, sink)) {
+                dbg("intervening code");
+                continue;
+            }
             if (!headerContentSimple(s2)) { dbg("L2 header content"); continue; }
             if (!phiInitsAvailable(L1, s1, L2, s2, chain)) { dbg("L2 phi init"); continue; }
             if (!exitUsesAvailable(L1, s1, L2, s2, chain)) { dbg("exit phi use"); continue; }
@@ -160,7 +168,7 @@ bool LoopFusion::runOnFunction(Function *func) {
                 std::cerr << "[LoopFusion] fuse " << func->name_ << ": "
                           << s1.header->name_ << " + " << s2.header->name_
                           << "\n";
-            applyFusion(func, s1, s2, chain);
+            applyFusion(func, s1, s2, chain, bypassPhis, hoist, sink);
             fused = true;
             everChanged = true;
             break;
@@ -269,14 +277,51 @@ bool LoopFusion::boundsEqual(const Shape &s1, const Shape &s2) const {
     return c1 && c2 && c1->value_ == c2->value_;
 }
 
-bool LoopFusion::chainHoistable(Loop *L1, Loop *L2,
-                                const std::vector<BasicBlock *> &chain) const {
+bool LoopFusion::planChainMotion(
+    Loop *L1, Loop *L2, const Shape &s2,
+    const std::vector<BasicBlock *> &chain,
+    std::vector<PhiInst *> &bypassPhis,
+    std::vector<Instruction *> &hoist,
+    std::vector<Instruction *> &sink) const {
+    std::set<BasicBlock *> chainSet(chain.begin(), chain.end());
+    std::unordered_map<Value *, Value *> aliases;
+    std::set<Value *> dependsOnL1;
+
+    auto resolveAlias = [&](Value *value) {
+        std::set<Value *> seen;
+        while (aliases.count(value) && seen.insert(value).second)
+            value = aliases.at(value);
+        return value;
+    };
+    auto valueDependsOnL1 = [&](Value *value) {
+        value = resolveAlias(value);
+        return definedInLoop(L1, value) || dependsOnL1.count(value);
+    };
+
     for (auto *X : chain) {
         for (auto *inst : X->instr_list_) {
             if (inst == X->get_terminator()) continue;
-            if (!isHoistableInst(inst)) return false;
+
+            if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
+                // Every block on the bridge has one predecessor.  Its phi is
+                // therefore only an LCSSA/edge forwarding node and can be
+                // replaced by the sole incoming value before the bridge dies.
+                if (phi->num_ops_ != 2 ||
+                    phi->get_operand(1) != X->pre_bbs_.front())
+                    return false;
+                Value *incoming = resolveAlias(phi->get_operand(0));
+                aliases[phi] = incoming;
+                if (valueDependsOnL1(incoming))
+                    dependsOnL1.insert(phi);
+                bypassPhis.push_back(phi);
+                continue;
+            }
+
+            if (!isHoistableInst(inst))
+                return false;
+            bool dependent = false;
             for (unsigned i = 0; i < inst->num_ops_; i++) {
-                Value *v = inst->get_operand(i);
+                Value *v = resolveAlias(inst->get_operand(i));
                 if (dynamic_cast<BasicBlock *>(v)) continue;
                 if (dynamic_cast<Constant *>(v) ||
                     dynamic_cast<Argument *>(v) ||
@@ -284,12 +329,52 @@ bool LoopFusion::chainHoistable(Loop *L1, Loop *L2,
                     continue;
                 auto *def = dynamic_cast<Instruction *>(v);
                 if (!def || !def->parent_) return false;
-                // 循环内定义的值上提后不再可用；链内先前提到的值随之上提，
-                // 其余位置由到达链必过 L1.preheader 保证支配。
-                if (L1->blocks.count(def->parent_) ||
-                    L2->blocks.count(def->parent_))
+                if (L2->blocks.count(def->parent_))
                     return false;
+                dependent |= valueDependsOnL1(v);
             }
+            if (dependent) {
+                dependsOnL1.insert(inst);
+                sink.push_back(inst);
+            } else {
+                hoist.push_back(inst);
+            }
+        }
+    }
+
+    // A value that needs L1's final state cannot initialize or execute inside
+    // L2 after fusion: there L1 has only advanced to the current iteration.
+    // It also cannot feed an E2 phi, because sunk instructions are placed in
+    // E2 and therefore do not dominate E2's incoming edges.
+    auto invalidDependentUse = [&](Value *value) {
+        for (const auto &use : value->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || chainSet.count(user->parent_))
+                continue;
+            if (L2->blocks.count(user->parent_))
+                return true;
+            if (user->parent_ == s2.exit && user->is_phi())
+                return true;
+        }
+        return false;
+    };
+    for (auto *phi : bypassPhis)
+        if (dependsOnL1.count(phi) && invalidDependentUse(phi))
+            return false;
+    for (auto *inst : sink)
+        if (invalidDependentUse(inst))
+            return false;
+
+    // Hoisted bridge values must not depend on a sunk bridge value.  The
+    // classification above is transitive in dominance order; keep this final
+    // assertion-like check defensive against malformed, non-dominating SSA.
+    std::set<Instruction *> sunkSet(sink.begin(), sink.end());
+    for (auto *inst : hoist) {
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            auto *def = dynamic_cast<Instruction *>(
+                resolveAlias(inst->get_operand(i)));
+            if (def && sunkSet.count(def))
+                return false;
         }
     }
     return true;
@@ -469,8 +554,12 @@ const char *LoopFusion::profitabilityRejection(
     return nullptr;
 }
 
-void LoopFusion::applyFusion(Function *func, const Shape &s1, const Shape &s2,
-                             const std::vector<BasicBlock *> &chain) {
+void LoopFusion::applyFusion(
+    Function *func, const Shape &s1, const Shape &s2,
+    const std::vector<BasicBlock *> &chain,
+    const std::vector<PhiInst *> &bypassPhis,
+    const std::vector<Instruction *> &hoist,
+    const std::vector<Instruction *> &sink) {
     BasicBlock *P1 = s1.preheader;
     BasicBlock *H1 = s1.header;
     BasicBlock *Lat1 = s1.latch;
@@ -481,15 +570,24 @@ void LoopFusion::applyFusion(Function *func, const Shape &s1, const Shape &s2,
     BasicBlock *E2 = s2.exit;
     BasicBlock *B2 = s2.bodyEntry;
 
-    // 1. 中间块纯指令按序上提到 L1.preheader 末尾（次数一致、操作数可用）。
-    for (auto *X : chain) {
-        std::vector<Instruction *> hoist;
-        for (auto *inst : X->instr_list_)
-            if (inst != X->get_terminator()) hoist.push_back(inst);
-        for (auto *inst : hoist) {
-            X->remove_instr(inst);
-            P1->add_instruction_before_terminator(inst);
+    // 1. 单前驱 LCSSA phi 只转发桥接边上的值，先旁路它们。随后把循环外
+    //    不变量上提，把依赖 L1 最终状态的纯计算下沉到融合循环出口。
+    for (auto *phi : bypassPhis)
+        phi->replace_all_use_with(phi->get_operand(0));
+    for (auto *inst : hoist) {
+        inst->parent_->remove_instr(inst);
+        P1->add_instruction_before_terminator(inst);
+    }
+    Instruction *exitAnchor = nullptr;
+    for (auto *inst : E2->instr_list_) {
+        if (!inst->is_phi()) {
+            exitAnchor = inst;
+            break;
         }
+    }
+    for (auto *inst : sink) {
+        inst->parent_->remove_instr(inst);
+        E2->add_instruction_before_inst(inst, exitAnchor);
     }
 
     // 2. iv2 → iv1：两边迭代区间相同，值语义一致。
@@ -539,6 +637,41 @@ void LoopFusion::applyFusion(Function *func, const Shape &s1, const Shape &s2,
     H2->remove_pre_basic_block(Lat2);
     Lat2->add_succ_basic_block(H1);
     H1->add_pre_basic_block(Lat2);
+
+    // 两边都是单 body/latch 循环时，融合暂时形成 H1 -> Lat1 -> Lat2
+    // -> H1。把无 phi 的线性 Lat2 拼入 Lat1，恢复标准两块 while 形，
+    // 让后续规范 unroller 和其它单 latch 分析直接复用。
+    bool collapseLatches =
+        (!bypassPhis.empty() || !sink.empty()) &&
+        B2 == Lat2 && Lat2->pre_bbs_.size() == 1 &&
+        Lat2->pre_bbs_.front() == Lat1;
+    if (collapseLatches) {
+        for (auto *inst : Lat2->instr_list_) {
+            if (inst->is_phi()) {
+                collapseLatches = false;
+                break;
+            }
+        }
+    }
+    if (collapseLatches) {
+        std::vector<Instruction *> payload;
+        for (auto *inst : Lat2->instr_list_)
+            if (inst != lat2Term)
+                payload.push_back(inst);
+        for (auto *inst : payload) {
+            Lat2->remove_instr(inst);
+            Lat1->add_instruction_before_terminator(inst);
+        }
+
+        lat1Term->set_operand(0, H1);
+        Lat1->remove_succ_basic_block(Lat2);
+        Lat2->remove_pre_basic_block(Lat1);
+        Lat2->remove_succ_basic_block(H1);
+        H1->remove_pre_basic_block(Lat2);
+        Lat1->add_succ_basic_block(H1);
+        H1->add_pre_basic_block(Lat1);
+        retargetPhiPred(H1, Lat2, Lat1);
+    }
 
     // 7. L1.header 的 exit 边 E1→E2；E2 中 phi 的 H2 入边改 H1。
     auto *h1Term = dynamic_cast<BranchInst *>(H1->get_terminator());

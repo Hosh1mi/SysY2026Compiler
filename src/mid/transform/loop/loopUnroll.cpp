@@ -9,9 +9,100 @@
 #include <set>
 #include <vector>
 
-static const int UNROLL_FACTOR   = 4;
-static const int MAX_LATCH_INSTS = 8; // skip unrolling if body is too large
+static const int DEFAULT_UNROLL_FACTOR = 4;
 static const int MAX_STRUCTURED_LOOP_INSTS = 24;
+
+struct UnrollCost {
+    int bodyInstructions = 0;
+    int memoryOperations = 0;
+    bool hasVectorOperations = false;
+    int integerStates = 0;
+    int pointerStates = 0;
+    int floatingStates = 0;
+    int vectorStates = 0;
+};
+
+// Choose an unroll factor from target-independent loop facts and the A53
+// register/code-size budget.  Eight-way unrolling is reserved for compact,
+// register-only scalar loops: it amortizes loop control and exposes enough
+// independent work for the dual-issue core without multiplying memory traffic
+// or pointer live ranges.  General scalar loops retain the four-way default;
+// vector or high pointer-pressure loops use two-way unrolling.
+static int chooseUnrollFactor(const UnrollCost &cost) {
+    if (cost.bodyInstructions <= 0)
+        return 0;
+
+    int gprPeak =
+        2 * (cost.integerStates + cost.pointerStates) + 2;
+    int fprPeak =
+        2 * (cost.floatingStates + cost.vectorStates);
+    bool highPointerPressure =
+        cost.pointerStates >= 2 && cost.integerStates > 0;
+
+    if (cost.hasVectorOperations) {
+        if (cost.bodyInstructions <= 12 &&
+            cost.bodyInstructions * 2 <= 24 &&
+            gprPeak <= 26 && fprPeak <= 28)
+            return 2;
+        return 0;
+    }
+
+    bool registerOnly =
+        cost.memoryOperations == 0 && cost.pointerStates == 0;
+    if (!registerOnly) {
+        // Keep memory-loop growth conservative.  Replicating a large scalar
+        // memory body increases A53 load/store pressure and code footprint;
+        // the scheduler cannot recover that cost.  This retains the previous
+        // eight-instruction eligibility boundary while still using the common
+        // pressure model to select two-way versus four-way expansion.
+        if (cost.bodyInstructions > 8)
+            return 0;
+        int factor =
+            highPointerPressure ? 2 : DEFAULT_UNROLL_FACTOR;
+        if (cost.bodyInstructions * factor > 32 ||
+            gprPeak > 24 || fprPeak > 24)
+            return 0;
+        return factor;
+    }
+
+    bool enoughScalarWorkForEight =
+        cost.bodyInstructions >= 6 || cost.floatingStates > 0;
+    if (enoughScalarWorkForEight &&
+        cost.bodyInstructions <= 9 &&
+        cost.bodyInstructions * 8 <= 72 &&
+        gprPeak <= 20 && fprPeak <= 20)
+        return 8;
+
+    if (cost.bodyInstructions <= 8 &&
+        cost.bodyInstructions * DEFAULT_UNROLL_FACTOR <= 48 &&
+        gprPeak <= 24 && fprPeak <= 24)
+        return DEFAULT_UNROLL_FACTOR;
+    return 0;
+}
+
+static void countLoopStates(const std::vector<PhiInst *> &headerPhis,
+                            PhiInst *ivPhi, UnrollCost &cost) {
+    for (auto *phi : headerPhis) {
+        if (phi == ivPhi)
+            continue;
+        switch (phi->type_->tid_) {
+        case Type::IntegerTyID:
+            ++cost.integerStates;
+            break;
+        case Type::PointerTyID:
+            ++cost.pointerStates;
+            break;
+        case Type::FloatTyID:
+            ++cost.floatingStates;
+            break;
+        case Type::VectorTyID:
+            ++cost.vectorStates;
+            break;
+        default:
+            break;
+        }
+    }
+}
 
 static bool debugStructuredReject(Function *func, Loop &loop,
                                   const char *reason) {
@@ -389,17 +480,18 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // No calls/phis/allocas in latch; only handle instruction types we can clone;
     // also skip loops whose body is large enough to cause register pressure when
     // unrolled (Cortex-A53 has limited registers and no OOO execution).
-    int latchBodySize = 0;
-    bool hasVectorOps = false;
+    UnrollCost unrollCost;
     for (auto inst : latch->instr_list_) {
         if (inst->isTerminator()) continue;
         if (inst->is_call() || inst->is_phi() || inst->is_alloca()) return false;
-        latchBodySize++;
+        ++unrollCost.bodyInstructions;
+        if (inst->is_load() || inst->is_store() || inst->is_gep())
+            ++unrollCost.memoryOperations;
         if (inst->type_->tid_ == Type::VectorTyID)
-            hasVectorOps = true;
+            unrollCost.hasVectorOperations = true;
         for (unsigned i = 0; i < inst->num_ops_; ++i) {
             if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID) {
-                hasVectorOps = true;
+                unrollCost.hasVectorOperations = true;
                 break;
             }
         }
@@ -416,36 +508,21 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
                         dynamic_cast<Bitcast *>(inst);
         if (!canClone) return false;
     }
-    // A two-way vector unroll exposes independent memory/ALU operations while
-    // growing the body much less than the default four-way scalar unroll.
-    // Permit that modestly larger source body, but keep the original bound for
-    // scalar loops.
-    int maxLatchInsts = hasVectorOps ? 12 : MAX_LATCH_INSTS;
-    if (latchBodySize > maxLatchInsts) return false;
-
-    // ── Register pressure estimation ─────────────────────────────────────
-    // A 4× unrolled body creates 4 interleaved SSA chains for each header
-    // phi.  When the loop has both an integer accumulator AND ≥2 pointer
-    // phis (from IVSR), the register allocator cannot color all the
-    // live-range-interleaved values → the accumulator spills to the stack
-    // between consecutive madds.  Reduce the unroll factor in this case.
-    int numPtrPhis = 0;
-    int numIntNonIVPhis = 0;
-    for (auto phi : headerPhis) {
-        if (phi == ivPhi) continue;
-        if (phi->type_->tid_ == Type::PointerTyID)
-            numPtrPhis++;
-        else if (phi->type_->tid_ == Type::IntegerTyID)
-            numIntNonIVPhis++;
-    }
-    int effectiveUnrollFactor = UNROLL_FACTOR;  // 4
-    if (hasVectorOps || (numIntNonIVPhis > 0 && numPtrPhis >= 2))
-        effectiveUnrollFactor = 2;
+    countLoopStates(headerPhis, ivPhi, unrollCost);
+    int effectiveUnrollFactor = chooseUnrollFactor(unrollCost);
+    if (effectiveUnrollFactor == 0)
+        return false;
 
     if (std::getenv("DEBUG_LOOP_UNROLL"))
         std::cerr << "[LoopUnroll] func=" << func->name_
                   << " header=" << header->name_
-                  << " factor=" << effectiveUnrollFactor << "\n";
+                  << " factor=" << effectiveUnrollFactor
+                  << " body=" << unrollCost.bodyInstructions
+                  << " gpr-state="
+                  << unrollCost.integerStates + unrollCost.pointerStates
+                  << " fpr-state="
+                  << unrollCost.floatingStates + unrollCost.vectorStates
+                  << " memory=" << unrollCost.memoryOperations << "\n";
 
     // ── Transformation ────────────────────────────────────────────────────
 
@@ -546,7 +623,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             iterMap[phi] = curPhiVals[phi];
     }
 
-    if (N == 2 && hasVectorOps)
+    if (N == 2 && unrollCost.hasVectorOperations)
         clusterTwoVectorStores(unrolledBody, BAA);
 
     // 4. Branch in unrolledBody → headerMain (back-edge)
@@ -1065,7 +1142,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         }
     }
 
-    const int N = UNROLL_FACTOR;
+    const int N = DEFAULT_UNROLL_FACTOR;
     const int guardAdj = N - 1;
     Value *boundMain = nullptr;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
@@ -1420,7 +1497,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         if (bi->parent_ == header) return false;
 
     // ── body 可克隆性 ───────────────────────────────────────────────────
-    int bodySize = 0;
+    UnrollCost unrollCost;
     for (auto inst : header->instr_list_) {
         if (inst->is_phi() || inst == cmpInst || inst->isTerminator()) continue;
         if (inst->is_call() || inst->is_alloca()) return false;
@@ -1436,9 +1513,19 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
                         dynamic_cast<SiToFpInst *>(inst) ||
                         dynamic_cast<Bitcast *>(inst);
         if (!canClone) return false;
-        bodySize++;
+        ++unrollCost.bodyInstructions;
+        if (inst->is_load() || inst->is_store() || inst->is_gep())
+            ++unrollCost.memoryOperations;
+        if (inst->type_->tid_ == Type::VectorTyID)
+            unrollCost.hasVectorOperations = true;
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            if (inst->get_operand(i)->type_->tid_ ==
+                Type::VectorTyID) {
+                unrollCost.hasVectorOperations = true;
+                break;
+            }
+        }
     }
-    if (bodySize > MAX_LATCH_INSTS) return false;
 
     // ── 循环外使用清点：只允许 (a) exitBB 中的 phi（入边=header），
     //    (b) 其他位置的使用（exitBB 唯一出口支配它们，事后补 phi）─────
@@ -1454,15 +1541,10 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         }
     }
 
-    // ── 压力启发式（与 while 形一致）────────────────────────────────────
-    int numPtrPhis = 0, numIntNonIVPhis = 0;
-    for (auto phi : headerPhis) {
-        if (phi == ivPhi) continue;
-        if (phi->type_->tid_ == Type::PointerTyID) numPtrPhis++;
-        else if (phi->type_->tid_ == Type::IntegerTyID) numIntNonIVPhis++;
-    }
-    int N = UNROLL_FACTOR;
-    if (numIntNonIVPhis > 0 && numPtrPhis >= 2) N = 2;
+    countLoopStates(headerPhis, ivPhi, unrollCost);
+    int N = chooseUnrollFactor(unrollCost);
+    if (N == 0)
+        return false;
 
     int adj = (N - 1) * strideVal;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
@@ -1474,7 +1556,14 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     if (std::getenv("DEBUG_LOOP_UNROLL"))
         std::cerr << "[LoopUnroll] func=" << func->name_
                   << " header=" << header->name_
-                  << " factor=" << N << " form=dowhile\n";
+                  << " factor=" << N
+                  << " form=dowhile"
+                  << " body=" << unrollCost.bodyInstructions
+                  << " gpr-state="
+                  << unrollCost.integerStates + unrollCost.pointerStates
+                  << " fpr-state="
+                  << unrollCost.floatingStates + unrollCost.vectorStates
+                  << " memory=" << unrollCost.memoryOperations << "\n";
 
     // ── 变换 ────────────────────────────────────────────────────────────
     // 1. boundMain = bound - adj
