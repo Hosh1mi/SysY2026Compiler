@@ -490,6 +490,13 @@ bool simplifyLoop(Loop &loop, Function *func, Module *module,
     InductionMatch match;
     if (!findMatch(loop, match)) return false;
     if (!usesAreReplaceable(match, loop)) return false;
+    if (!match.strideIsConstant) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject header="
+                      << loop.header->name_
+                      << " reason=variable-stride-not-profitable\n";
+        return false;
+    }
 
     auto &RA = AM.getRangeAnalysis(func);
     auto &SE = AM.getScalarEvolution(func);

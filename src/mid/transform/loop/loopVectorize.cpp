@@ -577,6 +577,12 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         }
     }
 
+    // A53 has no vector gather; scalarizing gathered lanes plus horizontal
+    // reduction is slower than the original scalar recurrence on h-5/LUDCMP.
+    if (lhs.kind == PackedOperand::GATHER ||
+        rhs.kind == PackedOperand::GATHER)
+        return reject("gather-not-profitable-on-a53");
+
     if (debugReduction) {
         std::cerr << "[LoopVectorize:reduction] match header="
                   << loop.header->name_ << " gather="
