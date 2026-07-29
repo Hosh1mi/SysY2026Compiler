@@ -4,6 +4,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -125,6 +126,7 @@ public:
     const SCEV *getSCEV(Value *v);
     const SCEV *getSCEVAtScope(Value *v, Loop *scope);
     const SCEV *getTripCount(Loop *loop);
+    std::optional<long long> getConstantTripCount(Loop *loop) const;
     SCEVGEPInfo getLinearizedGEP(GetElementPtrInst *gep);
 
     bool isLoopInvariant(const SCEV *s, Loop *loop) const;

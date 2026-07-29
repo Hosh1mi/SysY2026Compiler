@@ -72,9 +72,82 @@ const SCEV *ScalarEvolution::getSCEVAtScope(Value *v, Loop *scope) {
 }
 
 const SCEV *ScalarEvolution::getTripCount(Loop *loop) {
+    if (auto exact = getConstantTripCount(loop)) {
+        Type *type = loop && loop->controlInduction.phi
+                         ? loop->controlInduction.phi->type_
+                         : nullptr;
+        return getConstant(type, *exact);
+    }
     if (!loop || !loop->hasCanonicalIV() || !loop->tripCount)
         return getCouldNotCompute(nullptr);
     return getSCEV(loop->tripCount);
+}
+
+std::optional<long long>
+ScalarEvolution::getConstantTripCount(Loop *loop) const {
+    if (!loop || loop->exiting.size() != 1 || loop->exits.size() != 1)
+        return std::nullopt;
+
+    const InductionDescriptor *induction = loop->getInductionDescriptor();
+    if (!induction || !induction->constantStep)
+        return std::nullopt;
+
+    BasicBlock *guard =
+        induction->guardPosition == InductionGuardPosition::Header
+            ? loop->header
+            : loop->singleLatch();
+    if (!guard || loop->exiting.front() != guard)
+        return std::nullopt;
+
+    auto *startConstant = dynamic_cast<ConstantInt *>(induction->start);
+    auto *boundConstant = dynamic_cast<ConstantInt *>(induction->bound);
+    if (!startConstant || !boundConstant)
+        return std::nullopt;
+
+    const long long start = startConstant->value_;
+    const long long bound = boundConstant->value_;
+    const long long step = *induction->constantStep;
+    if (step == 0)
+        return std::nullopt;
+
+    long long iterations = 0;
+    if (step > 0) {
+        if (induction->predicate == ICmpInst::ICMP_SLT) {
+            if (start < bound)
+                iterations = (bound - start + step - 1) / step;
+        } else if (induction->predicate == ICmpInst::ICMP_SLE) {
+            if (start <= bound)
+                iterations = (bound - start) / step + 1;
+        } else {
+            return std::nullopt;
+        }
+    } else {
+        const long long magnitude = -step;
+        if (induction->predicate == ICmpInst::ICMP_SGT) {
+            if (start > bound)
+                iterations = (start - bound + magnitude - 1) / magnitude;
+        } else if (induction->predicate == ICmpInst::ICMP_SGE) {
+            if (start >= bound)
+                iterations = (start - bound) / magnitude + 1;
+        } else {
+            return std::nullopt;
+        }
+    }
+
+    if (induction->guardPosition == InductionGuardPosition::Latch)
+        iterations = std::max(1LL, iterations);
+
+    // The recurrence must reach the first failing comparison without signed
+    // i32 wraparound.  Otherwise the mathematical count is not an exact
+    // count for the actual machine recurrence.
+    const __int128 terminal =
+        static_cast<__int128>(start) +
+        static_cast<__int128>(iterations) * static_cast<__int128>(step);
+    if (terminal < std::numeric_limits<int>::min() ||
+        terminal > std::numeric_limits<int>::max())
+        return std::nullopt;
+
+    return iterations;
 }
 
 static bool multiplyNoOverflow(long long a, long long b, long long &out) {

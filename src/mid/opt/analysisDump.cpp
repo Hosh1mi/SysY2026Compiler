@@ -166,6 +166,13 @@ void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
                               : "latch")
                       << " compares="
                       << (induction->comparesUpdate ? "update" : "phi")
+                      << " exactConstantTrips=";
+            if (auto trips =
+                    scalarEvolution.getConstantTripCount(loop))
+                std::cerr << *trips;
+            else
+                std::cerr << "unknown";
+            std::cerr
                       << "\n";
         }
 
