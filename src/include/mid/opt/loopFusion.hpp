@@ -74,7 +74,7 @@ private:
     bool boundsEqual(const Shape &s1, const Shape &s2) const;
     bool chainHoistable(Loop *L1, Loop *L2,
                         const std::vector<BasicBlock *> &chain) const;
-    bool noCalls(Loop *L1, Loop *L2) const;
+    bool callsArePure(Loop *L1, Loop *L2) const;
     bool noScalarCrossUse(Loop *L1, Loop *L2) const;
     bool headerContentSimple(const Shape &s2) const;
     // L2.header 中 phi 的初值在融合后必须在 L1.preheader 可用。

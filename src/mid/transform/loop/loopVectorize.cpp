@@ -736,12 +736,18 @@ void LoopVectorize::emitReductionVectorizedLoop(
     vecHeader->setSemFlag(SemFlag::TargetPointerRecurrenceLoop);
 
     // Two contiguous vector parts halve loop-control overhead on the A53.
-    // Keep a single accumulator chain: it also keeps one logical address
-    // stream and has materially lower register pressure in the ARM64 backend.
-    // Scalarized gathers already have a large body and stay at UF=1.
+    // Min/max uses one accumulator per part because the A53 has a long
+    // dependency latency for vector signed min/max. Duplicating the initial
+    // value is valid because min/max is idempotent; the accumulators are
+    // combined once at vector-loop exit. Scalarized gathers already have a
+    // large body and stay at UF=1.
     const bool hasGather = group.lhs.kind == PackedOperand::GATHER ||
                            group.rhs.kind == PackedOperand::GATHER;
     const int reductionUF = hasGather ? 1 : 2;
+    const bool isMinMaxReduction =
+        group.kind == ReductionGroup::SMin ||
+        group.kind == ReductionGroup::SMax;
+    const int accumulatorCount = isMinMaxReduction ? reductionUF : 1;
     const int vectorTrip = vecWidth * reductionUF;
 
     auto *vecIVPhi = PhiInst::create_phi(module->int32_ty_, vecHeader);
@@ -753,8 +759,7 @@ void LoopVectorize::emitReductionVectorizedLoop(
         zeroElems.push_back(new ConstantInt(module->int32_ty_, 0));
     auto *zeroVec = new ConstantVector(vecTyCast, zeroElems);
     Value *initAccVec = nullptr;
-    if (group.kind == ReductionGroup::SMin ||
-        group.kind == ReductionGroup::SMax) {
+    if (isMinMaxReduction) {
         initAccVec = emitSplat(group.initVal, preheader);
     } else {
         auto *zeroLane = new ConstantInt(module->int32_ty_, 0);
@@ -767,9 +772,13 @@ void LoopVectorize::emitReductionVectorizedLoop(
         std::cerr << "[LoopVectorize:reduction] emit-init header="
                   << origHeader->name_ << "\n";
 
-    auto *vecAccPhi = PhiInst::create_phi(vecTy, vecHeader);
-    vecHeader->add_instruction_front(vecAccPhi);
-    vecAccPhi->addIncoming(initAccVec, preheader);
+    std::vector<PhiInst *> vecAccPhis;
+    for (int index = 0; index < accumulatorCount; ++index) {
+        auto *vecAccPhi = PhiInst::create_phi(vecTy, vecHeader);
+        vecHeader->add_instruction_front(vecAccPhi);
+        vecAccPhi->addIncoming(initAccVec, preheader);
+        vecAccPhis.push_back(vecAccPhi);
+    }
 
     std::unordered_map<PhiInst*, Value*> vecPtrPhis;
     std::unordered_map<PhiInst*, int> laneStrides;
@@ -1022,17 +1031,27 @@ void LoopVectorize::emitReductionVectorizedLoop(
                               contribution, vecBody);
     };
 
-    Value *vecAccNext = emitReductionPart(vecAccPhi, 0);
-    if (!vecAccNext) return;
-    if (reductionUF == 2) {
-        vecAccNext = emitReductionPart(vecAccNext, 1);
-        if (!vecAccNext) return;
+    std::vector<Value *> vecAccNexts;
+    if (isMinMaxReduction) {
+        for (int part = 0; part < reductionUF; ++part) {
+            Value *next = emitReductionPart(vecAccPhis[part], part);
+            if (!next) return;
+            vecAccNexts.push_back(next);
+        }
+    } else {
+        Value *next = vecAccPhis[0];
+        for (int part = 0; part < reductionUF; ++part) {
+            next = emitReductionPart(next, part);
+            if (!next) return;
+        }
+        vecAccNexts.push_back(next);
     }
     if (debugReduction)
         std::cerr << "[LoopVectorize:reduction] emit-operands header="
                   << origHeader->name_ << "\n";
 
-    vecAccPhi->addIncoming(vecAccNext, vecBody);
+    for (int index = 0; index < accumulatorCount; ++index)
+        vecAccPhis[index]->addIncoming(vecAccNexts[index], vecBody);
 
     auto *vecStep = new ConstantInt(module->int32_ty_, vectorTrip);
     auto *vecIVNext = new BinaryInst(module->int32_ty_, Instruction::Add,
@@ -1076,10 +1095,23 @@ void LoopVectorize::emitReductionVectorizedLoop(
         std::cerr << "[LoopVectorize:reduction] emit-body header="
                   << origHeader->name_ << "\n";
 
+    Value *exitAccVec = vecAccPhis[0];
+    if (isMinMaxReduction && accumulatorCount > 1) {
+        auto intrinsicKind =
+            group.kind == ReductionGroup::SMin
+                ? SignedMinMaxIntrinsic::SMin
+                : SignedMinMaxIntrinsic::SMax;
+        auto *function = getOrInsertSignedMinMaxIntrinsic(
+            module, intrinsicKind, vecTy);
+        for (int index = 1; index < accumulatorCount; ++index)
+            exitAccVec = new CallInst(
+                function, {exitAccVec, vecAccPhis[index]}, vecExit);
+    }
+
     std::vector<Value*> laneVals;
     for (int lane = 0; lane < vecWidth; ++lane) {
         auto *index = new ConstantInt(module->int32_ty_, lane);
-        laneVals.push_back(new ExtractElementInst(vecAccPhi, index, vecExit));
+        laneVals.push_back(new ExtractElementInst(exitAccVec, index, vecExit));
     }
 
     Value *foldedAcc = laneVals[0];

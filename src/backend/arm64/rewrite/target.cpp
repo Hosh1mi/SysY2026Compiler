@@ -340,17 +340,19 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "umov"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDv4i32: case Opcode::SUBv4i32:
-    case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
     case Opcode::ADDv4f32: case Opcode::SUBv4f32:
     case Opcode::ANDv16i8: case Opcode::ORRv16i8: case Opcode::EORv16i8:
         dynamic.mnemonic = opcode == Opcode::ADDv4i32 || opcode == Opcode::ADDv4f32 ? "add"
                            : opcode == Opcode::SUBv4i32 || opcode == Opcode::SUBv4f32 ? "sub"
-                           : opcode == Opcode::SMINv4i32 ? "smin"
-                           : opcode == Opcode::SMAXv4i32 ? "smax"
                            : opcode == Opcode::ANDv16i8 ? "and"
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
         dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
+        dynamic.mnemonic =
+            opcode == Opcode::SMINv4i32 ? "smin" : "smax";
+        dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::MULv4i32: case Opcode::MLAv4i32: case Opcode::MLSv4i32:
     case Opcode::MULv4f32: case Opcode::DIVv4f32:
     case Opcode::FMLAv4f32: case Opcode::FMLSv4f32:

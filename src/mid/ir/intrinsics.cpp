@@ -6,6 +6,12 @@ const char *baseName(SignedMinMaxIntrinsic kind) {
     return kind == SignedMinMaxIntrinsic::SMin ? "llvm.smin" : "llvm.smax";
 }
 
+Function::IntrinsicID intrinsicID(SignedMinMaxIntrinsic kind) {
+    return kind == SignedMinMaxIntrinsic::SMin
+               ? Function::IntrinsicID::SignedMin
+               : Function::IntrinsicID::SignedMax;
+}
+
 std::string typeSuffix(Type *type) {
     if (auto *integer = dynamic_cast<IntegerType *>(type)) {
         if (integer->num_bits_ == 32)
@@ -39,38 +45,46 @@ Function *getOrInsertSignedMinMaxIntrinsic(Module *module,
     if (!module || !isSupportedSignedMinMaxType(type))
         return nullptr;
 
+    Function::IntrinsicID id = intrinsicID(kind);
     std::string name = std::string(baseName(kind)) + "." + typeSuffix(type);
     for (auto *function : module->function_list_) {
-        if (function->name_ == name) {
-            function->setSemFlag(SemFlag::FnPure);
-            return function;
-        }
+        if (function->intrinsicID() != id)
+            continue;
+        auto *functionType = dynamic_cast<FunctionType *>(function->type_);
+        if (!functionType || functionType->result_ != type ||
+            functionType->args_.size() != 2 ||
+            functionType->args_[0] != type || functionType->args_[1] != type)
+            continue;
+        function->setSemFlag(SemFlag::FnPure);
+        return function;
     }
 
     auto *functionType = new FunctionType(type, {type, type});
     auto *function = new Function(functionType, name, module);
+    function->setIntrinsicID(id);
     function->setSemFlag(SemFlag::FnPure);
     return function;
 }
 
-bool isSignedMinMaxIntrinsicName(const std::string &name,
-                                 SignedMinMaxIntrinsic *kind) {
+bool isSignedMinMaxIntrinsic(Function *function,
+                             SignedMinMaxIntrinsic *kind) {
+    if (!function)
+        return false;
+
     SignedMinMaxIntrinsic matched;
-    if (name == "llvm.smin.i32" || name == "llvm.smin.v4i32") {
+    switch (function->intrinsicID()) {
+    case Function::IntrinsicID::SignedMin:
         matched = SignedMinMaxIntrinsic::SMin;
-    } else if (name == "llvm.smax.i32" || name == "llvm.smax.v4i32") {
+        break;
+    case Function::IntrinsicID::SignedMax:
         matched = SignedMinMaxIntrinsic::SMax;
-    } else {
+        break;
+    default:
         return false;
     }
     if (kind)
         *kind = matched;
     return true;
-}
-
-bool isSignedMinMaxIntrinsic(Function *function,
-                             SignedMinMaxIntrinsic *kind) {
-    return function && isSignedMinMaxIntrinsicName(function->name_, kind);
 }
 
 bool matchSignedMinMaxSelect(SelectInst *select,

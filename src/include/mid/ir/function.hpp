@@ -35,6 +35,12 @@ struct DominatorInfo {
 
 class Function : public Value {
 public:
+    enum class IntrinsicID {
+        None,
+        SignedMin,
+        SignedMax,
+    };
+
     Function(FunctionType* ty, const std::string& name, Module* parent) : Value(ty, name), parent_(parent), seq_cnt_(0), gep_cnt_(0) {
         parent->add_function(this);
         size_t num_args = ty->args_.size();
@@ -45,6 +51,8 @@ public:
     }
     ~Function();
     virtual std::string print() override;
+    IntrinsicID intrinsicID() const { return intrinsicID_; }
+    void setIntrinsicID(IntrinsicID id) { intrinsicID_ = id; }
     void add_basic_block(BasicBlock* bb) { basic_blocks_.push_back(bb); invalidateDominatorInfo(); }
     Type* get_return_type() const { return static_cast<FunctionType*>(type_)->result_; }
     bool is_declaration() { return basic_blocks_.empty(); }  // 无基本块→仅为声明
@@ -84,4 +92,5 @@ private:
     void computeDominatorInfo();
     std::unique_ptr<DominatorInfo> domInfo_;
     HiraWorkerState hiraWorkerState_ = HiraWorkerState::None;
+    IntrinsicID intrinsicID_ = IntrinsicID::None;
 };
