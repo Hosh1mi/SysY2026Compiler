@@ -55,6 +55,7 @@ enum class SDOpcode : std::uint16_t {
     ShuffleVector,
     Phi,
     Call,
+    TailCall,
     Branch,
     BranchCond,
     Return,

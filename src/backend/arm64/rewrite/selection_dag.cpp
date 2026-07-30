@@ -47,7 +47,7 @@ const char *opcodeName(SDOpcode opcode) {
     NAME(FCmp); NAME(Select); NAME(GEP); NAME(Load); NAME(Store); NAME(ZExt);
     NAME(FPToSI); NAME(SIToFP); NAME(Bitcast); NAME(Clz);
     NAME(Splat); NAME(InsertElement); NAME(ExtractElement);
-    NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(Branch);
+    NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(TailCall); NAME(Branch);
     NAME(BranchCond); NAME(Return); NAME(MAdd); NAME(MSub);
     NAME(VectorReduceAdd); NAME(SMin); NAME(SMax);
 #undef NAME
@@ -73,6 +73,25 @@ bool isSupportedValueType(ValueType type) {
            type == ValueType::F32 || type == ValueType::Ptr ||
            type == ValueType::V4I32 || type == ValueType::V4F32 ||
            type == ValueType::Flags;
+}
+
+// AArch64 register-argument boundary: each bank has 8 slots.  Stack-passed
+// args cannot be emitted as sibling TCO with the current frame layout.
+bool callArgsFitInRegisters(Instruction *call) {
+    unsigned integerArgs = 0;
+    unsigned floatArgs = 0;
+    for (unsigned i = 0; i + 1 < call->num_ops_; ++i) {
+        ValueType type = SelectionDAGBuilder::valueType(
+            call->get_operand(i)->type_);
+        bool vectorBank = type == ValueType::F32 ||
+                          type == ValueType::V4F32 ||
+                          type == ValueType::V4I32;
+        if (vectorBank)
+            ++floatArgs;
+        else
+            ++integerArgs;
+    }
+    return integerArgs <= 8 && floatArgs <= 8;
 }
 
 bool sameSplatScalar(SDValue lhs, SDValue rhs) {
@@ -363,8 +382,13 @@ SelectionDAGBuilder::build(Function *function) const {
     for (BasicBlock *block : result->blockOrder) {
         SelectionDAG &dag = *result->blocks.at(block);
         SDValue chain = dag.entryToken();
+        Instruction *skipInstruction = nullptr;
 
         for (Instruction *instruction : block->instr_list_) {
+            if (instruction == skipInstruction) {
+                skipInstruction = nullptr;
+                continue;
+            }
             if (dynamic_cast<PhiInst *>(instruction))
                 continue;
             if (dynamic_cast<AllocaInst *>(instruction))
@@ -518,9 +542,28 @@ SelectionDAGBuilder::build(Function *function) const {
                             {operand(0), operand(1)});
                         break;
                     }
+                    auto *callInst = static_cast<CallInst *>(instruction);
+                    Instruction *term = block->get_terminator();
+                    bool emitTail =
+                        callInst->is_tail() && callArgsFitInRegisters(callInst) &&
+                        term && term->is_ret() &&
+                        ((callInst->is_void() && term->num_ops_ == 0) ||
+                         (term->num_ops_ > 0 &&
+                          term->get_operand(0) == callInst));
                     std::vector<SDValue> operands = {chain};
                     for (unsigned i = 0; i + 1 < instruction->num_ops_; ++i)
                         operands.push_back(operand(i));
+                    if (emitTail) {
+                        // Terminator: reuse the frame / LR of the caller.
+                        created = &dag.createNode(SDOpcode::TailCall,
+                                                  {ValueType::Invalid},
+                                                  std::move(operands));
+                        created->symbol =
+                            callee ? callee->name_ : std::string();
+                        chain = SDValue{created, 0};
+                        skipInstruction = term;
+                        break;
+                    }
                     std::vector<ValueType> results;
                     if (!instruction->is_void())
                         results.push_back(valueType(instruction->type_));
@@ -574,7 +617,8 @@ SelectionDAGBuilder::build(Function *function) const {
 
             if (created) {
                 created->origin = instruction;
-                if (!instruction->is_void() &&
+                if (created->opcode() != SDOpcode::TailCall &&
+                    !instruction->is_void() &&
                     instruction->op_id_ != Instruction::Store &&
                     instruction->op_id_ != Instruction::Br &&
                     instruction->op_id_ != Instruction::Ret)

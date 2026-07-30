@@ -187,6 +187,9 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
     if (AutoMemoization::moduleHasAnyCandidate(m)) {
         pm.addPass(std::make_unique<AutoMemoization>());
     }
+    // After memo (and UnifyExitNodes): mark remaining call+ret tails for
+    // backend sibling/general TCO (b instead of bl).
+    pm.addPass(std::make_unique<TailCallOpt>());
 }
 
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {

@@ -235,7 +235,13 @@ public:
         set_operand(num_ops - 1, func);
         parent_ = bb;
     }
+    bool is_tail() const { return is_tail_; }
+    void set_tail(bool v = true) { is_tail_ = v; }
     virtual std::string print() override;
+
+private:
+    // 尾调用提示：位于返回路径上，后端可在 ABI 允许时发 b 而非 bl
+    bool is_tail_ = false;
 };
 
 // 分支跳转（条件/无条件）

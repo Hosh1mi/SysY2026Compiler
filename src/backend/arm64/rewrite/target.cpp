@@ -101,6 +101,15 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::Branch};
         return value;
     }
+    case Opcode::TAILCALL: {
+        // Sibling/general TCO: tear down the frame then branch.  Treated as
+        // both a call (uses arg regs) and a return terminator (needs epilogue).
+        static const InstrDesc value{
+            opcode, "b", 0, 0, true, true, true, true,
+            false, false, true, false, false, false, 1,
+            SchedResource::Branch};
+        return value;
+    }
     case Opcode::RET: {
         static const InstrDesc value{
             opcode, "ret", 0, 0, true, true, false, true,

@@ -481,6 +481,9 @@ void printInstruction(const MachineFunction &function,
     case Opcode::CALL:
         output << "\tbl " << operands[0].symbol() << '\n';
         break;
+    case Opcode::TAILCALL:
+        output << "\tb " << operands[0].symbol() << '\n';
+        break;
     case Opcode::RET:
         output << "\tret\n";
         break;

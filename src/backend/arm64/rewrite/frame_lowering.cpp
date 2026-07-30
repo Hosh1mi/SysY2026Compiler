@@ -346,7 +346,8 @@ void AArch64FrameLowering::insertPrologueEpilogues(
     for (auto &owned : function.blocks()) {
         auto &instructions = owned->instructions();
         for (auto it = instructions.begin(); it != instructions.end(); ++it) {
-            if (it->opcode() != Opcode::RET)
+            if (it->opcode() != Opcode::RET &&
+                it->opcode() != Opcode::TAILCALL)
                 continue;
             for (std::size_t i = frame.savedRegisters.size(); i > 0;) {
                 if (i >= 2) {
