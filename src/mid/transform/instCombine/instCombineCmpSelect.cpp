@@ -305,6 +305,100 @@ Value* visitICmp(ICmpInst *inst) {
         }
     }
 
+    if (cy) {
+        if (ValueFacts::isKnownNonNegative(x, bb)) {
+            bool known = false;
+            bool result = false;
+            switch (pred) {
+            case ICmpInst::ICMP_SGT:
+                if (cy->value_ < 0) known = result = true;
+                break;
+            case ICmpInst::ICMP_SGE:
+                if (cy->value_ <= 0) known = result = true;
+                break;
+            case ICmpInst::ICMP_SLT:
+                if (cy->value_ <= 0) known = true;
+                break;
+            case ICmpInst::ICMP_SLE:
+                if (cy->value_ < 0) known = true;
+                break;
+            default:
+                break;
+            }
+            if (known)
+                return make_const_int(ty, result ? 1 : 0);
+        }
+
+        uint32_t unsignedLower = 0, unsignedUpper = 0;
+        if (ValueFacts::knownUnsignedBounds(x, unsignedLower, unsignedUpper)) {
+            const unsigned bits = ValueFacts::integerBitWidth(x);
+            const uint32_t mask = ValueFacts::widthMask(bits);
+            const uint32_t constant =
+                static_cast<uint32_t>(cy->value_) & mask;
+            bool known = false;
+            bool result = false;
+            switch (pred) {
+            case ICmpInst::ICMP_EQ:
+                known = constant < unsignedLower || constant > unsignedUpper;
+                result = false;
+                break;
+            case ICmpInst::ICMP_NE:
+                known = constant < unsignedLower || constant > unsignedUpper;
+                result = true;
+                break;
+            case ICmpInst::ICMP_UGT:
+                if (unsignedLower > constant) known = result = true;
+                else if (unsignedUpper <= constant) known = true;
+                break;
+            case ICmpInst::ICMP_UGE:
+                if (unsignedLower >= constant) known = result = true;
+                else if (unsignedUpper < constant) known = true;
+                break;
+            case ICmpInst::ICMP_ULT:
+                if (unsignedUpper < constant) known = result = true;
+                else if (unsignedLower >= constant) known = true;
+                break;
+            case ICmpInst::ICMP_ULE:
+                if (unsignedUpper <= constant) known = result = true;
+                else if (unsignedLower > constant) known = true;
+                break;
+            default:
+                break;
+            }
+            if (known)
+                return make_const_int(ty, result ? 1 : 0);
+        }
+
+        int64_t signedLower = 0, signedUpper = 0;
+        if (ValueFacts::knownNonNegativeBounds(x, signedLower, signedUpper)) {
+            const int64_t constant = cy->value_;
+            bool known = false;
+            bool result = false;
+            switch (pred) {
+            case ICmpInst::ICMP_SGT:
+                if (signedLower > constant) known = result = true;
+                else if (signedUpper <= constant) known = true;
+                break;
+            case ICmpInst::ICMP_SGE:
+                if (signedLower >= constant) known = result = true;
+                else if (signedUpper < constant) known = true;
+                break;
+            case ICmpInst::ICMP_SLT:
+                if (signedUpper < constant) known = result = true;
+                else if (signedLower >= constant) known = true;
+                break;
+            case ICmpInst::ICMP_SLE:
+                if (signedUpper <= constant) known = result = true;
+                else if (signedLower > constant) known = true;
+                break;
+            default:
+                break;
+            }
+            if (known)
+                return make_const_int(ty, result ? 1 : 0);
+        }
+    }
+
     if (auto *folded = foldScaledCompareFromPred(inst))
         return folded;
 
