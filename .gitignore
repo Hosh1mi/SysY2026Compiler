@@ -8,6 +8,8 @@
 !src/
 !lib/
 !.proto/
+.agents/
+test/*
 
 src/backend/riscv_deprecated/
 src/mid/hira*

@@ -80,6 +80,17 @@ void debug_progress(int seg) {
     fflush(stderr);
 }
 
+void debug_text(int text[]) {
+    fputs("[profile] case ", stderr);
+    int i = 0;
+    while (text[i] != 0) {
+        fputc(text[i], stderr);
+        i++;
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
 void _sysy_starttime(int lineno){
   _sysy_l1[_sysy_idx] = lineno;
   gettimeofday(&_sysy_start,NULL);

@@ -145,7 +145,7 @@ public:
 
 #ifdef ENABLE_PROFILING_HOOKS
         // Opt-in profiling helpers (lib/sylib.c).  Exposed only when the
-        // compiler is built with -DENABLE_PROFILING_HOOKS, because both are
+        // compiler is built with -DENABLE_PROFILING_HOOKS, because they are
         // unsafe on the A53 target / production .sy programs:
         //   - redirect_stdin: freopens "/tmp/mmc-1.in" onto stdin.  On the
         //     A53 board the file doesn't exist; freopen fails and leaves
@@ -153,12 +153,15 @@ public:
         //     (input is normally read from a memory page at 0xc0000000).
         //     See MEMORY.md feedback_redirect_stdin_a53.
         //   - debug_progress: fprintf(stderr, "[profile] seg%d\n", seg).
+        //   - debug_text: prints a zero-terminated integer character array to
+        //     stderr with a profiling prefix.
         //     Useless on A53 (no console) and the extra UART traffic skews
         //     timing measurements.
         // Stock contest .sy programs must not call these; they are reserved
         // for in-tree profiling scratch files only.
         Function *redirect_stdin_fn = nullptr;
         Function *debug_progress_fn = nullptr;
+        Function *debug_text_fn = nullptr;
         {
             auto rs_ty = new FunctionType(TyVoid, {});
             redirect_stdin_fn = new Function(rs_ty, "redirect_stdin", module.get());
@@ -166,6 +169,10 @@ public:
             std::vector<Type *> dp_params{TyInt32};
             auto dp_ty = new FunctionType(TyVoid, dp_params);
             debug_progress_fn = new Function(dp_ty, "debug_progress", module.get());
+
+            std::vector<Type *> dt_params{TyInt32Ptr};
+            auto dt_ty = new FunctionType(TyVoid, dt_params);
+            debug_text_fn = new Function(dt_ty, "debug_text", module.get());
         }
 #endif
 
@@ -191,6 +198,7 @@ public:
 #ifdef ENABLE_PROFILING_HOOKS
         scope.push("redirect_stdin", redirect_stdin_fn);
         scope.push("debug_progress", debug_progress_fn);
+        scope.push("debug_text", debug_text_fn);
 #endif
     }
     std::unique_ptr<Module> getModule() {

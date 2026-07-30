@@ -14,6 +14,9 @@ void putfloat(float a);
 void putfarray(int n, float a[]);
 
 void putf(char a[], ...);
+void redirect_stdin(void);
+void debug_progress(int seg);
+void debug_text(int text[]);
 
 /* Timing function implementation */
 struct timeval _sysy_start,_sysy_end;
