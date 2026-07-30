@@ -17,6 +17,8 @@ namespace {
 
 constexpr int kMaxDim = 4;
 
+constexpr int kMatPowMinTrip = 256;
+
 bool debugEnabled() {
     static bool on = std::getenv("DEBUG_LINEAR_RECURRENCE") != nullptr;
     return on;
@@ -737,6 +739,122 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     return true;
 }
 
+// Keep the original loop for short trips; matpow only when trip >= threshold.
+//   PH: br (trip < T), header, matpow.header
+//   header/.../exit(liveRoot) -> join
+//   matpow.after(folded) -> join
+//   join: phi [liveRoot, exit], [folded, after] ; rest of former exit tail
+bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
+                          Instruction *liveRoot, MatPowLoopEmit &mp) {
+    BasicBlock *PH = loop.preheader;
+    BasicBlock *exit = loop.singleExit();
+    if (!PH || !exit || !liveRoot || liveRoot->parent_ != exit)
+        return reject("guarded matpow needs liveRoot in exit");
+
+    auto *preheaderBr = PH->get_terminator();
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1)
+        return reject("bad preheader terminator");
+    if (preheaderBr->get_operand(0) != loop.header)
+        return reject("preheader does not target header");
+
+    auto *afterBr = mp.after->get_terminator();
+    if (!afterBr || !afterBr->is_br() || afterBr->num_ops_ != 1)
+        return reject("bad matpow after terminator");
+    if (afterBr->get_operand(0) != exit)
+        return reject("matpow after does not target exit");
+
+    Function *func = PH->parent_;
+    auto *i32 = module->int32_ty_;
+    std::string baseName = exit->name_;
+
+    // Split exit: keep liveRoot and everything before it; move the rest to join.
+    auto *join = new BasicBlock(module, baseName + ".linrec.join", func);
+    std::vector<Instruction *> toMove;
+    bool seenLive = false;
+    for (auto *inst : exit->instr_list_) {
+        if (!seenLive) {
+            if (inst == liveRoot)
+                seenLive = true;
+            continue;
+        }
+        toMove.push_back(inst);
+    }
+    if (!seenLive)
+        return reject("liveRoot not found in exit order");
+    if (toMove.empty())
+        return reject("exit has no tail after liveRoot");
+
+    for (auto *inst : toMove) {
+        exit->remove_instr(inst);
+        join->add_instruction(inst);
+    }
+
+    // The moved terminator still jumps to the old successor, but that successor
+    // now has predecessor `join` instead of `exit`. Retarget PHI incomings.
+    auto *movedTerm = join->get_terminator();
+    if (movedTerm && movedTerm->is_br()) {
+        for (unsigned oi = 0; oi < movedTerm->num_ops_; ++oi) {
+            auto *succ = dynamic_cast<BasicBlock *>(movedTerm->get_operand(oi));
+            if (!succ || succ == exit)
+                continue;
+            for (auto *inst : succ->instr_list_) {
+                if (!inst->is_phi())
+                    break;
+                auto *phi = static_cast<PhiInst *>(inst);
+                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    if (phi->get_operand(i + 1) == exit)
+                        phi->set_operand(i + 1, join);
+                }
+            }
+            succ->remove_pre_basic_block(exit);
+            succ->add_pre_basic_block(join);
+            exit->remove_succ_basic_block(succ);
+            // join->succ set when BranchInst was originally on exit; fix lists:
+            join->add_succ_basic_block(succ);
+        }
+    }
+
+    // exit -> join (BranchInst maintains CFG)
+    new BranchInst(join, exit);
+
+    // matpow.after -> join (retarget)
+    afterBr->set_operand(0, join);
+    mp.after->remove_succ_basic_block(exit);
+    mp.after->add_succ_basic_block(join);
+    exit->remove_pre_basic_block(mp.after);
+    join->add_pre_basic_block(mp.after);
+
+    // Merge live-out at join.
+    auto *merge = PhiInst::create_phi(i32, join);
+    join->add_instruction_front(merge);
+    merge->add_phi_pair_operand(liveRoot, exit);
+    merge->add_phi_pair_operand(mp.result, mp.after);
+
+    std::vector<std::pair<Instruction *, unsigned>> uses;
+    for (auto &use : liveRoot->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (user && user != merge)
+            uses.push_back({user, use.arg_no_});
+    }
+    for (auto &[user, arg] : uses)
+        user->set_operand(arg, merge);
+
+    // PH: br (trip < T), header, matpow.header
+    auto *thr = new ConstantInt(i32, kMatPowMinTrip);
+    auto *isShort =
+        new ICmpInst(ICmpInst::ICMP_ULT, trip, thr, PH, true);
+    PH->add_instruction_before_terminator(isShort);
+    PH->remove_succ_basic_block(loop.header);
+    loop.header->remove_pre_basic_block(PH);
+    PH->delete_instr(preheaderBr);
+    new BranchInst(isShort, loop.header, mp.header, PH);
+
+    if (debugEnabled())
+        std::cerr << "[LinearRecurrenceFold] matpow guarded threshold="
+                  << kMatPowMinTrip << "\n";
+    return true;
+}
+
 } // namespace
 
 bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
@@ -863,9 +981,6 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
 
     BasicBlock *PH = loop.preheader;
     Value *trip = emitNonNegTripManual(module, PH, bound);
-    Value *folded = nullptr;
-    BasicBlock *newTarget = nullptr;
-    BasicBlock *exitPred = nullptr;
 
     int32_t lambda = 0;
     if (findLeftEigen(sys, lambda)) {
@@ -873,21 +988,37 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
             std::cerr << "[LinearRecurrenceFold] left-eigen lambda=" << lambda
                       << "\n";
         Value *s0 = emitDotManual(module, PH, sys);
-        folded = emitScalePow(module, PH, s0, lambda, trip);
-        // PH computes result then jumps straight to exit.
+        Value *folded = emitScalePow(module, PH, s0, lambda, trip);
+        if (!rewriteAndDeleteLoop(loop, module, folded, sys.liveRoot, nullptr,
+                                  nullptr))
+            return false;
     } else {
+        // Constant short trip: keep the original add loop (matpow too heavy).
+        if (auto *ci = dynamic_cast<ConstantInt *>(bound)) {
+            long long t = ci->value_;
+            if (t < 0)
+                t = 0;
+            if (t < kMatPowMinTrip)
+                return reject("matpow trip too small");
+        }
+
         if (debugEnabled())
             std::cerr << "[LinearRecurrenceFold] matpow loop path\n";
-        MatPowLoopEmit mp = emitMatPowLoop(module, PH->parent_, PH, sys, trip,
-                                           exit);
-        folded = mp.result;
-        newTarget = mp.header;
-        exitPred = mp.after;
-    }
+        MatPowLoopEmit mp =
+            emitMatPowLoop(module, PH->parent_, PH, sys, trip, exit);
 
-    if (!rewriteAndDeleteLoop(loop, module, folded, sys.liveRoot, newTarget,
-                              exitPred))
-        return false;
+        if (auto *ci = dynamic_cast<ConstantInt *>(bound)) {
+            (void)ci;
+            // Known-large trip: replace the loop entirely.
+            if (!rewriteAndDeleteLoop(loop, module, mp.result, sys.liveRoot,
+                                      mp.header, mp.after))
+                return false;
+        } else {
+            // Dynamic trip: short → original loop, long → matpow.
+            if (!rewriteMatPowGuarded(loop, module, trip, sys.liveRoot, mp))
+                return false;
+        }
+    }
 
     if (debugEnabled())
         std::cerr << "[LinearRecurrenceFold] folded "
@@ -905,8 +1036,13 @@ void LinearRecurrenceFold::runOnFunction(Function *func, AnalysisManager *AM) {
         std::vector<Loop *> loops;
         for (auto &l : LI.allLoops())
             loops.push_back(l.get());
-        // Prefer smaller / inner loops first.
+        // Prefer producer loops first: if A.exit == B.preheader, fold A before B
+        // so later closed forms are not inserted into A's exit.
         std::sort(loops.begin(), loops.end(), [](Loop *a, Loop *b) {
+            if (a->singleExit() && a->singleExit() == b->preheader)
+                return true;
+            if (b->singleExit() && b->singleExit() == a->preheader)
+                return false;
             return a->blocks.size() < b->blocks.size();
         });
         for (auto *loop : loops) {
