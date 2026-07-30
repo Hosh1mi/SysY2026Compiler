@@ -17,6 +17,8 @@ void putf(char a[], ...);
 void redirect_stdin(void);
 void debug_progress(int seg);
 void debug_text(int text[]);
+void profile_start(int seg);
+void profile_stop(int seg);
 
 /* Timing function implementation */
 struct timeval _sysy_start,_sysy_end;

@@ -72,7 +72,7 @@ __attribute((destructor)) void after_main(){
 }  
 /* profiling helpers */
 void redirect_stdin(void) {
-    freopen("/tmp/mmc-1.in", "r", stdin);
+    freopen("/tmp/test.in", "r", stdin);
 }
 
 void debug_progress(int seg) {
@@ -89,6 +89,38 @@ void debug_text(int text[]) {
     }
     fputc('\n', stderr);
     fflush(stderr);
+}
+
+static struct timeval _profile_start_time;
+static int _profile_active_seg = -1;
+
+void profile_start(int seg) {
+    _profile_active_seg = seg;
+    gettimeofday(&_profile_start_time, NULL);
+}
+
+void profile_stop(int seg) {
+    struct timeval end;
+    gettimeofday(&end, NULL);
+    long long elapsed =
+        1000000LL * (end.tv_sec - _profile_start_time.tv_sec) +
+        end.tv_usec - _profile_start_time.tv_usec;
+
+    if (_profile_active_seg != seg) {
+        fprintf(stderr, "[profile] ERROR: timer seg%d stopped as seg%d\n",
+                _profile_active_seg, seg);
+    }
+    fprintf(stderr, "[profile] time seg%d: %lld us\n", seg, elapsed);
+    fflush(stderr);
+    _profile_active_seg = -1;
+
+    _sysy_us[0] += elapsed;
+    _sysy_s[0] += _sysy_us[0] / 1000000;
+    _sysy_us[0] %= 1000000;
+    _sysy_m[0] += _sysy_s[0] / 60;
+    _sysy_s[0] %= 60;
+    _sysy_h[0] += _sysy_m[0] / 60;
+    _sysy_m[0] %= 60;
 }
 
 void _sysy_starttime(int lineno){

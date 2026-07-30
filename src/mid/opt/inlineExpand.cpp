@@ -36,6 +36,8 @@ void InlineExpand::execute(Module *module) {
 
         Function *caller = call->parent_->parent_;
         Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
+        if (!isReachableFromEntry(caller, module))
+            continue;
         if (!callee || !canInline(call, callee, caller, item.recursiveBudget))
             continue;
 
@@ -187,6 +189,12 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
     // Phase B: forward propagation through callee in RPO order
     auto rpo = getRPO(callee);
     int foldBenefit = 0;
+    auto isKnownConstant = [&](Value *value) {
+        return dynamic_cast<ConstantInt *>(value) ||
+               dynamic_cast<ConstantFloat *>(value) ||
+               dynamic_cast<ConstantZero *>(value) ||
+               knownConst.count(value) != 0;
+    };
 
     for (auto *bb : rpo) {
         for (auto *inst : bb->instr_list_) {
@@ -196,7 +204,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
                     Value *op = i->get_operand(k);
                     // Skip basic block operands (phi incoming blocks, branch targets)
                     if (dynamic_cast<BasicBlock*>(op)) continue;
-                    if (!knownConst.count(op)) return false;
+                    if (!isKnownConstant(op)) return false;
                 }
                 return true;
             };
@@ -205,7 +213,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
                 bool allIncomingConst = true;
                 for (unsigned k = 0; k < phi->num_ops_; k += 2) {
                     Value *incVal = phi->get_operand(k);
-                    if (!knownConst.count(incVal)) {
+                    if (!isKnownConstant(incVal)) {
                         allIncomingConst = false;
                         break;
                     }
@@ -345,6 +353,16 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
     if (callInLoop)
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
+    bool hasConstantArgument = false;
+    for (unsigned i = 0; i + 1 < call->num_ops_; ++i) {
+        Value *actual = call->get_operand(i);
+        if (dynamic_cast<ConstantInt *>(actual) ||
+            dynamic_cast<ConstantFloat *>(actual) ||
+            dynamic_cast<ConstantZero *>(actual)) {
+            hasConstantArgument = true;
+            break;
+        }
+    }
 
     if (recursive) {
         if (hasNonSelfCalls(callee))
@@ -367,6 +385,14 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
 
     // Code bloat guard for multi-site inlines
     int totalBloat = weightedCost * (int)sites;
+    // A constant actual argument can expose substantially more than the local
+    // fold estimator sees: branch pruning, constant-divisor lowering and
+    // scalar promotion across the former call boundary.  Permit such hot-loop
+    // calls when the existing module-wide bloat budget can absorb all sites.
+    if (callInLoop && hasConstantArgument && foldBenefit > 0 &&
+        totalBloat <= INLINE_COST_BUDGET)
+        return true;
+
     if (totalBloat > INLINE_COST_BUDGET) {
         // Override only if constant-fold eliminates > 50% of the function
         if (foldBenefit < weightedCost / 2)
@@ -380,6 +406,8 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
 unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
     unsigned count = 0;
     for (auto func : module->function_list_) {
+        if (!isReachableFromEntry(func, module))
+            continue;
         for (auto bb : func->basic_blocks_) {
             for (auto inst : bb->instr_list_) {
                 if (auto *call = dynamic_cast<CallInst*>(inst)) {
@@ -390,6 +418,43 @@ unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
         }
     }
     return count;
+}
+
+bool InlineExpand::isReachableFromEntry(Function *target, Module *module) {
+    Function *entry = nullptr;
+    for (auto *func : module->function_list_) {
+        if (func->name_ == "main") {
+            entry = func;
+            break;
+        }
+    }
+    if (!entry)
+        return true;
+
+    std::unordered_set<Function *> visited;
+    return reaches(entry, target, visited);
+}
+
+bool InlineExpand::reaches(Function *from, Function *target,
+                           std::unordered_set<Function *> &visited) {
+    if (from == target)
+        return true;
+    if (!visited.insert(from).second)
+        return false;
+
+    for (auto *bb : from->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            auto *call = dynamic_cast<CallInst *>(inst);
+            if (!call)
+                continue;
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (callee && !callee->is_declaration() &&
+                reaches(callee, target, visited))
+                return true;
+        }
+    }
+    return false;
 }
 
 bool InlineExpand::isCallInLoop(CallInst *call) {
