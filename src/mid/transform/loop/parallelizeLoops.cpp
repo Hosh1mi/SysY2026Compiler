@@ -90,6 +90,20 @@ bool definedInLoop(Value *v, const std::set<BasicBlock *> &blocks) {
     return inst && blocks.count(inst->parent_);
 }
 
+void replaceUsesOutsideOutlinedLoop(Value *oldValue, Value *newValue,
+                                    const std::set<BasicBlock *> &blocks,
+                                    Function *outlinedBody) {
+    std::vector<std::pair<Instruction *, unsigned>> fixes;
+    for (auto &use : oldValue->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (user && !blocks.count(user->parent_) &&
+            (!outlinedBody || user->parent_->parent_ != outlinedBody))
+            fixes.push_back({user, use.arg_no_});
+    }
+    for (auto &fix : fixes)
+        fix.first->set_operand(fix.second, newValue);
+}
+
 // ScalarExpansion scratch：每个父循环迭代先清零、后累加、再写回。
 // 若某个并行循环内完整使用该 scratch，可在 worker 内改成线程私有 alloca。
 bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
@@ -123,6 +137,93 @@ Type *scratchAllocaType(Value *root) {
     return alloca ? alloca->alloca_ty_ : nullptr;
 }
 
+bool isAllowedReductionTerm(Value *value, const Loop &loop,
+                            PhiInst *accumulator, PhiInst *ivPhi,
+                            Instruction *ivNext,
+                            std::set<Value *> &visiting) {
+    if (!value || value == accumulator)
+        return false;
+    if (value == ivPhi || value == ivNext)
+        return true;
+    if (dynamic_cast<Constant *>(value) ||
+        dynamic_cast<GlobalVariable *>(value) ||
+        dynamic_cast<Argument *>(value) ||
+        dynamic_cast<Function *>(value) ||
+        dynamic_cast<BasicBlock *>(value))
+        return true;
+
+    auto *inst = dynamic_cast<Instruction *>(value);
+    if (!inst)
+        return false;
+    if (!loop.blocks.count(inst->parent_))
+        return true;
+    if (!visiting.insert(value).second)
+        return true;
+
+    auto allOperandsAllowed = [&]() {
+        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            Value *op = inst->get_operand(i);
+            if (dynamic_cast<BasicBlock *>(op) || dynamic_cast<Function *>(op))
+                continue;
+            if (!isAllowedReductionTerm(op, loop, accumulator, ivPhi, ivNext,
+                                        visiting))
+                return false;
+        }
+        return true;
+    };
+
+    bool ok = false;
+    if (auto *bin = dynamic_cast<BinaryInst *>(inst)) {
+        switch (bin->op_id_) {
+        case Instruction::Add:
+        case Instruction::Sub:
+        case Instruction::Mul:
+        case Instruction::Shl:
+            ok = allOperandsAllowed();
+            break;
+        default:
+            ok = false;
+            break;
+        }
+    } else if (dynamic_cast<ICmpInst *>(inst)) {
+        ok = allOperandsAllowed();
+    } else if (auto *load = dynamic_cast<LoadInst *>(inst)) {
+        Value *ptr = load->get_operand(0);
+        if (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr)) {
+            ok = isAcceptedMemoryRoot(gepRootBase(gep));
+            for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
+                ok = isAllowedReductionTerm(gep->get_operand(i), loop,
+                                            accumulator, ivPhi, ivNext,
+                                            visiting);
+        } else {
+            ok = dynamic_cast<GlobalVariable *>(ptr) != nullptr;
+        }
+    } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(inst)) {
+        ok = isAcceptedMemoryRoot(gepRootBase(gep));
+        for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
+            ok = isAllowedReductionTerm(gep->get_operand(i), loop,
+                                        accumulator, ivPhi, ivNext, visiting);
+    } else if (auto *call = dynamic_cast<CallInst *>(inst)) {
+        auto *callee = dynamic_cast<Function *>(
+            call->get_operand(call->num_ops_ - 1));
+        ok = callee && callee->hasSemFlag(SemFlag::FnPure);
+        for (unsigned i = 0; ok && i + 1 < call->num_ops_; ++i)
+            ok = isAllowedReductionTerm(call->get_operand(i), loop,
+                                        accumulator, ivPhi, ivNext, visiting);
+    } else if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
+        ok = true;
+        for (unsigned i = 0; ok && i < phi->num_ops_; i += 2)
+            ok = isAllowedReductionTerm(phi->get_operand(i), loop,
+                                        accumulator, ivPhi, ivNext, visiting);
+    } else if (inst->op_id_ == Instruction::Select ||
+               inst->op_id_ == Instruction::ZExt) {
+        ok = allOperandsAllowed();
+    }
+
+    visiting.erase(value);
+    return ok;
+}
+
 } // namespace
 
 void ParallelizeLoops::execute(Module *module) {
@@ -145,67 +246,71 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
     shape.latch = latch;
     shape.exitBlock = exitBlock;
 
-    // 唯一 header phi = IV
-    PhiInst *iv = nullptr;
-    for (auto inst : loop.header->instr_list_) {
-        if (!inst->is_phi()) break;
-        if (iv) return fail("multiple header phi nodes");
-        iv = static_cast<PhiInst *>(inst);
-    }
-    if (!iv) return fail("missing header IV phi");
-    if (iv->type_->tid_ != Type::IntegerTyID)
-        return fail("IV phi is not integer");
-    auto *ivTy = dynamic_cast<IntegerType *>(iv->type_);
-    if (!ivTy || ivTy->num_bits_ != 32) return fail("IV phi is not i32");
-    shape.ivPhi = iv;
-
-    for (unsigned i = 0; i < iv->num_ops_; i += 2) {
-        auto *pred = static_cast<BasicBlock *>(iv->get_operand(i + 1));
-        if (pred == loop.preheader)
-            shape.init = iv->get_operand(i);
-        else if (pred == latch)
-            shape.ivNext = dynamic_cast<Instruction *>(iv->get_operand(i));
-        else
-            return fail("IV phi has unexpected predecessor");
-    }
-    if (!shape.init) return fail("missing IV init");
-    if (!shape.ivNext) return fail("missing IV next");
-
-    // ivNext = add(iv, 1)
-    if (!shape.ivNext->is_add()) return fail("IV next is not add");
-    Value *a = shape.ivNext->get_operand(0), *b = shape.ivNext->get_operand(1);
     auto isOne = [](Value *v) {
         auto *c = dynamic_cast<ConstantInt *>(v);
         return c && c->value_ == 1;
     };
-    if (!((a == iv && isOne(b)) || (b == iv && isOne(a))))
-        return fail("IV step is not +1");
+
+    struct IVCandidate {
+        PhiInst *phi = nullptr;
+        Value *init = nullptr;
+        Instruction *next = nullptr;
+    };
+    std::vector<IVCandidate> ivCandidates;
+    for (auto inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        auto *ivTy = dynamic_cast<IntegerType *>(phi->type_);
+        if (!ivTy || ivTy->num_bits_ != 32) continue;
+
+        Value *init = nullptr;
+        Instruction *next = nullptr;
+        bool badPred = false;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred == loop.preheader) {
+                init = phi->get_operand(i);
+            } else if (pred == latch) {
+                next = dynamic_cast<Instruction *>(phi->get_operand(i));
+            } else {
+                badPred = true;
+                break;
+            }
+        }
+        if (badPred || !init || !next || !next->is_add()) continue;
+        Value *a = next->get_operand(0), *b = next->get_operand(1);
+        if (!((a == phi && isOne(b)) || (b == phi && isOne(a)))) continue;
+        ivCandidates.push_back({phi, init, next});
+    }
+
+    if (ivCandidates.empty()) return fail("missing i32 +1 IV phi");
 
     // 出口：header（while 形）或 latch（do-while 形）的 slt 条件分支
-    for (BasicBlock *cand : {loop.header, latch}) {
-        auto *term = cand->get_terminator();
-        if (!term || term->num_ops_ != 3) continue; // 非 cond br
-        auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
-        if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) continue;
-        Value *lhs = cmp->get_operand(0);
-        if (lhs != iv && lhs != shape.ivNext) continue;
-        auto *tSucc = static_cast<BasicBlock *>(term->get_operand(1));
-        auto *fSucc = static_cast<BasicBlock *>(term->get_operand(2));
-        if (fSucc != exitBlock || !loop.blocks.count(tSucc)) continue;
-        shape.exitCmp = cmp;
-        shape.bound = cmp->get_operand(1);
-        shape.exitingBlock = cand;
-        break;
+    for (auto &candidate : ivCandidates) {
+        for (BasicBlock *cand : {loop.header, latch}) {
+            auto *term = cand->get_terminator();
+            if (!term || term->num_ops_ != 3) continue; // 非 cond br
+            auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
+            if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) continue;
+            Value *lhs = cmp->get_operand(0);
+            if (lhs != candidate.phi && lhs != candidate.next) continue;
+            auto *tSucc = static_cast<BasicBlock *>(term->get_operand(1));
+            auto *fSucc = static_cast<BasicBlock *>(term->get_operand(2));
+            if (fSucc != exitBlock || !loop.blocks.count(tSucc)) continue;
+            shape.ivPhi = candidate.phi;
+            shape.init = candidate.init;
+            shape.ivNext = candidate.next;
+            shape.exitCmp = cmp;
+            shape.bound = cmp->get_operand(1);
+            shape.exitingBlock = cand;
+            shape.latchComparesIV = cand == latch && lhs == candidate.phi;
+            break;
+        }
+        if (shape.exitCmp) break;
     }
     if (!shape.exitCmp) return fail("missing i < bound exit condition");
     if (definedInLoop(shape.bound, loop.blocks))
         return fail("loop bound is defined in loop");
-
-    // exit 块不得有 phi（含 LCSSA phi——意味着有 live-out）
-    for (auto inst : exitBlock->instr_list_) {
-        if (inst->is_phi()) return fail("exit block has phi live-out");
-        break;
-    }
 
     // 逃逸边检查：循环内所有后继必须仍在循环内，唯一例外是
     // exitingBlock→exitBlock。dedicated exits（plan 1.1）未实现，
@@ -228,7 +333,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                     Function *func, AnalysisManager *AM,
                                     const ArgumentAliasAnalysis &argAA,
                                     std::set<Value *> *privatize,
-                                    std::vector<Reduction> *reductions) {
+                                    std::vector<Reduction> *reductions,
+                                    std::vector<ScalarReduction> *scalarReductions) {
     auto fail = [&](const std::string &why) {
         debugPar("reject func=" + func->name_ + " loop=" + loopName(loop) +
                  ": " + why);
@@ -270,7 +376,179 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             }
         }
     }
-    if (stores.empty()) return fail("no stores"); // 无写循环交给其他 pass
+
+    std::vector<ScalarReduction> localScalarReductions;
+    for (auto *inst : loop.header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi == shape.ivPhi) continue;
+
+        auto *phiTy = dynamic_cast<IntegerType *>(phi->type_);
+        if (!phiTy || phiTy->num_bits_ != 32)
+            return fail("unsupported non-IV header phi");
+
+        Value *init = nullptr;
+        Value *latchVal = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (pred == loop.preheader)
+                init = phi->get_operand(i);
+            else if (pred == shape.latch)
+                latchVal = phi->get_operand(i);
+            else
+                return fail("non-IV phi has unexpected predecessor");
+        }
+
+        auto *identity = dynamic_cast<ConstantInt *>(init);
+        if (!identity || identity->value_ != 0)
+            return fail("non-IV phi is not zero-init scalar reduction");
+
+        auto *rem = dynamic_cast<BinaryInst *>(latchVal);
+        ConstantInt *mod = nullptr;
+        Value *updateValue = latchVal;
+        if (rem && rem->op_id_ == Instruction::SRem) {
+            mod = dynamic_cast<ConstantInt *>(rem->get_operand(1));
+            if (!mod || mod->value_ <= 0)
+                return fail("modulo reduction divisor is not positive constant");
+            updateValue = rem->get_operand(0);
+        } else {
+            rem = nullptr;
+        }
+
+        auto *update = dynamic_cast<BinaryInst *>(updateValue);
+        if (!update || !(update->is_add() || update->is_sub()))
+            return fail("scalar reduction is not add/sub update");
+
+        Value *term = nullptr;
+        bool isSub = update->is_sub();
+        if (update->is_add()) {
+            if (update->get_operand(0) == phi)
+                term = update->get_operand(1);
+            else if (update->get_operand(1) == phi)
+                term = update->get_operand(0);
+        } else if (update->get_operand(0) == phi) {
+            term = update->get_operand(1);
+        }
+        if (!term)
+            return fail("scalar reduction update does not use accumulator");
+
+        std::set<Value *> visitingTerm;
+        if (!isAllowedReductionTerm(term, loop, phi, shape.ivPhi,
+                                    shape.ivNext, visitingTerm))
+            return fail("unsupported scalar reduction term");
+
+        localScalarReductions.push_back(
+            {phi, update, rem, {}, {}, {}, term, mod, identity, isSub});
+    }
+
+    if (localScalarReductions.size() > 1)
+        return fail("multiple scalar reductions");
+    if (!localScalarReductions.empty()) {
+        if (!stores.empty())
+            return fail("mixed scalar reduction and memory stores");
+    }
+    if (stores.empty() && localScalarReductions.empty())
+        return fail("no stores or scalar reductions");
+
+    for (auto &red : localScalarReductions) {
+        red.liveOutUpdateValues.push_back(red.update);
+        red.liveOutFinalValues.push_back(red.phi);
+        if (red.rem) {
+            red.liveOutRems.push_back(red.rem);
+            red.liveOutFinalValues.push_back(red.rem);
+        }
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (auto *bb : func->basic_blocks_) {
+                if (loop.blocks.count(bb)) continue;
+                for (auto *user : bb->instr_list_) {
+                    bool usesLiveOutUpdate = false;
+                    bool usesLiveOutFinal = false;
+                    for (unsigned i = 0; i < user->num_ops_; ++i) {
+                        usesLiveOutUpdate |=
+                            std::find(red.liveOutUpdateValues.begin(),
+                                      red.liveOutUpdateValues.end(),
+                                      user->get_operand(i)) !=
+                            red.liveOutUpdateValues.end();
+                        usesLiveOutFinal |=
+                            std::find(red.liveOutFinalValues.begin(),
+                                      red.liveOutFinalValues.end(),
+                                      user->get_operand(i)) !=
+                            red.liveOutFinalValues.end();
+                    }
+                    if (!usesLiveOutUpdate && !usesLiveOutFinal) continue;
+
+                    if (auto *phi = dynamic_cast<PhiInst *>(user)) {
+                        bool onlyForwardsReductionUpdate = true;
+                        bool onlyForwardsReductionFinal = true;
+                        bool hasLoopIncoming = false;
+                        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                            auto *pred =
+                                dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+                            if (!loop.blocks.count(pred))
+                                continue;
+                            hasLoopIncoming = true;
+                            onlyForwardsReductionUpdate &=
+                                std::find(red.liveOutUpdateValues.begin(),
+                                          red.liveOutUpdateValues.end(),
+                                          phi->get_operand(i)) !=
+                                red.liveOutUpdateValues.end();
+                            onlyForwardsReductionFinal &=
+                                std::find(red.liveOutFinalValues.begin(),
+                                          red.liveOutFinalValues.end(),
+                                          phi->get_operand(i)) !=
+                                red.liveOutFinalValues.end();
+                        }
+                        if (hasLoopIncoming && !onlyForwardsReductionUpdate &&
+                            !onlyForwardsReductionFinal)
+                            return fail("scalar reduction update has mixed live-out phi");
+                        if (hasLoopIncoming && onlyForwardsReductionUpdate &&
+                            std::find(red.liveOutUpdateValues.begin(),
+                                      red.liveOutUpdateValues.end(), phi) ==
+                                red.liveOutUpdateValues.end()) {
+                            red.liveOutUpdateValues.push_back(phi);
+                            grew = true;
+                        }
+                        if (hasLoopIncoming && onlyForwardsReductionFinal &&
+                            std::find(red.liveOutFinalValues.begin(),
+                                      red.liveOutFinalValues.end(), phi) ==
+                                red.liveOutFinalValues.end()) {
+                            red.liveOutFinalValues.push_back(phi);
+                            grew = true;
+                        }
+                        continue;
+                    }
+
+                    if (!usesLiveOutUpdate || !red.mod)
+                        continue;
+
+                    auto *rem = dynamic_cast<BinaryInst *>(user);
+                    auto *remMod =
+                        rem ? dynamic_cast<ConstantInt *>(rem->get_operand(1))
+                            : nullptr;
+                    bool remUsesLiveOutUpdate =
+                        rem && std::find(red.liveOutUpdateValues.begin(),
+                                         red.liveOutUpdateValues.end(),
+                                         rem->get_operand(0)) !=
+                                   red.liveOutUpdateValues.end();
+                    if (!rem || rem->op_id_ != Instruction::SRem ||
+                        !remUsesLiveOutUpdate ||
+                        !remMod || remMod->value_ != red.mod->value_)
+                        return fail("modulo reduction update has unsupported live-out use by " +
+                                    valueName(user));
+                    if (std::find(red.liveOutRems.begin(),
+                                  red.liveOutRems.end(), rem) ==
+                        red.liveOutRems.end())
+                        red.liveOutRems.push_back(rem);
+                    if (std::find(red.liveOutFinalValues.begin(),
+                                  red.liveOutFinalValues.end(), rem) ==
+                        red.liveOutFinalValues.end())
+                        red.liveOutFinalValues.push_back(rem);
+                }
+            }
+        }
+    }
 
     std::string aliasReason;
     if (!hasProvenSafeMemoryRoots(stores, accesses, argAA, &aliasReason))
@@ -279,10 +557,40 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     // 标量 live-out：循环内定义被循环外使用 → bail
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
-            for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
-                if (user && !loop.blocks.count(user->parent_))
-                    return fail("loop-defined value is used outside loop");
+            for (auto *userBB : func->basic_blocks_) {
+                if (loop.blocks.count(userBB)) continue;
+                for (auto *user : userBB->instr_list_) {
+                    bool usesInst = false;
+                    for (unsigned i = 0; i < user->num_ops_; ++i)
+                        usesInst |= user->get_operand(i) == inst;
+                    if (!usesInst) continue;
+
+                    bool allowedScalarReductionLiveOut = false;
+                    for (auto &red : localScalarReductions) {
+                        allowedScalarReductionLiveOut |=
+                            std::find(red.liveOutFinalValues.begin(),
+                                      red.liveOutFinalValues.end(), inst) !=
+                            red.liveOutFinalValues.end();
+                        if (inst == red.update) {
+                            auto *userInst = dynamic_cast<BinaryInst *>(user);
+                            if (red.mod) {
+                                allowedScalarReductionLiveOut |=
+                                    std::find(red.liveOutRems.begin(),
+                                              red.liveOutRems.end(), userInst) !=
+                                    red.liveOutRems.end();
+                            } else {
+                                allowedScalarReductionLiveOut = true;
+                            }
+                            allowedScalarReductionLiveOut |=
+                                std::find(red.liveOutUpdateValues.begin(),
+                                          red.liveOutUpdateValues.end(), user) !=
+                                red.liveOutUpdateValues.end();
+                        }
+                    }
+                    if (!allowedScalarReductionLiveOut)
+                        return fail("loop-defined value is used outside loop: " +
+                                    valueName(inst) + " by " + valueName(user));
+                }
             }
         }
     }
@@ -429,6 +737,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
 
     if (reductions)
         *reductions = std::move(localReductions);
+    if (scalarReductions)
+        *scalarReductions = std::move(localScalarReductions);
 
     return true;
 }
@@ -436,7 +746,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
 void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                  Function *func, Module *module,
                                  const std::set<Value *> &privatize,
-                                 const std::vector<Reduction> &reductions) {
+                                 const std::vector<Reduction> &reductions,
+                                 const std::vector<ScalarReduction> &scalarReductions) {
     (void)reductions;  // IV-varying reductions need no privatization
     int id = (int)bodies_.size();
 
@@ -457,7 +768,6 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     auto *entry = new BasicBlock(module, "label_par_entry", bodyFn);
     auto *retbb = new BasicBlock(module, "label_par_ret", bodyFn);
     auto *builder = new IRStmtBuilder(retbb, module);
-    builder->create_void_ret();
 
     // live-in 收集（与 isLegalDoall 同口径）→ ctx 全局
     std::vector<Value *> liveIns;
@@ -505,6 +815,47 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
         ctxSlots.push_back(gv);
         ctxLoads.push_back(builder->create_load(gv));
     }
+
+    GlobalVariable *scalarStartSlot = nullptr;
+    GlobalVariable *scalarBoundSlot = nullptr;
+    GlobalVariable *scalarPartial0 = nullptr;
+    GlobalVariable *scalarPartial1 = nullptr;
+    Value *scalarBodyBound = hi;
+    Value *scalarSlotPtr = nullptr;
+    if (!scalarReductions.empty()) {
+        scalarStartSlot = new GlobalVariable(
+            "__sysy_par_scalar_start_" + std::to_string(id),
+            module, module->int32_ty_, false,
+            new ConstantZero(module->int32_ty_));
+        scalarBoundSlot = new GlobalVariable(
+            "__sysy_par_scalar_bound_" + std::to_string(id),
+            module, module->int32_ty_, false,
+            new ConstantZero(module->int32_ty_));
+        scalarPartial0 = new GlobalVariable(
+            "__sysy_par_scalar_partial_" + std::to_string(id) + "_0",
+            module, module->int32_ty_, false,
+            new ConstantZero(module->int32_ty_));
+        scalarPartial1 = new GlobalVariable(
+            "__sysy_par_scalar_partial_" + std::to_string(id) + "_1",
+            module, module->int32_ty_, false,
+            new ConstantZero(module->int32_ty_));
+
+        auto *ctxStart = builder->create_load(scalarStartSlot);
+        auto *isFirstChunk = builder->create_icmp_eq(lo, ctxStart);
+        if (shape.latchComparesIV) {
+            auto *ctxBound = builder->create_load(scalarBoundSlot);
+            auto *isWholeRange = builder->create_icmp_eq(hi, ctxBound);
+            auto *isSplitFirst = builder->create_icmp_ne(
+                isWholeRange, new ConstantInt(module->int1_ty_, 1));
+            auto *needsTrim = new BinaryInst(module->int1_ty_, Instruction::And,
+                                             isFirstChunk, isSplitFirst, entry);
+            auto *trimmedHi = builder->create_isub(
+                hi, new ConstantInt(module->int32_ty_, 1));
+            scalarBodyBound = new SelectInst(needsTrim, trimmedHi, hi, entry);
+        }
+        scalarSlotPtr = new SelectInst(isFirstChunk, scalarPartial0,
+                                       scalarPartial1, entry);
+    }
     builder->create_br(loop.header);
     entry->add_succ_basic_block(loop.header);
 
@@ -529,7 +880,24 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
             shape.ivPhi->set_operand(i + 1, entry);
         }
     }
-    shape.exitCmp->set_operand(1, hi);
+    for (auto &red : scalarReductions) {
+        for (unsigned i = 0; i < red.phi->num_ops_; i += 2) {
+            if (red.phi->get_operand(i + 1) ==
+                static_cast<Value *>(loop.preheader))
+                red.phi->set_operand(i + 1, entry);
+        }
+    }
+    shape.exitCmp->set_operand(1, scalarBodyBound);
+
+    builder->set_insert_point(retbb);
+    for (auto &red : scalarReductions) {
+        Value *partial = shape.exitingBlock == loop.header
+                             ? static_cast<Value *>(red.phi)
+                             : (red.rem ? static_cast<Value *>(red.rem)
+                                        : static_cast<Value *>(red.update));
+        builder->create_store(partial, scalarSlotPtr);
+    }
+    builder->create_void_ret();
 
     // 循环块迁移到 bodyFn
     for (auto *bb : loop.blocksOrdered) {
@@ -557,9 +925,48 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     builder->set_insert_point(parCall);
     for (size_t k = 0; k < liveIns.size(); k++)
         builder->create_store(liveIns[k], ctxSlots[k]);
+    for (auto &red : scalarReductions) {
+        builder->create_store(shape.init, scalarStartSlot);
+        builder->create_store(shape.bound, scalarBoundSlot);
+        builder->create_store(red.identity, scalarPartial0);
+        builder->create_store(red.identity, scalarPartial1);
+    }
     builder->create_call(parallelForDecl_,
                          {new ConstantInt(module->int32_ty_, id), shape.init,
                           shape.bound});
+    for (auto &red : scalarReductions) {
+        auto *p0 = builder->create_load(scalarPartial0);
+        auto *p1 = builder->create_load(scalarPartial1);
+        Value *merged = builder->create_iadd(p0, p1);
+        if (red.mod)
+            merged = builder->create_isrem(merged, red.mod);
+        std::vector<Value *> exitForwardValues = red.liveOutUpdateValues;
+        for (auto *value : red.liveOutFinalValues) {
+            if (std::find(exitForwardValues.begin(), exitForwardValues.end(),
+                          value) == exitForwardValues.end())
+                exitForwardValues.push_back(value);
+        }
+        for (auto *value : exitForwardValues) {
+            auto *phi = dynamic_cast<PhiInst *>(value);
+            if (!phi || phi->parent_ != shape.exitBlock) continue;
+            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i + 1) !=
+                    static_cast<Value *>(shape.exitingBlock))
+                    continue;
+                phi->set_operand(i, merged);
+                phi->set_operand(i + 1, parCall);
+            }
+        }
+        if (red.mod) {
+            for (auto *value : red.liveOutFinalValues)
+                replaceUsesOutsideOutlinedLoop(value, merged, loop.blocks, bodyFn);
+        } else {
+            for (auto *value : red.liveOutUpdateValues)
+                replaceUsesOutsideOutlinedLoop(value, merged, loop.blocks, bodyFn);
+            for (auto *value : red.liveOutFinalValues)
+                replaceUsesOutsideOutlinedLoop(value, merged, loop.blocks, bodyFn);
+        }
+    }
     builder->create_br(shape.exitBlock);
     parCall->add_succ_basic_block(shape.exitBlock);
     shape.exitBlock->add_pre_basic_block(parCall);
@@ -615,7 +1022,9 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                 }
                 std::set<Value *> privatize;
                 std::vector<Reduction> reductions;
-                if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize, &reductions))
+                std::vector<ScalarReduction> scalarReductions;
+                if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize,
+                                   &reductions, &scalarReductions))
                     continue;
                 // A nested leaf loop would invoke the persistent-worker
                 // protocol once per parent iteration.  Besides overwhelming
@@ -626,13 +1035,15 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                 // the complete region has already passed the same dependence
                 // and live-out checks as a top-level DOALL loop.
                 if (loop->depth != 0 && reductions.empty() &&
+                    scalarReductions.empty() &&
                     loop->children.empty()) {
                     debugPar("skip func=" + func->name_ + " loop=" +
                              loopName(*loop) +
                              ": nested leaf loop without reduction");
                     continue;
                 }
-                transform(*loop, shape, func, module, privatize, reductions);
+                transform(*loop, shape, func, module, privatize, reductions,
+                          scalarReductions);
                 AM.clear(func);
                 changed = true;
                 localChanged = true;

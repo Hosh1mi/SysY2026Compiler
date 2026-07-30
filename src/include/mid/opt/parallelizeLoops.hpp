@@ -33,6 +33,7 @@ private:
         BasicBlock *latch = nullptr;
         BasicBlock *exitBlock = nullptr;
         BasicBlock *exitingBlock = nullptr; // 出口比较所在块（header 或 latch）
+        bool latchComparesIV = false; // latch 中用 iv < bound 表示闭区间末次迭代
     };
 
     // 归约操作：store 将累加值写回同一内存位置（如 ans[i] = ans[i] + x）
@@ -42,16 +43,33 @@ private:
         Value *accRoot;          // 累加器根（GEP 基址）
     };
 
+    // 标量加/减归约：acc.next = acc +/- term，
+    // 可选外层 positive_const srem。
+    struct ScalarReduction {
+        PhiInst *phi = nullptr;
+        BinaryInst *update = nullptr;
+        BinaryInst *rem = nullptr;
+        std::vector<Value *> liveOutUpdateValues;
+        std::vector<Value *> liveOutFinalValues;
+        std::vector<BinaryInst *> liveOutRems;
+        Value *term = nullptr;
+        ConstantInt *mod = nullptr;
+        ConstantInt *identity = nullptr;
+        bool isSub = false;
+    };
+
     bool matchShape(Loop &loop, LoopShape &shape, std::string *reason = nullptr);
     bool isLegalDoall(Loop &loop, const LoopShape &shape, Function *func,
                       AnalysisManager *AM,
                       const ArgumentAliasAnalysis &argAA,
                       std::set<Value *> *privatize,
-                      std::vector<Reduction> *reductions = nullptr);
+                      std::vector<Reduction> *reductions = nullptr,
+                      std::vector<ScalarReduction> *scalarReductions = nullptr);
     void transform(Loop &loop, const LoopShape &shape, Function *func,
                    Module *module,
                    const std::set<Value *> &privatize,
-                   const std::vector<Reduction> &reductions = {});
+                   const std::vector<Reduction> &reductions = {},
+                   const std::vector<ScalarReduction> &scalarReductions = {});
 
     // 已外提的 (id, body 函数)；execute 末尾生成 dispatch
     std::vector<Function *> bodies_;
