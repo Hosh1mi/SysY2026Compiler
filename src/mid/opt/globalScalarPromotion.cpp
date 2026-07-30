@@ -128,25 +128,19 @@ static void promoteInFunction(Function *func, BasicAliasAnalysis &BAA) {
         auto *alloca = new AllocaInst(elemTy, entry, /*no_insert=*/true);
         entry->add_instruction_before_inst(alloca, anchor);
 
-        Value *initialValue = nullptr;
-        if (func == func->parent_->getMainFunc() && gv->init_val_) {
-            // The language entry function runs after static initialization
-            // and before any user code can mutate a non-escaping global.
-            // Seed the promoted slot directly from that initializer so later
-            // SSA/range analysis retains exact startup facts.
-            initialValue = gv->init_val_;
-        } else {
-            // LoadInst has no no_insert ctor: it always appends to the supplied
-            // BB. Insert at end, immediately unlink, then re-insert before the
-            // anchor. BasicBlock::remove_instr preserves use-list edges.
-            auto *initLoad = new LoadInst(gv, entry);
-            entry->remove_instr(initLoad);
-            entry->add_instruction_before_inst(initLoad, anchor);
-            initialValue = initLoad;
-        }
+        // Keep the initial value as a load. Exposing the initializer as a
+        // constant currently lets later loop propagation incorrectly fold
+        // loop-carried state after inlining.
+        //
+        // LoadInst has no no_insert ctor: it always appends to the supplied
+        // BB. Insert at end, immediately unlink, then re-insert before the
+        // anchor. BasicBlock::remove_instr preserves use-list edges.
+        auto *initLoad = new LoadInst(gv, entry);
+        entry->remove_instr(initLoad);
+        entry->add_instruction_before_inst(initLoad, anchor);
 
         auto *initStore =
-            new StoreInst(initialValue, alloca, entry, /*no_insert=*/true);
+            new StoreInst(initLoad, alloca, entry, /*no_insert=*/true);
         entry->add_instruction_before_inst(initStore, anchor);
 
         gvAlloca[gv] = alloca;
