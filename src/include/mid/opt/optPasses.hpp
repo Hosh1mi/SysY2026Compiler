@@ -31,6 +31,7 @@
 #include "indVarStrengthReduce.hpp"
 #include "idiomRecognize.hpp"
 #include "loopRepFold.hpp"
+#include "linearRecurrenceFold.hpp"
 #include "loopDistribution.hpp"
 #include "loopFusion.hpp"
 #include "loopUnroll.hpp"
