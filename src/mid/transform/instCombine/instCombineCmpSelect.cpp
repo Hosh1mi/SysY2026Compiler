@@ -1,6 +1,8 @@
 #include "instCombineInternal.hpp"
 #include "../../../include/mid/ir/intrinsics.hpp"
 
+#include <limits>
+
 // ═══════════════════════════════════════════════════════════════════════
 // getSwappedPredicate — icmp predicate after swapping operands
 // ═══════════════════════════════════════════════════════════════════════
@@ -141,6 +143,69 @@ bool isSourceNonNegative(Value *v, BasicBlock *ctx) {
     return isSourceNonNegative(v, ctx, assuming, 0);
 }
 
+bool inferSignedLowerBound(Value *value, BasicBlock *ctx,
+                           long long &lower, int depth) {
+    if (!value || depth > 8)
+        return false;
+    if (auto *constant = as_const_int(value)) {
+        lower = constant->value_;
+        return true;
+    }
+    if (ValueFacts::isKnownNonNegative(value, ctx)) {
+        lower = 0;
+        return true;
+    }
+
+    auto *select = dynamic_cast<SelectInst *>(value);
+    SignedMinMaxIntrinsic kind;
+    Value *lhs = nullptr;
+    Value *rhs = nullptr;
+    if (!select ||
+        !matchSignedMinMaxSelect(select, kind, lhs, rhs) ||
+        kind != SignedMinMaxIntrinsic::SMax)
+        return false;
+
+    Value *base = nullptr;
+    BinaryInst *complement = nullptr;
+    if (auto *sub = dynamic_cast<BinaryInst *>(lhs);
+        sub && sub->op_id_ == Instruction::Sub &&
+        sub->get_operand(1) == rhs &&
+        as_const_int(sub->get_operand(0))) {
+        base = rhs;
+        complement = sub;
+    } else if (auto *sub = dynamic_cast<BinaryInst *>(rhs);
+               sub && sub->op_id_ == Instruction::Sub &&
+               sub->get_operand(1) == lhs &&
+               as_const_int(sub->get_operand(0))) {
+        base = lhs;
+        complement = sub;
+    }
+
+    long long baseLower = 0;
+    if (base && complement &&
+        inferSignedLowerBound(base, ctx, baseLower, depth + 1)) {
+        const long long c =
+            as_const_int(complement->get_operand(0))->value_;
+        const long long typeMin = std::numeric_limits<int>::min();
+        const long long typeMax = std::numeric_limits<int>::max();
+        if (c - typeMax >= typeMin &&
+            c - baseLower <= typeMax) {
+            const long long ceilHalf =
+                c >= 0 ? (c + 1) / 2 : c / 2;
+            lower = std::max(baseLower, ceilHalf);
+            return true;
+        }
+    }
+
+    long long lhsLower = 0;
+    long long rhsLower = 0;
+    if (!inferSignedLowerBound(lhs, ctx, lhsLower, depth + 1) ||
+        !inferSignedLowerBound(rhs, ctx, rhsLower, depth + 1))
+        return false;
+    lower = std::max(lhsLower, rhsLower);
+    return true;
+}
+
 // Dominated false-edge: if k1*x < B failed and x≥0 and k2≥k1, then k2*x < B is false.
 // Relies on signed overflow being undefined at source level (SysY / C signed arith).
 Value *foldScaledCompareFromPred(ICmpInst *inst) {
@@ -243,6 +308,19 @@ Value* visitICmp(ICmpInst *inst) {
     if (auto *folded = foldScaledCompareFromPred(inst))
         return folded;
 
+    // Keep the canonical compare feeding a signed min/max select intact.
+    // Rewriting x < C-x into a scaled compare before visiting the select
+    // obscures both the min/max identity and its range-derived simplification.
+    for (const Use &use : inst->use_list_) {
+        auto *select = dynamic_cast<SelectInst *>(use.val_);
+        SignedMinMaxIntrinsic kind;
+        Value *lhs = nullptr;
+        Value *rhs = nullptr;
+        if (select &&
+            matchSignedMinMaxSelect(select, kind, lhs, rhs))
+            return nullptr;
+    }
+
     return foldICmpAddSub(inst);
 }
 
@@ -317,8 +395,58 @@ Value* visitSelect(SelectInst *inst) {
     SignedMinMaxIntrinsic minMaxKind;
     Value *minMaxLHS = nullptr;
     Value *minMaxRHS = nullptr;
+    const bool isSignedMinMax =
+        matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS);
+    if (isSignedMinMax &&
+        minMaxKind == SignedMinMaxIntrinsic::SMax) {
+        Value *base = nullptr;
+        BinaryInst *complement = nullptr;
+        if (auto *sub = dynamic_cast<BinaryInst *>(minMaxLHS);
+            sub && sub->op_id_ == Instruction::Sub &&
+            sub->get_operand(1) == minMaxRHS &&
+            dynamic_cast<ConstantInt *>(sub->get_operand(0))) {
+            base = minMaxRHS;
+            complement = sub;
+        } else if (auto *sub = dynamic_cast<BinaryInst *>(minMaxRHS);
+                   sub && sub->op_id_ == Instruction::Sub &&
+                   sub->get_operand(1) == minMaxLHS &&
+                   dynamic_cast<ConstantInt *>(sub->get_operand(0))) {
+            base = minMaxLHS;
+            complement = sub;
+        }
+
+        if (base && complement) {
+            RangeAnalysis::IntRange baseRange =
+                gInstCombineRangeAnalysis
+                    ? gInstCombineRangeAnalysis->getRange(base, bb)
+                    : RangeAnalysis::IntRange::top();
+            auto *constant = static_cast<ConstantInt *>(
+                complement->get_operand(0));
+            auto *integerTy = dynamic_cast<IntegerType *>(ty);
+            long long baseLower = 0;
+            bool hasLower =
+                baseRange.valid && !baseRange.isTop &&
+                !baseRange.isBottom;
+            if (hasLower)
+                baseLower = baseRange.lower;
+            else
+                hasLower =
+                    inferSignedLowerBound(base, bb, baseLower, 0);
+            if (integerTy && integerTy->num_bits_ == 32 && hasLower) {
+                const long long c = constant->value_;
+                const long long complementMin =
+                    c - std::numeric_limits<int>::max();
+                const long long complementMax = c - baseLower;
+                if (complementMin >= std::numeric_limits<int>::min() &&
+                    complementMax <= std::numeric_limits<int>::max() &&
+                    baseLower >= complementMax)
+                    return base;
+            }
+        }
+    }
+
     if (dynamic_cast<VectorType *>(ty) &&
-        matchSignedMinMaxSelect(inst, minMaxKind, minMaxLHS, minMaxRHS)) {
+        isSignedMinMax) {
         auto *function = getOrInsertSignedMinMaxIntrinsic(
             bb->parent_->parent_, minMaxKind, ty);
         if (function) {

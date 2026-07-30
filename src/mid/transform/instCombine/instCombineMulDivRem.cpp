@@ -1,6 +1,115 @@
 #include "instCombineInternal.hpp"
 
 #include <limits>
+#include <set>
+
+namespace {
+
+// Infer a signed i32 interval from operations whose bounds are independent of
+// their inputs' exact values.  In particular, a remainder by a positive
+// constant is always in (-C, C), which lets modular loop recurrences retain a
+// useful bound through their header phi.
+bool inferSignedBounds(Value *value, long long &lower, long long &upper,
+                       std::set<Value *> &visiting, unsigned depth = 0) {
+    if (!value || depth > 12 || !visiting.insert(value).second)
+        return false;
+
+    auto finish = [&](bool result) {
+        visiting.erase(value);
+        return result;
+    };
+
+    if (auto *constant = dynamic_cast<ConstantInt *>(value)) {
+        lower = upper = constant->value_;
+        return finish(true);
+    }
+
+    auto *inst = dynamic_cast<Instruction *>(value);
+    auto *type = value->type_
+                     ? dynamic_cast<IntegerType *>(value->type_)
+                     : nullptr;
+    if (!inst || !type || type->num_bits_ != 32)
+        return finish(false);
+
+    if (inst->op_id_ == Instruction::SRem) {
+        auto *divisor =
+            dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (!divisor || divisor->value_ <= 0)
+            return finish(false);
+        lower = -static_cast<long long>(divisor->value_) + 1;
+        upper = static_cast<long long>(divisor->value_) - 1;
+        return finish(true);
+    }
+
+    if (inst->op_id_ == Instruction::Add ||
+        inst->op_id_ == Instruction::Sub) {
+        long long lhsLower = 0, lhsUpper = 0;
+        long long rhsLower = 0, rhsUpper = 0;
+        if (!inferSignedBounds(inst->get_operand(0), lhsLower, lhsUpper,
+                               visiting, depth + 1) ||
+            !inferSignedBounds(inst->get_operand(1), rhsLower, rhsUpper,
+                               visiting, depth + 1))
+            return finish(false);
+
+        if (inst->op_id_ == Instruction::Add) {
+            lower = lhsLower + rhsLower;
+            upper = lhsUpper + rhsUpper;
+        } else {
+            lower = lhsLower - rhsUpper;
+            upper = lhsUpper - rhsLower;
+        }
+        if (lower < std::numeric_limits<int>::min() ||
+            upper > std::numeric_limits<int>::max())
+            return finish(false);
+        return finish(true);
+    }
+
+    if (auto *select = dynamic_cast<SelectInst *>(inst)) {
+        long long trueLower = 0, trueUpper = 0;
+        long long falseLower = 0, falseUpper = 0;
+        if (!inferSignedBounds(select->get_operand(1), trueLower, trueUpper,
+                               visiting, depth + 1) ||
+            !inferSignedBounds(select->get_operand(2), falseLower, falseUpper,
+                               visiting, depth + 1))
+            return finish(false);
+        lower = std::min(trueLower, falseLower);
+        upper = std::max(trueUpper, falseUpper);
+        return finish(true);
+    }
+
+    if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
+        bool haveIncoming = false;
+        long long joinedLower = 0, joinedUpper = 0;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            long long incomingLower = 0, incomingUpper = 0;
+            if (!inferSignedBounds(phi->get_operand(i), incomingLower,
+                                   incomingUpper, visiting, depth + 1))
+                return finish(false);
+            if (!haveIncoming) {
+                joinedLower = incomingLower;
+                joinedUpper = incomingUpper;
+                haveIncoming = true;
+            } else {
+                joinedLower = std::min(joinedLower, incomingLower);
+                joinedUpper = std::max(joinedUpper, incomingUpper);
+            }
+        }
+        if (!haveIncoming)
+            return finish(false);
+        lower = joinedLower;
+        upper = joinedUpper;
+        return finish(true);
+    }
+
+    return finish(false);
+}
+
+bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
+    std::set<Value *> visiting;
+    return inferSignedBounds(value, lower, upper, visiting);
+}
+
+} // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
 // visitMul — integer Mul
@@ -248,6 +357,55 @@ Value* visitSRem(BinaryInst *inst) {
                                       : static_cast<int64_t>(cy->value_);
         if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
             return x;
+    }
+
+    // A value already known to lie in (-2M, 2M) needs at most one signed
+    // correction in either direction.  This is especially valuable for
+    // modular loop recurrences: the backedge remainder bounds the state phi,
+    // and a smaller bounded increment keeps the next dividend in this range.
+    // The replacement preserves C/IR signed-remainder behavior for negative
+    // dividends and avoids a multiply-high division sequence on AArch64.
+    if (cy && cy->value_ > 0) {
+        long long lower = 0, upper = 0;
+        long long modulus = cy->value_;
+        if (inferSignedBounds(x, lower, upper) &&
+            lower > -2 * modulus && upper < 2 * modulus) {
+            auto *positiveMod = make_const_int(ty, cy->value_);
+            Value *adjusted = x;
+
+            if (upper >= modulus) {
+                auto *highCmp = new ICmpInst(ICmpInst::ICMP_SGE, adjusted,
+                                              positiveMod, bb, true);
+                bb->add_instruction_before_inst(highCmp, inst);
+                auto *highSub = new BinaryInst(ty, Instruction::Sub, adjusted,
+                                                positiveMod, bb, true);
+                stampIntegerFacts(highSub);
+                bb->add_instruction_before_inst(highSub, inst);
+                auto *highAdjusted =
+                    new SelectInst(highCmp, highSub, adjusted, ty);
+                stampIntegerFacts(highAdjusted);
+                bb->add_instruction_before_inst(highAdjusted, inst);
+                adjusted = highAdjusted;
+            }
+
+            if (lower <= -modulus) {
+                auto *negativeMod = make_const_int(ty, -cy->value_);
+                auto *lowCmp = new ICmpInst(ICmpInst::ICMP_SLE, adjusted,
+                                             negativeMod, bb, true);
+                bb->add_instruction_before_inst(lowCmp, inst);
+                auto *lowAdd =
+                    new BinaryInst(ty, Instruction::Add, adjusted,
+                                   positiveMod, bb, true);
+                stampIntegerFacts(lowAdd);
+                bb->add_instruction_before_inst(lowAdd, inst);
+                auto *lowAdjusted =
+                    new SelectInst(lowCmp, lowAdd, adjusted, ty);
+                stampIntegerFacts(lowAdjusted);
+                bb->add_instruction_before_inst(lowAdjusted, inst);
+                adjusted = lowAdjusted;
+            }
+            return adjusted;
+        }
     }
 
     if (cy && cy->value_ > 0 && gInstCombineRangeAnalysis &&

@@ -239,6 +239,9 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (!inst)
         return nonNegativeBranchImpl(v, ctx);
 
+    if (inst->hasSemFlag(SemFlag::KnownNonNegative))
+        return true;
+
     const unsigned bits = integerBitWidth(v);
     if (bits > 0 && bits <= 32 &&
         hasKnownZeroBits(v, 1u << (bits - 1)))

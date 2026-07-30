@@ -31,6 +31,7 @@ enum class SemFlag : uint32_t {
     HiraRepetitionFolded = 1u << 13,
         // BasicBlock：Hira 已将循环的重复加性递推折叠为单次执行
     MemsetIdiomLoop = 1u << 14, // BasicBlock：preheader 已插入 memset 替换原循环
+    KnownNonNegative = 1u << 15, // Value：所有到达该值的路径上均为非负 i32
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {

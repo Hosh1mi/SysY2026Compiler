@@ -3,6 +3,7 @@
 #include "../../include/mid/analysis/valueFacts.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
+#include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -349,6 +350,10 @@ RangeAnalysis::IntRange RangeAnalysis::getRange(Value *v, BasicBlock *ctx) {
 
     if (AM_ && queryDepth_++ == 0) AM_->enterRangeAnalysis(func_);
     IntRange result = getRangeImpl(v, ctx);
+    if (v->hasSemFlag(SemFlag::KnownNonNegative) && isIntegerValue(v)) {
+        auto [lo, hi] = typeBounds(v->type_);
+        result = result.intersect(IntRange::bounded(std::max(0LL, lo), hi));
+    }
     result = applyFacts(v, result, ctx);
     visiting_.erase(guard);
     if (AM_ && --queryDepth_ == 0) AM_->leaveRangeAnalysis(func_);
@@ -804,6 +809,78 @@ RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBloc
     }
     auto t = getRange(sel->get_operand(1), ctx);
     auto f = getRange(sel->get_operand(2), ctx);
+
+    SignedMinMaxIntrinsic kind;
+    Value *lhsValue = nullptr;
+    Value *rhsValue = nullptr;
+    if (matchSignedMinMaxSelect(sel, kind, lhsValue, rhsValue)) {
+        auto lhs = getRange(lhsValue, ctx);
+        auto rhs = getRange(rhsValue, ctx);
+        if (lhs.valid && rhs.valid && !lhs.isTop && !rhs.isTop &&
+            !lhs.isBottom && !rhs.isBottom) {
+            long long lower =
+                kind == SignedMinMaxIntrinsic::SMax
+                    ? std::max(lhs.lower, rhs.lower)
+                    : std::min(lhs.lower, rhs.lower);
+            long long upper =
+                kind == SignedMinMaxIntrinsic::SMax
+                    ? std::max(lhs.upper, rhs.upper)
+                    : std::min(lhs.upper, rhs.upper);
+
+            // max(x, C-x) has a tighter V-shaped lower bound than the
+            // independent operand ranges reveal.  Refine it only when C-x
+            // is proven not to wrap over x's complete interval.
+            if (kind == SignedMinMaxIntrinsic::SMax) {
+                Value *base = nullptr;
+                BinaryInst *complement = nullptr;
+                if (auto *sub = dynamic_cast<BinaryInst *>(lhsValue);
+                    sub && sub->op_id_ == Instruction::Sub &&
+                    sub->get_operand(1) == rhsValue &&
+                    dynamic_cast<ConstantInt *>(sub->get_operand(0))) {
+                    base = rhsValue;
+                    complement = sub;
+                } else if (auto *sub = dynamic_cast<BinaryInst *>(rhsValue);
+                           sub && sub->op_id_ == Instruction::Sub &&
+                           sub->get_operand(1) == lhsValue &&
+                           dynamic_cast<ConstantInt *>(sub->get_operand(0))) {
+                    base = lhsValue;
+                    complement = sub;
+                }
+
+                if (base && complement) {
+                    auto baseRange = getRange(base, ctx);
+                    auto *constant = static_cast<ConstantInt *>(
+                        complement->get_operand(0));
+                    auto [typeLo, typeHi] = typeBounds(sel->type_);
+                    const long long c = constant->value_;
+                    if (baseRange.valid && !baseRange.isTop &&
+                        !baseRange.isBottom &&
+                        c - baseRange.upper >= typeLo &&
+                        c - baseRange.lower <= typeHi) {
+                        auto evaluate = [c](long long x) {
+                            return std::max(x, c - x);
+                        };
+                        long long refined = std::min(
+                            evaluate(baseRange.lower),
+                            evaluate(baseRange.upper));
+                        long long floorHalf =
+                            c >= 0 ? c / 2 : (c - 1) / 2;
+                        long long ceilHalf = c - floorHalf;
+                        if (floorHalf >= baseRange.lower &&
+                            floorHalf <= baseRange.upper)
+                            refined = std::min(refined,
+                                               evaluate(floorHalf));
+                        if (ceilHalf >= baseRange.lower &&
+                            ceilHalf <= baseRange.upper)
+                            refined = std::min(refined,
+                                               evaluate(ceilHalf));
+                        lower = std::max(lower, refined);
+                    }
+                }
+            }
+            return IntRange::bounded(lower, upper);
+        }
+    }
     return t.join(f);
 }
 

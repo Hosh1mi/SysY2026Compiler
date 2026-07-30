@@ -77,6 +77,15 @@ static int chooseUnrollFactor(const UnrollCost &cost) {
         cost.bodyInstructions * DEFAULT_UNROLL_FACTOR <= 48 &&
         gprPeak <= 24 && fprPeak <= 24)
         return DEFAULT_UNROLL_FACTOR;
+
+    // Larger register-only arithmetic loops can still benefit from exposing
+    // one independent successor iteration.  Keep this at two copies: it is
+    // enough to hide multi-cycle multiply/divide chains on an in-order A53,
+    // while a wider expansion would exceed the available GPR budget.
+    if (cost.bodyInstructions <= 28 &&
+        cost.bodyInstructions * 2 <= 56 &&
+        gprPeak <= 20 && fprPeak <= 20)
+        return 2;
     return 0;
 }
 
@@ -201,6 +210,17 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
             return inst;
         }
 
+    if (auto *si = dynamic_cast<SelectInst *>(orig))
+        {
+            auto *inst = new SelectInst(remap(si->get_operand(0)),
+                                        remap(si->get_operand(1)),
+                                        remap(si->get_operand(2)),
+                                        si->type_);
+            inst->copySemFlagsFrom(si);
+            destBB->add_instruction(inst);
+            return inst;
+        }
+
     if (auto *gi = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> idxs;
         for (unsigned i = 1; i < gi->num_ops_; i++)
@@ -278,6 +298,7 @@ static bool isCloneableForUnroll(Instruction *inst) {
            dynamic_cast<UnaryInst *>(inst) ||
            dynamic_cast<ICmpInst *>(inst) ||
            dynamic_cast<FCmpInst *>(inst) ||
+           dynamic_cast<SelectInst *>(inst) ||
            dynamic_cast<GetElementPtrInst *>(inst) ||
            dynamic_cast<LoadInst *>(inst) ||
            dynamic_cast<ZextInst *>(inst) ||
@@ -499,6 +520,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
                         dynamic_cast<UnaryInst *>(inst) ||
                         dynamic_cast<ICmpInst *>(inst) ||
                         dynamic_cast<FCmpInst *>(inst) ||
+                        dynamic_cast<SelectInst *>(inst) ||
                         dynamic_cast<GetElementPtrInst *>(inst) ||
                         dynamic_cast<LoadInst *>(inst) ||
                         dynamic_cast<StoreInst *>(inst) ||
@@ -799,6 +821,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
                             dynamic_cast<UnaryInst *>(inst) ||
                             dynamic_cast<ICmpInst *>(inst) ||
                             dynamic_cast<FCmpInst *>(inst) ||
+                            dynamic_cast<SelectInst *>(inst) ||
                             dynamic_cast<GetElementPtrInst *>(inst) ||
                             dynamic_cast<LoadInst *>(inst) ||
                             dynamic_cast<StoreInst *>(inst) ||
@@ -1447,10 +1470,13 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         if (phi->num_ops_ != 4 || !getInitVal(phi) || !getBackVal(phi))
             return false;
 
-    // ── 识别 IV：backedge 入值 = add/sub(phi, 常量) ─────────────────────
+    // ── 识别 IV：backedge 入值 = add/sub(phi, 常量)，或
+    //    add(phi, loop-invariant step) ──────────────────────────────────
     PhiInst     *ivPhi    = nullptr;
     Instruction *ivUpdate = nullptr;
     int          strideVal = 0;
+    Value       *strideValue = nullptr;
+    bool         dynamicStride = false;
     for (auto phi : headerPhis) {
         if (phi->type_->tid_ != Type::IntegerTyID) continue;
         auto *upd = dynamic_cast<Instruction *>(getBackVal(phi));
@@ -1461,10 +1487,29 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         if (upd->is_add()) {
             auto *c0 = dynamic_cast<ConstantInt *>(op0);
             auto *c1 = dynamic_cast<ConstantInt *>(op1);
-            ConstantInt *c    = c1 ? c1 : c0;
-            Value       *base = c1 ? op0 : op1;
-            if (!c || c->value_ <= 0 || base != phi) continue;
-            strideVal = c->value_;
+            ConstantInt *c = c1 ? c1 : c0;
+            Value *base = c1 ? op0 : op1;
+            if (c && c->value_ > 0 && base == phi) {
+                strideVal = c->value_;
+            } else {
+                Value *candidate = nullptr;
+                if (op0 == phi)
+                    candidate = op1;
+                else if (op1 == phi)
+                    candidate = op0;
+                auto *candidateInst =
+                    dynamic_cast<Instruction *>(candidate);
+                auto *candidateTy =
+                    candidate
+                        ? dynamic_cast<IntegerType *>(candidate->type_)
+                        : nullptr;
+                if (!candidate || !candidateTy ||
+                    candidateTy->num_bits_ != 32 ||
+                    (candidateInst && candidateInst->parent_ == header))
+                    continue;
+                strideValue = candidate;
+                dynamicStride = true;
+            }
         } else {
             auto *c1 = dynamic_cast<ConstantInt *>(op1);
             if (!c1 || c1->value_ <= 0 || op0 != phi) continue;
@@ -1495,6 +1540,9 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     }
     if (auto *bi = dynamic_cast<Instruction *>(bound))
         if (bi->parent_ == header) return false;
+    if (dynamicStride &&
+        (!ivIsLeft || op != ICmpInst::ICMP_SLT))
+        return false;
 
     // ── body 可克隆性 ───────────────────────────────────────────────────
     UnrollCost unrollCost;
@@ -1505,6 +1553,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
                         dynamic_cast<UnaryInst *>(inst) ||
                         dynamic_cast<ICmpInst *>(inst) ||
                         dynamic_cast<FCmpInst *>(inst) ||
+                        dynamic_cast<SelectInst *>(inst) ||
                         dynamic_cast<GetElementPtrInst *>(inst) ||
                         dynamic_cast<LoadInst *>(inst) ||
                         dynamic_cast<StoreInst *>(inst) ||
@@ -1543,14 +1592,24 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
     countLoopStates(headerPhis, ivPhi, unrollCost);
     int N = chooseUnrollFactor(unrollCost);
+    if (dynamicStride && unrollCost.memoryOperations == 0 &&
+        unrollCost.bodyInstructions <= 24 &&
+        unrollCost.integerStates + unrollCost.pointerStates <= 2)
+        N = 4;
     if (N == 0)
         return false;
+    if (dynamicStride && N != 2 && N != 4 && N != 8)
+        return false;
 
-    int adj = (N - 1) * strideVal;
-    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
-        if (strideVal > 0 && cb->value_ < adj) return false;
-        if (strideVal < 0 && cb->value_ > adj + std::numeric_limits<int>::max())
-            return false;
+    int adj = 0;
+    if (!dynamicStride) {
+        adj = (N - 1) * strideVal;
+        if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+            if (strideVal > 0 && cb->value_ < adj) return false;
+            if (strideVal < 0 &&
+                cb->value_ > adj + std::numeric_limits<int>::max())
+                return false;
+        }
     }
 
     if (std::getenv("DEBUG_LOOP_UNROLL"))
@@ -1558,6 +1617,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
                   << " header=" << header->name_
                   << " factor=" << N
                   << " form=dowhile"
+                  << (dynamicStride ? " dynamic-stride" : "")
                   << " body=" << unrollCost.bodyInstructions
                   << " gpr-state="
                   << unrollCost.integerStates + unrollCost.pointerStates
@@ -1566,9 +1626,26 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
                   << " memory=" << unrollCost.memoryOperations << "\n";
 
     // ── 变换 ────────────────────────────────────────────────────────────
-    // 1. boundMain = bound - adj
+    // 1. boundMain = bound - adj.  For a dynamic step, this is only
+    // consumed on the guarded path below.
     Value *boundMain;
-    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+    Value *dynamicAdjustment = strideValue;
+    if (dynamicStride) {
+        if (N != 2) {
+            auto *factor = new ConstantInt(module->int32_ty_, N - 1);
+            auto *scaled = new BinaryInst(module->int32_ty_,
+                                          Instruction::Mul, strideValue,
+                                          factor, preheader,
+                                          /*no-insert*/true);
+            preheader->add_instruction_before_terminator(scaled);
+            dynamicAdjustment = scaled;
+        }
+        auto *sub = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                   bound, dynamicAdjustment, preheader,
+                                   /*no-insert*/true);
+        preheader->add_instruction_before_terminator(sub);
+        boundMain = sub;
+    } else if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
         boundMain = new ConstantInt(module->int32_ty_, cb->value_ - adj);
     } else {
         auto *adjC = new ConstantInt(module->int32_ty_, adj);
@@ -1583,6 +1660,53 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     ICmpInst *cmpEnter =
         ivIsLeft ? new ICmpInst(op, getInitVal(ivPhi), boundMain, checkBlock)
                  : new ICmpInst(op, boundMain, getInitVal(ivPhi), checkBlock);
+    Value *enterCondition = cmpEnter;
+    if (dynamicStride) {
+        auto *zero = new ConstantInt(module->int32_ty_, 0);
+        auto *intMin = new ConstantInt(module->int32_ty_,
+                                       std::numeric_limits<int>::min());
+        auto *intMax = new ConstantInt(module->int32_ty_,
+                                       std::numeric_limits<int>::max());
+        auto *one = new ConstantInt(module->int32_ty_, 1);
+
+        auto *stepPositive = new ICmpInst(ICmpInst::ICMP_SGT, strideValue,
+                                          zero, checkBlock);
+        auto *stepScaleSafe = new ICmpInst(
+            ICmpInst::ICMP_SLE, strideValue,
+            new ConstantInt(module->int32_ty_,
+                            std::numeric_limits<int>::max() / (N - 1)),
+            checkBlock);
+        auto *startNonNegative = new ICmpInst(
+            ICmpInst::ICMP_SGE, getInitVal(ivPhi), zero, checkBlock);
+        auto *lowerLimit = new BinaryInst(module->int32_ty_,
+                                          Instruction::Add, intMin,
+                                          dynamicAdjustment, checkBlock);
+        auto *boundLowerSafe = new ICmpInst(ICmpInst::ICMP_SGE, bound,
+                                            lowerLimit, checkBlock);
+        auto *maxMinusStep = new BinaryInst(module->int32_ty_,
+                                             Instruction::Sub, intMax,
+                                             strideValue, checkBlock);
+        auto *upperLimit = new BinaryInst(module->int32_ty_,
+                                          Instruction::Add, maxMinusStep,
+                                          one, checkBlock);
+        auto *boundUpperSafe = new ICmpInst(ICmpInst::ICMP_SLE, bound,
+                                            upperLimit, checkBlock);
+        auto *positiveAndLower = new BinaryInst(
+            module->int1_ty_, Instruction::And, stepPositive,
+            boundLowerSafe, checkBlock);
+        auto *withScale = new BinaryInst(module->int1_ty_,
+                                         Instruction::And,
+                                         positiveAndLower,
+                                         stepScaleSafe, checkBlock);
+        auto *withUpper = new BinaryInst(module->int1_ty_,
+                                         Instruction::And,
+                                         withScale,
+                                         boundUpperSafe, checkBlock);
+        auto *safe = new BinaryInst(module->int1_ty_, Instruction::And,
+                                    withUpper, startNonNegative, checkBlock);
+        enterCondition = new BinaryInst(module->int1_ty_, Instruction::And,
+                                        safe, cmpEnter, checkBlock);
+    }
 
     // 3. mainLoop：phi + N 份克隆
     auto *mainLoop = new BasicBlock(module, "unroll_main", func);
@@ -1592,6 +1716,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         auto *mainPhi = PhiInst::create_phi(phi->type_, mainLoop);
         mainLoop->add_instruction_front(mainPhi);
         mainPhi->addIncoming(getInitVal(phi), checkBlock);
+        if (dynamicStride && phi == ivPhi)
+            mainPhi->setSemFlag(SemFlag::KnownNonNegative);
         phiToMain[phi] = mainPhi;
     }
 
@@ -1600,24 +1726,146 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         iterMap[phi] = phiToMain[phi];
     std::unordered_map<Value *, Value *> finalMap; // 最后一轮的完整映射
     std::unordered_map<PhiInst *, Value *> curPhiVals;
-    for (int iter = 0; iter < N; iter++) {
-        std::unordered_map<Value *, Value *> localMap = iterMap;
-        for (auto inst : header->instr_list_) {
+    for (auto *phi : headerPhis)
+        curPhiVals[phi] = phiToMain[phi];
+
+    // For a guarded register-only loop, compute the unrolled iterations'
+    // state-independent expressions before updating loop-carried scalar
+    // states.  This keeps only the final contributions live, while exposing
+    // the two long arithmetic chains to instruction scheduling.
+    std::set<Instruction *> deferredStateUpdates;
+    if (dynamicStride && (N == 2 || N == 4 || N == 8) &&
+        unrollCost.memoryOperations == 0) {
+        for (auto *inst : header->instr_list_) {
             if (inst->is_phi() || inst == cmpInst || inst->isTerminator())
                 continue;
+            bool dependsOnState = false;
+            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                Value *operand = inst->get_operand(i);
+                auto *phi = dynamic_cast<PhiInst *>(operand);
+                auto *operandInst = dynamic_cast<Instruction *>(operand);
+                if ((phi && phi != ivPhi &&
+                     phiToMain.count(phi)) ||
+                    (operandInst &&
+                     deferredStateUpdates.count(operandInst))) {
+                    dependsOnState = true;
+                    break;
+                }
+            }
+            if (dependsOnState)
+                deferredStateUpdates.insert(inst);
+        }
+    }
+
+    auto cloneBodyInstruction =
+        [&](Instruction *inst,
+            std::unordered_map<Value *, Value *> &localMap) -> bool {
             auto *newInst = cloneInst(inst, mainLoop, localMap);
-            if (!newInst) return false; // 前置检查后不应发生
+            if (!newInst)
+                return false;
+            if (dynamicStride && inst == ivUpdate) {
+                newInst->setSemFlag(SemFlag::NoSignedWrap);
+                newInst->setSemFlag(SemFlag::KnownNonNegative);
+            }
             localMap[inst] = newInst;
+            return true;
+        };
+
+    if (deferredStateUpdates.empty()) {
+        for (int iter = 0; iter < N; iter++) {
+            std::unordered_map<Value *, Value *> localMap = iterMap;
+            for (auto inst : header->instr_list_) {
+                if (inst->is_phi() || inst == cmpInst ||
+                    inst->isTerminator())
+                    continue;
+                if (!cloneBodyInstruction(inst, localMap))
+                    return false;
+            }
+            for (auto phi : headerPhis) {
+                Value *bv = getBackVal(phi);
+                auto it = localMap.find(bv);
+                curPhiVals[phi] =
+                    (it != localMap.end()) ? it->second : bv;
+            }
+            for (auto phi : headerPhis)
+                iterMap[phi] = curPhiVals[phi];
+            if (iter == N - 1)
+                finalMap = std::move(localMap);
         }
-        for (auto phi : headerPhis) {
-            Value *bv = getBackVal(phi);
-            auto it = localMap.find(bv);
-            curPhiVals[phi] = (it != localMap.end()) ? it->second : bv;
+    } else {
+        std::vector<std::unordered_map<Value *, Value *>> iterationMaps;
+        iterationMaps.reserve(N);
+
+        // Materialize the next IVs first, then clone independent instructions
+        // in lockstep across iterations.  The resulting order interleaves
+        // equal-depth operations from the two dependency chains.
+        Value *ivBack = getBackVal(ivPhi);
+        for (int iter = 0; iter < N; ++iter) {
+            std::unordered_map<Value *, Value *> localMap = iterMap;
+            if (!cloneBodyInstruction(ivUpdate, localMap))
+                return false;
+            auto ivIt = localMap.find(ivBack);
+            if (ivIt == localMap.end())
+                return false;
+            curPhiVals[ivPhi] = ivIt->second;
+            iterMap[ivPhi] = ivIt->second;
+            iterationMaps.push_back(std::move(localMap));
         }
-        for (auto phi : headerPhis)
-            iterMap[phi] = curPhiVals[phi];
-        if (iter == N - 1)
-            finalMap = std::move(localMap);
+        for (auto it = header->instr_list_.begin();
+             it != header->instr_list_.end(); ++it) {
+            Instruction *inst = *it;
+            if (inst->is_phi() || inst == cmpInst ||
+                inst == ivUpdate || inst->isTerminator() ||
+                deferredStateUpdates.count(inst))
+                continue;
+
+            Instruction *flagUser = nullptr;
+            if (dynamic_cast<ICmpInst *>(inst)) {
+                auto next = std::next(it);
+                if (next != header->instr_list_.end()) {
+                    auto *select = dynamic_cast<SelectInst *>(*next);
+                    if (select && select->get_operand(0) == inst &&
+                        !deferredStateUpdates.count(select))
+                        flagUser = select;
+                }
+            }
+
+            for (auto &localMap : iterationMaps) {
+                if (!cloneBodyInstruction(inst, localMap))
+                    return false;
+                if (flagUser &&
+                    !cloneBodyInstruction(flagUser, localMap))
+                    return false;
+            }
+            if (flagUser)
+                ++it;
+        }
+
+        // Then emit each recurrence update in iteration order so its exact
+        // scalar semantics remain unchanged.
+        for (int iter = 0; iter < N; ++iter) {
+            auto &localMap = iterationMaps[iter];
+            for (auto *phi : headerPhis)
+                if (phi != ivPhi)
+                    localMap[phi] = curPhiVals[phi];
+            for (auto *inst : header->instr_list_) {
+                if (!deferredStateUpdates.count(inst))
+                    continue;
+                if (!cloneBodyInstruction(inst, localMap))
+                    return false;
+            }
+            for (auto *phi : headerPhis) {
+                if (phi == ivPhi)
+                    continue;
+                Value *back = getBackVal(phi);
+                auto stateIt = localMap.find(back);
+                if (stateIt == localMap.end())
+                    return false;
+                curPhiVals[phi] = stateIt->second;
+            }
+            if (iter == N - 1)
+                finalMap = localMap;
+        }
     }
 
     auto mapFinal = [&](Value *v) -> Value * {
@@ -1642,7 +1890,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     new BranchInst(cmpRem, header, exitBB, remCheck);
 
     // 5. 分支接线（BranchInst 构造器维护 CFG 链接）
-    new BranchInst(cmpEnter, mainLoop, header, checkBlock);
+    new BranchInst(enterCondition, mainLoop, header, checkBlock);
     new BranchInst(cmpMain, mainLoop, remCheck, mainLoop);
 
     // 6. preheader → checkBlock（替换原指向 header 的边）
