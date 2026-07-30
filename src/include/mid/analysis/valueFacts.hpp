@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <unordered_set>
 
 namespace ValueFacts {
 
@@ -119,6 +120,38 @@ inline KnownBits computeKnownBits(Value *v) {
     return computeKnownBitsImpl(v, 0);
 }
 
+// Derive the tightest unsigned interval implied by the currently known bits.
+// Unknown bits may independently be either zero or one, so `one` is a safe
+// lower bound and every bit not known zero contributes to the upper bound.
+inline bool knownUnsignedBounds(Value *v, uint32_t &lower, uint32_t &upper) {
+    const unsigned bits = integerBitWidth(v);
+    if (bits == 0 || bits > 32)
+        return false;
+    const uint32_t mask = widthMask(bits);
+    KnownBits known = computeKnownBits(v);
+    lower = known.one & mask;
+    upper = static_cast<uint32_t>(~known.zero) & mask;
+    return true;
+}
+
+// Signed bounds are directly available when the sign bit is known zero.
+// This deliberately returns "unknown" for mixed/negative ranges rather than
+// trying to linearize a wrapped unsigned interval.
+inline bool knownNonNegativeBounds(Value *v, int64_t &lower, int64_t &upper) {
+    const unsigned bits = integerBitWidth(v);
+    if (bits == 0 || bits > 32)
+        return false;
+    uint32_t unsignedLower = 0, unsignedUpper = 0;
+    if (!knownUnsignedBounds(v, unsignedLower, unsignedUpper))
+        return false;
+    const uint32_t signBit = 1u << (bits - 1);
+    if (unsignedUpper & signBit)
+        return false;
+    lower = unsignedLower;
+    upper = unsignedUpper;
+    return true;
+}
+
 inline bool hasKnownZeroBits(Value *v, uint32_t mask) {
     return (computeKnownBits(v).zero & mask) == mask;
 }
@@ -198,6 +231,97 @@ inline bool nonNegativeBranchImpl(Value *v, BasicBlock *ctx) {
     return false;
 }
 
+// Prove loop-carried non-negativity as a closed induction over an SSA value
+// cycle.  Encountering a value already on the recursion stack is the
+// induction hypothesis; every non-cyclic incoming edge must still have a
+// non-negative base, and every traversed operation must preserve the fact.
+inline bool isNonNegativeRecurrenceImpl(
+    Value *v, std::unordered_set<Value *> &visiting, int depth) {
+    if (!v || depth > 32)
+        return false;
+    if (auto *ci = dynamic_cast<ConstantInt *>(v))
+        return ci->value_ >= 0;
+
+    auto *inst = dynamic_cast<Instruction *>(v);
+    if (!inst)
+        return false;
+    if (inst->hasSemFlag(SemFlag::KnownNonNegative))
+        return true;
+
+    const unsigned bits = integerBitWidth(v);
+    if (bits > 0 && bits <= 32 &&
+        hasKnownZeroBits(v, 1u << (bits - 1)))
+        return true;
+
+    if (!visiting.insert(v).second)
+        return true;
+    auto finish = [&](bool result) {
+        visiting.erase(v);
+        return result;
+    };
+    auto recurse = [&](Value *operand) {
+        return isNonNegativeRecurrenceImpl(operand, visiting, depth + 1);
+    };
+
+    if (inst->op_id_ == Instruction::LShr ||
+        inst->op_id_ == Instruction::ZExt ||
+        inst->op_id_ == Instruction::Clz)
+        return finish(true);
+
+    if (inst->op_id_ == Instruction::AShr)
+        return finish(recurse(inst->get_operand(0)));
+
+    if (inst->op_id_ == Instruction::SDiv) {
+        auto *divisor =
+            dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        return finish(divisor && divisor->value_ > 0 &&
+                      recurse(inst->get_operand(0)));
+    }
+
+    if (inst->op_id_ == Instruction::And) {
+        auto *mask = dynamic_cast<ConstantInt *>(inst->get_operand(1));
+        if (!mask)
+            mask = dynamic_cast<ConstantInt *>(inst->get_operand(0));
+        if (mask && mask->value_ >= 0)
+            return finish(true);
+    }
+
+    if (inst->op_id_ == Instruction::Select) {
+        auto *cmp = dynamic_cast<ICmpInst *>(inst->get_operand(0));
+        Value *trueValue = inst->get_operand(1);
+        Value *falseValue = inst->get_operand(2);
+        auto *trueConst = dynamic_cast<ConstantInt *>(trueValue);
+        auto *zero = cmp
+                         ? dynamic_cast<ConstantInt *>(cmp->get_operand(1))
+                         : nullptr;
+        if (cmp && cmp->icmp_op_ == ICmpInst::ICMP_SLT &&
+            trueConst && trueConst->value_ == 0 &&
+            cmp->get_operand(0) == falseValue &&
+            zero && zero->value_ == 0)
+            return finish(true);
+        return finish(recurse(trueValue) && recurse(falseValue));
+    }
+
+    if (inst->op_id_ == Instruction::Or)
+        return finish(recurse(inst->get_operand(0)) &&
+                      recurse(inst->get_operand(1)));
+
+    if (inst->op_id_ == Instruction::Add &&
+        inst->hasSemFlag(SemFlag::NoSignedWrap))
+        return finish(recurse(inst->get_operand(0)) &&
+                      recurse(inst->get_operand(1)));
+
+    if (inst->is_phi()) {
+        for (unsigned i = 0; i + 1 < inst->num_ops_; i += 2) {
+            if (!recurse(inst->get_operand(i)))
+                return finish(false);
+        }
+        return finish(true);
+    }
+
+    return finish(false);
+}
+
 inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     if (!v || depth > 8)
         return false;
@@ -269,14 +393,40 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
         }
     }
 
-    if (inst->op_id_ == Instruction::Select)
+    if (inst->op_id_ == Instruction::Select) {
+        // Canonical signed clamp: select (x < 0), 0, x == max(x, 0).
+        // Recognizing the value relation (rather than requiring both arms to
+        // be independently non-negative) lets later division and remainder
+        // transforms safely use the fact.
+        auto *cmp = dynamic_cast<ICmpInst *>(inst->get_operand(0));
+        Value *trueValue = inst->get_operand(1);
+        Value *falseValue = inst->get_operand(2);
+        auto *trueConst = dynamic_cast<ConstantInt *>(trueValue);
+        if (cmp && cmp->icmp_op_ == ICmpInst::ICMP_SLT &&
+            trueConst && trueConst->value_ == 0 &&
+            cmp->get_operand(0) == falseValue) {
+            auto *zero = dynamic_cast<ConstantInt *>(cmp->get_operand(1));
+            if (zero && zero->value_ == 0)
+                return true;
+        }
         return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1) &&
                isKnownNonNegativeImpl(inst->get_operand(2), ctx, depth + 1);
+    }
+
+    if (inst->op_id_ == Instruction::Or)
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
+               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
 
     if (inst->op_id_ == Instruction::Add &&
         inst->hasSemFlag(SemFlag::NoSignedWrap))
         return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
                isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
+
+    if (inst->is_phi()) {
+        std::unordered_set<Value *> visiting;
+        if (isNonNegativeRecurrenceImpl(inst, visiting, 0))
+            return true;
+    }
 
     // A bounded increasing induction variable stays non-negative when the
     // loop's taken edge dominates its backedge and the constant upper bound

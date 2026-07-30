@@ -313,7 +313,10 @@ Value* visitSDiv(BinaryInst *inst) {
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         int k = log2Int(cy->value_);
         bool exact = isKnownMultipleOf(x, k, bb);
-        if (isKnownNonNegative(x) || exact) {
+        bool nonNegative = isKnownNonNegative(x, bb);
+        if (!nonNegative && gInstCombineRangeAnalysis)
+            nonNegative = gInstCombineRangeAnalysis->isKnownNonNegative(x, bb);
+        if (nonNegative || exact) {
             auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                             make_const_int(ty, k), bb, true);
             if (exact) ashr->setSemFlag(SemFlag::Exact);
@@ -327,7 +330,11 @@ Value* visitSDiv(BinaryInst *inst) {
         int k;
         if (isKnownPowerOfTwo(y, k) && k > 0) {
             bool exact = isKnownMultipleOf(x, k, bb);
-            if (isKnownNonNegative(x) || exact) {
+            bool nonNegative = isKnownNonNegative(x, bb);
+            if (!nonNegative && gInstCombineRangeAnalysis)
+                nonNegative =
+                    gInstCombineRangeAnalysis->isKnownNonNegative(x, bb);
+            if (nonNegative || exact) {
                 auto *ashr = new BinaryInst(ty, Instruction::AShr, x,
                                 make_const_int(ty, k), bb, true);
                 if (exact) ashr->setSemFlag(SemFlag::Exact);
