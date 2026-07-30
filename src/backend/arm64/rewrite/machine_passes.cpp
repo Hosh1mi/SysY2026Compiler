@@ -2100,10 +2100,6 @@ bool PostRAAddressingOptimizer::run(
                     base, RegClass::GPR64, true);
                 memory->operands()[2] =
                     MachineOperand::immediate(increment);
-                MachineOperand baseUse = MachineOperand::physReg(
-                    base, RegClass::GPR64, false, true);
-                baseUse.tiedTo = 1;
-                memory->addOperand(std::move(baseUse));
                 instructions.erase(scan);
                 changed = true;
                 break;

@@ -134,7 +134,7 @@ void AArch64Backend::generate() {
             std::cerr << printMachineIR(*machineFunction);
         if (options_.optimizationLevel >= 1 &&
             !options_.disablePreSchedule)
-            scheduler.run(*machineFunction, SchedulingStage::PreRA);
+            scheduler.run(*machineFunction);
         trace(function, "regalloc");
         registerAllocator.run(*machineFunction);
         trace(function, "parallel-copies");
@@ -156,7 +156,7 @@ void AArch64Backend::generate() {
             // The A53 post-RA scheduler is terminal: later stages only
             // verify and lower the already explicit MIR to assembly.
             if (!options_.disableSchedule)
-                scheduler.run(*machineFunction, SchedulingStage::PostRA);
+                scheduler.run(*machineFunction);
         }
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "frame-lowering");
