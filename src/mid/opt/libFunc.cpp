@@ -1,11 +1,11 @@
 #include "../../include/mid/opt/libFunc.hpp"
 
 Function *getOrInsertLibFunc(Module *module, LibFunc kind) {
-    const char *name = "_sysy_memcpy";
+    const char *name = "memcpy";
     if (kind == LibFunc::Memset)
-        name = "_sysy_memset";
+        name = "memset";
     else if (kind == LibFunc::Memmove)
-        name = "_sysy_memmove";
+        name = "memmove";
 
     for (auto *func : module->function_list_) {
         if (func->name_ == name) {

@@ -1,5 +1,5 @@
 #pragma once
-// 最小 runtime memory helper 声明工具。
+// 最小 libc 外部函数声明工具（memset / memcpy / memmove）。
 
 #include "../ir/ir.hpp"
 

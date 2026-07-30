@@ -91,18 +91,6 @@ void debug_text(int text[]) {
     fflush(stderr);
 }
 
-void _sysy_memset(int dst[], int byte, int nbytes) {
-  memset(dst, byte, (size_t)nbytes);
-}
-
-void _sysy_memcpy(int dst[], int src[], int nbytes) {
-  memcpy(dst, src, (size_t)nbytes);
-}
-
-void _sysy_memmove(int dst[], int src[], int nbytes) {
-  memmove(dst, src, (size_t)nbytes);
-}
-
 void _sysy_starttime(int lineno){
   _sysy_l1[_sysy_idx] = lineno;
   gettimeofday(&_sysy_start,NULL);

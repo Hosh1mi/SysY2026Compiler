@@ -17,9 +17,6 @@ void putf(char a[], ...);
 void redirect_stdin(void);
 void debug_progress(int seg);
 void debug_text(int text[]);
-void _sysy_memset(int dst[], int byte, int nbytes);
-void _sysy_memcpy(int dst[], int src[], int nbytes);
-void _sysy_memmove(int dst[], int src[], int nbytes);
 
 /* Timing function implementation */
 struct timeval _sysy_start,_sysy_end;
