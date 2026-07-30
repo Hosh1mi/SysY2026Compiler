@@ -61,22 +61,27 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
         if (!isCandidate(func, baa, selfCalls, externalCalls)) continue;
         if (selfCalls < MIN_SELF_CALLS) continue;
 
-        // 推导每个形参的 bound；推不出时用 DEFAULT_BOUND 兜底（仅作为单参数
-        // 本地默认，不会让 BSS 失控——最终是否走数组仍由总乘积阈值决定）
+        // 推导每个形参的 bound。
+        // - 至少一个参数可推导，且乘积 ≤ 上限 → 数组路径（其余用 DEFAULT 填）
+        // - 全部推不出，或乘积过大 → 哈希路径（避免无界域上的盲猜稠密表）
         std::vector<unsigned> bounds;
         bounds.reserve(func->arguments_.size());
         uint64_t product = 1;
+        bool anyDerived = false;
         for (auto arg : func->arguments_) {
-            unsigned b = deriveArgBound(func, arg);
-            if (b == 0) b = DEFAULT_BOUND;
-            else b = std::min<unsigned>(b + BOUND_MARGIN, MAX_BOUND);
+            unsigned raw = deriveArgBound(func, arg);
+            unsigned b;
+            if (raw == 0) {
+                b = DEFAULT_BOUND;
+            } else {
+                anyDerived = true;
+                b = std::min<unsigned>(raw + BOUND_MARGIN, MAX_BOUND);
+            }
             product *= b;
             bounds.push_back(b);
         }
 
-        // 数组路径：总元素数 ≤ ARRAY_PRODUCT_LIMIT，BSS 严格可控
-        // 否则切换到固定大小哈希，避免静态数组爆炸
-        if (product <= ARRAY_PRODUCT_LIMIT) {
+        if (anyDerived && product <= ARRAY_PRODUCT_LIMIT) {
             arrayFuncs.push_back(func);
             arrayBoundsList.push_back(std::move(bounds));
         } else {
@@ -104,14 +109,10 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
 //   2. 1 ~ MAX_ARGS 个 i32 形参
 //   3. 无 store（自身无副作用），且所有非自调用 callee 都是 pure
 //   4. 至少 MIN_SELF_CALLS 个自调用（保证记忆化收益）
-//   5. 调用点要求：
-//      - 函数体含 load（依赖全局/堆内存）：externalCallCount 必须 == 1
-//        理由：调用之间外部代码可能修改函数读取的全局，多调用点缓存会
-//        返回旧值。举例：int g; int f(int n){return n+g;}
-//                      g=10; f(5);  // 缓存 f(5)=15
-//                      g=20; f(5);  // 期望 25，但命中缓存返回 15 → WA
-//      - 函数体无 load（真 readnone）：externalCallCount >= 1 即可
-//        理由：返回值仅依赖形参，跨调用点缓存语义安全。
+//   5. 至少 1 个外部调用点
+//   6. 若函数体含 load：所读全局必须在全部外部调用点之前已冻结
+//      （每个相关 store 的基本块支配每一个外部调用点）。否则跨调用点
+//      缓存可能读到过期值。无 load（readnone）则允许多调用点。
 
 bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
                                    unsigned &selfCallCount,
@@ -149,15 +150,7 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
 
     if (externalCallCount == 0) return false;
 
-    // 读全局的函数：限制单调用点；纯输入函数：允许多调用点
-    bool readsMem = functionReadsMemory(f);
-    if (readsMem && externalCallCount != 1) return false;
-
-    // 读全局的函数：仅当其读取的全局在模块任何位置都不被 store 改写时才可缓存。
-    // 缓存常驻 BSS 且永不失效，若某全局在两次调用之间被改（典型：调用 f 的
-    // 循环体里 `G[i]=..`），缓存会返回旧值 → WA。仅对未被模块内 store 修改的
-    // 全局读应用缓存。
-    if (readsMem && readsMutatedGlobal(f)) return false;
+    if (functionReadsMemory(f) && readsUnfrozenGlobal(f)) return false;
 
     return true;
 }
@@ -183,8 +176,13 @@ static GlobalVariable *baseGlobal(Value *ptr) {
     return dynamic_cast<GlobalVariable *>(ptr);
 }
 
-// f 读取的全局中，是否存在被模块内任意 store 改写的。是 → 不可安全缓存。
-bool AutoMemoization::readsMutatedGlobal(Function *f) {
+// f 读取的全局是否在全部外部调用点之前未冻结。
+//
+// 安全条件：对每个被 f load 的全局 G，模块内每个写 G 的 store 都必须
+// 与全部外部调用点位于同一函数，且 store 所在基本块支配每一个调用点
+// 基本块。这样所有写都发生在首次调用之前，调用之间不会再改 G。
+// 跨函数的 store / 调用关系无法用单函数支配树刻画 → 保守视为未冻结。
+bool AutoMemoization::readsUnfrozenGlobal(Function *f) {
     std::set<GlobalVariable *> readGlobals;
     for (auto bb : f->basic_blocks_)
         for (auto inst : bb->instr_list_)
@@ -193,12 +191,32 @@ bool AutoMemoization::readsMutatedGlobal(Function *f) {
                     readGlobals.insert(gv);
     if (readGlobals.empty()) return false;
 
-    for (auto func : f->parent_->function_list_)
-        for (auto bb : func->basic_blocks_)
-            for (auto inst : bb->instr_list_)
-                if (inst->is_store())
-                    if (auto gv = baseGlobal(inst->get_operand(1)))
-                        if (readGlobals.count(gv)) return true;
+    std::vector<Instruction *> callSites;
+    for (auto &use : f->use_list_) {
+        auto user = dynamic_cast<Instruction *>(use.val_);
+        if (!user || !user->parent_) continue;
+        if (user->parent_->parent_ != f)
+            callSites.push_back(user);
+    }
+    if (callSites.empty()) return false;
+
+    for (auto func : f->parent_->function_list_) {
+        for (auto bb : func->basic_blocks_) {
+            for (auto inst : bb->instr_list_) {
+                if (!inst->is_store()) continue;
+                auto gv = baseGlobal(inst->get_operand(1));
+                if (!gv || !readGlobals.count(gv)) continue;
+
+                for (auto *cs : callSites) {
+                    Function *caller = cs->parent_->parent_;
+                    if (caller != func)
+                        return true;
+                    if (!func->dominates(bb, cs->parent_))
+                        return true;
+                }
+            }
+        }
+    }
     return false;
 }
 
@@ -265,22 +283,34 @@ unsigned AutoMemoization::deriveArgBound(Function *f, Argument *arg) {
     return bound;
 }
 
-// ── 变换：插入入口查表 + 出口写回 ────────────────────────────────────────
+// ── outline：原函数体迁到 *_memo_body，自调用仍指向包装符号 f ──
+Function *AutoMemoization::outlineBody(Function *f) {
+    Module *m = f->parent_;
+    auto *fty = static_cast<FunctionType *>(f->type_);
+    auto *body = new Function(fty, f->name_ + "_memo_body", m);
+
+    std::vector<BasicBlock *> moved = f->basic_blocks_;
+    f->basic_blocks_.clear();
+    for (auto *bb : moved) {
+        bb->parent_ = body;
+        body->basic_blocks_.push_back(bb);
+    }
+    for (size_t i = 0; i < f->arguments_.size(); ++i)
+        f->arguments_[i]->replace_all_use_with(body->arguments_[i]);
+
+    body->invalidateDominatorInfo();
+    f->invalidateDominatorInfo();
+    return body;
+}
+
+// ── 数组路径：打包表 + 薄包装 ────────────────────────────────────────────
 //
-// CFG 结构（TRE 之后）：
-//   oldEntry (preheader)  → tailrec_header → ... → retBB
-//
-// 变换后：
-//   newEntry → (bounds OK) → checkBB → (flag != 0) → hitBB
-//             (bounds bad) ────────────────┐                ↓ ret cached
-//             (flag == 0) ─────────────────┴→ oldEntry → ... → retBB
-//                                                            (改写)
-//                                              boundsOK? → storeBB → finalRetBB → ret
-//                                                       │              ↑
-//                                                       └──────────────┘
-//
-// 关键不变量：oldEntry 的 PHI 操作数无需修改——我们没有改写从 oldEntry
-// 出发的边，也没有改写 tailrec_header 的前驱表中 “oldEntry” 这一项。
+// 表元素为 [2 x i32]：[0]=flag，[1]=val，命中时两次 load 落在同一缓存行。
+// 包装 CFG：
+//   entry → (in bounds) → check → (flag!=0) → hit → ret cached
+//                        ↓ miss              ↓
+//         (oob) ─────────┴───────────────────┴→ missBB
+//                                               call body → (in bounds) store → ret
 
 void AutoMemoization::transform(Function *f,
                                  const std::vector<unsigned> &bounds) {
@@ -288,176 +318,134 @@ void AutoMemoization::transform(Function *f,
     auto i32 = m->int32_ty_;
     auto i1 = m->int1_ty_;
 
-    // 构造缓存表的类型：bounds = [b0, b1] → [b0 x [b1 x i32]]
-    Type *valTy = i32;
+    Function *bodyFn = outlineBody(f);
+
+    // 未命中冷路径：call body + 写回。独立成函数，避免包装入口为 miss
+    // 路径分配 callee-saved，从而让命中路径接近叶子（只动调用者保存寄存器）。
+    auto *fty = static_cast<FunctionType *>(f->type_);
+    auto *fillFn = new Function(fty, f->name_ + "_memo_fill", m);
+
+    // [b0 x [b1 x ... [2 x i32]]]
+    Type *pairTy = m->get_array_type(i32, 2);
+    Type *tableTy = pairTy;
     for (auto it = bounds.rbegin(); it != bounds.rend(); ++it)
-        valTy = m->get_array_type(valTy, *it);
-    Type *flagTy = valTy;
+        tableTy = m->get_array_type(tableTy, *it);
 
-    auto *flagGV = new GlobalVariable("__memo_flag_" + f->name_, m, flagTy,
-                                       false, new ConstantZero(flagTy));
-    auto *valGV  = new GlobalVariable("__memo_val_"  + f->name_, m, valTy,
-                                       false, new ConstantZero(valTy));
+    auto *tableGV = new GlobalVariable("__memo_" + f->name_, m, tableTy,
+                                       false, new ConstantZero(tableTy));
 
-    BasicBlock *oldEntry = f->basic_blocks_.front();
-    // 避免命名冲突：让 newEntry 占用 label_entry，old 改名
-    if (oldEntry->name_ == "label_entry") oldEntry->name_ = "label_entry_uncached";
-
-    auto *newEntry = new BasicBlock(m, "label_entry", f);
-    auto *checkBB  = new BasicBlock(m, "memo_check", f);
-    auto *hitBB    = new BasicBlock(m, "memo_hit",   f);
-
-    // 把 newEntry / checkBB / hitBB 调整到 basic_blocks_ 最前（new 时默认 push_back）
-    auto &bbs = f->basic_blocks_;
-    auto pull = [&](BasicBlock *bb) {
-        bbs.erase(std::remove(bbs.begin(), bbs.end(), bb), bbs.end());
-    };
-    pull(newEntry); pull(checkBB); pull(hitBB);
-    bbs.insert(bbs.begin(), {newEntry, checkBB, hitBB});
-
-    auto *builder = new IRStmtBuilder(newEntry, m);
-
-    // ── newEntry: 边界检查 ──
-    Value *inBounds = nullptr;
-    for (size_t i = 0; i < f->arguments_.size(); ++i) {
-        auto arg = f->arguments_[i];
-        auto boundC = new ConstantInt(i32, static_cast<int>(bounds[i]));
-        auto cmp = new ICmpInst(ICmpInst::ICMP_ULT, arg, boundC, newEntry);
-        if (!inBounds) inBounds = cmp;
-        else inBounds = new BinaryInst(i1, Instruction::And, inBounds, cmp,
-                                         newEntry);
-    }
-    builder->create_cond_br(inBounds, checkBB, oldEntry);
-
-    auto makeIdxs = [&](BasicBlock *) {
+    auto makePairIdxs = [&](Function *owner, int field) {
         std::vector<Value *> v;
-        v.reserve(1 + f->arguments_.size());
+        v.reserve(2 + owner->arguments_.size());
         v.push_back(new ConstantInt(i32, 0));
-        for (auto a : f->arguments_) v.push_back(a);
+        for (auto *a : owner->arguments_)
+            v.push_back(a);
+        v.push_back(new ConstantInt(i32, field));
         return v;
     };
 
-    // ── checkBB: 查表 ──
-    builder->set_insert_point(checkBB);
-    auto flagPtr = builder->create_gep(flagGV, makeIdxs(checkBB));
-    auto flag = builder->create_load(flagPtr);
-    auto hit = builder->create_icmp_ne(flag, new ConstantInt(i32, 0));
-    builder->create_cond_br(hit, hitBB, oldEntry);
-
-    // ── hitBB: 命中返回 ──
-    builder->set_insert_point(hitBB);
-    auto valPtr = builder->create_gep(valGV, makeIdxs(hitBB));
-    auto cached = builder->create_load(valPtr);
-    builder->create_ret(cached);
-
-    // ── 改写所有返回点 ──
-    std::vector<std::pair<BasicBlock *, ReturnInst *>> retSites;
-    for (auto bb : f->basic_blocks_) {
-        if (bb == newEntry || bb == checkBB || bb == hitBB) continue;
-        auto term = bb->get_terminator();
-        if (term && term->is_ret() && term->num_ops_ > 0)
-            retSites.push_back({bb, static_cast<ReturnInst *>(term)});
-    }
-
-    for (auto &site : retSites) {
-        BasicBlock *retBB = site.first;
-        ReturnInst *retInst = site.second;
-        Value *retVal = retInst->get_operand(0);
-
-        retBB->delete_instr(retInst);
-
-        auto *storeBB    = new BasicBlock(m, "memo_store", f);
-        auto *finalRetBB = new BasicBlock(m, "memo_ret",   f);
-
-        // 重新计算边界（避免把 newEntry 的 i1 跨过整个函数体）
-        Value *okExit = nullptr;
-        for (size_t i = 0; i < f->arguments_.size(); ++i) {
-            auto arg = f->arguments_[i];
-            auto boundC = new ConstantInt(i32, static_cast<int>(bounds[i]));
-            auto cmp = new ICmpInst(ICmpInst::ICMP_ULT, arg, boundC, retBB);
-            if (!okExit) okExit = cmp;
-            else okExit = new BinaryInst(i1, Instruction::And, okExit, cmp,
-                                          retBB);
+    auto emitInBounds = [&](Function *owner, BasicBlock *bb) -> Value * {
+        Value *ok = nullptr;
+        for (size_t i = 0; i < owner->arguments_.size(); ++i) {
+            auto *boundC = new ConstantInt(i32, static_cast<int>(bounds[i]));
+            auto *cmp = new ICmpInst(ICmpInst::ICMP_ULT, owner->arguments_[i],
+                                     boundC, bb);
+            if (!ok) ok = cmp;
+            else ok = new BinaryInst(i1, Instruction::And, ok, cmp, bb);
         }
-        builder->set_insert_point(retBB);
-        builder->create_cond_br(okExit, storeBB, finalRetBB);
+        return ok;
+    };
 
-        // storeBB: 写 flag=1 + val=retVal，跳到 finalRetBB
-        builder->set_insert_point(storeBB);
-        auto flagS = builder->create_gep(flagGV, makeIdxs(storeBB));
-        builder->create_store(new ConstantInt(i32, 1), flagS);
-        auto valS = builder->create_gep(valGV, makeIdxs(storeBB));
-        builder->create_store(retVal, valS);
-        builder->create_br(finalRetBB);
+    // ── fillFn: body + optional store ──
+    {
+        auto *fEntry = new BasicBlock(m, "label_entry", fillFn);
+        auto *fStore = new BasicBlock(m, "memo_store", fillFn);
+        auto *fRet = new BasicBlock(m, "memo_ret", fillFn);
+        auto *fb = new IRStmtBuilder(fEntry, m);
+        std::vector<Value *> args(fillFn->arguments_.begin(),
+                                  fillFn->arguments_.end());
+        auto *result = fb->create_call(bodyFn, args);
+        Value *ok = emitInBounds(fillFn, fEntry);
+        fb->create_cond_br(ok, fStore, fRet);
 
-        // finalRetBB: retVal 由 retBB 支配，可直接复用
-        builder->set_insert_point(finalRetBB);
-        builder->create_ret(retVal);
+        fb->set_insert_point(fStore);
+        fb->create_store(new ConstantInt(i32, 1),
+                         fb->create_gep(tableGV, makePairIdxs(fillFn, 0)));
+        fb->create_store(result,
+                         fb->create_gep(tableGV, makePairIdxs(fillFn, 1)));
+        fb->create_br(fRet);
+
+        fb->set_insert_point(fRet);
+        fb->create_ret(result);
+        fillFn->set_instr_name();
+        fillFn->invalidateDominatorInfo();
+        delete fb;
     }
 
-    f->set_instr_name();
-    f->invalidateDominatorInfo();
-    delete builder;
-}
+    // ── wrapper f: 薄查表；miss 只 tail-call 式 call fill ──
+    {
+        auto *entry = new BasicBlock(m, "label_entry", f);
+        auto *checkBB = new BasicBlock(m, "memo_check", f);
+        auto *hitBB = new BasicBlock(m, "memo_hit", f);
+        auto *missBB = new BasicBlock(m, "memo_miss", f);
+        auto *builder = new IRStmtBuilder(entry, m);
 
-// ── 变换（哈希路径）：固定大小直接映射哈希缓存 ────────────────────────────
-//
-// 适用于"bound 推不出"或"bound 乘积过大"的场景，避免静态数组方案的 BSS
-// 爆炸 / 兜底 DEFAULT_BOUND 半推半就的问题。
-//
-// 槽布局（flat [HASH_SLOTS * slotFields x i32]）：
-//   slot k 起始偏移 = k * slotFields
-//   [base + 0]:           valid (0 = 空)
-//   [base + 1 ... +nArgs]: key0, key1, ... （用于碰撞检测）
-//   [base + 1 + nArgs]:    val
-//
-// 哈希式：
-//   1 arg : idx = (arg0 * P1) & MASK
-//   2 args: idx = (arg0 * P1) ^ (arg1 * P2) & MASK
-//   P1=0x45D9F3B, P2=0x119DE1F3 为正向 i32 素数，避免 C++ 端 UB
-//
-// CFG 结构（TRE 之后）：
-//   newEntry → checkKey → hit → ret cached
-//             ↓          ↓
-//           oldEntry ← (valid==0 或任一 key 不匹配)
-//                  ... → retBB → store{keys, val, valid=1} → ret retVal
+        Value *inBounds = emitInBounds(f, entry);
+        builder->create_cond_br(inBounds, checkBB, missBB);
+
+        builder->set_insert_point(checkBB);
+        auto *flag = builder->create_load(
+            builder->create_gep(tableGV, makePairIdxs(f, 0)));
+        auto *hit = builder->create_icmp_ne(flag, new ConstantInt(i32, 0));
+        builder->create_cond_br(hit, hitBB, missBB);
+
+        builder->set_insert_point(hitBB);
+        auto *cached = builder->create_load(
+            builder->create_gep(tableGV, makePairIdxs(f, 1)));
+        builder->create_ret(cached);
+
+        builder->set_insert_point(missBB);
+        std::vector<Value *> args(f->arguments_.begin(), f->arguments_.end());
+        auto *result = builder->create_call(fillFn, args);
+        builder->create_ret(result);
+
+        f->set_instr_name();
+        f->invalidateDominatorInfo();
+        delete builder;
+    }
+
+    bodyFn->set_instr_name();
+    bodyFn->invalidateDominatorInfo();
+}
 
 /* static */ void AutoMemoization::transformHash(Function *f) {
     Module *m = f->parent_;
     auto i32 = m->int32_ty_;
     unsigned nArgs = f->arguments_.size();
-    unsigned slotFields = 1 + nArgs + 1;           // valid + keys + val
+    unsigned slotFields = 1 + nArgs + 1;
     unsigned totalI32 = HASH_SLOTS * slotFields;
 
-    // 哈希乘子：正向 i32 素数；IR 层 Mul 的溢出是 well-defined 模 2^32 行为
     static constexpr int P1 = 0x45D9F3B;
     static constexpr int P2 = 0x119DE1F3;
+    static constexpr int P3 = 0x1AC1337;
+
+    // 哈希路径 miss 率/写回更重：不再拆 fill，避免多层 call 放大开销。
+    Function *bodyFn = outlineBody(f);
 
     Type *arrTy = m->get_array_type(i32, totalI32);
     auto *hashGV = new GlobalVariable("__memo_hash_" + f->name_, m, arrTy,
                                        false, new ConstantZero(arrTy));
 
-    BasicBlock *oldEntry = f->basic_blocks_.front();
-    if (oldEntry->name_ == "label_entry") oldEntry->name_ = "label_entry_uncached";
+    auto *entry = new BasicBlock(m, "label_entry", f);
+    auto *checkKey = new BasicBlock(m, "memo_check_key", f);
+    auto *hitBB = new BasicBlock(m, "memo_hit", f);
+    auto *missBB = new BasicBlock(m, "memo_miss", f);
+    auto *builder = new IRStmtBuilder(entry, m);
 
-    auto *newEntry  = new BasicBlock(m, "label_entry", f);
-    auto *checkKey  = new BasicBlock(m, "memo_check_key", f);
-    auto *hitBB     = new BasicBlock(m, "memo_hit", f);
-
-    auto &bbs = f->basic_blocks_;
-    auto pull = [&](BasicBlock *bb) {
-        bbs.erase(std::remove(bbs.begin(), bbs.end(), bb), bbs.end());
-    };
-    pull(newEntry); pull(checkKey); pull(hitBB);
-    bbs.insert(bbs.begin(), {newEntry, checkKey, hitBB});
-
-    auto *builder = new IRStmtBuilder(newEntry, m);
-
-    // 计算 idx 与 base：可在多个 BB 重用，封装成 lambda
     auto computeBase = [&](BasicBlock *bb) -> Value * {
         Value *hashVal = nullptr;
         for (unsigned i = 0; i < nArgs; ++i) {
-            int p = (i == 0) ? P1 : P2;
+            int p = (i == 0) ? P1 : (i == 1) ? P2 : P3;
             auto *mul = new BinaryInst(i32, Instruction::Mul,
                                        f->arguments_[i],
                                        new ConstantInt(i32, p), bb);
@@ -466,7 +454,6 @@ void AutoMemoization::transform(Function *f,
         }
         auto *idx = new BinaryInst(i32, Instruction::And, hashVal,
                                     new ConstantInt(i32, static_cast<int>(HASH_MASK)), bb);
-        // slot base = idx * slotFields
         return new BinaryInst(i32, Instruction::Mul, idx,
                               new ConstantInt(i32, static_cast<int>(slotFields)), bb);
     };
@@ -481,67 +468,40 @@ void AutoMemoization::transform(Function *f,
         return new GetElementPtrInst(hashGV, idxs, bb);
     };
 
-    // ── newEntry: 计算 base，load valid，分流 ──
-    Value *base = computeBase(newEntry);
-    Value *vPtr = gepSlot(base, 0, newEntry);
-    builder->set_insert_point(newEntry);
-    auto validVal = builder->create_load(vPtr);
-    auto isValid = builder->create_icmp_ne(validVal, new ConstantInt(i32, 0));
-    builder->create_cond_br(isValid, checkKey, oldEntry);
+    Value *base = computeBase(entry);
+    auto *validVal = builder->create_load(gepSlot(base, 0, entry));
+    auto *isValid = builder->create_icmp_ne(validVal, new ConstantInt(i32, 0));
+    builder->create_cond_br(isValid, checkKey, missBB);
 
-    // ── checkKey: 比较每个 key，全相等才命中 ──
     Value *baseCK = computeBase(checkKey);
     Value *allEq = nullptr;
     for (unsigned i = 0; i < nArgs; ++i) {
-        Value *kPtr = gepSlot(baseCK, 1 + i, checkKey);
-        auto *load = new LoadInst(kPtr, checkKey);
+        auto *load = new LoadInst(gepSlot(baseCK, 1 + i, checkKey), checkKey);
         auto *eq = new ICmpInst(ICmpInst::ICMP_EQ, load, f->arguments_[i], checkKey);
         if (!allEq) allEq = eq;
         else allEq = new BinaryInst(m->int1_ty_, Instruction::And, allEq, eq, checkKey);
     }
     builder->set_insert_point(checkKey);
-    builder->create_cond_br(allEq, hitBB, oldEntry);
+    builder->create_cond_br(allEq, hitBB, missBB);
 
-    // ── hitBB: load val 返回 ──
     Value *baseHit = computeBase(hitBB);
-    Value *valPtrHit = gepSlot(baseHit, 1 + nArgs, hitBB);
     builder->set_insert_point(hitBB);
-    auto cached = builder->create_load(valPtrHit);
+    auto *cached = builder->create_load(gepSlot(baseHit, 1 + nArgs, hitBB));
     builder->create_ret(cached);
 
-    // ── 改写所有返回点：store keys + val + valid=1，再 ret ──
-    std::vector<std::pair<BasicBlock *, ReturnInst *>> retSites;
-    for (auto bb : f->basic_blocks_) {
-        if (bb == newEntry || bb == checkKey || bb == hitBB) continue;
-        auto term = bb->get_terminator();
-        if (term && term->is_ret() && term->num_ops_ > 0)
-            retSites.push_back({bb, static_cast<ReturnInst *>(term)});
-    }
-
-    for (auto &site : retSites) {
-        BasicBlock *retBB = site.first;
-        ReturnInst *retInst = site.second;
-        Value *retVal = retInst->get_operand(0);
-
-        retBB->delete_instr(retInst);
-
-        Value *baseRet = computeBase(retBB);
-
-        builder->set_insert_point(retBB);
-        // 先写 keys 和 val，最后才置 valid（后置写顺序仅风格选择，单线程无影响）
-        for (unsigned i = 0; i < nArgs; ++i) {
-            Value *kPtr = gepSlot(baseRet, 1 + i, retBB);
-            builder->create_store(f->arguments_[i], kPtr);
-        }
-        Value *vPtrRet = gepSlot(baseRet, 1 + nArgs, retBB);
-        builder->create_store(retVal, vPtrRet);
-        Value *validPtrRet = gepSlot(baseRet, 0, retBB);
-        builder->create_store(new ConstantInt(i32, 1), validPtrRet);
-
-        builder->create_ret(retVal);
-    }
+    builder->set_insert_point(missBB);
+    std::vector<Value *> callArgs(f->arguments_.begin(), f->arguments_.end());
+    auto *result = builder->create_call(bodyFn, callArgs);
+    Value *baseRet = computeBase(missBB);
+    for (unsigned i = 0; i < nArgs; ++i)
+        builder->create_store(f->arguments_[i], gepSlot(baseRet, 1 + i, missBB));
+    builder->create_store(result, gepSlot(baseRet, 1 + nArgs, missBB));
+    builder->create_store(new ConstantInt(i32, 1), gepSlot(baseRet, 0, missBB));
+    builder->create_ret(result);
 
     f->set_instr_name();
+    bodyFn->set_instr_name();
     f->invalidateDominatorInfo();
+    bodyFn->invalidateDominatorInfo();
     delete builder;
 }
