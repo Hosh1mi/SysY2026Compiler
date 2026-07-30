@@ -71,7 +71,7 @@ const InstrDesc &descriptor(Opcode opcode) {
         return value;
     }
     case Opcode::COPY: {
-        static const InstrDesc value = DESC(COPY, "COPY", 1, 2, 1,
+        static const InstrDesc value = DESC(COPY, "COPY", 1, 2, 3,
                                             SchedResource::ALU);
         return value;
     }
@@ -149,40 +149,40 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::CSELW:
     case Opcode::CSELX:
     case Opcode::FCSELS: {
-        static const InstrDesc w = DESC(CSELW, "csel", 1, 4, 1,
+        static const InstrDesc w = DESC(CSELW, "csel", 1, 4, 3,
                                         SchedResource::ALU);
-        static const InstrDesc x = DESC(CSELX, "csel", 1, 4, 1,
+        static const InstrDesc x = DESC(CSELX, "csel", 1, 4, 3,
                                         SchedResource::ALU);
-        static const InstrDesc s = DESC(FCSELS, "fcsel", 1, 4, 2,
+        static const InstrDesc s = DESC(FCSELS, "fcsel", 1, 4, 6,
                                         SchedResource::FPALU);
         return opcode == Opcode::CSELW ? w : opcode == Opcode::CSELX ? x : s;
     }
     case Opcode::CSETW: {
         static const InstrDesc value{
             Opcode::CSETW, "cset", 1, 2, false, false, false, false,
-            false, false, false, false, false, true, 1,
+            false, false, false, false, false, true, 3,
             SchedResource::ALU};
         return value;
     }
     case Opcode::MOVi32:
     case Opcode::MOVi64:
     case Opcode::MOVIv4Zero: {
-        static const InstrDesc w = DESC(MOVi32, "MOVi32", 1, 2, 1,
+        static const InstrDesc w = DESC(MOVi32, "MOVi32", 1, 2, 3,
                                         SchedResource::ALU);
-        static const InstrDesc x = DESC(MOVi64, "MOVi64", 1, 2, 1,
+        static const InstrDesc x = DESC(MOVi64, "MOVi64", 1, 2, 3,
                                         SchedResource::ALU);
-        static const InstrDesc v = DESC(MOVIv4Zero, "movi", 1, 1, 2,
+        static const InstrDesc v = DESC(MOVIv4Zero, "movi", 1, 1, 6,
                                         SchedResource::FPALU);
         return opcode == Opcode::MOVi32 ? w
              : opcode == Opcode::MOVi64 ? x : v;
     }
     case Opcode::ADRP: {
-        static const InstrDesc value = DESC(ADRP, "adrp", 1, 2, 1,
+        static const InstrDesc value = DESC(ADRP, "adrp", 1, 2, 3,
                                             SchedResource::ALU);
         return value;
     }
     case Opcode::ADDlow: {
-        static const InstrDesc value = DESC(ADDlow, "add", 1, 3, 1,
+        static const InstrDesc value = DESC(ADDlow, "add", 1, 3, 3,
                                             SchedResource::ALU);
         return value;
     }
@@ -198,85 +198,85 @@ const InstrDesc &descriptor(Opcode opcode) {
         static const InstrDesc value = DESC(OP, MN, DEFS, OPS, LAT, RES); \
         return value; \
     }
-    SIMPLE_CASE(ADDWrr, "add", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ADDWri, "add", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ADDWrs, "add", 1, 4, 1, SchedResource::ALU)
-    SIMPLE_CASE(ADDWrsX, "add", 1, 4, 1, SchedResource::ALU)
-    SIMPLE_CASE(ADDWlsl, "add", 1, 4, 1, SchedResource::ALU)
-    SIMPLE_CASE(SUBWrr, "sub", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(SUBWri, "sub", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(NEGW, "neg", 1, 2, 1, SchedResource::ALU)
+    SIMPLE_CASE(ADDWrr, "add", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(ADDWri, "add", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(ADDWrs, "add", 1, 4, 3, SchedResource::ALU)
+    SIMPLE_CASE(ADDWrsX, "add", 1, 4, 3, SchedResource::ALU)
+    SIMPLE_CASE(ADDWlsl, "add", 1, 4, 3, SchedResource::ALU)
+    SIMPLE_CASE(SUBWrr, "sub", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(SUBWri, "sub", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(NEGW, "neg", 1, 2, 3, SchedResource::ALU)
     case Opcode::CNEGW: {
         static const InstrDesc value{
             Opcode::CNEGW, "cneg", 1, 3, false, false, false, false,
-            false, false, false, false, false, true, 1,
+            false, false, false, false, false, true, 3,
             SchedResource::ALU};
         return value;
     }
-    SIMPLE_CASE(MULWrr, "mul", 1, 3, 3, SchedResource::MAC)
-    SIMPLE_CASE(MADDWrrr, "madd", 1, 4, 3, SchedResource::MAC)
-    SIMPLE_CASE(MSUBWrrr, "msub", 1, 4, 3, SchedResource::MAC)
-    SIMPLE_CASE(SDIVWrr, "sdiv", 1, 3, 12, SchedResource::Divide)
-    SIMPLE_CASE(UDIVWrr, "udiv", 1, 3, 12, SchedResource::Divide)
-    SIMPLE_CASE(SMULLXrr, "smull", 1, 3, 3, SchedResource::MAC)
-    SIMPLE_CASE(SMADDLXrrr, "smaddl", 1, 4, 3, SchedResource::MAC)
-    SIMPLE_CASE(ANDWrr, "and", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ANDWri, "and", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ORRWrr, "orr", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(EORWrr, "eor", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(LSLWrr, "lsl", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(LSLWri, "lsl", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(LSRWrr, "lsr", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(LSRWri, "lsr", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ASRWrr, "asr", 1, 3, 1, SchedResource::ALU)
-    SIMPLE_CASE(ASRWri, "asr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(MULWrr, "mul", 1, 3, 4, SchedResource::MAC)
+    SIMPLE_CASE(MADDWrrr, "madd", 1, 4, 4, SchedResource::MAC)
+    SIMPLE_CASE(MSUBWrrr, "msub", 1, 4, 4, SchedResource::MAC)
+    SIMPLE_CASE(SDIVWrr, "sdiv", 1, 3, 4, SchedResource::Divide)
+    SIMPLE_CASE(UDIVWrr, "udiv", 1, 3, 4, SchedResource::Divide)
+    SIMPLE_CASE(SMULLXrr, "smull", 1, 3, 4, SchedResource::MAC)
+    SIMPLE_CASE(SMADDLXrrr, "smaddl", 1, 4, 4, SchedResource::MAC)
+    SIMPLE_CASE(ANDWrr, "and", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(ANDWri, "and", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(ORRWrr, "orr", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(EORWrr, "eor", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(LSLWrr, "lsl", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(LSLWri, "lsl", 1, 3, 2, SchedResource::ALU)
+    SIMPLE_CASE(LSRWrr, "lsr", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(LSRWri, "lsr", 1, 3, 2, SchedResource::ALU)
+    SIMPLE_CASE(ASRWrr, "asr", 1, 3, 3, SchedResource::ALU)
+    SIMPLE_CASE(ASRWri, "asr", 1, 3, 2, SchedResource::ALU)
     case Opcode::CMPWrr:
     case Opcode::CMPWri:
     case Opcode::TSTWrr:
     case Opcode::TSTWri: {
         static const InstrDesc cmp{
             Opcode::CMPWrr, "cmp", 0, 2, false, false, false, false,
-            false, false, false, false, true, false, 1,
+            false, false, false, false, true, false, 3,
             SchedResource::ALU};
         static const InstrDesc cmpi{
             Opcode::CMPWri, "cmp", 0, 2, false, false, false, false,
-            false, false, false, false, true, false, 1,
+            false, false, false, false, true, false, 3,
             SchedResource::ALU};
         static const InstrDesc tst{
             Opcode::TSTWrr, "tst", 0, 2, false, false, false, false,
-            false, false, false, false, true, false, 1,
+            false, false, false, false, true, false, 3,
             SchedResource::ALU};
         static const InstrDesc tsti{
             Opcode::TSTWri, "tst", 0, 2, false, false, false, false,
-            false, false, false, false, true, false, 1,
+            false, false, false, false, true, false, 3,
             SchedResource::ALU};
         return opcode == Opcode::CMPWrr ? cmp
              : opcode == Opcode::CMPWri ? cmpi
              : opcode == Opcode::TSTWrr ? tst : tsti;
     }
-    SIMPLE_CASE(CLZW, "clz", 1, 2, 1, SchedResource::ALU)
-    SIMPLE_CASE(RBITW, "rbit", 1, 2, 1, SchedResource::ALU)
-    SIMPLE_CASE(FADDS, "fadd", 1, 3, 4, SchedResource::FPALU)
-    SIMPLE_CASE(FSUBS, "fsub", 1, 3, 4, SchedResource::FPALU)
-    SIMPLE_CASE(FMULS, "fmul", 1, 3, 4, SchedResource::FPMulDiv)
+    SIMPLE_CASE(CLZW, "clz", 1, 2, 3, SchedResource::ALU)
+    SIMPLE_CASE(RBITW, "rbit", 1, 2, 3, SchedResource::ALU)
+    SIMPLE_CASE(FADDS, "fadd", 1, 3, 6, SchedResource::FPALU)
+    SIMPLE_CASE(FSUBS, "fsub", 1, 3, 6, SchedResource::FPALU)
+    SIMPLE_CASE(FMULS, "fmul", 1, 3, 6, SchedResource::FPMulDiv)
     SIMPLE_CASE(FDIVS, "fdiv", 1, 3, 18, SchedResource::FPMulDiv)
-    SIMPLE_CASE(FNEGS, "fneg", 1, 2, 2, SchedResource::FPALU)
+    SIMPLE_CASE(FNEGS, "fneg", 1, 2, 6, SchedResource::FPALU)
     case Opcode::FCMPSrr:
     case Opcode::FCMPZS: {
         static const InstrDesc rr{
             Opcode::FCMPSrr, "fcmp", 0, 2, false, false, false, false,
-            false, false, false, false, true, false, 3,
+            false, false, false, false, true, false, 6,
             SchedResource::FPALU};
         static const InstrDesc zero{
             Opcode::FCMPZS, "fcmp", 0, 1, false, false, false, false,
-            false, false, false, false, true, false, 3,
+            false, false, false, false, true, false, 6,
             SchedResource::FPALU};
         return opcode == Opcode::FCMPSrr ? rr : zero;
     }
-    SIMPLE_CASE(SCVTFWS, "scvtf", 1, 2, 4, SchedResource::FPALU)
-    SIMPLE_CASE(FCVTZSW, "fcvtzs", 1, 2, 4, SchedResource::FPALU)
-    SIMPLE_CASE(FMOVWS, "fmov", 1, 2, 2, SchedResource::FPALU)
-    SIMPLE_CASE(FMOVSW, "fmov", 1, 2, 2, SchedResource::FPALU)
+    SIMPLE_CASE(SCVTFWS, "scvtf", 1, 2, 6, SchedResource::FPALU)
+    SIMPLE_CASE(FCVTZSW, "fcvtzs", 1, 2, 6, SchedResource::FPALU)
+    SIMPLE_CASE(FMOVWS, "fmov", 1, 2, 6, SchedResource::FPALU)
+    SIMPLE_CASE(FMOVSW, "fmov", 1, 2, 6, SchedResource::FPALU)
 #undef SIMPLE_CASE
     default:
         break;
@@ -308,7 +308,7 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::LDRQui: case Opcode::LDRQlo: case Opcode::LDRQpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
-        dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
+        dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
     case Opcode::LDRXui: case Opcode::LDRXlo: case Opcode::LDRXpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
@@ -326,7 +326,7 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::LDPXi: case Opcode::LDPDi: case Opcode::LDPQi:
         dynamic.mnemonic = "ldp"; dynamic.explicitDefs = 2;
         dynamic.explicitOperands = 4; dynamic.mayLoad = true;
-        dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
+        dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
     case Opcode::STPXi: case Opcode::STPDi: case Opcode::STPQi:
         dynamic.mnemonic = "stp"; dynamic.explicitOperands = 4;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
@@ -338,29 +338,29 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::LDPXpost:
         dynamic.mnemonic = "ldp"; dynamic.explicitDefs = 3;
         dynamic.explicitOperands = 4; dynamic.mayLoad = true;
-        dynamic.hasSideEffects = true; dynamic.latency = 5;
+        dynamic.hasSideEffects = true; dynamic.latency = 4;
         dynamic.resource = SchedResource::LoadStore; break;
     case Opcode::ADDXrr: case Opcode::ADDXri:
         dynamic.mnemonic = "add"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 3; break;
     case Opcode::ADDXrs:
         dynamic.mnemonic = "add"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 5; break;
+        dynamic.explicitOperands = 5; dynamic.latency = 3; break;
     case Opcode::SUBXrr: case Opcode::SUBXri:
         dynamic.mnemonic = "sub"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 3; break;
     case Opcode::LSLXri:
         dynamic.mnemonic = "lsl"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 2; break;
     case Opcode::ASRXri:
         dynamic.mnemonic = "asr"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 2; break;
     case Opcode::COPYXtoW:
         dynamic.mnemonic = "mov"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 3; break;
     case Opcode::MOVXrr:
         dynamic.mnemonic = "mov"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 3; break;
     case Opcode::SUBSPri:
         dynamic.mnemonic = "sub"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.hasSideEffects = true; break;
@@ -369,19 +369,22 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.explicitOperands = 3; dynamic.hasSideEffects = true; break;
     case Opcode::SXTW:
         dynamic.mnemonic = "sxtw"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 3; break;
     case Opcode::UXTW:
         dynamic.mnemonic = "uxtw"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 3; break;
     case Opcode::DUPv4i32: case Opcode::DUPv4f32:
         dynamic.mnemonic = "dup"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::INSv4i32: case Opcode::INSv4f32:
         dynamic.mnemonic = "ins"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 4; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::EXTRACTv4i32: case Opcode::EXTRACTv4f32:
         dynamic.mnemonic = "umov"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDv4i32: case Opcode::SUBv4i32:
     case Opcode::ADDv4f32: case Opcode::SUBv4f32:
     case Opcode::ANDv16i8: case Opcode::ORRv16i8: case Opcode::EORv16i8:
@@ -390,7 +393,7 @@ const InstrDesc &descriptor(Opcode opcode) {
                            : opcode == Opcode::ANDv16i8 ? "and"
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
-        dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
         dynamic.mnemonic =
             opcode == Opcode::SMINv4i32 ? "smin" : "smax";
@@ -410,27 +413,37 @@ const InstrDesc &descriptor(Opcode opcode) {
             opcode == Opcode::MULv4i32 ||
                     opcode == Opcode::MULv4f32 ||
                     opcode == Opcode::DIVv4f32 ? 3 : 4;
-        dynamic.latency = 5; dynamic.resource = SchedResource::FPMulDiv; break;
+        dynamic.latency =
+            opcode == Opcode::DIVv4f32 ? 18
+            : opcode == Opcode::FMLAv4f32 ||
+                      opcode == Opcode::FMLSv4f32 ? 10 : 6;
+        dynamic.resource =
+            opcode == Opcode::MULv4i32 ||
+                    opcode == Opcode::MLAv4i32 ||
+                    opcode == Opcode::MLSv4i32
+                ? SchedResource::FPALU
+                : SchedResource::FPMulDiv;
+        break;
     case Opcode::NEGv4f32:
         dynamic.mnemonic = "fneg"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 2;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::NEGv4i32:
         dynamic.mnemonic = "neg"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 2;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SSHLv4i32: case Opcode::USHLv4i32:
         dynamic.mnemonic =
             opcode == Opcode::SSHLv4i32 ? "sshl" : "ushl";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
-        dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SHUFFLEv16i8:
         dynamic.mnemonic = "tbl"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 4; dynamic.latency = 4;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDVv4i32:
         dynamic.mnemonic = "addv"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 4;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::FRAME_SETUP:
         dynamic.mnemonic = "FRAME_SETUP"; dynamic.pseudo = true;
