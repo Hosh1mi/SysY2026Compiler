@@ -220,6 +220,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
         pm.addPass(std::make_unique<LCSSA>());
         pm.addPass(std::make_unique<LoopDeletion>());
     });
+    pm.addPass(std::make_unique<LoopFixedPointEliminate>());
+    addCanonicalCleanup(pm);
     addAnalysisDumpIfRequested(pm);
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
     pm.addPass(std::make_unique<LoopFusion>());

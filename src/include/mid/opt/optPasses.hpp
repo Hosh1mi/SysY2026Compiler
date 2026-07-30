@@ -27,6 +27,7 @@
 #include "loopInvariantCodeMotion.hpp"
 #include "loopMemoryScalarPromotion.hpp"
 #include "loopDeletion.hpp"
+#include "loopFixedPointEliminate.hpp"
 #include "indVarSimplify.hpp"
 #include "indVarStrengthReduce.hpp"
 #include "idiomRecognize.hpp"
