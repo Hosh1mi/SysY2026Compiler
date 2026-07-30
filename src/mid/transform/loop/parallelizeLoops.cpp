@@ -43,6 +43,19 @@ std::string loopName(const Loop &loop) {
     return loop.header ? loop.header->name_ : "<no-header>";
 }
 
+template <typename T>
+bool containsPtr(const std::vector<T *> &values, T *value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+template <typename T>
+bool addUniquePtr(std::vector<T *> &values, T *value) {
+    if (containsPtr(values, value))
+        return false;
+    values.push_back(value);
+    return true;
+}
+
 bool isScalarExpansionScratch(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     return alloca && alloca->isLoopExpansionScratch();
@@ -83,6 +96,31 @@ bool hasProvenSafeMemoryRoots(
         }
     }
     return true;
+}
+
+Value *createModuloPartialMerge(IRStmtBuilder *builder, Module *module,
+                                Value *p0, Value *p1, ConstantInt *mod) {
+    auto *zero = new ConstantInt(module->int32_ty_, 0);
+    auto *p1NonNegative = builder->create_icmp_ge(p1, zero);
+
+    auto *posThreshold = builder->create_isub(mod, p1);
+    auto *posWrapped = builder->create_isub(p0, posThreshold);
+    auto *posPlain = builder->create_iadd(p0, p1);
+    auto *posNeedsWrap = builder->create_icmp_ge(p0, posThreshold);
+    auto *posMerged = new SelectInst(posNeedsWrap, posWrapped, posPlain,
+                                     builder->get_insert_block());
+
+    auto *negMod = builder->create_isub(zero, mod);
+    auto *negThreshold = builder->create_isub(negMod, p1);
+    auto *negWrapped = builder->create_isub(p0, negThreshold);
+    auto *negPlain = builder->create_iadd(p0, p1);
+    auto *negNeedsWrap = builder->create_icmp_le(p0, negThreshold);
+    auto *negMerged = new SelectInst(negNeedsWrap, negWrapped, negPlain,
+                                     builder->get_insert_block());
+
+    auto *merged = new SelectInst(p1NonNegative, posMerged, negMerged,
+                                  builder->get_insert_block());
+    return builder->create_isrem(merged, mod);
 }
 
 bool definedInLoop(Value *v, const std::set<BasicBlock *> &blocks) {
@@ -406,11 +444,13 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         auto *rem = dynamic_cast<BinaryInst *>(latchVal);
         ConstantInt *mod = nullptr;
         Value *updateValue = latchVal;
+        ScalarModuloSource moduloSource = ScalarModuloSource::None;
         if (rem && rem->op_id_ == Instruction::SRem) {
             mod = dynamic_cast<ConstantInt *>(rem->get_operand(1));
             if (!mod || mod->value_ <= 0)
                 return fail("modulo reduction divisor is not positive constant");
             updateValue = rem->get_operand(0);
+            moduloSource = ScalarModuloSource::InlineModulo;
         } else {
             rem = nullptr;
         }
@@ -438,7 +478,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             return fail("unsupported scalar reduction term");
 
         localScalarReductions.push_back(
-            {phi, update, rem, {}, {}, {}, term, mod, identity, isSub});
+            {phi, update, rem, {}, {}, {}, term, mod, identity, isSub,
+             moduloSource});
     }
 
     if (localScalarReductions.size() > 1)
@@ -457,6 +498,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             red.liveOutRems.push_back(red.rem);
             red.liveOutFinalValues.push_back(red.rem);
         }
+        bool sawRawLiveOutUse = false;
+        std::string rawLiveOutUser;
         bool grew = true;
         while (grew) {
             grew = false;
@@ -465,17 +508,26 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 for (auto *user : bb->instr_list_) {
                     bool usesLiveOutUpdate = false;
                     bool usesLiveOutFinal = false;
+                    bool usesLiveOutModuloInput = false;
                     for (unsigned i = 0; i < user->num_ops_; ++i) {
+                        Value *op = user->get_operand(i);
                         usesLiveOutUpdate |=
                             std::find(red.liveOutUpdateValues.begin(),
                                       red.liveOutUpdateValues.end(),
-                                      user->get_operand(i)) !=
+                                      op) !=
                             red.liveOutUpdateValues.end();
                         usesLiveOutFinal |=
                             std::find(red.liveOutFinalValues.begin(),
                                       red.liveOutFinalValues.end(),
-                                      user->get_operand(i)) !=
+                                      op) !=
                             red.liveOutFinalValues.end();
+                        auto *opRem = dynamic_cast<BinaryInst *>(op);
+                        if (containsPtr(red.liveOutUpdateValues, op) ||
+                            (red.moduloSource !=
+                                 ScalarModuloSource::InlineModulo &&
+                             containsPtr(red.liveOutFinalValues, op) &&
+                             !containsPtr(red.liveOutRems, opRem)))
+                            usesLiveOutModuloInput = true;
                     }
                     if (!usesLiveOutUpdate && !usesLiveOutFinal) continue;
 
@@ -490,63 +542,80 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                 continue;
                             hasLoopIncoming = true;
                             onlyForwardsReductionUpdate &=
-                                std::find(red.liveOutUpdateValues.begin(),
-                                          red.liveOutUpdateValues.end(),
-                                          phi->get_operand(i)) !=
-                                red.liveOutUpdateValues.end();
+                                containsPtr(red.liveOutUpdateValues,
+                                            phi->get_operand(i));
                             onlyForwardsReductionFinal &=
-                                std::find(red.liveOutFinalValues.begin(),
-                                          red.liveOutFinalValues.end(),
-                                          phi->get_operand(i)) !=
-                                red.liveOutFinalValues.end();
+                                containsPtr(red.liveOutFinalValues,
+                                            phi->get_operand(i));
                         }
                         if (hasLoopIncoming && !onlyForwardsReductionUpdate &&
                             !onlyForwardsReductionFinal)
                             return fail("scalar reduction update has mixed live-out phi");
                         if (hasLoopIncoming && onlyForwardsReductionUpdate &&
-                            std::find(red.liveOutUpdateValues.begin(),
-                                      red.liveOutUpdateValues.end(), phi) ==
-                                red.liveOutUpdateValues.end()) {
-                            red.liveOutUpdateValues.push_back(phi);
+                            addUniquePtr(red.liveOutUpdateValues,
+                                         static_cast<Value *>(phi))) {
                             grew = true;
                         }
                         if (hasLoopIncoming && onlyForwardsReductionFinal &&
-                            std::find(red.liveOutFinalValues.begin(),
-                                      red.liveOutFinalValues.end(), phi) ==
-                                red.liveOutFinalValues.end()) {
-                            red.liveOutFinalValues.push_back(phi);
+                            addUniquePtr(red.liveOutFinalValues,
+                                         static_cast<Value *>(phi))) {
                             grew = true;
                         }
                         continue;
                     }
 
-                    if (!usesLiveOutUpdate || !red.mod)
+                    bool finalMayNeedModulo =
+                        red.moduloSource != ScalarModuloSource::InlineModulo;
+                    if (!usesLiveOutModuloInput)
                         continue;
 
                     auto *rem = dynamic_cast<BinaryInst *>(user);
                     auto *remMod =
                         rem ? dynamic_cast<ConstantInt *>(rem->get_operand(1))
                             : nullptr;
-                    bool remUsesLiveOutUpdate =
-                        rem && std::find(red.liveOutUpdateValues.begin(),
-                                         red.liveOutUpdateValues.end(),
-                                         rem->get_operand(0)) !=
-                                   red.liveOutUpdateValues.end();
-                    if (!rem || rem->op_id_ != Instruction::SRem ||
-                        !remUsesLiveOutUpdate ||
-                        !remMod || remMod->value_ != red.mod->value_)
-                        return fail("modulo reduction update has unsupported live-out use by " +
-                                    valueName(user));
-                    if (std::find(red.liveOutRems.begin(),
-                                  red.liveOutRems.end(), rem) ==
-                        red.liveOutRems.end())
-                        red.liveOutRems.push_back(rem);
-                    if (std::find(red.liveOutFinalValues.begin(),
-                                  red.liveOutFinalValues.end(), rem) ==
-                        red.liveOutFinalValues.end())
-                        red.liveOutFinalValues.push_back(rem);
+                    bool remUsesLiveOutValue =
+                        rem && (containsPtr(red.liveOutUpdateValues,
+                                            rem->get_operand(0)) ||
+                                (finalMayNeedModulo &&
+                                 containsPtr(red.liveOutFinalValues,
+                                             rem->get_operand(0)) &&
+                                 !containsPtr(
+                                     red.liveOutRems,
+                                     dynamic_cast<BinaryInst *>(
+                                         rem->get_operand(0)))));
+                    bool isPositiveConstRem =
+                        rem && rem->op_id_ == Instruction::SRem &&
+                        remUsesLiveOutValue && remMod && remMod->value_ > 0;
+                    if (isPositiveConstRem) {
+                        if (!red.mod) {
+                            red.mod = remMod;
+                            red.moduloSource = ScalarModuloSource::LiveOutModulo;
+                        } else if (remMod->value_ != red.mod->value_) {
+                            return fail("scalar modulo reduction has mixed live-out moduli");
+                        }
+                        addUniquePtr(red.liveOutRems, rem);
+                        addUniquePtr(red.liveOutFinalValues,
+                                     static_cast<Value *>(rem));
+                        continue;
+                    }
+
+                    if (!sawRawLiveOutUse) {
+                        sawRawLiveOutUse = true;
+                        rawLiveOutUser = valueName(user);
+                    }
                 }
             }
+        }
+        if (red.mod && sawRawLiveOutUse) {
+            return fail("scalar modulo reduction has mixed modulo and naked live-out use by " +
+                        rawLiveOutUser);
+        }
+        if (red.mod) {
+            debugPar("scalar modulo reduction source=" +
+                     std::string(red.moduloSource ==
+                                         ScalarModuloSource::InlineModulo
+                                     ? "inline"
+                                     : "liveout"));
         }
     }
 
@@ -750,6 +819,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                  const std::vector<ScalarReduction> &scalarReductions) {
     (void)reductions;  // IV-varying reductions need no privatization
     int id = (int)bodies_.size();
+    std::vector<ScalarReduction> scalarReds = scalarReductions;
 
     if (!parallelForDecl_) {
         auto *fty = new FunctionType(
@@ -768,6 +838,22 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     auto *entry = new BasicBlock(module, "label_par_entry", bodyFn);
     auto *retbb = new BasicBlock(module, "label_par_ret", bodyFn);
     auto *builder = new IRStmtBuilder(retbb, module);
+
+    for (auto &red : scalarReds) {
+        if (!red.mod || red.moduloSource != ScalarModuloSource::LiveOutModulo)
+            continue;
+        auto *rem = new BinaryInst(module->int32_ty_, Instruction::SRem,
+                                   red.update, red.mod, shape.latch, true);
+        shape.latch->add_instruction_before_terminator(rem);
+        red.rem = rem;
+        for (unsigned i = 0; i < red.phi->num_ops_; i += 2) {
+            if (red.phi->get_operand(i + 1) ==
+                static_cast<Value *>(shape.latch)) {
+                red.phi->set_operand(i, rem);
+                break;
+            }
+        }
+    }
 
     // live-in 收集（与 isLegalDoall 同口径）→ ctx 全局
     std::vector<Value *> liveIns;
@@ -822,7 +908,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     GlobalVariable *scalarPartial1 = nullptr;
     Value *scalarBodyBound = hi;
     Value *scalarSlotPtr = nullptr;
-    if (!scalarReductions.empty()) {
+    if (!scalarReds.empty()) {
         scalarStartSlot = new GlobalVariable(
             "__sysy_par_scalar_start_" + std::to_string(id),
             module, module->int32_ty_, false,
@@ -880,7 +966,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
             shape.ivPhi->set_operand(i + 1, entry);
         }
     }
-    for (auto &red : scalarReductions) {
+    for (auto &red : scalarReds) {
         for (unsigned i = 0; i < red.phi->num_ops_; i += 2) {
             if (red.phi->get_operand(i + 1) ==
                 static_cast<Value *>(loop.preheader))
@@ -890,11 +976,17 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     shape.exitCmp->set_operand(1, scalarBodyBound);
 
     builder->set_insert_point(retbb);
-    for (auto &red : scalarReductions) {
-        Value *partial = shape.exitingBlock == loop.header
-                             ? static_cast<Value *>(red.phi)
-                             : (red.rem ? static_cast<Value *>(red.rem)
-                                        : static_cast<Value *>(red.update));
+    for (auto &red : scalarReds) {
+        Value *partial = nullptr;
+        if (red.mod) {
+            partial = shape.exitingBlock == loop.header
+                          ? static_cast<Value *>(red.phi)
+                          : static_cast<Value *>(red.rem);
+        } else {
+            partial = shape.exitingBlock == loop.header
+                          ? static_cast<Value *>(red.phi)
+                          : static_cast<Value *>(red.update);
+        }
         builder->create_store(partial, scalarSlotPtr);
     }
     builder->create_void_ret();
@@ -925,7 +1017,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     builder->set_insert_point(parCall);
     for (size_t k = 0; k < liveIns.size(); k++)
         builder->create_store(liveIns[k], ctxSlots[k]);
-    for (auto &red : scalarReductions) {
+    for (auto &red : scalarReds) {
         builder->create_store(shape.init, scalarStartSlot);
         builder->create_store(shape.bound, scalarBoundSlot);
         builder->create_store(red.identity, scalarPartial0);
@@ -934,12 +1026,13 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     builder->create_call(parallelForDecl_,
                          {new ConstantInt(module->int32_ty_, id), shape.init,
                           shape.bound});
-    for (auto &red : scalarReductions) {
+    for (auto &red : scalarReds) {
         auto *p0 = builder->create_load(scalarPartial0);
         auto *p1 = builder->create_load(scalarPartial1);
-        Value *merged = builder->create_iadd(p0, p1);
-        if (red.mod)
-            merged = builder->create_isrem(merged, red.mod);
+        Value *merged = red.mod
+                            ? createModuloPartialMerge(builder, module, p0, p1,
+                                                       red.mod)
+                            : static_cast<Value *>(builder->create_iadd(p0, p1));
         std::vector<Value *> exitForwardValues = red.liveOutUpdateValues;
         for (auto *value : red.liveOutFinalValues) {
             if (std::find(exitForwardValues.begin(), exitForwardValues.end(),
