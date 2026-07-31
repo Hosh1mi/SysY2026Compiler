@@ -82,6 +82,27 @@ bool inferBoundsImpl(Value *value, long long &lower, long long &upper,
     if (!instruction || !type || type->num_bits_ > 32)
         return finish(false);
 
+    if (auto *phi = dynamic_cast<PhiInst *>(instruction)) {
+        if (phi->num_ops_ == 0 || phi->num_ops_ % 2 != 0)
+            return finish(false);
+        bool firstIncoming = true;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            long long incomingLower = 0, incomingUpper = 0;
+            if (!inferBoundsImpl(phi->get_operand(i), incomingLower,
+                                 incomingUpper, visiting, depth + 1))
+                return finish(false);
+            if (firstIncoming) {
+                lower = incomingLower;
+                upper = incomingUpper;
+                firstIncoming = false;
+            } else {
+                lower = std::min(lower, incomingLower);
+                upper = std::max(upper, incomingUpper);
+            }
+        }
+        return finish(!firstIncoming);
+    }
+
     if (auto *zext = dynamic_cast<ZextInst *>(instruction)) {
         auto *sourceType = dynamic_cast<IntegerType *>(
             zext->get_operand(0)->type_);
