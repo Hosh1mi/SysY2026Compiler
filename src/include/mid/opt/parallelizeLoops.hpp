@@ -45,6 +45,12 @@ private:
 
     // 标量加/减归约：acc.next = acc +/- term，
     // 可选外层 positive_const srem。
+    enum class ScalarModuloSource {
+        None,
+        InlineModulo,
+        LiveOutModulo,
+    };
+
     struct ScalarReduction {
         PhiInst *phi = nullptr;
         BinaryInst *update = nullptr;
@@ -56,6 +62,7 @@ private:
         ConstantInt *mod = nullptr;
         ConstantInt *identity = nullptr;
         bool isSub = false;
+        ScalarModuloSource moduloSource = ScalarModuloSource::None;
     };
 
     bool matchShape(Loop &loop, LoopShape &shape, std::string *reason = nullptr);

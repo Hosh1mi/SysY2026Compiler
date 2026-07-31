@@ -9,6 +9,7 @@
 #include "correlatedValuePropagation.hpp"
 #include "jumpThreadingLite.hpp"
 #include "tailRecursionEliminate.hpp"
+#include "tailCallOpt.hpp"
 #include "radixRecurrenceEliminate.hpp"
 #include "autoMemoization.hpp"
 #include "mem2reg.hpp"

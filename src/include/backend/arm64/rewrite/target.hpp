@@ -50,6 +50,7 @@ enum class Opcode : std::uint16_t {
     ADJCALLSTACKDOWN,
     ADJCALLSTACKUP,
     CALL,
+    TAILCALL,
     RET,
     B,
     Bcc,

@@ -269,6 +269,7 @@ std::string SelectInst::print() {
 }
 
 // %v = call i32 @func(i32 %a, i32 %b)
+// %v = tail call i32 @func(i32 %a, i32 %b)
 std::string CallInst::print() {
     std::string instr_ir;
     if (!(this->type_->tid_ == Type::VoidTyID)) {
@@ -276,6 +277,8 @@ std::string CallInst::print() {
         instr_ir += this->name_;
         instr_ir += " = ";
     }
+    if (is_tail_)
+        instr_ir += "tail ";
     instr_ir += instr_id2string_[this->op_id_];
     instr_ir += " ";
     unsigned int numops = this->num_ops_;

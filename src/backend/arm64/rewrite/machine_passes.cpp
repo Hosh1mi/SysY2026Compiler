@@ -1845,7 +1845,23 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
                     break;
                 }
                 if (scan->isTerminator()) {
-                    if (!physicalLiveOut[block.get()].count(
+                    bool terminatorUsesDestination = false;
+                    for (const MachineOperand &operand :
+                         scan->operands())
+                        if (operand.isPhysicalRegister() &&
+                            !operand.isDef &&
+                            RegisterInfo::aliases(
+                                operand.physicalRegister(),
+                                destination)) {
+                            terminatorUsesDestination = true;
+                            break;
+                        }
+                    // A value consumed by the terminator is not necessarily
+                    // live-out: conditional branches use it on the current
+                    // block's outgoing edge.  Keep the copy in that case.
+                    if (terminatorUsesDestination) {
+                        blocked = true;
+                    } else if (!physicalLiveOut[block.get()].count(
                             destination) &&
                         (scan->opcode() != Opcode::RET ||
                          (!isReturnRegister(destination) &&

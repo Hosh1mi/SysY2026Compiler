@@ -277,6 +277,15 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
             return inst;
         }
 
+    if (auto *sel = dynamic_cast<SelectInst *>(orig))
+        {
+            auto *inst = new SelectInst(remap(sel->get_operand(0)),
+                                        remap(sel->get_operand(1)),
+                                        remap(sel->get_operand(2)), destBB);
+            inst->copySemFlagsFrom(sel);
+            return inst;
+        }
+
     return nullptr; // unsupported (phi, branch, call, alloca …)
 }
 
@@ -301,10 +310,34 @@ static bool isCloneableForUnroll(Instruction *inst) {
            dynamic_cast<SelectInst *>(inst) ||
            dynamic_cast<GetElementPtrInst *>(inst) ||
            dynamic_cast<LoadInst *>(inst) ||
+           dynamic_cast<StoreInst *>(inst) ||
            dynamic_cast<ZextInst *>(inst) ||
            dynamic_cast<FpToSiInst *>(inst) ||
            dynamic_cast<SiToFpInst *>(inst) ||
-           dynamic_cast<Bitcast *>(inst);
+           dynamic_cast<Bitcast *>(inst) ||
+           dynamic_cast<SelectInst *>(inst);
+}
+
+static bool dependsOnAlloca(Value *value, std::set<Value *> &visited) {
+    if (!value || !visited.insert(value).second)
+        return false;
+    if (dynamic_cast<AllocaInst *>(value))
+        return true;
+    auto *inst = dynamic_cast<Instruction *>(value);
+    if (!inst)
+        return false;
+    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        if (dynamic_cast<BasicBlock *>(inst->get_operand(i)))
+            continue;
+        if (dependsOnAlloca(inst->get_operand(i), visited))
+            return true;
+    }
+    return false;
+}
+
+static bool dependsOnAlloca(Value *value) {
+    std::set<Value *> visited;
+    return dependsOnAlloca(value, visited);
 }
 
 static bool hasEntryLowerBoundGuard(BasicBlock *preheader, BasicBlock *header,
@@ -1009,6 +1042,393 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         } else {
             phi->addIncoming(it->second, remCheck);
         }
+    }
+
+    return true;
+}
+
+bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
+                                                 Module *module) {
+    if (loop.blocks.size() <= 2)
+        return false;
+
+    BasicBlock *header = loop.header;
+    BasicBlock *latch = loop.singleLatch();
+    BasicBlock *preheader = loop.preheader;
+    BasicBlock *exitBB = loop.singleExit();
+    if (!header || !latch || !preheader || !exitBB)
+        return debugCFGRegionReject(func, loop, "stateful-missing-structural-block");
+    if (loop.exiting.size() != 1 || loop.exiting[0] != header)
+        return debugCFGRegionReject(func, loop, "stateful-non-header-exit");
+
+    auto *headerBr = dynamic_cast<BranchInst *>(header->get_terminator());
+    if (!headerBr || headerBr->num_ops_ != 3)
+        return debugCFGRegionReject(func, loop, "stateful-header-not-cond-branch");
+    auto *bodyEntry = dynamic_cast<BasicBlock *>(headerBr->get_operand(1));
+    auto *headerExit = dynamic_cast<BasicBlock *>(headerBr->get_operand(2));
+    if (!bodyEntry || !headerExit || !loop.blocks.count(bodyEntry) ||
+        headerExit != exitBB)
+        return debugCFGRegionReject(func, loop, "stateful-header-successors");
+
+    auto *latchBr = dynamic_cast<BranchInst *>(latch->get_terminator());
+    if (!latchBr || latchBr->num_ops_ != 1 || latchBr->get_operand(0) != header)
+        return debugCFGRegionReject(func, loop, "stateful-latch-not-backedge");
+
+    std::vector<PhiInst *> headerPhis;
+    std::unordered_map<PhiInst *, Value *> initVals;
+    std::unordered_map<PhiInst *, Value *> latchVals;
+    for (auto *inst : header->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        if (phi->num_ops_ != 4)
+            return debugCFGRegionReject(func, loop, "stateful-non-canonical-header-phi");
+        Value *init = nullptr;
+        Value *back = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *src = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (src == preheader)
+                init = phi->get_operand(i);
+            else if (src == latch)
+                back = phi->get_operand(i);
+            else
+                return debugCFGRegionReject(func, loop, "stateful-header-phi-edge");
+        }
+        if (!init || !back)
+            return debugCFGRegionReject(func, loop, "stateful-header-phi-missing-edge");
+        headerPhis.push_back(phi);
+        initVals[phi] = init;
+        latchVals[phi] = back;
+    }
+    if (headerPhis.empty())
+        return debugCFGRegionReject(func, loop, "stateful-no-header-phis");
+
+    auto *cmpInst = dynamic_cast<ICmpInst *>(headerBr->get_operand(0));
+    if (!cmpInst || cmpInst->icmp_op_ != ICmpInst::ICMP_SLT)
+        return debugCFGRegionReject(func, loop, "stateful-unsupported-predicate");
+
+    PhiInst *ivPhi = nullptr;
+    Value *bound = nullptr;
+    for (auto *phi : headerPhis) {
+        if (phi->type_->tid_ != Type::IntegerTyID)
+            continue;
+        auto *upd = dynamic_cast<Instruction *>(latchVals[phi]);
+        if (!upd || upd->parent_ != latch || !upd->is_add())
+            continue;
+        auto *c0 = dynamic_cast<ConstantInt *>(upd->get_operand(0));
+        auto *c1 = dynamic_cast<ConstantInt *>(upd->get_operand(1));
+        bool stepOne = (upd->get_operand(0) == phi && c1 && c1->value_ == 1) ||
+                       (upd->get_operand(1) == phi && c0 && c0->value_ == 1);
+        if (!stepOne)
+            continue;
+        if (cmpInst->get_operand(0) != phi)
+            continue;
+        ivPhi = phi;
+        bound = cmpInst->get_operand(1);
+        break;
+    }
+    if (!ivPhi || !bound)
+        return debugCFGRegionReject(func, loop, "stateful-no-iv");
+    if (auto *boundInst = dynamic_cast<Instruction *>(bound))
+        if (loop.blocks.count(boundInst->parent_))
+            return debugCFGRegionReject(func, loop, "stateful-variant-bound");
+
+    bool hasState = false;
+    for (auto *phi : headerPhis) {
+        if (phi != ivPhi) {
+            hasState = true;
+            break;
+        }
+    }
+    if (!hasState)
+        return debugCFGRegionReject(func, loop, "stateful-no-carried-state");
+
+    int bodyInstCount = 0;
+    int condBranchBlocks = 0;
+    int memoryOps = 0;
+    int vectorOps = 0;
+    for (auto *bb : loop.blocksOrdered) {
+        for (auto *inst : bb->instr_list_) {
+            if (inst->is_phi())
+                continue;
+            if (inst->isTerminator()) {
+                auto *br = dynamic_cast<BranchInst *>(inst);
+                if (!br)
+                    return debugCFGRegionReject(func, loop, "stateful-non-branch-terminator");
+                for (unsigned i = br->num_ops_ == 3 ? 1 : 0; i < br->num_ops_; ++i) {
+                    auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(i));
+                    if (!succ)
+                        return debugCFGRegionReject(func, loop, "stateful-bad-branch-target");
+                    if (bb == header && succ == exitBB)
+                        continue;
+                    if (!loop.blocks.count(succ))
+                        return debugCFGRegionReject(func, loop, "stateful-branch-exits-region");
+                }
+                if (br->num_ops_ == 3)
+                    ++condBranchBlocks;
+                continue;
+            }
+            if (inst->is_call() || inst->is_alloca())
+                return debugCFGRegionReject(func, loop, "stateful-side-effect");
+            if (!isCloneableForUnroll(inst))
+                return debugCFGRegionReject(func, loop, "stateful-unsupported-inst");
+            if (inst->is_store() && dependsOnAlloca(inst->get_operand(1)))
+                return debugCFGRegionReject(func, loop, "stateful-stack-store");
+            if (inst->is_load() || inst->is_store() || inst->is_gep())
+                ++memoryOps;
+            if (inst->type_->tid_ == Type::VectorTyID)
+                ++vectorOps;
+            for (unsigned i = 0; i < inst->num_ops_; ++i)
+                if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID)
+                    ++vectorOps;
+            ++bodyInstCount;
+        }
+    }
+    if (bodyInstCount > 72 || loop.blocksOrdered.size() > 18)
+        return debugCFGRegionReject(func, loop, "stateful-clone-budget");
+    if (!isProfitableCFGRegionUnroll(loop, bodyInstCount, condBranchBlocks,
+                                     memoryOps, vectorOps))
+        return debugCFGRegionReject(func, loop, "stateful-profitability");
+
+    struct OutsideUse { Instruction *user; unsigned idx; };
+    std::map<Value *, std::vector<OutsideUse>> liveOuts;
+    auto collectLiveOut = [&](Instruction *inst) {
+        for (const auto &use : inst->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !user->parent_ || loop.blocks.count(user->parent_))
+                continue;
+            if (user->parent_ == exitBB && user->is_phi())
+                continue;
+            liveOuts[inst].push_back({user, use.arg_no_});
+        }
+    };
+    for (auto *phi : headerPhis)
+        collectLiveOut(phi);
+    for (auto *bb : loop.blocksOrdered) {
+        if (bb == header) continue;
+        for (auto *inst : bb->instr_list_) {
+            if (inst->isTerminator()) continue;
+            collectLiveOut(inst);
+        }
+    }
+    for (auto &entry : liveOuts) {
+        if (std::find(headerPhis.begin(), headerPhis.end(), entry.first) ==
+            headerPhis.end())
+            return debugCFGRegionReject(func, loop, "stateful-non-header-liveout");
+    }
+
+    const int N = 2;
+    const int guardAdj = N - 1;
+    Value *boundMain = nullptr;
+    if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
+        if (cb->value_ < guardAdj)
+            return debugCFGRegionReject(func, loop, "stateful-bound-underflow");
+        boundMain = new ConstantInt(module->int32_ty_, cb->value_ - guardAdj);
+    } else {
+        auto *adjC = new ConstantInt(module->int32_ty_, guardAdj);
+        auto *sub = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                   bound, adjC, preheader, true);
+        preheader->add_instruction_before_terminator(sub);
+        boundMain = sub;
+    }
+
+    if (std::getenv("DEBUG_LOOP_UNROLL"))
+        std::cerr << "[LoopUnroll] func=" << func->name_
+                  << " header=" << header->name_
+                  << " factor=" << N << " form=stateful-while-cfg\n";
+
+    auto *headerMain = new BasicBlock(module, "unroll_state_hdr", func);
+    std::unordered_map<PhiInst *, PhiInst *> mainPhis;
+    for (int i = (int)headerPhis.size() - 1; i >= 0; --i) {
+        auto *phi = headerPhis[i];
+        auto *mainPhi = PhiInst::create_phi(phi->type_, headerMain);
+        headerMain->add_instruction_front(mainPhi);
+        mainPhi->addIncoming(initVals[phi], preheader);
+        mainPhis[phi] = mainPhi;
+    }
+
+    auto *cmpMain = new ICmpInst(ICmpInst::ICMP_SLT, mainPhis[ivPhi],
+                                 boundMain, headerMain);
+    auto *remCheck = new BasicBlock(module, "unroll_state_rem", func);
+    auto *cmpRem = new ICmpInst(ICmpInst::ICMP_SLT, mainPhis[ivPhi],
+                                bound, remCheck);
+
+    std::vector<std::unordered_map<BasicBlock *, BasicBlock *>> iterBBMaps(N);
+    for (int iter = 0; iter < N; ++iter) {
+        for (auto *oldBB : loop.blocksOrdered) {
+            auto *newBB = new BasicBlock(module,
+                                         "unroll_state_" + std::to_string(iter) +
+                                             "_" + oldBB->name_,
+                                         func);
+            iterBBMaps[iter][oldBB] = newBB;
+        }
+    }
+
+    auto headerCloneFor = [&](int iter) { return iterBBMaps[iter][header]; };
+
+    std::unordered_map<PhiInst *, Value *> currentPhiVals;
+    for (auto *phi : headerPhis)
+        currentPhiVals[phi] = mainPhis[phi];
+
+    for (int iter = 0; iter < N; ++iter) {
+        std::unordered_map<Value *, Value *> valueMap;
+        auto &bbMap = iterBBMaps[iter];
+
+        for (auto *phi : headerPhis)
+            valueMap[phi] = currentPhiVals[phi];
+
+        for (auto *oldBB : loop.blocksOrdered) {
+            if (oldBB == header)
+                continue;
+            auto *newBB = bbMap[oldBB];
+            for (auto *oldInst : oldBB->instr_list_) {
+                if (!oldInst->is_phi()) break;
+                auto *newPhi = PhiInst::create_phi(oldInst->type_, newBB);
+                newBB->add_instruction(newPhi);
+                valueMap[oldInst] = newPhi;
+            }
+        }
+
+        for (auto *oldBB : loop.blocksOrdered) {
+            auto *newBB = bbMap[oldBB];
+            if (oldBB == header) {
+                new BranchInst(bbMap[bodyEntry], newBB);
+                continue;
+            }
+
+            for (auto *oldInst : oldBB->instr_list_) {
+                if (oldInst->is_phi())
+                    continue;
+                if (oldInst->isTerminator()) {
+                    auto *oldBr = dynamic_cast<BranchInst *>(oldInst);
+                    if (!oldBr)
+                        return false;
+                    if (oldBB == latch) {
+                        if (iter + 1 < N)
+                            new BranchInst(headerCloneFor(iter + 1), newBB);
+                        else
+                            new BranchInst(headerMain, newBB);
+                        continue;
+                    }
+                    if (oldBr->num_ops_ == 1) {
+                        auto *dest = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(0), valueMap, bbMap));
+                        if (!dest) return false;
+                        new BranchInst(dest, newBB);
+                    } else {
+                        auto *cond = mapLoopValue(oldBr->get_operand(0), valueMap, bbMap);
+                        auto *ifTrue = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(1), valueMap, bbMap));
+                        auto *ifFalse = dynamic_cast<BasicBlock *>(
+                            mapLoopValue(oldBr->get_operand(2), valueMap, bbMap));
+                        if (!cond || !ifTrue || !ifFalse) return false;
+                        new BranchInst(cond, ifTrue, ifFalse, newBB);
+                    }
+                    continue;
+                }
+
+                auto *newInst = cloneInst(oldInst, newBB, valueMap);
+                if (!newInst)
+                    return false;
+                valueMap[oldInst] = newInst;
+            }
+        }
+
+        for (auto *oldBB : loop.blocksOrdered) {
+            if (oldBB == header)
+                continue;
+            auto *newBB = bbMap[oldBB];
+            for (auto *oldInst : oldBB->instr_list_) {
+                if (!oldInst->is_phi()) break;
+                auto *newPhi = static_cast<PhiInst *>(valueMap[oldInst]);
+                for (unsigned i = 0; i < oldInst->num_ops_; i += 2) {
+                    auto *oldPred = dynamic_cast<BasicBlock *>(oldInst->get_operand(i + 1));
+                    if (!oldPred || !loop.blocks.count(oldPred))
+                        return debugCFGRegionReject(func, loop, "stateful-internal-phi-outside-pred");
+                    Value *mappedVal = mapLoopValue(oldInst->get_operand(i), valueMap, bbMap);
+                    auto *mappedPred = dynamic_cast<BasicBlock *>(
+                        mapLoopValue(oldPred, valueMap, bbMap));
+                    if (!mappedVal || !mappedPred)
+                        return debugCFGRegionReject(func, loop, "stateful-internal-phi-map-fail");
+                    newPhi->addIncoming(mappedVal, mappedPred);
+                }
+            }
+        }
+
+        for (auto *phi : headerPhis) {
+            Value *mapped = mapLoopValue(latchVals[phi], valueMap, bbMap);
+            if (!mapped)
+                return debugCFGRegionReject(func, loop, "stateful-latch-map-fail");
+            currentPhiVals[phi] = mapped;
+        }
+    }
+
+    for (auto *phi : headerPhis)
+        mainPhis[phi]->addIncoming(currentPhiVals[phi], iterBBMaps[N - 1][latch]);
+
+    new BranchInst(cmpMain, headerCloneFor(0), remCheck, headerMain);
+    new BranchInst(cmpRem, header, exitBB, remCheck);
+
+    auto *preBr = preheader->get_terminator();
+    bool redirected = false;
+    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+        if (preBr->get_operand(i) == header) {
+            preBr->set_operand(i, headerMain);
+            redirected = true;
+        }
+    }
+    if (!redirected)
+        return debugCFGRegionReject(func, loop, "stateful-preheader-no-edge");
+    preheader->remove_succ_basic_block(header);
+    preheader->add_succ_basic_block(headerMain);
+    header->remove_pre_basic_block(preheader);
+    headerMain->add_pre_basic_block(preheader);
+
+    for (auto *phi : headerPhis) {
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == preheader) {
+                phi->set_operand(i, mainPhis[phi]);
+                phi->set_operand(i + 1, remCheck);
+                break;
+            }
+        }
+    }
+
+    auto mapMainState = [&](Value *v) -> Value * {
+        if (auto *phi = dynamic_cast<PhiInst *>(v)) {
+            auto it = mainPhis.find(phi);
+            if (it != mainPhis.end())
+                return it->second;
+        }
+        for (auto *phi : headerPhis)
+            if (latchVals[phi] == v)
+                return mainPhis[phi];
+        return v;
+    };
+
+    for (auto *inst : exitBB->instr_list_) {
+        if (!inst->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(inst);
+        Value *fromHeader = nullptr;
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == header) {
+                fromHeader = phi->get_operand(i);
+                break;
+            }
+        }
+        if (fromHeader)
+            phi->addIncoming(mapMainState(fromHeader), remCheck);
+    }
+
+    for (auto *phi : headerPhis) {
+        auto liveOutIt = liveOuts.find(phi);
+        if (liveOutIt == liveOuts.end())
+            continue;
+        auto *mergePhi = PhiInst::create_phi(phi->type_, exitBB);
+        exitBB->add_instruction_front(mergePhi);
+        mergePhi->addIncoming(phi, header);
+        mergePhi->addIncoming(mainPhis[phi], remCheck);
+        for (auto &use : liveOutIt->second)
+            use.user->set_operand(use.idx, mergePhi);
     }
 
     return true;
@@ -1970,6 +2390,10 @@ bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
             continue;
         }
         if (tryUnrollStructured(*loop, func, func->parent_)) {
+            changed = true;
+            continue;
+        }
+        if (tryUnrollStatefulWhileCFGRegion(*loop, func, func->parent_)) {
             changed = true;
             continue;
         }

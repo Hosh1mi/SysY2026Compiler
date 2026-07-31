@@ -1548,6 +1548,39 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 }
                 break;
             }
+            case SDOpcode::TailCall: {
+                // Register-only sibling/general TCO.  Does not set hasCalls so
+                // a function whose only calls are tail calls can stay frameless.
+                unsigned integerIndex = 0;
+                unsigned floatIndex = 0;
+                const unsigned callCopyGroup = nextParallelCopyGroup++;
+                for (unsigned i = 1; i < node.operands().size(); ++i) {
+                    RegClass regClass = valueClass(node.operands()[i]);
+                    bool vectorBank =
+                        regClass == RegClass::FPR32 ||
+                        regClass == RegClass::NEON128;
+                    unsigned &index = vectorBank ? floatIndex : integerIndex;
+                    if (index >= 8)
+                        throw std::logic_error(
+                            "TailCall selected with stack-passed arguments");
+                    PhysReg destination =
+                        vectorBank ? vectorArgumentRegister(index)
+                                   : integerArgumentRegister(index);
+                    MachineInstr copy(Opcode::COPY);
+                    copy.parallelCopyGroup = callCopyGroup;
+                    copy.addOperand(MachineOperand::physReg(
+                                        destination, regClass, true))
+                        .addOperand(use(node.operands()[i]));
+                    append(block, std::move(copy));
+                    ++index;
+                }
+                MachineInstr call(Opcode::TAILCALL);
+                call.addOperand(MachineOperand::external(node.symbol))
+                    .addOperand(MachineOperand::registerMask(
+                        callPreservedMask()));
+                append(block, std::move(call));
+                break;
+            }
             case SDOpcode::Branch: {
                 MachineInstr branch(Opcode::B);
                 branch.addOperand(MachineOperand::block(

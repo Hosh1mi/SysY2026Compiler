@@ -182,9 +182,14 @@ static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
     addCorrelatedCleanup(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
     pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    // 放在 TRE 之后：线性自递归已被消成循环的函数不再误加缓存；
+    // 指数型重叠子问题（仍保留自调用）继续受益。
     if (AutoMemoization::moduleHasAnyCandidate(m)) {
         pm.addPass(std::make_unique<AutoMemoization>());
     }
+    // After memo (and UnifyExitNodes): mark remaining call+ret tails for
+    // backend sibling/general TCO (b instead of bl).
+    pm.addPass(std::make_unique<TailCallOpt>());
 }
 
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
