@@ -109,6 +109,44 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
     return inferSignedBounds(value, lower, upper, visiting);
 }
 
+bool dependsOnValue(Value *value, Value *target,
+                    std::set<Value *> &visiting, unsigned depth = 0) {
+    if (value == target)
+        return true;
+    if (!value || depth > 16 || !visiting.insert(value).second)
+        return false;
+    auto *instruction = dynamic_cast<Instruction *>(value);
+    if (!instruction) {
+        visiting.erase(value);
+        return false;
+    }
+    for (unsigned i = 0; i < instruction->num_ops_; ++i)
+        if (dependsOnValue(instruction->get_operand(i), target, visiting,
+                           depth + 1)) {
+            visiting.erase(value);
+            return true;
+        }
+    visiting.erase(value);
+    return false;
+}
+
+// Keep a loop-carried remainder intact until loop transforms have had a
+// chance to combine several unrolled recurrence steps.  A later InstCombine
+// run can still lower the remaining remainder to bounded corrections.
+bool isLoopCarriedRemainder(BinaryInst *remainder) {
+    for (const auto &use : remainder->use_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(use.val_);
+        if (!phi || use.arg_no_ % 2 != 0 ||
+            use.arg_no_ + 1 >= phi->num_ops_ ||
+            phi->get_operand(use.arg_no_ + 1) != remainder->parent_)
+            continue;
+        std::set<Value *> visiting;
+        if (dependsOnValue(remainder->get_operand(0), phi, visiting))
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -365,6 +403,9 @@ Value* visitSRem(BinaryInst *inst) {
         if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
             return x;
     }
+
+    if (cy && cy->value_ > 0 && isLoopCarriedRemainder(inst))
+        return nullptr;
 
     // A value already known to lie in (-2M, 2M) needs at most one signed
     // correction in either direction.  This is especially valuable for

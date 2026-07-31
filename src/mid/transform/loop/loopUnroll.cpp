@@ -113,6 +113,110 @@ static void countLoopStates(const std::vector<PhiInst *> &headerPhis,
     }
 }
 
+static bool inferModuloTermBounds(Value *value, long long &lower,
+                                  long long &upper,
+                                  std::set<Value *> &visiting,
+                                  unsigned depth = 0) {
+    if (!value || depth > 12 || !visiting.insert(value).second)
+        return false;
+    auto finish = [&](bool result) {
+        visiting.erase(value);
+        return result;
+    };
+
+    if (auto *constant = dynamic_cast<ConstantInt *>(value)) {
+        lower = upper = constant->value_;
+        return finish(true);
+    }
+
+    auto *instruction = dynamic_cast<Instruction *>(value);
+    auto *type = value->type_
+                     ? dynamic_cast<IntegerType *>(value->type_)
+                     : nullptr;
+    if (!instruction || !type || type->num_bits_ != 32)
+        return finish(false);
+
+    if (instruction->op_id_ == Instruction::SRem) {
+        auto *modulus = dynamic_cast<ConstantInt *>(
+            instruction->get_operand(1));
+        if (!modulus || modulus->value_ <= 0)
+            return finish(false);
+        lower = -static_cast<long long>(modulus->value_) + 1;
+        upper = static_cast<long long>(modulus->value_) - 1;
+        return finish(true);
+    }
+
+    if (instruction->op_id_ == Instruction::Add ||
+        instruction->op_id_ == Instruction::Sub) {
+        long long lhsLower = 0, lhsUpper = 0;
+        long long rhsLower = 0, rhsUpper = 0;
+        if (!inferModuloTermBounds(instruction->get_operand(0), lhsLower,
+                                   lhsUpper, visiting, depth + 1) ||
+            !inferModuloTermBounds(instruction->get_operand(1), rhsLower,
+                                   rhsUpper, visiting, depth + 1))
+            return finish(false);
+        if (instruction->op_id_ == Instruction::Add) {
+            lower = lhsLower + rhsLower;
+            upper = lhsUpper + rhsUpper;
+        } else {
+            lower = lhsLower - rhsUpper;
+            upper = lhsUpper - rhsLower;
+        }
+        if (lower < std::numeric_limits<int>::min() ||
+            upper > std::numeric_limits<int>::max())
+            return finish(false);
+        return finish(true);
+    }
+
+    if (auto *select = dynamic_cast<SelectInst *>(instruction)) {
+        long long trueLower = 0, trueUpper = 0;
+        long long falseLower = 0, falseUpper = 0;
+        if (!inferModuloTermBounds(select->get_operand(1), trueLower,
+                                   trueUpper, visiting, depth + 1) ||
+            !inferModuloTermBounds(select->get_operand(2), falseLower,
+                                   falseUpper, visiting, depth + 1))
+            return finish(false);
+        lower = std::min(trueLower, falseLower);
+        upper = std::max(trueUpper, falseUpper);
+        return finish(true);
+    }
+
+    return finish(false);
+}
+
+static bool inferModuloTermBounds(Value *value, long long &lower,
+                                  long long &upper) {
+    std::set<Value *> visiting;
+    return inferModuloTermBounds(value, lower, upper, visiting);
+}
+
+static bool valueDependsOn(Value *value, Value *target,
+                           std::set<Value *> &visiting,
+                           unsigned depth = 0) {
+    if (value == target)
+        return true;
+    if (!value || depth > 16 || !visiting.insert(value).second)
+        return false;
+    auto *instruction = dynamic_cast<Instruction *>(value);
+    if (!instruction) {
+        visiting.erase(value);
+        return false;
+    }
+    for (unsigned i = 0; i < instruction->num_ops_; ++i)
+        if (valueDependsOn(instruction->get_operand(i), target, visiting,
+                           depth + 1)) {
+            visiting.erase(value);
+            return true;
+        }
+    visiting.erase(value);
+    return false;
+}
+
+static bool valueDependsOn(Value *value, Value *target) {
+    std::set<Value *> visiting;
+    return valueDependsOn(value, target, visiting);
+}
+
 static bool debugStructuredReject(Function *func, Loop &loop,
                                   const char *reason) {
     if (std::getenv("DEBUG_LOOP_UNROLL")) {
@@ -2177,6 +2281,141 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         }
     }
 
+    struct ModularRecurrence {
+        PhiInst *state = nullptr;
+        BinaryInst *remainder = nullptr;
+        ConstantInt *modulus = nullptr;
+        std::vector<Value *> contributionTerms;
+        std::set<Instruction *> updateChain;
+        long long contributionLower = 0;
+        long long contributionUpper = 0;
+        long long prefixLower = 0;
+        long long prefixUpper = 0;
+    };
+    std::vector<ModularRecurrence> modularRecurrences;
+    std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
+    std::set<Instruction *> modularUpdateInstructions;
+
+    // For an unrolled recurrence
+    //   state.next = (state + contribution) % M
+    // combine the first N-1 contributions behind one remainder.  The final
+    // iteration stays in its original form because rotated loops may export
+    // an intermediate value from that iteration to the dedicated exit block.
+    // This preserves that live-out mapping while shortening the serial
+    // remainder chain from N steps to two.
+    if (!deferredStateUpdates.empty() && N > 2) {
+        for (auto *phi : headerPhis) {
+            if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
+                continue;
+            auto *remainder = dynamic_cast<BinaryInst *>(getBackVal(phi));
+            if (!remainder || remainder->parent_ != header ||
+                remainder->op_id_ != Instruction::SRem)
+                continue;
+            auto *modulus = dynamic_cast<ConstantInt *>(
+                remainder->get_operand(1));
+            auto *init = dynamic_cast<ConstantInt *>(getInitVal(phi));
+            if (!modulus || modulus->value_ <= 0 || !init)
+                continue;
+
+            ModularRecurrence candidate;
+            candidate.state = phi;
+            candidate.remainder = remainder;
+            candidate.modulus = modulus;
+            candidate.updateChain.insert(remainder);
+            unsigned stateTerms = 0;
+            std::function<bool(Value *)> collectTerms = [&](Value *value) {
+                if (value == phi) {
+                    ++stateTerms;
+                    return true;
+                }
+                auto *binary = dynamic_cast<BinaryInst *>(value);
+                if (binary && binary->parent_ == header &&
+                    binary->op_id_ == Instruction::Add) {
+                    candidate.updateChain.insert(binary);
+                    return collectTerms(binary->get_operand(0)) &&
+                           collectTerms(binary->get_operand(1));
+                }
+                if (valueDependsOn(value, phi))
+                    return false;
+                candidate.contributionTerms.push_back(value);
+                return true;
+            };
+            if (!collectTerms(remainder->get_operand(0)) ||
+                stateTerms != 1 || candidate.contributionTerms.empty())
+                continue;
+
+            bool privateChain = true;
+            for (Instruction *chainInst : candidate.updateChain) {
+                for (const auto &use : chainInst->use_list_) {
+                    auto *user = dynamic_cast<Instruction *>(use.val_);
+                    if (candidate.updateChain.count(user))
+                        continue;
+                    if (chainInst == remainder && user == phi)
+                        continue;
+                    if (user && user->parent_ != header)
+                        continue;
+                    privateChain = false;
+                    break;
+                }
+                if (!privateChain)
+                    break;
+            }
+            if (!privateChain)
+                continue;
+
+            bool bounded = true;
+            for (Value *term : candidate.contributionTerms) {
+                for (auto *otherPhi : headerPhis)
+                    if (otherPhi != ivPhi &&
+                        valueDependsOn(term, otherPhi)) {
+                        bounded = false;
+                        break;
+                    }
+                if (!bounded)
+                    break;
+                long long termLower = 0, termUpper = 0;
+                if (!inferModuloTermBounds(term, termLower, termUpper)) {
+                    bounded = false;
+                    break;
+                }
+                candidate.contributionLower += termLower;
+                candidate.contributionUpper += termUpper;
+            }
+            if (!bounded)
+                continue;
+
+            const long long mod = modulus->value_;
+            long long stateLower = std::min<long long>(init->value_, -mod + 1);
+            long long stateUpper = std::max<long long>(init->value_, mod - 1);
+            for (int prefix = 1; prefix < N; ++prefix) {
+                long long lower = stateLower +
+                    prefix * candidate.contributionLower;
+                long long upper = stateUpper +
+                    prefix * candidate.contributionUpper;
+                if (lower < std::numeric_limits<int>::min() ||
+                    upper > std::numeric_limits<int>::max()) {
+                    bounded = false;
+                    break;
+                }
+                if (prefix == N - 1) {
+                    candidate.prefixLower = lower;
+                    candidate.prefixUpper = upper;
+                }
+            }
+            if (!bounded)
+                continue;
+
+            modularRecurrenceIndex[phi] = modularRecurrences.size();
+            modularUpdateInstructions.insert(
+                candidate.updateChain.begin(), candidate.updateChain.end());
+            modularRecurrences.push_back(std::move(candidate));
+            if (std::getenv("DEBUG_LOOP_UNROLL"))
+                std::cerr << "[LoopUnroll] func=" << func->name_
+                          << " header=" << header->name_
+                          << " modular-prefix=" << N - 1 << "\n";
+        }
+    }
+
     auto cloneBodyInstruction =
         [&](Instruction *inst,
             std::unordered_map<Value *, Value *> &localMap) -> bool {
@@ -2261,15 +2500,73 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
                 ++it;
         }
 
+        auto buildBoundedModulo = [&](Value *dividend, long long lower,
+                                      long long upper,
+                                      int modulus) -> Value * {
+            Value *adjusted = dividend;
+            if (upper >= modulus) {
+                auto *positiveMod = new ConstantInt(module->int32_ty_, modulus);
+                auto *highCmp = new ICmpInst(ICmpInst::ICMP_SGE, adjusted,
+                                              positiveMod, mainLoop);
+                auto *highSub = new BinaryInst(
+                    module->int32_ty_, Instruction::Sub, adjusted,
+                    positiveMod, mainLoop);
+                adjusted = new SelectInst(highCmp, highSub, adjusted,
+                                          mainLoop);
+            }
+            if (lower <= -modulus) {
+                auto *negativeMod =
+                    new ConstantInt(module->int32_ty_, -modulus);
+                auto *positiveMod =
+                    new ConstantInt(module->int32_ty_, modulus);
+                auto *lowCmp = new ICmpInst(ICmpInst::ICMP_SLE, adjusted,
+                                             negativeMod, mainLoop);
+                auto *lowAdd = new BinaryInst(
+                    module->int32_ty_, Instruction::Add, adjusted,
+                    positiveMod, mainLoop);
+                adjusted = new SelectInst(lowCmp, lowAdd, adjusted,
+                                          mainLoop);
+            }
+            return adjusted;
+        };
+
+        std::unordered_map<PhiInst *, Value *> modularPrefixStates;
+        for (const auto &recurrence : modularRecurrences) {
+            Value *accumulator = phiToMain[recurrence.state];
+            for (int iter = 0; iter < N - 1; ++iter) {
+                auto &localMap = iterationMaps[iter];
+                for (Value *term : recurrence.contributionTerms) {
+                    auto mapped = localMap.find(term);
+                    Value *contribution =
+                        mapped != localMap.end() ? mapped->second : term;
+                    accumulator = new BinaryInst(
+                        module->int32_ty_, Instruction::Add, accumulator,
+                        contribution, mainLoop);
+                }
+            }
+            Value *combined = buildBoundedModulo(
+                accumulator, recurrence.prefixLower,
+                recurrence.prefixUpper, recurrence.modulus->value_);
+            modularPrefixStates[recurrence.state] = combined;
+        }
+
         // Then emit each recurrence update in iteration order so its exact
-        // scalar semantics remain unchanged.
+        // scalar semantics remain unchanged.  Modular recurrences defer their
+        // private update chain until the final iteration; that iteration uses
+        // the safely combined prefix state above.
         for (int iter = 0; iter < N; ++iter) {
             auto &localMap = iterationMaps[iter];
+            if (iter == N - 1)
+                for (const auto &[phi, value] : modularPrefixStates)
+                    curPhiVals[phi] = value;
             for (auto *phi : headerPhis)
                 if (phi != ivPhi)
                     localMap[phi] = curPhiVals[phi];
             for (auto *inst : header->instr_list_) {
                 if (!deferredStateUpdates.count(inst))
+                    continue;
+                if (iter < N - 1 &&
+                    modularUpdateInstructions.count(inst))
                     continue;
                 if (!cloneBodyInstruction(inst, localMap))
                     return false;
@@ -2277,10 +2574,31 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
             for (auto *phi : headerPhis) {
                 if (phi == ivPhi)
                     continue;
+                if (iter < N - 1 && modularRecurrenceIndex.count(phi))
+                    continue;
                 Value *back = getBackVal(phi);
                 auto stateIt = localMap.find(back);
                 if (stateIt == localMap.end())
                     return false;
+                auto recurrenceIt = modularRecurrenceIndex.find(phi);
+                if (iter == N - 1 &&
+                    recurrenceIt != modularRecurrenceIndex.end()) {
+                    const auto &recurrence =
+                        modularRecurrences[recurrenceIt->second];
+                    auto *finalRemainder =
+                        dynamic_cast<BinaryInst *>(stateIt->second);
+                    if (!finalRemainder ||
+                        finalRemainder->op_id_ != Instruction::SRem)
+                        return false;
+                    const long long mod = recurrence.modulus->value_;
+                    Value *lowered = buildBoundedModulo(
+                        finalRemainder->get_operand(0),
+                        -mod + 1 + recurrence.contributionLower,
+                        mod - 1 + recurrence.contributionUpper,
+                        recurrence.modulus->value_);
+                    localMap[back] = lowered;
+                    stateIt = localMap.find(back);
+                }
                 curPhiVals[phi] = stateIt->second;
             }
             if (iter == N - 1)
