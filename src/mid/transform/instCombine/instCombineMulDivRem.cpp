@@ -1,4 +1,5 @@
 #include "instCombineInternal.hpp"
+#include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
 #include <limits>
 #include <set>
@@ -109,27 +110,6 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
     return inferSignedBounds(value, lower, upper, visiting);
 }
 
-bool dependsOnValue(Value *value, Value *target,
-                    std::set<Value *> &visiting, unsigned depth = 0) {
-    if (value == target)
-        return true;
-    if (!value || depth > 16 || !visiting.insert(value).second)
-        return false;
-    auto *instruction = dynamic_cast<Instruction *>(value);
-    if (!instruction) {
-        visiting.erase(value);
-        return false;
-    }
-    for (unsigned i = 0; i < instruction->num_ops_; ++i)
-        if (dependsOnValue(instruction->get_operand(i), target, visiting,
-                           depth + 1)) {
-            visiting.erase(value);
-            return true;
-        }
-    visiting.erase(value);
-    return false;
-}
-
 // Keep a loop-carried remainder intact until loop transforms have had a
 // chance to combine several unrolled recurrence steps.  A later InstCombine
 // run can still lower the remaining remainder to bounded corrections.
@@ -140,8 +120,65 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
             use.arg_no_ + 1 >= phi->num_ops_ ||
             phi->get_operand(use.arg_no_ + 1) != remainder->parent_)
             continue;
-        std::set<Value *> visiting;
-        if (dependsOnValue(remainder->get_operand(0), phi, visiting))
+        std::set<BasicBlock *> updateBlocks{remainder->parent_};
+        ModuloRecurrenceAnalysis::Recurrence recurrence;
+        if (!ModuloRecurrenceAnalysis::analyze(
+                phi, remainder, updateBlocks, recurrence) ||
+            !ModuloRecurrenceAnalysis::hasPrivateUpdateChain(
+                recurrence, updateBlocks, true))
+            continue;
+
+        Value *init = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) != remainder->parent_) {
+                init = phi->get_operand(i);
+                break;
+            }
+        }
+        long long initLower = 0, initUpper = 0;
+        if (!init || !ModuloRecurrenceAnalysis::inferBounds(
+                         init, initLower, initUpper))
+            continue;
+
+        const long long mod = recurrence.modulus->value_;
+        auto advanceByTerms = [&](long long &lower, long long &upper) {
+            for (const auto &term : recurrence.contributionTerms) {
+                long long termLower = 0, termUpper = 0;
+                if (!ModuloRecurrenceAnalysis::inferBounds(
+                        term.value, termLower, termUpper))
+                    return false;
+                __int128 nextLower =
+                    term.sign > 0
+                        ? static_cast<__int128>(lower) + termLower
+                        : static_cast<__int128>(lower) - termUpper;
+                __int128 nextUpper =
+                    term.sign > 0
+                        ? static_cast<__int128>(upper) + termUpper
+                        : static_cast<__int128>(upper) - termLower;
+                if (nextLower < std::numeric_limits<int>::min() ||
+                    nextUpper > std::numeric_limits<int>::max())
+                    return false;
+                lower = static_cast<long long>(nextLower);
+                upper = static_cast<long long>(nextUpper);
+            }
+            return true;
+        };
+
+        long long prefixLower = std::min(initLower, -mod + 1);
+        long long prefixUpper = std::max(initUpper, mod - 1);
+        bool safe = true;
+        // Cover every factor currently selected by LoopUnroll (4 or 8).
+        for (int iteration = 0; iteration < 7; ++iteration)
+            if (safe)
+                safe = advanceByTerms(prefixLower, prefixUpper);
+        long long finalLower = -mod + 1;
+        long long finalUpper = mod - 1;
+        if (safe)
+            safe = advanceByTerms(finalLower, finalUpper);
+        if (safe && ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+                        prefixLower, prefixUpper, mod) &&
+            ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+                finalLower, finalUpper, mod))
             return true;
     }
     return false;
