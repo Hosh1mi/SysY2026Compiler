@@ -113,6 +113,26 @@ static bool prepareModuloRecurrence(
     return true;
 }
 
+static bool isMustExecuteModuloRecurrence(
+    const UnrolledModuloRecurrence &recurrence, const Loop &loop,
+    Function *func, BasicBlock *latch) {
+    if (!func || !latch)
+        return false;
+    for (Instruction *instruction : recurrence.updateChain) {
+        if (!instruction->parent_ ||
+            !loop.blocks.count(instruction->parent_) ||
+            !func->dominates(instruction->parent_, latch))
+            return false;
+    }
+    for (const auto &term : recurrence.contributionTerms) {
+        auto *instruction = dynamic_cast<Instruction *>(term.value);
+        if (instruction && loop.blocks.count(instruction->parent_) &&
+            !func->dominates(instruction->parent_, latch))
+            return false;
+    }
+    return true;
+}
+
 static Value *buildBoundedModulo(Value *dividend, long long lower,
                                  long long upper, int modulus,
                                  Module *module, BasicBlock *block) {
@@ -1079,6 +1099,35 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     if (bodyInstCount * N > 32)
         return debugStructuredReject(func, loop, "clone-budget");
 
+    std::vector<UnrolledModuloRecurrence> modularRecurrences;
+    std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
+    std::set<Instruction *> modularUpdateInstructions;
+    if (N > 2) {
+        for (auto *phi : headerPhis) {
+            if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
+                continue;
+            auto *remainder =
+                dynamic_cast<BinaryInst *>(latchVals[phi]);
+            UnrolledModuloRecurrence candidate;
+            if (!remainder ||
+                !prepareModuloRecurrence(
+                    phi, remainder, initVals[phi], loop.blocks,
+                    headerPhis, ivPhi, N, false, candidate) ||
+                !isMustExecuteModuloRecurrence(
+                    candidate, loop, func, latch))
+                continue;
+            modularRecurrenceIndex[phi] = modularRecurrences.size();
+            modularUpdateInstructions.insert(
+                candidate.updateChain.begin(), candidate.updateChain.end());
+            modularRecurrences.push_back(std::move(candidate));
+            if (std::getenv("DEBUG_LOOP_UNROLL"))
+                std::cerr << "[LoopUnroll] func=" << func->name_
+                          << " header=" << header->name_
+                          << " modular-prefix=" << N - 1
+                          << " form=structured\n";
+        }
+    }
+
     int guardAdj = (N - 1) * strideVal;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
         if (strideVal > 0 && cb->value_ < guardAdj)
@@ -1146,6 +1195,56 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
                     if (!oldBr)
                         return false;
                     if (oldBB == latch) {
+                        if (iter < N - 1) {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *accumulator =
+                                    currentPhiVals[recurrence.state];
+                                for (const auto &term :
+                                     recurrence.contributionTerms) {
+                                    Value *contribution = mapLoopValue(
+                                        term.value, valueMap, bbMap);
+                                    if (!contribution)
+                                        return debugStructuredReject(
+                                            func, loop,
+                                            "modular-term-map-fail");
+                                    accumulator = new BinaryInst(
+                                        module->int32_ty_,
+                                        term.sign > 0 ? Instruction::Add
+                                                      : Instruction::Sub,
+                                        accumulator, contribution, newBB);
+                                }
+                                if (iter == N - 2)
+                                    accumulator = buildBoundedModulo(
+                                        accumulator,
+                                        recurrence.prefixLower,
+                                        recurrence.prefixUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                                currentPhiVals[recurrence.state] = accumulator;
+                            }
+                        } else {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *mapped = mapLoopValue(
+                                    recurrence.remainder, valueMap, bbMap);
+                                auto *finalRemainder =
+                                    dynamic_cast<BinaryInst *>(mapped);
+                                if (!finalRemainder ||
+                                    finalRemainder->op_id_ !=
+                                        Instruction::SRem)
+                                    return debugStructuredReject(
+                                        func, loop,
+                                        "modular-final-map-fail");
+                                valueMap[recurrence.remainder] =
+                                    buildBoundedModulo(
+                                        finalRemainder->get_operand(0),
+                                        recurrence.finalLower,
+                                        recurrence.finalUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                            }
+                        }
                         if (iter + 1 < N)
                             new BranchInst(headerCloneFor(iter + 1), newBB);
                         else
@@ -1169,6 +1268,10 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
                     continue;
                 }
 
+                if (iter < N - 1 &&
+                    modularUpdateInstructions.count(oldInst))
+                    continue;
+
                 auto *newInst = cloneInst(oldInst, newBB, valueMap);
                 if (!newInst)
                     return false;
@@ -1177,6 +1280,8 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         }
 
         for (auto *phi : headerPhis) {
+            if (iter < N - 1 && modularRecurrenceIndex.count(phi))
+                continue;
             auto *mapped = mapLoopValue(latchVals[phi], valueMap, bbMap);
             if (!mapped)
                 return debugStructuredReject(func, loop, "latch-map-fail");
@@ -1409,7 +1514,39 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
             return debugCFGRegionReject(func, loop, "stateful-non-header-liveout");
     }
 
-    const int N = 2;
+    int N = 2;
+    std::vector<UnrolledModuloRecurrence> modularRecurrences;
+    std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
+    std::set<Instruction *> modularUpdateInstructions;
+    if (bodyInstCount <= 24 && loop.blocksOrdered.size() <= 12) {
+        constexpr int modularFactor = 4;
+        for (auto *phi : headerPhis) {
+            if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
+                continue;
+            auto *remainder =
+                dynamic_cast<BinaryInst *>(latchVals[phi]);
+            UnrolledModuloRecurrence candidate;
+            if (!remainder ||
+                !prepareModuloRecurrence(
+                    phi, remainder, initVals[phi], loop.blocks,
+                    headerPhis, ivPhi, modularFactor, false, candidate) ||
+                !isMustExecuteModuloRecurrence(
+                    candidate, loop, func, latch))
+                continue;
+            modularRecurrenceIndex[phi] = modularRecurrences.size();
+            modularUpdateInstructions.insert(
+                candidate.updateChain.begin(), candidate.updateChain.end());
+            modularRecurrences.push_back(std::move(candidate));
+        }
+        if (!modularRecurrences.empty()) {
+            N = modularFactor;
+            if (std::getenv("DEBUG_LOOP_UNROLL"))
+                std::cerr << "[LoopUnroll] func=" << func->name_
+                          << " header=" << header->name_
+                          << " modular-prefix=" << N - 1
+                          << " form=stateful-while-cfg\n";
+        }
+    }
     const int guardAdj = N - 1;
     Value *boundMain = nullptr;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
@@ -1496,6 +1633,56 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                     if (!oldBr)
                         return false;
                     if (oldBB == latch) {
+                        if (iter < N - 1) {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *accumulator =
+                                    currentPhiVals[recurrence.state];
+                                for (const auto &term :
+                                     recurrence.contributionTerms) {
+                                    Value *contribution = mapLoopValue(
+                                        term.value, valueMap, bbMap);
+                                    if (!contribution)
+                                        return debugCFGRegionReject(
+                                            func, loop,
+                                            "stateful-modular-term-map-fail");
+                                    accumulator = new BinaryInst(
+                                        module->int32_ty_,
+                                        term.sign > 0 ? Instruction::Add
+                                                      : Instruction::Sub,
+                                        accumulator, contribution, newBB);
+                                }
+                                if (iter == N - 2)
+                                    accumulator = buildBoundedModulo(
+                                        accumulator,
+                                        recurrence.prefixLower,
+                                        recurrence.prefixUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                                currentPhiVals[recurrence.state] = accumulator;
+                            }
+                        } else {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *mapped = mapLoopValue(
+                                    recurrence.remainder, valueMap, bbMap);
+                                auto *finalRemainder =
+                                    dynamic_cast<BinaryInst *>(mapped);
+                                if (!finalRemainder ||
+                                    finalRemainder->op_id_ !=
+                                        Instruction::SRem)
+                                    return debugCFGRegionReject(
+                                        func, loop,
+                                        "stateful-modular-final-map-fail");
+                                valueMap[recurrence.remainder] =
+                                    buildBoundedModulo(
+                                        finalRemainder->get_operand(0),
+                                        recurrence.finalLower,
+                                        recurrence.finalUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                            }
+                        }
                         if (iter + 1 < N)
                             new BranchInst(headerCloneFor(iter + 1), newBB);
                         else
@@ -1518,6 +1705,10 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                     }
                     continue;
                 }
+
+                if (iter < N - 1 &&
+                    modularUpdateInstructions.count(oldInst))
+                    continue;
 
                 auto *newInst = cloneInst(oldInst, newBB, valueMap);
                 if (!newInst)
@@ -1548,6 +1739,8 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
         }
 
         for (auto *phi : headerPhis) {
+            if (iter < N - 1 && modularRecurrenceIndex.count(phi))
+                continue;
             Value *mapped = mapLoopValue(latchVals[phi], valueMap, bbMap);
             if (!mapped)
                 return debugCFGRegionReject(func, loop, "stateful-latch-map-fail");
@@ -1780,6 +1973,32 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
 
     const int N = DEFAULT_UNROLL_FACTOR;
     const int guardAdj = N - 1;
+
+    std::vector<UnrolledModuloRecurrence> modularRecurrences;
+    std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
+    std::set<Instruction *> modularUpdateInstructions;
+    for (auto *phi : headerPhis) {
+        if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
+            continue;
+        auto *remainder = dynamic_cast<BinaryInst *>(latchVals[phi]);
+        UnrolledModuloRecurrence candidate;
+        if (!remainder ||
+            !prepareModuloRecurrence(
+                phi, remainder, initVals[phi], loop.blocks,
+                headerPhis, ivPhi, N, false, candidate) ||
+            !isMustExecuteModuloRecurrence(candidate, loop, func, latch))
+            continue;
+        modularRecurrenceIndex[phi] = modularRecurrences.size();
+        modularUpdateInstructions.insert(
+            candidate.updateChain.begin(), candidate.updateChain.end());
+        modularRecurrences.push_back(std::move(candidate));
+        if (std::getenv("DEBUG_LOOP_UNROLL"))
+            std::cerr << "[LoopUnroll] func=" << func->name_
+                      << " header=" << header->name_
+                      << " modular-prefix=" << N - 1
+                      << " form=cfg-region\n";
+    }
+
     Value *boundMain = nullptr;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
         if (cb->value_ < initConst->value_ + guardAdj)
@@ -1861,6 +2080,56 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
                     if (!oldBr)
                         return false;
                     if (oldBB == latch) {
+                        if (iter < N - 1) {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *accumulator =
+                                    currentPhiVals[recurrence.state];
+                                for (const auto &term :
+                                     recurrence.contributionTerms) {
+                                    Value *contribution = mapLoopValue(
+                                        term.value, valueMap, bbMap);
+                                    if (!contribution)
+                                        return debugCFGRegionReject(
+                                            func, loop,
+                                            "modular-term-map-fail");
+                                    accumulator = new BinaryInst(
+                                        module->int32_ty_,
+                                        term.sign > 0 ? Instruction::Add
+                                                      : Instruction::Sub,
+                                        accumulator, contribution, newBB);
+                                }
+                                if (iter == N - 2)
+                                    accumulator = buildBoundedModulo(
+                                        accumulator,
+                                        recurrence.prefixLower,
+                                        recurrence.prefixUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                                currentPhiVals[recurrence.state] = accumulator;
+                            }
+                        } else {
+                            for (const auto &recurrence :
+                                 modularRecurrences) {
+                                Value *mapped = mapLoopValue(
+                                    recurrence.remainder, valueMap, bbMap);
+                                auto *finalRemainder =
+                                    dynamic_cast<BinaryInst *>(mapped);
+                                if (!finalRemainder ||
+                                    finalRemainder->op_id_ !=
+                                        Instruction::SRem)
+                                    return debugCFGRegionReject(
+                                        func, loop,
+                                        "modular-final-map-fail");
+                                valueMap[recurrence.remainder] =
+                                    buildBoundedModulo(
+                                        finalRemainder->get_operand(0),
+                                        recurrence.finalLower,
+                                        recurrence.finalUpper,
+                                        recurrence.modulus->value_, module,
+                                        newBB);
+                            }
+                        }
                         if (iter + 1 < N)
                             new BranchInst(headerCloneFor(iter + 1), newBB);
                         else
@@ -1887,6 +2156,9 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
                     valueMap[oldInst] = new ConstantInt(module->int1_ty_, 0);
                     continue;
                 }
+                if (iter < N - 1 &&
+                    modularUpdateInstructions.count(oldInst))
+                    continue;
                 auto *newInst = cloneInst(oldInst, newBB, valueMap);
                 if (!newInst)
                     return false;
@@ -1916,6 +2188,8 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         }
 
         for (auto *phi : headerPhis) {
+            if (iter < N - 1 && modularRecurrenceIndex.count(phi))
+                continue;
             Value *mapped = mapLoopValue(latchVals[phi], valueMap, bbMap);
             if (!mapped)
                 return debugCFGRegionReject(func, loop, "latch-map-fail");

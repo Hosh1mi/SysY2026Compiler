@@ -120,7 +120,18 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
             use.arg_no_ + 1 >= phi->num_ops_ ||
             phi->get_operand(use.arg_no_ + 1) != remainder->parent_)
             continue;
-        std::set<BasicBlock *> updateBlocks{remainder->parent_};
+        BasicBlock *header = phi->parent_;
+        Function *function = header ? header->parent_ : nullptr;
+        if (!function)
+            continue;
+        std::set<BasicBlock *> updateBlocks;
+        for (BasicBlock *block : function->basic_blocks_) {
+            if (function->dominates(header, block) &&
+                function->dominates(block, remainder->parent_))
+                updateBlocks.insert(block);
+        }
+        if (!updateBlocks.count(remainder->parent_))
+            continue;
         ModuloRecurrenceAnalysis::Recurrence recurrence;
         if (!ModuloRecurrenceAnalysis::analyze(
                 phi, remainder, updateBlocks, recurrence) ||
