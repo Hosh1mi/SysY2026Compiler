@@ -556,9 +556,6 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         return reject("non-i32");
     if (lhs.kind == PackedOperand::GATHER && rhs.kind == PackedOperand::GATHER)
         return reject("two-gathers");
-    // 两路非不变载入的点积（acc += a[i]*b[i]）暂不向量化：后端向量 mla 的
-    // 取址有 loadAddr 缓存 bug（两路 ld1 撞同一暂存寄存器，算成 b*b）。
-    // 待后端修好该缓存问题后再放开。求和与 a[i]*const 不受影响。
     if (isAdd && !noMul &&
         lhs.kind != PackedOperand::INVARIANT &&
         rhs.kind != PackedOperand::INVARIANT)
