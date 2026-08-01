@@ -19,6 +19,7 @@
 #include "localCopyPropagation.hpp"
 #include "inlineExpand.hpp"
 #include "bitFuncRecognize.hpp"
+#include "lastIterationElimination.hpp"
 #include "loopSimplify.hpp"
 #include "lcssa.hpp"
 #include "simpleLoopUnswitch.hpp"

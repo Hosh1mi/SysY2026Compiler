@@ -130,6 +130,44 @@ bool normalizeCompare(ICmpInst *compare, Value *inductionValue,
 }
 
 bool continuationSense(BranchInst *branch, const Loop *loop,
+                       bool &continuesWhenTrue);
+
+bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
+                        const Loop *loop, ICmpInst *&compare, Value *&bound,
+                        ICmpInst::ICmpOp &predicate) {
+    auto *branch = guardBlock
+                       ? dynamic_cast<BranchInst *>(guardBlock->get_terminator())
+                       : nullptr;
+    if (!branch || branch->num_ops_ != 3)
+        return false;
+    compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
+    if (!compare || compare->parent_ != guardBlock)
+        return false;
+
+    if (compare->get_operand(0) == inductionValue) {
+        bound = compare->get_operand(1);
+    } else if (compare->get_operand(1) == inductionValue) {
+        bound = compare->get_operand(0);
+    } else {
+        return false;
+    }
+    if (!isLoopInvariant(bound, loop))
+        return false;
+
+    predicate = compare->icmp_op_;
+    if (predicate != ICmpInst::ICMP_EQ &&
+        predicate != ICmpInst::ICMP_NE)
+        return false;
+
+    bool continuesWhenTrue = false;
+    if (!continuationSense(branch, loop, continuesWhenTrue))
+        return false;
+    if (!continuesWhenTrue)
+        predicate = invertPredicate(predicate);
+    return predicate == ICmpInst::ICMP_NE;
+}
+
+bool continuationSense(BranchInst *branch, const Loop *loop,
                        bool &continuesWhenTrue) {
     if (!branch || branch->num_ops_ != 3 || !loop) return false;
     auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
@@ -249,6 +287,76 @@ bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
 }
 
 } // namespace
+
+bool describeEqualityControlInduction(const Loop &loop,
+                                      InductionDescriptor &descriptor) {
+    BasicBlock *latch = loop.singleLatch();
+    if (!loop.preheader || !latch)
+        return false;
+
+    for (auto *instruction : loop.header->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(instruction);
+        if (!phi)
+            break;
+        if (phi->num_ops_ != 4 ||
+            phi->type_->tid_ != Type::IntegerTyID)
+            continue;
+
+        Value *start = nullptr;
+        Value *latchValue = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            auto *source =
+                dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (source == loop.preheader)
+                start = phi->get_operand(i);
+            else if (source == latch)
+                latchValue = phi->get_operand(i);
+        }
+        if (!start || !latchValue || !isLoopInvariant(start, &loop))
+            continue;
+
+        BinaryInst *update = nullptr;
+        Value *step = nullptr;
+        bool stepNegated = false;
+        std::optional<long long> constantStep;
+        if (!matchInductionUpdate(latchValue, phi, &loop, update, step,
+                                  stepNegated, constantStep))
+            continue;
+
+        ICmpInst *compare = nullptr;
+        Value *bound = nullptr;
+        ICmpInst::ICmpOp predicate = ICmpInst::ICMP_NE;
+        InductionGuardPosition guardPosition =
+            InductionGuardPosition::Header;
+        bool comparesUpdate = false;
+
+        if (!matchEqualityGuard(loop.header, phi, &loop, compare, bound,
+                                predicate)) {
+            guardPosition = InductionGuardPosition::Latch;
+            if (matchEqualityGuard(latch, update, &loop, compare, bound,
+                                   predicate)) {
+                comparesUpdate = true;
+            } else if (!matchEqualityGuard(latch, phi, &loop, compare, bound,
+                                           predicate)) {
+                continue;
+            }
+        }
+
+        descriptor.phi = phi;
+        descriptor.start = start;
+        descriptor.update = update;
+        descriptor.step = step;
+        descriptor.stepNegated = stepNegated;
+        descriptor.constantStep = constantStep;
+        descriptor.compare = compare;
+        descriptor.bound = bound;
+        descriptor.predicate = predicate;
+        descriptor.guardPosition = guardPosition;
+        descriptor.comparesUpdate = comparesUpdate;
+        return true;
+    }
+    return false;
+}
 
 // ── Loop ───────────────────────────────────────────────────────────────────
 

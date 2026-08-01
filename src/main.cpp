@@ -153,6 +153,7 @@ static void addScalarCleanup(PassManager &pm) {
 
 static void addInterproceduralAndGlobals(PassManager &pm) {
     pm.addPass(std::make_unique<BitFuncRecognize>());
+    pm.addPass(std::make_unique<LastIterationElimination>());
     pm.addPass(std::make_unique<InlineExpand>());
     pm.addPass(std::make_unique<LocalCopyPropagation>());
     pm.addPass(std::make_unique<SemanticMarkerStamp>());

@@ -37,6 +37,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "ScalarExpansion",
         "LoopDistribution",
         "LoopInvariantReduction",
+        "LastIterationElimination",
         "LoopSimplify",
         "LCSSA",
         "IndVarSimplify",
