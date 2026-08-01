@@ -34,6 +34,7 @@
 #include "loopRepFold.hpp"
 #include "linearRecurrenceFold.hpp"
 #include "triangularPanelize.hpp"
+#include "triangularRemapSourceCompose.hpp"
 #include "loopDistribution.hpp"
 #include "loopInvariantReduction.hpp"
 #include "loopFusion.hpp"
