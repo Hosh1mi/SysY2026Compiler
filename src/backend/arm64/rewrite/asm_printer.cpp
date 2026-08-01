@@ -558,16 +558,29 @@ void printInstruction(const MachineFunction &function,
                << vectorView(operands[1]) << ", "
                << vectorView(operands[2]) << '\n';
         break;
+    case Opcode::SHLiv4i32:
+    case Opcode::SSHRiv4i32:
+    case Opcode::USHRiv4i32:
+        output << '\t'
+               << (instruction.opcode() == Opcode::SHLiv4i32 ? "shl"
+                   : instruction.opcode() == Opcode::SSHRiv4i32 ? "sshr"
+                                                                 : "ushr")
+               << ' ' << vectorView(operands[0]) << ", "
+               << vectorView(operands[1]) << ", #"
+               << operands[2].immediate() << '\n';
+        break;
     case Opcode::MLAv4i32: case Opcode::MLSv4i32:
     case Opcode::FMLAv4f32: case Opcode::FMLSv4f32:
+        if (operands.size() != 4)
+            throw std::logic_error("malformed vector multiply-accumulate");
         output << '\t'
                << (instruction.opcode() == Opcode::MLAv4i32 ? "mla"
                    : instruction.opcode() == Opcode::MLSv4i32 ? "mls"
                    : instruction.opcode() == Opcode::FMLAv4f32 ? "fmla"
                                                                : "fmls")
                << ' ' << vectorView(operands[0]) << ", "
-               << vectorView(operands[1]) << ", "
-               << vectorView(operands[2]) << '\n';
+               << vectorView(operands[2]) << ", "
+               << vectorView(operands[3]) << '\n';
         break;
     case Opcode::SHUFFLEv16i8: {
         if (operands.size() != 4)

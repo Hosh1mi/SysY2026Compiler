@@ -1,4 +1,5 @@
 #include "../../include/mid/analysis/loopVectorizationAnalysis.hpp"
+#include "../../include/mid/analysis/vectorizationCostModel.hpp"
 #include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
@@ -377,6 +378,9 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         case Instruction::And:
         case Instruction::Or:
         case Instruction::Xor:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
         case Instruction::FAdd:
         case Instruction::FSub:
         case Instruction::FMul:
@@ -449,42 +453,75 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
 
 bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
                                                    std::string *reason) const {
-    int work = 0;
+    VectorizationCostModel costs;
+    int scalarLaneCost = 0;
+    int vectorPartCost = 0;
+    int livePerPart = 0;
+    std::set<Value *> splattedValues;
+    std::set<size_t> addressGroups;
+
+    for (const auto &access : plan.memoryAccesses)
+        if (access.addressKind != AddressKind::Uniform)
+            addressGroups.insert(access.addressGroup);
+
     for (auto *inst : plan.recipes) {
         if (inst->is_load() || inst->is_store() ||
-            dynamic_cast<BinaryInst *>(inst) ||
-            dynamic_cast<CallInst *>(inst))
-            ++work;
+            dynamic_cast<BinaryInst *>(inst) || dynamic_cast<CallInst *>(inst)) {
+            scalarLaneCost += costs.scalarInstructionCost(inst);
+            vectorPartCost += costs.vectorInstructionCost(inst);
+            if (!inst->is_store()) ++livePerPart;
+        }
+
+        auto *binary = dynamic_cast<BinaryInst *>(inst);
+        auto *call = dynamic_cast<CallInst *>(inst);
+        if (!binary && !call) continue;
+        unsigned valueOperands = call ? call->num_ops_ - 1 : inst->num_ops_;
+        for (unsigned i = 0; i < valueOperands; ++i) {
+            Value *operand = inst->get_operand(i);
+            if (isLoopInvariant(operand, *plan.loop))
+                splattedValues.insert(operand);
+        }
     }
-    // Cortex-A53 is an in-order, dual-issue core with 32 architectural SIMD
-    // registers.  Two independent vector parts hide load/use latency and halve
-    // branch overhead.  Keep the limit tied to the planned operation and
-    // memory-access counts: four memory values plus the arithmetic temporaries
-    // of a twelve-operation body still leave headroom for address generation
-    // and lowering scratch registers, while larger bodies stay at UF=1 to
-    // avoid spills.
-    if (work <= 12 && plan.memoryAccesses.size() <= 4)
+
+    if (scalarLaneCost <= 0 || vectorPartCost <= 0)
+        return reject(reason, "vector body has no costed work");
+
+    plan.setupCost = costs.setupCost(splattedValues.size(),
+                                     plan.runtimeMemoryChecks.size(),
+                                     addressGroups.size());
+    const int persistentVectors = static_cast<int>(splattedValues.size()) +
+                                  static_cast<int>(plan.pointerRecurrences.size()) +
+                                  static_cast<int>(addressGroups.size());
+    plan.estimatedLiveVectors = livePerPart + persistentVectors;
+
+    // UF=2 is useful on this in-order target only while two copies of the
+    // vector body leave ample room for persistent values and lowering
+    // temporaries.  Otherwise prefer UF=1 rather than relying on later spills.
+    const int unrolledLive = livePerPart * 2 + persistentVectors;
+    if (unrolledLive <= costs.maximumUnrolledLiveVectors())
         plan.unrollFactor = 2;
 
-    int lanesPerIteration = plan.vectorWidth * plan.unrollFactor;
-    plan.scalarCost = work * lanesPerIteration;
-    plan.vectorCost = work * plan.unrollFactor + 3;
-    if (plan.vectorCost >= plan.scalarCost)
+    auto setCandidate = [&](int unrollFactor) {
+        plan.unrollFactor = unrollFactor;
+        const int width = plan.vectorWidth * unrollFactor;
+        plan.scalarCost = scalarLaneCost * width;
+        plan.vectorCost = vectorPartCost * unrollFactor +
+                          costs.vectorLoopControlCost();
+        plan.minimumTripCount = costs.minimumProfitableTripCount(
+            scalarLaneCost, vectorPartCost, plan.setupCost, unrollFactor);
+    };
+    setCandidate(plan.unrollFactor);
+    if (plan.minimumTripCount == 0 || plan.vectorCost >= plan.scalarCost)
         return reject(reason, "estimated vector cost is not lower than scalar cost");
 
     auto *init = dynamic_cast<ConstantInt *>(plan.induction.init);
     auto *bound = dynamic_cast<ConstantInt *>(plan.induction.bound);
     if (init && bound) {
         long long trip = static_cast<long long>(bound->value_) - init->value_;
-        if (trip < 2LL * lanesPerIteration) {
-            if (plan.unrollFactor == 2 && trip >= 2LL * plan.vectorWidth) {
-                plan.unrollFactor = 1;
-                lanesPerIteration = plan.vectorWidth;
-                plan.scalarCost = work * lanesPerIteration;
-                plan.vectorCost = work + 3;
-            } else {
-                return reject(reason, "constant trip count is too small");
-            }
+        if (trip < plan.minimumTripCount && plan.unrollFactor == 2)
+            setCandidate(1);
+        if (trip < plan.minimumTripCount) {
+            return reject(reason, "constant trip count is too small");
         }
     }
     return true;

@@ -1303,19 +1303,20 @@ bool LoopVectorize::emitVectorizedLoop(
         initialAddressForGroup[access.addressGroup] = initialPointer;
     }
 
-    // Hoist the signed-overflow proof and first full-vector test out of the
-    // vector loop.  Proving `init + vectorTrip - 1 < bound` also proves that
+    // Hoist the signed-overflow proof and profitable-entry test out of the
+    // vector loop.  Proving `init + minimumTrip - 1 < bound` also proves that
     // `bound - vectorTrip` is representable.  Once entered, therefore,
     // `iv <= bound - vectorTrip` is exactly the scalar `iv < bound` condition
     // for every lane.  Constant initial values make the entry test a single
     // comparison, which is the common canonical-loop form.
+    const int minimumTrip = std::max(vectorTrip, plan.minimumTripCount);
     Value *canEnterVector = nullptr;
     if (auto *constantInit =
             dynamic_cast<ConstantInt *>(plan.induction.init)) {
-        if (constantInit->value_ <= INT_MAX - (vectorTrip - 1)) {
+        if (constantInit->value_ <= INT_MAX - (minimumTrip - 1)) {
             auto *lastInitialLane = new ConstantInt(
                 module->int32_ty_,
-                constantInit->value_ + vectorTrip - 1);
+                constantInit->value_ + minimumTrip - 1);
             auto *initialFull = new ICmpInst(ICmpInst::ICMP_SLT,
                                              lastInitialLane,
                                              plan.induction.bound, preheader);
@@ -1326,13 +1327,13 @@ bool LoopVectorize::emitVectorizedLoop(
         }
     } else {
         auto *maxStart = new ConstantInt(
-            module->int32_ty_, INT_MAX - (vectorTrip - 1));
+            module->int32_ty_, INT_MAX - (minimumTrip - 1));
         auto *initAddSafe = new ICmpInst(ICmpInst::ICMP_SLE,
                                          plan.induction.init, maxStart,
                                          preheader);
         insertBeforePreheaderTerminator(initAddSafe);
         auto *lastOffset = new ConstantInt(module->int32_ty_,
-                                           vectorTrip - 1);
+                                           minimumTrip - 1);
         auto *lastInitialLane = new BinaryInst(
             module->int32_ty_, Instruction::Add, plan.induction.init,
             lastOffset, preheader, true);

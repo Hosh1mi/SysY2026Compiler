@@ -704,7 +704,8 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
             SDNode &node = *owned;
             if (node.opcode() == SDOpcode::Add &&
                 node.operands().size() == 2 &&
-                node.resultTypes().front() == ValueType::I32) {
+                (node.resultTypes().front() == ValueType::I32 ||
+                 node.resultTypes().front() == ValueType::V4I32)) {
                 for (unsigned multiplyIndex = 0; multiplyIndex < 2;
                      ++multiplyIndex) {
                     SDNode *multiply = node.operands()[multiplyIndex].node;
@@ -721,7 +722,8 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
                 }
             } else if (node.opcode() == SDOpcode::Sub &&
                        node.operands().size() == 2 &&
-                       node.resultTypes().front() == ValueType::I32) {
+                       (node.resultTypes().front() == ValueType::I32 ||
+                        node.resultTypes().front() == ValueType::V4I32)) {
                 SDNode *multiply = node.operands()[1].node;
                 if (multiply && multiply->opcode() == SDOpcode::Mul &&
                     useCount[multiply] == 1) {

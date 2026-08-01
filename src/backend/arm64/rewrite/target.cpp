@@ -384,13 +384,16 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.explicitOperands = 2; break;
     case Opcode::DUPv4i32: case Opcode::DUPv4f32:
         dynamic.mnemonic = "dup"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::INSv4i32: case Opcode::INSv4f32:
         dynamic.mnemonic = "ins"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 4; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::EXTRACTv4i32: case Opcode::EXTRACTv4f32:
         dynamic.mnemonic = "umov"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.explicitOperands = 3; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDv4i32: case Opcode::SUBv4i32:
     case Opcode::ADDv4f32: case Opcode::SUBv4f32:
     case Opcode::ANDv16i8: case Opcode::ORRv16i8: case Opcode::EORv16i8:
@@ -399,14 +402,14 @@ const InstrDesc &descriptor(Opcode opcode) {
                            : opcode == Opcode::ANDv16i8 ? "and"
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
-        dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
         dynamic.mnemonic =
             opcode == Opcode::SMINv4i32 ? "smin" : "smax";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
         dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::MULv4i32: case Opcode::MLAv4i32: case Opcode::MLSv4i32:
-    case Opcode::MULv4f32: case Opcode::DIVv4f32:
+    case Opcode::MULv4f32:
     case Opcode::FMLAv4f32: case Opcode::FMLSv4f32:
         dynamic.mnemonic = opcode == Opcode::MULv4i32 ? "mul"
                            : opcode == Opcode::MLAv4i32 ? "mla"
@@ -419,27 +422,38 @@ const InstrDesc &descriptor(Opcode opcode) {
             opcode == Opcode::MULv4i32 ||
                     opcode == Opcode::MULv4f32 ||
                     opcode == Opcode::DIVv4f32 ? 3 : 4;
-        dynamic.latency = 5; dynamic.resource = SchedResource::FPMulDiv; break;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPMulDiv; break;
+    case Opcode::DIVv4f32:
+        dynamic.mnemonic = "fdiv"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 3; dynamic.latency = 18;
+        dynamic.resource = SchedResource::FPMulDiv; break;
     case Opcode::NEGv4f32:
         dynamic.mnemonic = "fneg"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 2;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::NEGv4i32:
         dynamic.mnemonic = "neg"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 2;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SSHLv4i32: case Opcode::USHLv4i32:
         dynamic.mnemonic =
             opcode == Opcode::SSHLv4i32 ? "sshl" : "ushl";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
-        dynamic.latency = 3; dynamic.resource = SchedResource::FPALU; break;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::SHLiv4i32:
+    case Opcode::SSHRiv4i32:
+    case Opcode::USHRiv4i32:
+        dynamic.mnemonic = opcode == Opcode::SHLiv4i32 ? "shl"
+                           : opcode == Opcode::SSHRiv4i32 ? "sshr" : "ushr";
+        dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SHUFFLEv16i8:
         dynamic.mnemonic = "tbl"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 4; dynamic.latency = 4;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDVv4i32:
         dynamic.mnemonic = "addv"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 4;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::FRAME_SETUP:
         dynamic.mnemonic = "FRAME_SETUP"; dynamic.pseudo = true;

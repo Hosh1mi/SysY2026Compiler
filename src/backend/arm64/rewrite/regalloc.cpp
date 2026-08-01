@@ -595,12 +595,23 @@ bool GraphColoringRegisterAllocator::colorOnce(
                 }
             }
 
-            for (const MachineOperand &operand : instruction.operands()) {
-                if (!operand.isVirtualRegister() ||
-                    !operand.isEarlyClobber || !operand.isDef)
+            for (std::size_t defIndex = 0;
+                 defIndex < instruction.operands().size(); ++defIndex) {
+                const MachineOperand &operand =
+                    instruction.operands()[defIndex];
+                if (!operand.isVirtualRegister() || !operand.isEarlyClobber ||
+                    !operand.isDef)
                     continue;
-                for (VReg used : uses)
-                    addEdge(operand.virtualRegister(), used);
+                for (std::size_t useIndex = 0;
+                     useIndex < instruction.operands().size(); ++useIndex) {
+                    const MachineOperand &use =
+                        instruction.operands()[useIndex];
+                    if (!use.isVirtualRegister() || use.isDef ||
+                        use.tiedTo == static_cast<int>(defIndex))
+                        continue;
+                    addEdge(operand.virtualRegister(),
+                            use.virtualRegister());
+                }
             }
         }
     }

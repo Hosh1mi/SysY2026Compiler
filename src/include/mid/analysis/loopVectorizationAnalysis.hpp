@@ -84,6 +84,9 @@ public:
         bool canDeferStoresAcrossParts = false;
         int scalarCost = 0;
         int vectorCost = 0;
+        int setupCost = 0;
+        int minimumTripCount = 0;
+        int estimatedLiveVectors = 0;
     };
 
     explicit LoopVectorizationAnalysis(const BasicAliasAnalysis &BAA)

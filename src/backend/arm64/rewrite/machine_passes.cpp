@@ -2012,8 +2012,15 @@ bool PostRAInstructionExpansion::run(
         auto &instructions = block->instructions();
         for (auto insert = instructions.begin();
              insert != instructions.end(); ++insert) {
-            if (insert->opcode() != Opcode::INSv4i32 &&
-                insert->opcode() != Opcode::INSv4f32)
+            const bool vectorInsert =
+                insert->opcode() == Opcode::INSv4i32 ||
+                insert->opcode() == Opcode::INSv4f32;
+            const bool vectorAccumulate =
+                insert->opcode() == Opcode::MLAv4i32 ||
+                insert->opcode() == Opcode::MLSv4i32 ||
+                insert->opcode() == Opcode::FMLAv4f32 ||
+                insert->opcode() == Opcode::FMLSv4f32;
+            if (!vectorInsert && !vectorAccumulate)
                 continue;
             if (insert->operands().size() != 4 ||
                 !insert->operands()[0].isPhysicalRegister() ||

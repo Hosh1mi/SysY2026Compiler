@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/module.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
+#include "../../include/mid/analysis/vectorizationCostModel.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -20,21 +21,22 @@ void SLPVectorize::execute(Module *module) {
 }
 
 PreservedAnalyses SLPVectorize::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
+    BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration()) {
-            runOnFunction(func, module);
-            changed = true;
+            changed |= runOnFunction(func, module, BAA);
         }
     }
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-void SLPVectorize::runOnFunction(Function *func, Module *module) {
-    if (func->basic_blocks_.empty()) return;
+bool SLPVectorize::runOnFunction(Function *func, Module *module,
+                                 const BasicAliasAnalysis &BAA) {
+    if (func->basic_blocks_.empty()) return false;
 
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
+    bool changed = false;
 
     for (auto *bb : func->basic_blocks_) {
         PackSet P = findAdjacentMemoryRefs(bb, module);
@@ -53,8 +55,15 @@ void SLPVectorize::runOnFunction(Function *func, Module *module) {
                       << " (phase1=" << P.packs.size() << ")\n";
         }
 
-        scheduleAndEmit(bb, P_combined, module);
+        if (!isProfitable(P_combined)) {
+            if (debug)
+                std::cerr << "[SLP] reject unprofitable pack set in "
+                          << bb->name_ << "\n";
+            continue;
+        }
+        changed |= scheduleAndEmit(bb, P_combined, module, BAA);
     }
+    return changed;
 }
 
 // =====================================================================
@@ -336,8 +345,9 @@ SLPVectorize::PackSet SLPVectorize::combinePacks(PackSet P)
 // Phase 4: Schedule and emit vector instructions
 // =====================================================================
 
-void SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
-                                    Module *module)
+bool SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
+                                    Module *module,
+                                    const BasicAliasAnalysis &BAA)
 {
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
 
@@ -361,7 +371,8 @@ void SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
         Instruction *first = pack->instrs[0];
 
         if (first->is_load()) {
-            emitVectorLoad(bb, *pack, module);
+            if (!hasInterveningMemoryEffect(bb, pack->instrs, BAA))
+                emitVectorLoad(bb, *pack, module);
         } else if (first->is_store()) {
             // Try to connect with upstream binary pack's vector value
             if (!pack->vecValue) {
@@ -374,7 +385,8 @@ void SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
                     }
                 }
             }
-            emitVectorStore(bb, *pack, module);
+            if (!hasInterveningMemoryEffect(bb, pack->instrs, BAA))
+                emitVectorStore(bb, *pack, module);
         } else if (auto *lb = dynamic_cast<BinaryInst*>(first)) {
             emitVectorBinary(bb, *pack, module, P);
         }
@@ -392,6 +404,8 @@ void SLPVectorize::scheduleAndEmit(BasicBlock *bb, PackSet P,
             pack.instrs[lane]->replace_all_use_with(
                 pack.scalarValues[lane]);
     }
+    return std::any_of(P.packs.begin(), P.packs.end(),
+                       [](const Pack &pack) { return pack.emitted; });
 }
 
 // ── Emit: vector load ─────────────────────────────────────────────────
@@ -400,7 +414,6 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
 {
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
     if ((int)pack.instrs.size() != VF) return;
-    if (hasInterveningMemoryEffect(bb, pack.instrs)) return;
 
     // Verify contiguous loads with same base
     Value *basePtr = nullptr;
@@ -486,7 +499,6 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
 {
     const bool debug = std::getenv("DEBUG_SLP_VECTORIZE") != nullptr;
     if ((int)pack.instrs.size() != VF) return;
-    if (hasInterveningMemoryEffect(bb, pack.instrs)) return;
 
     if (!pack.vecValue) {
         std::map<Instruction *, size_t> order;
@@ -782,8 +794,8 @@ bool SLPVectorize::isVectorizable(Instruction *inst) {
 }
 
 bool SLPVectorize::hasInterveningMemoryEffect(
-    BasicBlock *bb,
-    const std::vector<Instruction*> &instructions) {
+    BasicBlock *bb, const std::vector<Instruction*> &instructions,
+    const BasicAliasAnalysis &BAA) {
     if (!bb || instructions.empty())
         return true;
     std::set<Instruction*> selected(
@@ -798,13 +810,104 @@ bool SLPVectorize::hasInterveningMemoryEffect(
                 return false;
             continue;
         }
-        if (inside &&
-            (instruction->is_load() ||
-             instruction->is_store() ||
-             instruction->is_call()))
-            return true;
+        if (!inside) continue;
+        if (instruction->is_call()) return true;
+        if (!instruction->is_load() && !instruction->is_store()) continue;
+
+        // Moving a load pack to the first lane only crosses intervening
+        // stores.  Moving a store pack crosses both reads and writes.  Alias
+        // analysis lets independent accesses coexist without making the SLP
+        // legality test depend on their textual adjacency.
+        const bool selectedStores = instructions.front()->is_store();
+        if (!selectedStores && instruction->is_load()) continue;
+        Value *otherPointer = instruction->is_load()
+                                  ? instruction->get_operand(0)
+                                  : instruction->get_operand(1);
+        for (Instruction *selected : instructions) {
+            Value *selectedPointer = selected->is_load()
+                                         ? selected->get_operand(0)
+                                         : selected->get_operand(1);
+            if (BAA.alias(selectedPointer, otherPointer) !=
+                AliasResult::NoAlias)
+                return true;
+        }
     }
     return true;
+}
+
+bool SLPVectorize::isProfitable(const PackSet &P) const {
+    VectorizationCostModel costs;
+    int scalarCost = 0;
+    int vectorCost = 0;
+    bool hasVectorStore = false;
+    std::set<Instruction *> packed;
+    for (const Pack &pack : P.packs)
+        packed.insert(pack.instrs.begin(), pack.instrs.end());
+
+    for (const Pack &pack : P.packs) {
+        if (pack.instrs.size() != VF) continue;
+        Instruction *first = pack.instrs.front();
+        scalarCost += costs.scalarInstructionCost(first) * VF;
+        vectorCost += costs.vectorInstructionCost(first);
+        hasVectorStore |= first->is_store();
+
+        if (first->is_store()) {
+            bool fromPack = true;
+            bool sameValue = true;
+            Value *laneZero = pack.instrs.front()->get_operand(0);
+            for (Instruction *lane : pack.instrs) {
+                auto *producer = dynamic_cast<Instruction *>(
+                    lane->get_operand(0));
+                if (!producer || !packed.count(producer))
+                    fromPack = false;
+                Value *value = lane->get_operand(0);
+                if (value == laneZero) continue;
+                auto *firstConstant = dynamic_cast<ConstantInt *>(laneZero);
+                auto *laneConstant = dynamic_cast<ConstantInt *>(value);
+                if (!firstConstant || !laneConstant ||
+                    firstConstant->value_ != laneConstant->value_)
+                    sameValue = false;
+            }
+            if (!fromPack) vectorCost += sameValue ? 2 : VF;
+        }
+
+        auto *binary = dynamic_cast<BinaryInst *>(first);
+        if (binary) {
+            for (unsigned operand = 0; operand < binary->num_ops_; ++operand) {
+                bool same = true;
+                Value *laneZero = pack.instrs.front()->get_operand(operand);
+                for (unsigned lane = 1; lane < VF; ++lane)
+                    if (pack.instrs[lane]->get_operand(operand) != laneZero) {
+                        same = false;
+                        break;
+                    }
+                if (same) {
+                    vectorCost += 2;
+                    continue;
+                }
+
+                bool fromPack = true;
+                for (unsigned lane = 0; lane < VF; ++lane) {
+                    auto *producer = dynamic_cast<Instruction *>(
+                        pack.instrs[lane]->get_operand(operand));
+                    if (!producer || !packed.count(producer)) {
+                        fromPack = false;
+                        break;
+                    }
+                }
+                if (!fromPack) vectorCost += VF;
+            }
+        }
+
+        if (!first->is_store()) {
+            for (Instruction *lane : pack.instrs)
+                for (const Use &use : lane->use_list_) {
+                    auto *user = dynamic_cast<Instruction *>(use.val_);
+                    if (!user || !packed.count(user)) ++vectorCost;
+                }
+        }
+    }
+    return hasVectorStore && vectorCost < scalarCost;
 }
 
 bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,
