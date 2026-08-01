@@ -157,6 +157,45 @@ static Value *buildBoundedModulo(Value *dividend, long long lower,
     return adjusted;
 }
 
+static bool computeBoundAdjustment(int iterations, int stride,
+                                   int &adjustment) {
+    long long wide = static_cast<long long>(iterations) * stride;
+    if (wide < std::numeric_limits<int>::min() ||
+        wide > std::numeric_limits<int>::max())
+        return false;
+    adjustment = static_cast<int>(wide);
+    return true;
+}
+
+// `bound - adjustment` is evaluated with i32 arithmetic.  When the bound is
+// dynamic, guard the unrolled path so a wrapped adjusted bound cannot turn a
+// zero-trip loop into a very large loop.  The original loop remains the
+// fallback and therefore handles every value outside this safe interval.
+static Value *buildBoundAdjustmentGuard(Value *bound, int adjustment,
+                                        Module *module, BasicBlock *block) {
+    if (adjustment > 0) {
+        auto *lowerLimit = new ConstantInt(
+            module->int32_ty_,
+            std::numeric_limits<int>::min() + adjustment);
+        return new ICmpInst(ICmpInst::ICMP_SGE, bound, lowerLimit, block);
+    }
+    if (adjustment < 0) {
+        auto *upperLimit = new ConstantInt(
+            module->int32_ty_,
+            std::numeric_limits<int>::max() + adjustment);
+        return new ICmpInst(ICmpInst::ICMP_SLE, bound, upperLimit, block);
+    }
+    return nullptr;
+}
+
+static Value *guardCondition(Value *condition, Value *guard, Module *module,
+                             BasicBlock *block) {
+    if (!guard)
+        return condition;
+    return new BinaryInst(module->int1_ty_, Instruction::And, guard,
+                          condition, block);
+}
+
 // Choose an unroll factor from target-independent loop facts and the A53
 // register/code-size budget.  Eight-way unrolling is reserved for compact,
 // register-only scalar loops: it amortizes loop control and exposes enough
@@ -718,7 +757,9 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
 
     int N   = effectiveUnrollFactor;
     int s   = stride->value_;
-    int adj = (N - 1) * s; // bound adjustment for main loop condition
+    int adj = 0;
+    if (!computeBoundAdjustment(N - 1, s, adj))
+        return false;
 
     // Guard against integer underflow: if the loop bound is smaller than the
     // adjustment, bound - adj would go negative and wrap to a huge unsigned
@@ -802,6 +843,12 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
         cmpMain = new ICmpInst(cmpInst->icmp_op_, ivMain, boundMain, headerMain);
     else
         cmpMain = new ICmpInst(cmpInst->icmp_op_, boundMain, ivMain, headerMain);
+    Value *mainCondition = cmpMain;
+    if (!dynamic_cast<ConstantInt *>(bound))
+        mainCondition = guardCondition(
+            cmpMain,
+            buildBoundAdjustmentGuard(bound, adj, module, headerMain),
+            module, headerMain);
 
     // 3. Build unrolledBody: N copies of the latch (non-terminator instructions)
     BasicBlock *unrolledBody = new BasicBlock(module, "unroll_body", func);
@@ -905,7 +952,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // remainder entry so the newly created main loop keeps dedicated exits.
     BasicBlock *remEntry = new BasicBlock(module, "unroll_rem_entry", func);
     new BranchInst(header, remEntry);
-    new BranchInst(cmpMain, unrolledBody, remEntry, headerMain);
+    new BranchInst(mainCondition, unrolledBody, remEntry, headerMain);
 
     // 7. Update original header phis: change preheader-incoming →
     // [mainPhiVal, remEntry]
@@ -1128,7 +1175,9 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         }
     }
 
-    int guardAdj = (N - 1) * strideVal;
+    int guardAdj = 0;
+    if (!computeBoundAdjustment(N - 1, strideVal, guardAdj))
+        return debugStructuredReject(func, loop, "bound-adjustment-overflow");
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
         if (strideVal > 0 && cb->value_ < guardAdj)
             return debugStructuredReject(func, loop, "bound-underflow");
@@ -1158,6 +1207,12 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     ICmpInst *cmpMain = ivIsLeft
                             ? new ICmpInst(pred, mainPhis[ivPhi], boundMain, headerMain)
                             : new ICmpInst(pred, boundMain, mainPhis[ivPhi], headerMain);
+    Value *mainCondition = cmpMain;
+    if (!dynamic_cast<ConstantInt *>(bound))
+        mainCondition = guardCondition(
+            cmpMain,
+            buildBoundAdjustmentGuard(bound, guardAdj, module, headerMain),
+            module, headerMain);
     auto *remCheck = new BasicBlock(module, "unroll_rem_guard", func);
     ICmpInst *cmpRem = ivIsLeft
                            ? new ICmpInst(pred, mainPhis[ivPhi], bound, remCheck)
@@ -1292,7 +1347,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     for (auto *phi : headerPhis)
         mainPhis[phi]->addIncoming(currentPhiVals[phi], iterBBMaps[N - 1][latch]);
 
-    new BranchInst(cmpMain, headerCloneFor(0), remCheck, headerMain);
+    new BranchInst(mainCondition, headerCloneFor(0), remCheck, headerMain);
     new BranchInst(cmpRem, header, exitBB, remCheck);
 
     auto *preBr = preheader->get_terminator();
@@ -1578,6 +1633,12 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
 
     auto *cmpMain = new ICmpInst(ICmpInst::ICMP_SLT, mainPhis[ivPhi],
                                  boundMain, headerMain);
+    Value *mainCondition = cmpMain;
+    if (!dynamic_cast<ConstantInt *>(bound))
+        mainCondition = guardCondition(
+            cmpMain,
+            buildBoundAdjustmentGuard(bound, guardAdj, module, headerMain),
+            module, headerMain);
     auto *remCheck = new BasicBlock(module, "unroll_state_rem", func);
     auto *cmpRem = new ICmpInst(ICmpInst::ICMP_SLT, mainPhis[ivPhi],
                                 bound, remCheck);
@@ -1751,7 +1812,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
     for (auto *phi : headerPhis)
         mainPhis[phi]->addIncoming(currentPhiVals[phi], iterBBMaps[N - 1][latch]);
 
-    new BranchInst(cmpMain, headerCloneFor(0), remCheck, headerMain);
+    new BranchInst(mainCondition, headerCloneFor(0), remCheck, headerMain);
     new BranchInst(cmpRem, header, exitBB, remCheck);
 
     auto *preBr = preheader->get_terminator();
@@ -2028,6 +2089,12 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
     }
     auto *cmpMain = new ICmpInst(ICmpInst::ICMP_SLE, mainPhis[ivPhi],
                                  boundMain, headerMain);
+    Value *mainCondition = cmpMain;
+    if (!dynamic_cast<ConstantInt *>(bound))
+        mainCondition = guardCondition(
+            cmpMain,
+            buildBoundAdjustmentGuard(bound, guardAdj, module, headerMain),
+            module, headerMain);
 
     auto *remCheck = new BasicBlock(module, "unroll_cfg_rem", func);
     auto *cmpRem = new ICmpInst(ICmpInst::ICMP_SLE, mainPhis[ivPhi],
@@ -2202,7 +2269,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
     for (auto *phi : headerPhis)
         mainPhis[phi]->addIncoming(currentPhiVals[phi], iterBBMaps[N - 1][latch]);
 
-    new BranchInst(cmpMain, headerCloneFor(0), remCheck, headerMain);
+    new BranchInst(mainCondition, headerCloneFor(0), remCheck, headerMain);
     new BranchInst(cmpRem, header, exitBB, remCheck);
 
     auto *preBr = preheader->get_terminator();
@@ -2490,7 +2557,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
     int adj = 0;
     if (!dynamicStride) {
-        adj = (N - 1) * strideVal;
+        if (!computeBoundAdjustment(N - 1, strideVal, adj))
+            return false;
         if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
             if (strideVal > 0 && cb->value_ < adj) return false;
             if (strideVal < 0 &&
@@ -2548,6 +2616,11 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         ivIsLeft ? new ICmpInst(op, getInitVal(ivPhi), boundMain, checkBlock)
                  : new ICmpInst(op, boundMain, getInitVal(ivPhi), checkBlock);
     Value *enterCondition = cmpEnter;
+    if (!dynamicStride && !dynamic_cast<ConstantInt *>(bound))
+        enterCondition = guardCondition(
+            cmpEnter,
+            buildBoundAdjustmentGuard(bound, adj, module, checkBlock),
+            module, checkBlock);
     if (dynamicStride) {
         auto *zero = new ConstantInt(module->int32_ty_, 0);
         auto *intMin = new ConstantInt(module->int32_ty_,
