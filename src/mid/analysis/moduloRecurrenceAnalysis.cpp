@@ -40,7 +40,17 @@ bool dependsOnImpl(Value *value, Value *target,
                    std::set<Value *> &visiting, unsigned depth) {
     if (value == target)
         return true;
-    if (!value || depth > 24 || !visiting.insert(value).second)
+    if (!value)
+        return false;
+    // This predicate is used to prove that a contribution is independent of
+    // a loop-carried state.  Exhausting the search budget is "unknown", not
+    // proof of independence, so reject the optimization conservatively.
+    if (depth > 24)
+        return true;
+    // A backedge to a value already on the current DFS path adds no new path
+    // to the target.  The first visit still examines all of that value's
+    // operands, including any real dependency on the target.
+    if (!visiting.insert(value).second)
         return false;
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction) {
