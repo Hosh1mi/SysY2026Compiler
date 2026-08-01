@@ -2547,6 +2547,10 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     countLoopStates(headerPhis, ivPhi, unrollCost);
     int N = chooseUnrollFactor(unrollCost);
     if (dynamicStride && unrollCost.memoryOperations == 0 &&
+        unrollCost.bodyInstructions <= 18 &&
+        unrollCost.integerStates + unrollCost.pointerStates <= 2)
+        N = 8;
+    else if (dynamicStride && unrollCost.memoryOperations == 0 &&
         unrollCost.bodyInstructions <= 24 &&
         unrollCost.integerStates + unrollCost.pointerStates <= 2)
         N = 4;
