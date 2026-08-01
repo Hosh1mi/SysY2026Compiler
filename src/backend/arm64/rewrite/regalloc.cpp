@@ -435,6 +435,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
     std::unordered_map<VReg, LiveInterval> intervalFor;
     std::unordered_map<VReg, std::unordered_map<VReg, double>>
         affinities;
+    std::unordered_map<VReg, VReg> tiedPairs;  // tied use -> def
+    std::unordered_map<VReg, VReg> tiedDefs;  // tied def -> use
     std::unordered_map<VReg, std::vector<PhysReg>> physicalHints;
     std::unordered_map<VReg, std::unordered_set<PhysReg>> forbiddenColors;
     std::vector<VReg> graphNodes;
@@ -564,6 +566,34 @@ bool GraphColoringRegisterAllocator::colorOnce(
             for (std::size_t i = 0; i < uses.size(); ++i)
                 for (std::size_t j = i + 1; j < uses.size(); ++j)
                     addEdge(uses[i], uses[j]);
+
+            // Tied operands (e.g. fmla/fmls accumulate into vd in place):
+            // the tied use must share the destination register, while the
+            // destination must not collide with any other source of the
+            // same instruction (vd is read-modify-write).
+            for (std::size_t i = 0; i < instruction.operands().size(); ++i) {
+                const MachineOperand &operand = instruction.operands()[i];
+                if (!operand.isVirtualRegister() || operand.isDef ||
+                    operand.tiedTo < 0 ||
+                    static_cast<std::size_t>(operand.tiedTo) >=
+                        instruction.operands().size())
+                    continue;
+                const MachineOperand &defOperand =
+                    instruction.operands()[operand.tiedTo];
+                if (!defOperand.isVirtualRegister() || !defOperand.isDef)
+                    continue;
+                VReg tiedDef = defOperand.virtualRegister();
+                VReg tiedUse = operand.virtualRegister();
+                tiedPairs[tiedUse] = tiedDef;
+                tiedDefs[tiedDef] = tiedUse;
+                for (std::size_t j = 0; j < instruction.operands().size(); ++j) {
+                    const MachineOperand &other = instruction.operands()[j];
+                    if (other.isVirtualRegister() && !other.isDef &&
+                        i != j &&
+                        static_cast<std::size_t>(operand.tiedTo) != j)
+                        addEdge(tiedDef, other.virtualRegister());
+                }
+            }
 
             for (const MachineOperand &operand : instruction.operands()) {
                 if (!operand.isVirtualRegister() ||
@@ -800,6 +830,24 @@ bool GraphColoringRegisterAllocator::colorOnce(
             };
 
             PhysReg selected = PhysReg::NoReg;
+            // Tied pairs must share a register: prefer the partner's color
+            // (the partner cannot be an interference neighbor by
+            // construction, so its color is always available).
+            {
+                VReg partner = 0;
+                auto tiedUse = tiedPairs.find(reg);
+                if (tiedUse != tiedPairs.end())
+                    partner = tiedUse->second;
+                auto tiedDef = tiedDefs.find(reg);
+                if (!partner && tiedDef != tiedDefs.end())
+                    partner = tiedDef->second;
+                if (partner) {
+                    auto assigned = assignments.find(partner);
+                    if (assigned != assignments.end() &&
+                        allowed(assigned->second))
+                        selected = assigned->second;
+                }
+            }
             auto hints = physicalHints.find(reg);
             if (hints != physicalHints.end()) {
                 for (PhysReg hint : hints->second)

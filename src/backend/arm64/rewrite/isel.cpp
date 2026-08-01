@@ -965,6 +965,23 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(fused), &node);
                 break;
             }
+            case SDOpcode::FMAdd:
+            case SDOpcode::FMSub: {
+                // fmla/fmls vd, vn, vm accumulate into vd in place.  The
+                // accumulator operand (index 3) is tied to the destination;
+                // regalloc keeps them in the same register and excludes vd
+                // from vn/vm.
+                MachineInstr fused(node.opcode() == SDOpcode::FMAdd
+                                       ? Opcode::FMLAv4f32
+                                       : Opcode::FMLSv4f32);
+                fused.addOperand(define(node))
+                    .addOperand(use(node.operands()[0]))
+                    .addOperand(use(node.operands()[1]))
+                    .addOperand(use(node.operands()[2]));
+                fused.operands()[3].tiedTo = 0;
+                append(block, std::move(fused), &node);
+                break;
+            }
             case SDOpcode::FNeg: {
                 MachineInstr instruction(
                     node.resultTypes().front() == ValueType::V4F32

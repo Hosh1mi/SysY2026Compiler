@@ -61,6 +61,8 @@ enum class SDOpcode : std::uint16_t {
     Return,
     MAdd,
     MSub,
+    FMAdd,
+    FMSub,
     VectorReduceAdd,
     SMin,
     SMax,
