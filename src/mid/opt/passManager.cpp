@@ -51,6 +51,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "LoopFusion",
         "LoopInterchange",
         "ParallelizeLoops",
+        "LoopResetPointElimination",
         "LoopVectorize",
         "IndVarStrengthReduce",
         "LoopRepFold",

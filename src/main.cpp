@@ -232,6 +232,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInvariantReduction>());
     pm.addPass(std::make_unique<LoopInterchange>());
+    pm.addPass(std::make_unique<LoopResetPointElimination>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<IdiomRecognize>());
