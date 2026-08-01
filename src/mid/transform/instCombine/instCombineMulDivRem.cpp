@@ -117,17 +117,23 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
     for (const auto &use : remainder->use_list_) {
         auto *phi = dynamic_cast<PhiInst *>(use.val_);
         if (!phi || use.arg_no_ % 2 != 0 ||
-            use.arg_no_ + 1 >= phi->num_ops_ ||
-            phi->get_operand(use.arg_no_ + 1) != remainder->parent_)
+            use.arg_no_ + 1 >= phi->num_ops_ || phi->num_ops_ != 4)
             continue;
+        auto *backedge = dynamic_cast<BasicBlock *>(
+            phi->get_operand(use.arg_no_ + 1));
         BasicBlock *header = phi->parent_;
         Function *function = header ? header->parent_ : nullptr;
-        if (!function)
+        if (!function || !backedge || !remainder->parent_ ||
+            !function->dominates(header, remainder->parent_) ||
+            !function->dominates(remainder->parent_, backedge))
             continue;
+        // The remainder need not be in the latch itself.  Preserve it when it
+        // is on every path from the loop header to the PHI's backedge; this is
+        // the cross-block form consumed by CFG-region loop unrolling.
         std::set<BasicBlock *> updateBlocks;
         for (BasicBlock *block : function->basic_blocks_) {
             if (function->dominates(header, block) &&
-                function->dominates(block, remainder->parent_))
+                function->dominates(block, backedge))
                 updateBlocks.insert(block);
         }
         if (!updateBlocks.count(remainder->parent_))
@@ -141,7 +147,7 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
 
         Value *init = nullptr;
         for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
-            if (phi->get_operand(i + 1) != remainder->parent_) {
+            if (phi->get_operand(i + 1) != backedge) {
                 init = phi->get_operand(i);
                 break;
             }
