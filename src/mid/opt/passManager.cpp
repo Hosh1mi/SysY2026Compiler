@@ -46,6 +46,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "inductiveRangeCheckElimination",
         "LICM",
         "LoopDeletion",
+        "TriangularPanelize",
         "LoopFusion",
         "LoopInterchange",
         "ParallelizeLoops",

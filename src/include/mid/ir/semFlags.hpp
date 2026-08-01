@@ -32,6 +32,8 @@ enum class SemFlag : uint32_t {
         // BasicBlock：Hira 已将循环的重复加性递推折叠为单次执行
     MemsetIdiomLoop = 1u << 14, // BasicBlock：preheader 已插入 memset 替换原循环
     KnownNonNegative = 1u << 15, // Value：所有到达该值的路径上均为非负 i32
+    ScalarExpansionCompute = 1u << 16,
+        // BasicBlock：标量展开后、依赖已由 scratch 分离的计算循环
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {

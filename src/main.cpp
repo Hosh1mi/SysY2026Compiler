@@ -226,6 +226,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
         pm.addPass(std::make_unique<LoopDeletion>());
     });
     addAnalysisDumpIfRequested(pm);
+    pm.addPass(std::make_unique<TriangularPanelize>());
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
     pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInvariantReduction>());

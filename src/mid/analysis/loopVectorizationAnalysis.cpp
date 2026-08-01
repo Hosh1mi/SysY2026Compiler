@@ -163,8 +163,7 @@ bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
     for (auto *inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->type_->tid_ != Type::IntegerTyID ||
-            compare->get_operand(0) != phi)
+        if (phi->type_->tid_ != Type::IntegerTyID)
             continue;
 
         Value *init = nullptr;
@@ -177,6 +176,11 @@ bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
         auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
         if (update->get_operand(0) != phi || !step || step->value_ != 1)
             continue;
+
+        bool comparesCurrent = compare->get_operand(0) == phi;
+        bool comparesNext = plan.rotatedSingleBlock &&
+                            compare->get_operand(0) == update;
+        if (!comparesCurrent && !comparesNext) continue;
 
         Value *bound = compare->get_operand(1);
         if (!isLoopInvariant(bound, loop))
@@ -422,7 +426,17 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
                 continue;
             AliasResult alias = BAA_.alias(memoryPointer(a.inst),
                                            memoryPointer(b.inst));
-            if (alias == AliasResult::NoAlias) continue;
+            auto isExpansionScratch = [](Value *object) {
+                auto *alloca = dynamic_cast<AllocaInst *>(object);
+                return alloca && alloca->isLoopExpansionScratch();
+            };
+            bool distinctExpansionScratch =
+                a.underlyingObject && b.underlyingObject &&
+                a.underlyingObject != b.underlyingObject &&
+                (isExpansionScratch(a.underlyingObject) ||
+                 isExpansionScratch(b.underlyingObject));
+            if (alias == AliasResult::NoAlias || distinctExpansionScratch)
+                continue;
 
             // Equal lane-wise addresses preserve the scalar program order:
             // each vector memory instruction still appears in that order and
@@ -537,10 +551,9 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     plan.exit = loop.singleExit();
     if (loop.header && loop.header->hasSemFlag(SemFlag::VectorizedEpilogue))
         return reject(reason, "loop is already a vector epilogue");
-    if (!plan.preheader || !plan.latch || !plan.exit ||
-        plan.latch == plan.header)
+    if (!plan.preheader || !plan.latch || !plan.exit)
         return reject(reason, "loop lacks dedicated preheader, latch, or exit");
-    if (loop.blocks.size() < 2 || loop.blocks.size() > 3)
+    if (loop.blocks.empty() || loop.blocks.size() > 3)
         return reject(reason, "loop body is not a straight-line canonical body");
 
     auto *preTerm = plan.preheader->get_terminator();
@@ -555,10 +568,20 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     auto *bodyEntry = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
     if (!bodyEntry || !loop.blocks.count(bodyEntry))
         return reject(reason, "header does not enter the loop body");
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
-        latchTerm->get_operand(0) != plan.header)
+    const bool rotatedSingleBlock =
+        plan.header == plan.latch && bodyEntry == plan.header &&
+        loop.blocks.size() == 1;
+    if (rotatedSingleBlock &&
+        !plan.header->hasSemFlag(SemFlag::ScalarExpansionCompute))
+        return reject(reason, "rotated single-block loop is not a proved scalar-expansion compute loop");
+    plan.rotatedSingleBlock = rotatedSingleBlock;
+    if (!rotatedSingleBlock &&
+        (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+         latchTerm->get_operand(0) != plan.header))
         return reject(reason, "latch is not an unconditional backedge");
-    if (bodyEntry != plan.latch) {
+    if (rotatedSingleBlock) {
+        plan.body = plan.header;
+    } else if (bodyEntry != plan.latch) {
         auto *bodyTerm = bodyEntry->get_terminator();
         if (loop.blocks.size() != 3 || !bodyTerm || !bodyTerm->is_br() ||
             bodyTerm->num_ops_ != 1 || bodyTerm->get_operand(0) != plan.latch)
@@ -566,13 +589,14 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     } else if (loop.blocks.size() != 2) {
         return reject(reason, "loop contains an unexpected extra block");
     }
-    plan.body = bodyEntry;
+    if (!plan.body) plan.body = bodyEntry;
 
     if (!findInduction(loop, plan, reason) ||
         !findPointerRecurrences(plan, reason))
         return false;
 
-    std::vector<BasicBlock *> recipeBlocks{plan.header, plan.body};
+    std::vector<BasicBlock *> recipeBlocks{plan.header};
+    if (plan.body != plan.header) recipeBlocks.push_back(plan.body);
     if (plan.latch != plan.body) recipeBlocks.push_back(plan.latch);
     for (auto *bb : recipeBlocks) {
         for (auto *inst : bb->instr_list_) {
@@ -581,8 +605,23 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
         }
     }
 
-    return classifyMemory(plan, reason) &&
-           checkInstructions(plan, reason) &&
+    if (!classifyMemory(plan, reason)) return false;
+    if (plan.rotatedSingleBlock) {
+        bool hasExpansionScratch = false;
+        bool allI32 = true;
+        for (const auto &access : plan.memoryAccesses) {
+            auto *alloca = dynamic_cast<AllocaInst *>(access.underlyingObject);
+            hasExpansionScratch |=
+                alloca && alloca->isLoopExpansionScratch();
+            auto *integer = dynamic_cast<IntegerType *>(access.scalarType);
+            allI32 &= integer && integer->num_bits_ == 32;
+        }
+        if (!hasExpansionScratch || !allI32 ||
+            plan.memoryAccesses.size() < 3)
+            return reject(reason, "rotated scalar-expansion loop is not a profitable i32 scratch update");
+    }
+
+    return checkInstructions(plan, reason) &&
            checkMemoryDependences(plan, reason) &&
            checkProfitability(plan, reason);
 }

@@ -1306,7 +1306,12 @@ bool LoopVectorize::emitVectorizedLoop(
     // `iv <= bound - vectorTrip` is exactly the scalar `iv < bound` condition
     // for every lane.  Constant initial values make the entry test a single
     // comparison, which is the common canonical-loop form.
-    const int minimumTrip = std::max(vectorTrip, plan.minimumTripCount);
+    // A rotated one-block loop tests the incremented IV at the bottom.  Keep
+    // at least one scalar iteration for its epilogue; entering it with
+    // IV==bound would execute an extra iteration.
+    const int scalarTail = plan.rotatedSingleBlock ? 1 : 0;
+    const int minimumTrip =
+        std::max(vectorTrip + scalarTail, plan.minimumTripCount);
     Value *canEnterVector = nullptr;
     if (auto *constantInit =
             dynamic_cast<ConstantInt *>(plan.induction.init)) {
@@ -1349,7 +1354,8 @@ bool LoopVectorize::emitVectorizedLoop(
     // Wrapping subtraction is defined even on the bypassed path.  The entry
     // proof above guarantees a mathematical (non-wrapping) value whenever
     // vecHeader is reached.
-    auto *trip = new ConstantInt(module->int32_ty_, vectorTrip);
+    auto *trip = new ConstantInt(module->int32_ty_,
+                                 vectorTrip + scalarTail);
     auto *vectorEnd = new BinaryInst(module->int32_ty_, Instruction::Sub,
                                      plan.induction.bound, trip, preheader,
                                      true);

@@ -33,6 +33,7 @@
 #include "idiomRecognize.hpp"
 #include "loopRepFold.hpp"
 #include "linearRecurrenceFold.hpp"
+#include "triangularPanelize.hpp"
 #include "loopDistribution.hpp"
 #include "loopInvariantReduction.hpp"
 #include "loopFusion.hpp"
