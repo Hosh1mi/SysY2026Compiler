@@ -34,6 +34,7 @@
 #include "loopRepFold.hpp"
 #include "linearRecurrenceFold.hpp"
 #include "loopDistribution.hpp"
+#include "loopInvariantReduction.hpp"
 #include "loopFusion.hpp"
 #include "loopUnroll.hpp"
 #include "reassociate.hpp"
