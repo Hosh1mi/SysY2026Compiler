@@ -415,7 +415,7 @@ Function *buildEndOfKeyRun(Module *module, Function *key) {
 Function *buildSumMonotone(Module *module, Function *gcd,
                            Function *endKey, Function *sumSigned) {
     auto *function = makeFunction(module, "__compiler.pms.sum_monotone",
-                                  module->int64_ty_, 7);
+                                  module->int64_ty_, 9);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
     auto *outerCond = b.block("label_outer_cond");
@@ -443,10 +443,12 @@ Function *buildSumMonotone(Module *module, Function *gcd,
     Value *u0 = function->arguments_[0];
     Value *du = function->arguments_[1];
     Value *count = function->arguments_[2];
-    Value *multiplier = function->arguments_[3];
-    Value *divisor = function->arguments_[4];
-    Value *quotientMultiplier = function->arguments_[5];
-    Value *innerModulus = function->arguments_[6];
+    Value *linearMultiplier = function->arguments_[3];
+    Value *multiplier = function->arguments_[4];
+    Value *divisor = function->arguments_[5];
+    Value *quotientMultiplier = function->arguments_[6];
+    Value *rawConstant = function->arguments_[7];
+    Value *innerModulus = function->arguments_[8];
 
     b.at(entry);
     Value *answerSlot = b.slot(module->int64_ty_);
@@ -526,9 +528,15 @@ Function *buildSumMonotone(Module *module, Function *gcd,
         b.bin(Instruction::Mul, quotientStep, bRun));
     Value *wrappedB = b.i32Value(
         b.bin(Instruction::Mul, quotientMultiplier, runQ));
-    Value *rawZ = b.bin(Instruction::Add, runU, wrappedB);
+    Value *rawZ = b.bin(
+        Instruction::Add,
+        b.bin(Instruction::Add,
+              b.bin(Instruction::Mul, linearMultiplier, runU), wrappedB),
+        rawConstant);
     Value *dz = b.bin(
-        Instruction::Add, b.bin(Instruction::Mul, du, period),
+        Instruction::Add,
+        b.bin(Instruction::Mul, linearMultiplier,
+              b.bin(Instruction::Mul, du, period)),
         b.bin(Instruction::Mul, quotientMultiplier, quotientStep));
     b.store(b.i64(0), zRunSlot);
     b.jump(zCond);
@@ -649,14 +657,33 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     Value *s = b.sext(a[0]);
     Value *t = b.sext(a[1]);
     Value *d = b.sext(a[2]);
-    Value *maxConstant64 = b.sext(a[3]);
-    Value *multiplier64 = b.sext(a[4]);
-    Value *divisor64 = b.sext(a[5]);
-    Value *quotientMultiplier64 = b.sext(a[6]);
-    Value *innerModulus64 = b.sext(a[7]);
-    Value *additive64 = b.sext(a[8]);
-    Value *outerModulus64 = b.sext(a[9]);
-    Value *initial64 = b.sext(a[10]);
+    Value *piecewiseEnabled = a[3];
+    Value *lhsMultiplier64 = b.sext(a[4]);
+    Value *lhsConstant64 = b.sext(a[5]);
+    Value *rhsMultiplier64 = b.sext(a[6]);
+    Value *rhsConstant64 = b.sext(a[7]);
+    Value *trueUsesRight = a[8];
+    Value *linearMultiplier64 = b.sext(a[9]);
+    Value *multiplier64 = b.sext(a[10]);
+    Value *divisor64 = b.sext(a[11]);
+    Value *quotientMultiplier64 = b.sext(a[12]);
+    Value *rawConstant64 = b.sext(a[13]);
+    Value *innerModulus64 = b.sext(a[14]);
+    Value *additive64 = b.sext(a[15]);
+    Value *outerModulus64 = b.sext(a[16]);
+    Value *initial64 = b.sext(a[17]);
+    Value *piecewiseActive =
+        b.cmp(ICmpInst::ICMP_NE, piecewiseEnabled, b.i32(0));
+    Value *selectRight =
+        b.cmp(ICmpInst::ICMP_NE, trueUsesRight, b.i32(0));
+    Value *trueMultiplier = b.select(
+        selectRight, rhsMultiplier64, lhsMultiplier64);
+    Value *trueConstant = b.select(
+        selectRight, rhsConstant64, lhsConstant64);
+    Value *falseMultiplier = b.select(
+        selectRight, lhsMultiplier64, rhsMultiplier64);
+    Value *falseConstant = b.select(
+        selectRight, lhsConstant64, rhsConstant64);
     Value *count = b.bin(
         Instruction::SDiv,
         b.bin(Instruction::Sub,
@@ -680,8 +707,15 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     b.at(closedBody);
     Value *x = b.bin(Instruction::Add, s,
                      b.bin(Instruction::Mul, d, first));
-    Value *reflected = b.bin(Instruction::Sub, maxConstant64, x);
-    Value *left = b.cmp(ICmpInst::ICMP_SLT, x, reflected);
+    Value *lhs = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, lhsMultiplier64, x),
+        lhsConstant64);
+    Value *rhs = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, rhsMultiplier64, x),
+        rhsConstant64);
+    Value *left = b.bin(
+        Instruction::And,
+        piecewiseActive, b.cmp(ICmpInst::ICMP_SLT, lhs, rhs));
     Value *initialLow = b.bin(Instruction::Add, first, b.i64(1));
     b.jump(splitCond);
 
@@ -701,8 +735,16 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
               b.bin(Instruction::Sub, high, low), b.i64(2)));
     Value *middleX = b.bin(
         Instruction::Add, s, b.bin(Instruction::Mul, d, middle));
-    Value *middleReflected = b.bin(Instruction::Sub, maxConstant64, middleX);
-    Value *middleLeft = b.cmp(ICmpInst::ICMP_SLT, middleX, middleReflected);
+    Value *middleLhs = b.bin(
+        Instruction::Add,
+        b.bin(Instruction::Mul, lhsMultiplier64, middleX), lhsConstant64);
+    Value *middleRhs = b.bin(
+        Instruction::Add,
+        b.bin(Instruction::Mul, rhsMultiplier64, middleX), rhsConstant64);
+    Value *middleLeft = b.bin(
+        Instruction::And,
+        piecewiseActive,
+        b.cmp(ICmpInst::ICMP_SLT, middleLhs, middleRhs));
     b.branch(b.cmp(ICmpInst::ICMP_EQ, middleLeft, left),
              splitRaise, splitLower);
     b.at(splitRaise);
@@ -726,18 +768,25 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     b.at(splitExit);
     b.branch(left, sumLeft, sumRight);
     b.at(sumLeft);
+    Value *trueU = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, trueMultiplier, x),
+        trueConstant);
     Value *leftSum = b.call(
         sumMonotone,
-        {b.bin(Instruction::Sub, maxConstant64, x),
-         b.bin(Instruction::Sub, b.i64(0), d),
-         b.bin(Instruction::Sub, low, first), multiplier64, divisor64,
-         quotientMultiplier64, innerModulus64});
+        {trueU, b.bin(Instruction::Mul, trueMultiplier, d),
+         b.bin(Instruction::Sub, low, first), linearMultiplier64,
+         multiplier64, divisor64, quotientMultiplier64, rawConstant64,
+         innerModulus64});
     b.jump(sumMerge);
     b.at(sumRight);
+    Value *falseU = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, falseMultiplier, x),
+        falseConstant);
     Value *rightSum = b.call(
         sumMonotone,
-        {x, d, b.bin(Instruction::Sub, low, first), multiplier64,
-         divisor64, quotientMultiplier64, innerModulus64});
+        {falseU, b.bin(Instruction::Mul, falseMultiplier, d),
+         b.bin(Instruction::Sub, low, first), linearMultiplier64, multiplier64,
+         divisor64, quotientMultiplier64, rawConstant64, innerModulus64});
     b.jump(sumMerge);
     b.at(sumMerge);
     auto *segmentSum = PhiInst::create_phi(module->int64_ty_, sumMerge);
@@ -781,19 +830,28 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     b.at(tailBody);
     Value *tailX = b.trunc(b.bin(
         Instruction::Add, s, b.bin(Instruction::Mul, d, index)));
-    Value *tailReflected = b.bin(Instruction::Sub, a[3], tailX);
-    Value *tailU = b.select(
-        b.cmp(ICmpInst::ICMP_SLT, tailX, tailReflected),
-        tailReflected, tailX);
-    Value *product = b.bin(Instruction::Mul, tailU, a[4]);
-    Value *quotient = b.bin(Instruction::SDiv, product, a[5]);
-    Value *scaled = b.bin(Instruction::Mul, quotient, a[6]);
-    Value *z = b.bin(Instruction::Add, tailU, scaled);
-    Value *contribution = b.bin(Instruction::SRem, z, a[7]);
+    Value *tailLhs = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, a[4], tailX), a[5]);
+    Value *tailRhs = b.bin(
+        Instruction::Add, b.bin(Instruction::Mul, a[6], tailX), a[7]);
+    Value *useReflection = b.bin(
+        Instruction::And,
+        piecewiseActive, b.cmp(ICmpInst::ICMP_SLT, tailLhs, tailRhs));
+    Value *tailTrue = b.select(selectRight, tailRhs, tailLhs);
+    Value *tailFalse = b.select(selectRight, tailLhs, tailRhs);
+    Value *tailU = b.select(useReflection, tailTrue, tailFalse);
+    Value *linear = b.bin(Instruction::Mul, tailU, a[9]);
+    Value *product = b.bin(Instruction::Mul, tailU, a[10]);
+    Value *quotient = b.bin(Instruction::SDiv, product, a[11]);
+    Value *scaled = b.bin(Instruction::Mul, quotient, a[12]);
+    Value *z = b.bin(
+        Instruction::Add,
+        b.bin(Instruction::Add, linear, scaled), a[13]);
+    Value *contribution = b.bin(Instruction::SRem, z, a[14]);
     auto advance = [&](Value *state) {
         Value *sum = b.bin(Instruction::Add,
-                           b.bin(Instruction::Add, state, contribution), a[8]);
-        return static_cast<Value *>(b.bin(Instruction::SRem, sum, a[9]));
+                           b.bin(Instruction::Add, state, contribution), a[15]);
+        return static_cast<Value *>(b.bin(Instruction::SRem, sum, a[16]));
     };
     Value *nextA = advance(stateA);
     Value *nextB = advance(stateB);

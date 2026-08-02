@@ -1,6 +1,7 @@
 #include "../../../include/mid/opt/loopRepFold.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/recurrenceAnalysis.hpp"
+#include "../../../include/mid/analysis/summableExpressionAnalysis.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -34,10 +35,17 @@ struct PiecewiseModularSumMatch {
     Value *initial = nullptr;
     BinaryInst *stateRemainder = nullptr;
     Value *remainderBase = nullptr;
-    int maxConstant = 0;
+    int piecewiseEnabled = 0;
+    int lhsMultiplier = 1;
+    int lhsConstant = 0;
+    int rhsMultiplier = 1;
+    int rhsConstant = 0;
+    int trueUsesRight = 1;
+    int linearMultiplier = 0;
     int multiplier = 0;
     int divisor = 0;
     int quotientMultiplier = 0;
+    int contributionConstant = 0;
     int innerModulus = 0;
     int additiveConstant = 0;
     int outerModulus = 0;
@@ -50,62 +58,6 @@ bool constantI32(Value *value, int &result) {
         return false;
     result = static_cast<int>(constant->value_);
     return true;
-}
-
-bool matchReflected(Value *value, Value *base, int &constant) {
-    auto *sub = dynamic_cast<BinaryInst *>(value);
-    return sub && sub->is_sub() && constantI32(sub->get_operand(0), constant) &&
-           sub->get_operand(1) == base;
-}
-
-// Match max(base, C-base) in the canonical compare/select form left by
-// if-conversion.  Nested layers are accepted only when the inner max's
-// structural lower bound proves the outer layer redundant for every value.
-bool matchReflectedMaximum(Value *value, PhiInst *induction,
-                           int &baseConstant, long long &lowerBound) {
-    if (value == induction) {
-        lowerBound = std::numeric_limits<int>::min();
-        return true;
-    }
-    auto *select = dynamic_cast<SelectInst *>(value);
-    if (!select) return false;
-    auto *compare = dynamic_cast<ICmpInst *>(select->get_operand(0));
-    if (!compare || compare->icmp_op_ != ICmpInst::ICMP_SLT)
-        return false;
-    Value *base = compare->get_operand(0);
-    int constant = 0;
-    if (!matchReflected(compare->get_operand(1), base, constant) ||
-        constant < 0 ||
-        select->get_operand(1) != compare->get_operand(1) ||
-        select->get_operand(2) != base)
-        return false;
-
-    int innerConstant = 0;
-    long long innerLower = 0;
-    if (!matchReflectedMaximum(base, induction, innerConstant, innerLower))
-        return false;
-    long long layerLower =
-        (static_cast<long long>(constant) + 1) / 2;
-    if (base == induction) {
-        baseConstant = constant;
-        lowerBound = layerLower;
-        return true;
-    }
-    if (innerLower < layerLower)
-        return false;
-    baseConstant = innerConstant;
-    lowerBound = innerLower;
-    return true;
-}
-
-bool matchMultiplyByConstant(Value *value, Value *input, int &constant) {
-    auto *multiply = dynamic_cast<BinaryInst *>(value);
-    if (!multiply || !multiply->is_mul()) return false;
-    if (multiply->get_operand(0) == input)
-        return constantI32(multiply->get_operand(1), constant);
-    if (multiply->get_operand(1) == input)
-        return constantI32(multiply->get_operand(0), constant);
-    return false;
 }
 
 bool flattenAdd(Value *value, std::vector<Value *> &terms,
@@ -125,14 +77,18 @@ bool flattenAdd(Value *value, std::vector<Value *> &terms,
 
 bool matchAddConstant(Value *value, Value *base, int constant) {
     auto *add = dynamic_cast<BinaryInst *>(value);
-    if (!add || !add->is_add()) return false;
+    if (!add) return false;
     int candidate = 0;
-    return (add->get_operand(0) == base &&
-            constantI32(add->get_operand(1), candidate) &&
-            candidate == constant) ||
-           (add->get_operand(1) == base &&
-            constantI32(add->get_operand(0), candidate) &&
-            candidate == constant);
+    if (add->is_add())
+        return (add->get_operand(0) == base &&
+                constantI32(add->get_operand(1), candidate) &&
+                candidate == constant) ||
+               (add->get_operand(1) == base &&
+                constantI32(add->get_operand(0), candidate) &&
+                candidate == constant);
+    return add->is_sub() && add->get_operand(0) == base &&
+           constantI32(add->get_operand(1), candidate) &&
+           -static_cast<std::int64_t>(candidate) == constant;
 }
 
 bool matchCompareConstant(Value *value, ICmpInst::ICmpOp predicate,
@@ -151,6 +107,12 @@ bool matchCompareConstant(Value *value, ICmpInst::ICmpOp predicate,
 bool matchExitModuloReconstruction(
     Value *base, int additive, int modulus, BasicBlock *exit,
     std::unordered_set<Instruction *> &chain) {
+    auto reject = [&](const char *reason) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] exit modulo reject reason="
+                      << reason << "\n";
+        return false;
+    };
     std::int64_t highThresholdWide =
         static_cast<std::int64_t>(modulus) - additive;
     std::int64_t reducedAddWide =
@@ -159,11 +121,20 @@ bool matchExitModuloReconstruction(
         highThresholdWide > std::numeric_limits<int>::max() ||
         reducedAddWide < std::numeric_limits<int>::min() ||
         reducedAddWide > std::numeric_limits<int>::max())
-        return false;
+        return reject("constant-overflow");
     int highThreshold = static_cast<int>(highThresholdWide);
     int reducedAdd = static_cast<int>(reducedAddWide);
 
-    Instruction *dividend = nullptr;
+    Value *exitBase = base;
+    for (Instruction *instruction : exit->instr_list_) {
+        if (!instruction->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instruction);
+        if (phi->num_ops_ == 2 && phi->get_operand(0) == base) {
+            exitBase = phi;
+            break;
+        }
+    }
+    Value *dividend = additive == 0 ? exitBase : nullptr;
     Instruction *highCompare = nullptr;
     Instruction *highReduced = nullptr;
     SelectInst *highSelect = nullptr;
@@ -172,16 +143,17 @@ bool matchExitModuloReconstruction(
     SelectInst *lowSelect = nullptr;
 
     for (auto *instruction : exit->instr_list_) {
-        if (!dividend && matchAddConstant(instruction, base, additive))
+        if (!dividend && matchAddConstant(instruction, exitBase, additive))
             dividend = instruction;
         if (!highCompare &&
-            (matchCompareConstant(instruction, ICmpInst::ICMP_SGE, base,
+            (matchCompareConstant(instruction, ICmpInst::ICMP_SGE, exitBase,
                                   highThreshold)))
             highCompare = instruction;
-        if (!highReduced && matchAddConstant(instruction, base, reducedAdd))
+        if (!highReduced &&
+            matchAddConstant(instruction, exitBase, reducedAdd))
             highReduced = instruction;
     }
-    if (!dividend) return false;
+    if (!dividend) return reject("missing-dividend");
 
     for (auto *instruction : exit->instr_list_) {
         auto *remainder = dynamic_cast<BinaryInst *>(instruction);
@@ -191,20 +163,26 @@ bool matchExitModuloReconstruction(
             !constantI32(remainder->get_operand(1), candidateModulus) ||
             candidateModulus != modulus)
             continue;
-        chain = {dividend, remainder};
+        chain.clear();
+        if (auto *instruction = dynamic_cast<Instruction *>(dividend);
+            instruction && instruction->parent_ == exit)
+            chain.insert(instruction);
+        chain.insert(remainder);
         for (const auto &use : dividend->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
-            if (user != remainder) return false;
+            if (user && user->parent_ == exit && user != remainder)
+                return reject("exact-dividend-extra-use");
         }
-        for (const auto &use : base->use_list_) {
+        for (const auto &use : exitBase->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
             if (user && user->parent_ == exit && user != dividend)
-                return false;
+                return reject("exact-base-extra-use");
         }
         return true;
     }
 
-    if (!highCompare || !highReduced) return false;
+    if (!highCompare || !highReduced)
+        return reject("missing-high-correction");
 
     for (auto *instruction : exit->instr_list_) {
         auto *select = dynamic_cast<SelectInst *>(instruction);
@@ -215,7 +193,7 @@ bool matchExitModuloReconstruction(
             break;
         }
     }
-    if (!highSelect) return false;
+    if (!highSelect) return reject("missing-high-select");
 
     for (auto *instruction : exit->instr_list_) {
         if (!lowCompare &&
@@ -225,7 +203,8 @@ bool matchExitModuloReconstruction(
         if (!lowAdjusted && matchAddConstant(instruction, highSelect, modulus))
             lowAdjusted = instruction;
     }
-    if (!lowCompare || !lowAdjusted) return false;
+    if (!lowCompare || !lowAdjusted)
+        return reject("missing-low-correction");
     for (auto *instruction : exit->instr_list_) {
         auto *select = dynamic_cast<SelectInst *>(instruction);
         if (select && select->get_operand(0) == lowCompare &&
@@ -235,76 +214,51 @@ bool matchExitModuloReconstruction(
             break;
         }
     }
-    if (!lowSelect) return false;
+    if (!lowSelect) return reject("missing-low-select");
 
-    chain = {dividend, highCompare, highReduced, highSelect,
-             lowCompare, lowAdjusted, lowSelect};
+    chain.clear();
+    if (auto *instruction = dynamic_cast<Instruction *>(dividend);
+        instruction && instruction->parent_ == exit)
+        chain.insert(instruction);
+    for (Instruction *instruction : std::vector<Instruction *>{
+             highCompare, highReduced, highSelect,
+             lowCompare, lowAdjusted, lowSelect})
+        chain.insert(instruction);
     for (Instruction *instruction : chain) {
         if (instruction == lowSelect) continue;
         for (const auto &use : instruction->use_list_) {
             auto *user = dynamic_cast<Instruction *>(use.val_);
-            if (!user || !chain.count(user)) return false;
+            if (!user || !chain.count(user))
+                return reject("correction-chain-extra-use");
         }
     }
-    for (const auto &use : base->use_list_) {
+    for (const auto &use : exitBase->use_list_) {
         auto *user = dynamic_cast<Instruction *>(use.val_);
         if (user && user->parent_ == exit && !chain.count(user))
-            return false;
+            return reject("base-extra-use");
     }
     return true;
 }
 
 bool matchPiecewiseContribution(Value *value, PhiInst *induction,
                                 PiecewiseModularSumMatch &match) {
-    auto *innerRemainder = dynamic_cast<BinaryInst *>(value);
-    if (!innerRemainder || !innerRemainder->is_rem() ||
-        !constantI32(innerRemainder->get_operand(1), match.innerModulus) ||
-        match.innerModulus <= 0)
+    SummableExpressionAnalysis::LinearFloorExpression expression;
+    if (!SummableExpressionAnalysis::analyzeModular(
+            value, induction, expression))
         return false;
-
-    auto *sum = dynamic_cast<BinaryInst *>(innerRemainder->get_operand(0));
-    if (!sum || !sum->is_add()) return false;
-    Value *maximum = nullptr;
-    Value *scaledQuotient = nullptr;
-    auto chooseOperands = [&](Value *lhs, Value *rhs) {
-        auto *multiply = dynamic_cast<BinaryInst *>(rhs);
-        if (!multiply || !multiply->is_mul()) return false;
-        maximum = lhs;
-        scaledQuotient = rhs;
-        return true;
-    };
-    if (!chooseOperands(sum->get_operand(0), sum->get_operand(1)) &&
-        !chooseOperands(sum->get_operand(1), sum->get_operand(0)))
-        return false;
-
-    long long maximumLowerBound = 0;
-    if (maximum == induction ||
-        !matchReflectedMaximum(maximum, induction, match.maxConstant,
-                               maximumLowerBound))
-        return false;
-    auto *scaled = dynamic_cast<BinaryInst *>(scaledQuotient);
-    Value *quotient = nullptr;
-    if (auto *constant = dynamic_cast<ConstantInt *>(scaled->get_operand(1))) {
-        quotient = scaled->get_operand(0);
-        match.quotientMultiplier = static_cast<int>(constant->value_);
-    } else if (auto *constant =
-                   dynamic_cast<ConstantInt *>(scaled->get_operand(0))) {
-        quotient = scaled->get_operand(1);
-        match.quotientMultiplier = static_cast<int>(constant->value_);
-    } else {
-        return false;
-    }
-    auto *division = dynamic_cast<BinaryInst *>(quotient);
-    if (!division || !division->is_div() ||
-        !constantI32(division->get_operand(1), match.divisor) ||
-        match.divisor <= 0)
-        return false;
-    if (!matchMultiplyByConstant(division->get_operand(0), maximum,
-                                 match.multiplier))
-        return false;
-    return match.multiplier > 0 && match.quotientMultiplier > 0 &&
-           match.multiplier <= 65535 &&
-           match.quotientMultiplier <= 65535 && match.divisor <= 4096;
+    match.piecewiseEnabled = expression.piecewise ? 1 : 0;
+    match.lhsMultiplier = expression.lhsMultiplier;
+    match.lhsConstant = expression.lhsConstant;
+    match.rhsMultiplier = expression.rhsMultiplier;
+    match.rhsConstant = expression.rhsConstant;
+    match.trueUsesRight = expression.trueUsesRight ? 1 : 0;
+    match.linearMultiplier = expression.linearMultiplier;
+    match.multiplier = expression.divisionMultiplier;
+    match.divisor = expression.divisor;
+    match.quotientMultiplier = expression.quotientMultiplier;
+    match.contributionConstant = expression.constant;
+    match.innerModulus = expression.modulus;
+    return true;
 }
 
 bool analyzePiecewiseModularSum(Loop &loop,
@@ -370,7 +324,9 @@ bool analyzePiecewiseModularSum(Loop &loop,
     match.additiveConstant = static_cast<int>(additive);
     auto *dividendAdd = dynamic_cast<BinaryInst *>(
         match.stateRemainder->get_operand(0));
-    if (dividendAdd && dividendAdd->is_add()) {
+    if (match.additiveConstant == 0) {
+        match.remainderBase = match.stateRemainder->get_operand(0);
+    } else if (dividendAdd && dividendAdd->is_add()) {
         int directConstant = 0;
         if (constantI32(dividendAdd->get_operand(0), directConstant) &&
             directConstant == match.additiveConstant)
@@ -763,7 +719,7 @@ Function *LoopRepFold::getPiecewiseModSumDeclaration(Module *module) {
             piecewiseModSumDecl_ = function;
             return function;
         }
-    std::vector<Type *> arguments(11, module->int32_ty_);
+    std::vector<Type *> arguments(18, module->int32_ty_);
     auto *type = new FunctionType(module->int32_ty_, arguments);
     piecewiseModSumDecl_ =
         new Function(type, "__compiler.piecewise_mod_sum", module);
@@ -910,6 +866,46 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
                                      one, preheader, true);
     auto *boundSafe = new ICmpInst(ICmpInst::ICMP_SLE, match.bound,
                                    safeBound, preheader, true);
+    std::vector<Value *> affineSafetyConditions;
+    std::vector<Instruction *> affineSafetyInstructions;
+    {
+        auto *i64 = module->int64_ty_;
+        auto remember = [&](Instruction *instruction) -> Instruction * {
+            affineSafetyInstructions.push_back(instruction);
+            return instruction;
+        };
+        auto *start64 = static_cast<Value *>(remember(new ZextInst(
+            Instruction::SExt, match.start, i64, preheader, true)));
+        auto *bound64 = static_cast<Value *>(remember(new ZextInst(
+            Instruction::SExt, match.bound, i64, preheader, true)));
+        auto *last64 = static_cast<Value *>(remember(new BinaryInst(
+            i64, Instruction::Sub, bound64, new ConstantInt(i64, 1),
+            preheader, true)));
+        auto addLineSafety = [&](int multiplier, int constant) {
+            auto evaluate = [&](Value *x) -> Value * {
+                auto *product = static_cast<Value *>(remember(new BinaryInst(
+                    i64, Instruction::Mul, x,
+                    new ConstantInt(i64, multiplier), preheader, true)));
+                return static_cast<Value *>(remember(new BinaryInst(
+                    i64, Instruction::Add, product,
+                    new ConstantInt(i64, constant), preheader, true)));
+            };
+            for (Value *value : {evaluate(start64), evaluate(last64)}) {
+                auto *lower = static_cast<Value *>(remember(new ICmpInst(
+                    ICmpInst::ICMP_SGE, value,
+                    new ConstantInt(i64, std::numeric_limits<int>::min()),
+                    preheader, true)));
+                auto *upper = static_cast<Value *>(remember(new ICmpInst(
+                    ICmpInst::ICMP_SLE, value,
+                    new ConstantInt(i64, std::numeric_limits<int>::max()),
+                    preheader, true)));
+                affineSafetyConditions.push_back(lower);
+                affineSafetyConditions.push_back(upper);
+            }
+        };
+        addLineSafety(match.lhsMultiplier, match.lhsConstant);
+        addLineSafety(match.rhsMultiplier, match.rhsConstant);
+    }
     Value *guard = stepPositive;
     for (auto *condition : {static_cast<Value *>(stepSmall),
                             static_cast<Value *>(startNonnegative),
@@ -917,6 +913,9 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
                             static_cast<Value *>(initialInLowerRange),
                             static_cast<Value *>(initialInUpperRange),
                             static_cast<Value *>(boundSafe)})
+        guard = new BinaryInst(i1, Instruction::And, guard, condition,
+                               preheader, true);
+    for (Value *condition : affineSafetyConditions)
         guard = new BinaryInst(i1, Instruction::And, guard, condition,
                                preheader, true);
     for (auto *instruction : {static_cast<Instruction *>(stepPositive),
@@ -928,6 +927,8 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
                               static_cast<Instruction *>(maxMinusStep),
                               static_cast<Instruction *>(safeBound),
                               static_cast<Instruction *>(boundSafe)})
+        preheader->add_instruction_before_terminator(instruction);
+    for (Instruction *instruction : affineSafetyInstructions)
         preheader->add_instruction_before_terminator(instruction);
     // The guard's AND chain was created without insertion.  Insert it in
     // dependency order by walking backwards from the final node.
@@ -952,10 +953,17 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
         match.start,
         match.bound,
         match.step,
-        new ConstantInt(i32, match.maxConstant),
+        new ConstantInt(i32, match.piecewiseEnabled),
+        new ConstantInt(i32, match.lhsMultiplier),
+        new ConstantInt(i32, match.lhsConstant),
+        new ConstantInt(i32, match.rhsMultiplier),
+        new ConstantInt(i32, match.rhsConstant),
+        new ConstantInt(i32, match.trueUsesRight),
+        new ConstantInt(i32, match.linearMultiplier),
         new ConstantInt(i32, match.multiplier),
         new ConstantInt(i32, match.divisor),
         new ConstantInt(i32, match.quotientMultiplier),
+        new ConstantInt(i32, match.contributionConstant),
         new ConstantInt(i32, match.innerModulus),
         new ConstantInt(i32, match.additiveConstant),
         new ConstantInt(i32, match.outerModulus),
