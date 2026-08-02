@@ -3,6 +3,7 @@
 
 #include "value.hpp"
 
+#include <cstdint>
 #include <vector>
 
 // 常量基类
@@ -12,12 +13,12 @@ public:
     virtual ~Constant() = default;
 };
 
-// i32 常量，如 i32 42
+// 整数常量，如 i32 42 / i64 4294967296
 class ConstantInt : public Constant {
 public:
-    ConstantInt(Type* ty, int val) : Constant(ty, ""), value_(val) {}
+    ConstantInt(Type* ty, std::int64_t val) : Constant(ty, ""), value_(val) {}
     virtual std::string print() override;
-    int value_;
+    std::int64_t value_;
 };
 
 // float 常量，如 0x4057C21FC0000000

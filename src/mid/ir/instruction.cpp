@@ -36,6 +36,8 @@ std::map<Instruction::OpID, std::string> instr_id2string_ = {
     {Instruction::Select, "select"},
     {Instruction::GetElementPtr, "getelementptr"},
     {Instruction::ZExt, "zext"},
+    {Instruction::SExt, "sext"},
+    {Instruction::Trunc, "trunc"},
     {Instruction::FPtoSI, "fptosi"},
     {Instruction::SItoFP, "sitofp"},
     {Instruction::BitCast, "bitcast"},
@@ -183,8 +185,11 @@ std::string UnaryInst::print() {
     instr_ir += print_as_op(this->get_operand(0), false);
     switch (this->op_id_) {
         case Instruction::ZExt:
+        case Instruction::SExt:
+        case Instruction::Trunc:
             assert(this->type_->tid_ == Type::IntegerTyID);
-            instr_ir += " to i32";
+            instr_ir += " to ";
+            instr_ir += this->type_->print();
             break;
         case Instruction::FPtoSI:
             assert(this->type_->tid_ == Type::IntegerTyID);
