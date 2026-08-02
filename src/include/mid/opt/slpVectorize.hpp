@@ -1,5 +1,6 @@
 #pragma once
 #include "../ir/ir.hpp"
+#include "../analysis/basicAliasAnalysis.hpp"
 #include "pass.hpp"
 #include <set>
 #include <vector>
@@ -39,7 +40,8 @@ private:
         void add(Pack p);
     };
 
-    void runOnFunction(Function *func, Module *module);
+    bool runOnFunction(Function *func, Module *module,
+                       const BasicAliasAnalysis &BAA);
 
     // ── Phase 1: 识别相邻内存访问 ────────────────────────────────────
     PackSet findAdjacentMemoryRefs(BasicBlock *bb, Module *module);
@@ -51,7 +53,8 @@ private:
     PackSet combinePacks(PackSet P);
 
     // ── Phase 4: 调度并发射向量指令 ───────────────────────────────────
-    void scheduleAndEmit(BasicBlock *bb, PackSet P, Module *module);
+    bool scheduleAndEmit(BasicBlock *bb, PackSet P, Module *module,
+                         const BasicAliasAnalysis &BAA);
     void emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module);
     void emitVectorStore(BasicBlock *bb, Pack &pack, Module *module);
     void emitVectorBinary(BasicBlock *bb, Pack &pack, Module *module,
@@ -62,7 +65,9 @@ private:
     bool isIndependent(Instruction *a, Instruction *b);
     bool isVectorizable(Instruction *inst);
     bool hasInterveningMemoryEffect(
-        BasicBlock *bb, const std::vector<Instruction*> &instructions);
+        BasicBlock *bb, const std::vector<Instruction*> &instructions,
+        const BasicAliasAnalysis &BAA);
+    bool isProfitable(const PackSet &P) const;
     bool isAdjacentStore(Instruction *a, Instruction *b, Module *module);
     bool isAdjacentLoad(Instruction *a, Instruction *b, Module *module);
     Value *getStoredValue(Instruction *store);

@@ -761,6 +761,65 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         block, define(node), use(node.operands()[0]),
                         static_cast<std::int32_t>(rhs->integer), &node))
                     break;
+
+                if (integerVector && rhs &&
+                    (node.opcode() == SDOpcode::Shl ||
+                     node.opcode() == SDOpcode::LShr ||
+                     node.opcode() == SDOpcode::AShr) &&
+                    rhs->opcode() == SDOpcode::Splat &&
+                    rhs->operands().size() == 1) {
+                    SDNode *amount = rhs->operands()[0].node;
+                    if (amount && amount->opcode() == SDOpcode::Constant) {
+                        const std::int64_t shift = amount->integer;
+                        const bool validLeft = node.opcode() == SDOpcode::Shl &&
+                                               shift >= 0 && shift < 32;
+                        const bool validRight = node.opcode() != SDOpcode::Shl &&
+                                                shift > 0 && shift < 32;
+                        if (validLeft || validRight) {
+                            Opcode immediateShift =
+                                node.opcode() == SDOpcode::Shl
+                                    ? Opcode::SHLiv4i32
+                                    : node.opcode() == SDOpcode::LShr
+                                          ? Opcode::USHRiv4i32
+                                          : Opcode::SSHRiv4i32;
+                            MachineInstr shifted(immediateShift);
+                            shifted.addOperand(define(node))
+                                .addOperand(use(node.operands()[0]))
+                                .addOperand(MachineOperand::immediate(shift));
+                            append(block, std::move(shifted), &node);
+                            break;
+                        }
+                    }
+                }
+                if (integerVector && node.opcode() == SDOpcode::Mul) {
+                    SDNode *splat = nullptr;
+                    SDValue value;
+                    if (rhs && rhs->opcode() == SDOpcode::Splat) {
+                        splat = rhs;
+                        value = node.operands()[0];
+                    } else if (lhs && lhs->opcode() == SDOpcode::Splat) {
+                        splat = lhs;
+                        value = node.operands()[1];
+                    }
+                    SDNode *factor =
+                        splat && splat->operands().size() == 1
+                            ? splat->operands()[0].node
+                            : nullptr;
+                    if (factor && factor->opcode() == SDOpcode::Constant &&
+                        factor->integer > 0 &&
+                        factor->integer <= INT32_MAX &&
+                        isPowerOfTwo(static_cast<std::uint32_t>(
+                            factor->integer))) {
+                        MachineInstr shifted(Opcode::SHLiv4i32);
+                        shifted.addOperand(define(node))
+                            .addOperand(use(value))
+                            .addOperand(MachineOperand::immediate(
+                                log2Exact(static_cast<std::uint32_t>(
+                                    factor->integer))));
+                        append(block, std::move(shifted), &node);
+                        break;
+                    }
+                }
                 Opcode immediateOpcode = Opcode::Invalid;
                 if (!integerVector && !floatingVector &&
                     node.opcode() == SDOpcode::Add)
@@ -972,13 +1031,44 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             }
             case SDOpcode::MAdd:
             case SDOpcode::MSub: {
-                MachineInstr fused(node.opcode() == SDOpcode::MAdd
-                                       ? Opcode::MADDWrrr
-                                       : Opcode::MSUBWrrr);
+                const bool vector =
+                    node.resultTypes().front() == ValueType::V4I32;
+                MachineInstr fused(
+                    vector ? (node.opcode() == SDOpcode::MAdd
+                                  ? Opcode::MLAv4i32
+                                  : Opcode::MLSv4i32)
+                           : (node.opcode() == SDOpcode::MAdd
+                                  ? Opcode::MADDWrrr
+                                  : Opcode::MSUBWrrr));
+                fused.addOperand(define(node));
+                if (vector) {
+                    fused.operands()[0].isEarlyClobber = true;
+                    fused.addOperand(use(node.operands()[2]))
+                        .addOperand(use(node.operands()[0]))
+                        .addOperand(use(node.operands()[1]));
+                    fused.operands()[1].tiedTo = 0;
+                } else {
+                    fused.addOperand(use(node.operands()[0]))
+                        .addOperand(use(node.operands()[1]))
+                        .addOperand(use(node.operands()[2]));
+                }
+                append(block, std::move(fused), &node);
+                break;
+            }
+            case SDOpcode::FMAdd:
+            case SDOpcode::FMSub: {
+                // fmla/fmls vd, vn, vm accumulate into vd in place.  The
+                // accumulator operand (index 3) is tied to the destination;
+                // regalloc keeps them in the same register and excludes vd
+                // from vn/vm.
+                MachineInstr fused(node.opcode() == SDOpcode::FMAdd
+                                       ? Opcode::FMLAv4f32
+                                       : Opcode::FMLSv4f32);
                 fused.addOperand(define(node))
                     .addOperand(use(node.operands()[0]))
                     .addOperand(use(node.operands()[1]))
                     .addOperand(use(node.operands()[2]));
+                fused.operands()[3].tiedTo = 0;
                 append(block, std::move(fused), &node);
                 break;
             }

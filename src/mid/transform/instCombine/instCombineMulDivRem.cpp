@@ -1,6 +1,7 @@
 #include "instCombineInternal.hpp"
 #include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
+#include <cstdint>
 #include <limits>
 #include <set>
 
@@ -342,6 +343,33 @@ Value* visitSDiv(BinaryInst *inst) {
         stampIntegerFacts(neg);
         bb->add_instruction_before_inst(neg, inst);
         return neg;
+    }
+
+    // Nested constant division: (x / C1) / C2  →  x / (C1 * C2).
+    // Holds for truncating (toward-zero) division because
+    //   trunc(trunc(x/c1)/c2) = trunc(x/(c1*c2))
+    // (magnitudes satisfy floor(floor(a/b)/c) = floor(a/(b*c))), and the
+    // INT_MIN / -1 UB cases coincide on both sides.  The combined divisor
+    // must be exactly representable in i32; skip when the product overflows.
+    if (cy) {
+        auto *innerDiv = dynamic_cast<BinaryInst *>(x);
+        if (innerDiv && innerDiv->op_id_ == Instruction::SDiv &&
+            innerDiv->type_->tid_ == Type::IntegerTyID) {
+            ConstantInt *c1 = as_const_int(innerDiv->get_operand(1));
+            if (c1 && c1->value_ != 0) {
+                int64_t combined = static_cast<int64_t>(c1->value_) *
+                                   static_cast<int64_t>(cy->value_);
+                if (combined >= INT32_MIN && combined <= INT32_MAX) {
+                    auto *folded = new BinaryInst(
+                        ty, Instruction::SDiv, innerDiv->get_operand(0),
+                        make_const_int(ty, static_cast<int>(combined)),
+                        bb, true);
+                    stampIntegerFacts(folded);
+                    bb->add_instruction_before_inst(folded, inst);
+                    return folded;
+                }
+            }
+        }
     }
 
     if (cy && cy->value_ != 0) {

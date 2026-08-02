@@ -5,8 +5,12 @@
 #include "../../include/mid/ir/irBuilder.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
+#include <algorithm>
 #include <climits>
+#include <cstdlib>
+#include <iostream>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace {
@@ -132,6 +136,16 @@ bool isMemsetFillConstant(ConstantInt *ci, int &fillByte) {
     return true;
 }
 
+bool idiomDebugEnabled() {
+    static bool enabled = std::getenv("DEBUG_IDIOM") != nullptr;
+    return enabled;
+}
+
+void debugIdiom(const std::string &message) {
+    if (idiomDebugEnabled())
+        std::cerr << "[IdiomRecognize] " << message << "\n";
+}
+
 struct MemsetMatch {
     StoreInst *store = nullptr;
     Value *base = nullptr;
@@ -154,8 +168,11 @@ struct MemcpyMatch {
     GetElementPtrInst *srcGeep = nullptr;
     unsigned destIndex = 0;
     unsigned srcIndex = 0;
+    int destIndexOffset = 0;
+    int srcIndexOffset = 0;
     Value *elementCount = nullptr;
     int elementStrideBytes = 0;
+    LibFunc copyKind = LibFunc::Memcpy;
 };
 
 bool hasNestedChildLoop(const Loop &loop, LoopInfo &LI) {
@@ -172,6 +189,34 @@ struct IVDesc {
     AllocaInst *alloca = nullptr;
     Value *bound = nullptr;
 };
+
+bool isPositiveGuard(ICmpInst *cmp, Value *bound) {
+    if (!cmp) return false;
+    auto *one = dynamic_cast<ConstantInt *>(cmp->get_operand(1));
+    if (cmp->get_operand(0) == bound && one) {
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SGE && one->value_ == 1)
+            return true;
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SGT && one->value_ == 0)
+            return true;
+    }
+    auto *zero = dynamic_cast<ConstantInt *>(cmp->get_operand(0));
+    if (cmp->get_operand(1) == bound && zero) {
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SLE && zero->value_ == 0)
+            return true;
+        if (cmp->icmp_op_ == ICmpInst::ICMP_SLT && zero->value_ == 1)
+            return true;
+    }
+    return false;
+}
+
+bool preheaderHasPositiveGuard(BasicBlock *preheader, Value *bound) {
+    if (!preheader || preheader->pre_bbs_.size() != 1) return false;
+    auto *pred = preheader->pre_bbs_.front();
+    auto *term = pred->get_terminator();
+    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (term->get_operand(1) != preheader) return false;
+    return isPositiveGuard(dynamic_cast<ICmpInst *>(term->get_operand(0)), bound);
+}
 
 bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
                              MemsetMatch &match) {
@@ -289,7 +334,12 @@ bool findCountingIV(Loop &loop, BasicBlock *latch, ICmpInst *compare, IVDesc &iv
         if (!getLoopPhiIncoming(loop, phi, init, latchValue, latchBlock))
             continue;
         auto *initCI = dynamic_cast<ConstantInt *>(init);
-        if (!initCI || initCI->value_ != 0) continue;
+        if (!initCI) continue;
+        if (initCI->value_ != 0) {
+            if (initCI->value_ != 1 || loop.singleLatch() != loop.header ||
+                !preheaderHasPositiveGuard(loop.preheader, bound))
+                continue;
+        }
 
         auto *update = dynamic_cast<BinaryInst *>(latchValue);
         if (!update || !update->is_add()) continue;
@@ -421,7 +471,8 @@ bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
 bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
                            Type *scalarType, Value *&base,
                            GetElementPtrInst *&inductionGeep,
-                           unsigned &inductionIndex, int &elementStrideBytes) {
+                           unsigned &inductionIndex, int &elementStrideBytes,
+                           int *inductionOffset = nullptr) {
     int scalarBytes = typeSize(scalarType);
     if (scalarBytes <= 0) return false;
 
@@ -448,6 +499,7 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
         base = init;
         inductionGeep = nullptr;
         inductionIndex = 0;
+        if (inductionOffset) *inductionOffset = 0;
         elementStrideBytes = scalarBytes;
         return true;
     }
@@ -469,12 +521,14 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
         }
     }
     if (!isLoopInvariant(gep->get_operand(0), loop.blocks)) return false;
-    if (varyingCount != 1 || ivOffset != 0) return false;
+    if (varyingCount != 1) return false;
+    if (ivOffset != 0 && !inductionOffset) return false;
     if (!varyingIndexHasUnitElementStride(gep, varying, scalarType)) return false;
 
     base = nullptr;
     inductionGeep = gep;
     inductionIndex = varying;
+    if (inductionOffset) *inductionOffset = ivOffset;
     elementStrideBytes = scalarBytes;
     return true;
 }
@@ -492,15 +546,19 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
     GetElementPtrInst *srcGeep = nullptr;
     unsigned destIndex = 0;
     unsigned srcIndex = 0;
+    int destIndexOffset = 0;
+    int srcIndexOffset = 0;
     int destStride = 0;
     int srcStride = 0;
 
     if (iv.phi) {
         if (!classifyMemAddressPhi(loop, iv.phi, store->get_operand(1), scalarType,
-                                   destBase, destGeep, destIndex, destStride))
+                                   destBase, destGeep, destIndex, destStride,
+                                   &destIndexOffset))
             return false;
         if (!classifyMemAddressPhi(loop, iv.phi, load->get_operand(0), scalarType,
-                                   srcBase, srcGeep, srcIndex, srcStride))
+                                   srcBase, srcGeep, srcIndex, srcStride,
+                                   &srcIndexOffset))
             return false;
     } else if (iv.alloca) {
         auto *destGep = dynamic_cast<GetElementPtrInst *>(store->get_operand(1));
@@ -540,6 +598,8 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
         srcGeep = srcGep;
         destIndex = destVarying;
         srcIndex = srcVarying;
+        destIndexOffset = 0;
+        srcIndexOffset = 0;
         destStride = scalarBytes;
         srcStride = scalarBytes;
     } else {
@@ -554,15 +614,156 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
     match.srcGeep = srcGeep;
     match.destIndex = destIndex;
     match.srcIndex = srcIndex;
+    match.destIndexOffset = destIndexOffset;
+    match.srcIndexOffset = srcIndexOffset;
     match.elementStrideBytes = destStride;
     return true;
+}
+
+Value *underlyingObject(Value *value) {
+    Value *cursor = value;
+    while (cursor) {
+        if (auto *gep = dynamic_cast<GetElementPtrInst *>(cursor)) {
+            cursor = gep->get_operand(0);
+        } else if (auto *cast = dynamic_cast<Bitcast *>(cursor)) {
+            cursor = cast->get_operand(0);
+        } else {
+            break;
+        }
+    }
+    return cursor;
+}
+
+bool isStaticMemoryObject(Value *value) {
+    return dynamic_cast<GlobalVariable *>(value) ||
+           dynamic_cast<AllocaInst *>(value);
+}
+
+bool constantByteOffset(Value *value, long long &offset) {
+    if (auto *cast = dynamic_cast<Bitcast *>(value))
+        return constantByteOffset(cast->get_operand(0), offset);
+
+    auto *gep = dynamic_cast<GetElementPtrInst *>(value);
+    if (!gep) {
+        offset = 0;
+        return true;
+    }
+
+    long long baseOffset = 0;
+    if (!constantByteOffset(gep->get_operand(0), baseOffset)) return false;
+    if (gep->get_operand(0)->type_->tid_ != Type::PointerTyID) return false;
+
+    Type *current =
+        static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
+    long long total = baseOffset;
+    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+        auto *idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
+        if (!idx) return false;
+        int elemBytes = typeSize(current);
+        if (elemBytes <= 0) return false;
+        long long add = 0;
+        if (!RecurrenceAnalysis::checkedMul(idx->value_, elemBytes, add))
+            return false;
+        total += add;
+        if (current->tid_ == Type::ArrayTyID)
+            current = static_cast<ArrayType *>(current)->contained_;
+        else if (current->tid_ == Type::PointerTyID)
+            current = static_cast<PointerType *>(current)->contained_;
+    }
+    offset = total;
+    return true;
+}
+
+bool constantCopyBytes(const MemcpyMatch &match, long long &bytes) {
+    auto *count = dynamic_cast<ConstantInt *>(match.elementCount);
+    if (!count) return false;
+    return RecurrenceAnalysis::checkedMul(count->value_,
+                                          match.elementStrideBytes, bytes);
+}
+
+bool sameVaryingGEPShape(const MemcpyMatch &match) {
+    if (!match.destGeep || !match.srcGeep) return false;
+    if (match.destGeep->num_ops_ != match.srcGeep->num_ops_)
+        return false;
+    if (match.destIndex != match.srcIndex)
+        return false;
+    if (underlyingObject(match.destGeep) != underlyingObject(match.srcGeep))
+        return false;
+    for (unsigned i = 0; i < match.destGeep->num_ops_; ++i) {
+        if (i == match.destIndex) continue;
+        if (match.destGeep->get_operand(i) != match.srcGeep->get_operand(i))
+            return false;
+    }
+    return true;
+}
+
+enum class CopySelection {
+    Reject,
+    Memcpy,
+    Memmove,
+};
+
+CopySelection selectCopyLibFunc(const MemcpyMatch &match) {
+    Value *destPtr = match.destBase ? match.destBase : match.destGeep;
+    Value *srcPtr = match.srcBase ? match.srcBase : match.srcGeep;
+    if (!destPtr || !srcPtr) return CopySelection::Reject;
+
+    Value *destRoot = underlyingObject(destPtr);
+    Value *srcRoot = underlyingObject(srcPtr);
+    if (destRoot != srcRoot) {
+        if (isStaticMemoryObject(destRoot) && isStaticMemoryObject(srcRoot))
+            return CopySelection::Memcpy;
+        debugIdiom("reject memcpy: unknown inter-object alias");
+        return CopySelection::Reject;
+    }
+
+    long long destOffset = 0;
+    long long srcOffset = 0;
+    if (sameVaryingGEPShape(match)) {
+        destOffset = static_cast<long long>(match.destIndexOffset) *
+                     match.elementStrideBytes;
+        srcOffset = static_cast<long long>(match.srcIndexOffset) *
+                    match.elementStrideBytes;
+    } else if (!constantByteOffset(destPtr, destOffset) ||
+               !constantByteOffset(srcPtr, srcOffset)) {
+        debugIdiom("reject memcpy: same root with non-constant offsets");
+        return CopySelection::Reject;
+    }
+
+    if (destOffset <= srcOffset)
+        return CopySelection::Memmove;
+
+    long long bytes = 0;
+    if (constantCopyBytes(match, bytes) && srcOffset + bytes <= destOffset)
+        return CopySelection::Memcpy;
+
+    debugIdiom("reject memcpy: forward overlapping copy would change semantics");
+    return CopySelection::Reject;
 }
 
 bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
                                 ICmpInst *&compare) {
     if (!loop.preheader || !loop.singleLatch() || !loop.singleExit())
         return false;
-    if (loop.singleLatch() == loop.header) return false;
+    if (loop.singleLatch() == loop.header) {
+        if (loop.blocks.size() != 1) return false;
+        auto *preTerm = loop.preheader->get_terminator();
+        auto *headerTerm = loop.header->get_terminator();
+        auto *exit = loop.singleExit();
+        if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+            preTerm->get_operand(0) != loop.header)
+            return false;
+        if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3)
+            return false;
+        bool trueBackedge = headerTerm->get_operand(1) == loop.header &&
+                            headerTerm->get_operand(2) == exit;
+        bool falseBackedge = headerTerm->get_operand(1) == exit &&
+                             headerTerm->get_operand(2) == loop.header;
+        if (!trueBackedge && !falseBackedge) return false;
+        bodyEntry = loop.header;
+        compare = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
+        return compare != nullptr;
+    }
     if (loop.blocks.size() < 2 || loop.blocks.size() > 3) return false;
 
     auto *preTerm = loop.preheader->get_terminator();
@@ -726,8 +927,9 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
     IVDesc iv;
     if (!findCountingIV(loop, latch, compare, iv)) return false;
 
-    std::vector<BasicBlock *> recipeBlocks{loop.header, bodyEntry};
-    if (latch != bodyEntry) recipeBlocks.push_back(latch);
+    std::vector<BasicBlock *> recipeBlocks{loop.header};
+    if (bodyEntry != loop.header) recipeBlocks.push_back(bodyEntry);
+    if (latch != loop.header && latch != bodyEntry) recipeBlocks.push_back(latch);
 
     LoadInst *load = nullptr;
     StoreInst *store = nullptr;
@@ -761,6 +963,14 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
 
     MemcpyMatch local;
     if (!classifyMemcpyAddress(loop, iv, load, store, local)) return false;
+    if (loop.singleLatch() == loop.header &&
+        (!local.destBase || !local.srcBase)) {
+        debugIdiom("reject memcpy: rotated loop before pointer IV lowering");
+        return false;
+    }
+    local.elementCount = iv.bound;
+    CopySelection copySelection = selectCopyLibFunc(local);
+    if (copySelection == CopySelection::Reject) return false;
 
     for (auto *bb : loop.blocks) {
         for (auto *inst : bb->instr_list_) {
@@ -783,46 +993,24 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
     match.srcIndex = local.srcIndex;
     match.elementCount = iv.bound;
     match.elementStrideBytes = local.elementStrideBytes;
+    match.copyKind = copySelection == CopySelection::Memmove
+                         ? LibFunc::Memmove
+                         : LibFunc::Memcpy;
     return true;
 }
 
 bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
-    if (!loop.preheader || !loop.singleLatch() || !loop.singleExit())
-        return false;
-    if (loop.singleLatch() == loop.header) return false;
-    if (loop.blocks.size() < 2 || loop.blocks.size() > 3) return false;
+    BasicBlock *bodyEntry = nullptr;
+    ICmpInst *compare = nullptr;
+    if (!validateCanonicalLoopShape(loop, bodyEntry, compare)) return false;
 
-    auto *preTerm = loop.preheader->get_terminator();
-    auto *headerTerm = loop.header->get_terminator();
     auto *latch = loop.singleLatch();
-    auto *latchTerm = latch->get_terminator();
-    auto *exit = loop.singleExit();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
-        preTerm->get_operand(0) != loop.header)
-        return false;
-    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3 ||
-        headerTerm->get_operand(2) != exit)
-        return false;
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
-        latchTerm->get_operand(0) != loop.header)
-        return false;
-
-    auto *bodyEntry = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
-    if (!bodyEntry || !loop.blocks.count(bodyEntry)) return false;
-    if (bodyEntry != latch) {
-        if (loop.blocks.size() != 3) return false;
-        auto *bodyTerm = bodyEntry->get_terminator();
-        if (!bodyTerm || !bodyTerm->is_br() || bodyTerm->num_ops_ != 1 ||
-            bodyTerm->get_operand(0) != latch)
-            return false;
-    }
-
-    auto *compare = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
     IVDesc iv;
     if (!findCountingIV(loop, latch, compare, iv)) return false;
 
-    std::vector<BasicBlock *> recipeBlocks{loop.header, bodyEntry};
-    if (latch != bodyEntry) recipeBlocks.push_back(latch);
+    std::vector<BasicBlock *> recipeBlocks{loop.header};
+    if (bodyEntry != loop.header) recipeBlocks.push_back(bodyEntry);
+    if (latch != loop.header && latch != bodyEntry) recipeBlocks.push_back(latch);
 
     StoreInst *store = nullptr;
     bool sawStore = false;
@@ -841,6 +1029,10 @@ bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
 
     MemsetMatch local;
     if (!classifyStoreAddress(loop, iv, store, local)) return false;
+    if (loop.singleLatch() == loop.header && !local.base) {
+        debugIdiom("reject memset: rotated loop before pointer IV lowering");
+        return false;
+    }
 
     for (auto *bb : loop.blocks) {
         for (auto *inst : bb->instr_list_) {
@@ -866,12 +1058,15 @@ bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
 Value *buildMemBase(Value *base, GetElementPtrInst *geep,
                     unsigned inductionIndex, unsigned outerInductionIndex,
                     bool zeroOuterIndex, BasicBlock *preheader,
-                    Function *func, Module *module) {
+                    Function *func, Module *module,
+                    int inductionOffset = 0) {
     if (!base && geep) {
         std::vector<Value *> idxs;
         for (unsigned i = 1; i < geep->num_ops_; ++i) {
-            if (i == inductionIndex ||
-                (zeroOuterIndex && i == outerInductionIndex))
+            if (i == inductionIndex)
+                idxs.push_back(new ConstantInt(module->int32_ty_,
+                                               inductionOffset));
+            else if (zeroOuterIndex && i == outerInductionIndex)
                 idxs.push_back(new ConstantInt(module->int32_ty_, 0));
             else
                 idxs.push_back(geep->get_operand(i));
@@ -893,6 +1088,7 @@ Value *buildMemBase(Value *base, GetElementPtrInst *geep,
 
 bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
                      Function *memcpyDecl, Function *func) {
+    if (!memcpyDecl) return false;
     BasicBlock *preheader = loop.preheader;
     BasicBlock *exit = loop.singleExit();
     if (!preheader || !exit) return false;
@@ -931,15 +1127,17 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
 
     Value *dest = buildMemBase(match.destBase, match.destGeep,
                                match.destIndex, 0, false, preheader, func,
-                               module);
+                               module, match.destIndexOffset);
     Value *src = buildMemBase(match.srcBase, match.srcGeep, match.srcIndex,
-                              0, false, preheader, func, module);
+                              0, false, preheader, func, module,
+                              match.srcIndexOffset);
     if (!dest || !src) return false;
 
     std::vector<Value *> args{dest, src, byteCount};
     auto *call = new CallInst(memcpyDecl, args, preheader, true);
     preheader->add_instruction_before_terminator(call);
     preheader->setSemFlag(SemFlag::MemsetIdiomLoop);
+    debugIdiom(std::string("lowered loop to ") + memcpyDecl->name_);
 
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi()) break;
@@ -975,6 +1173,7 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
 
 bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
                      Function *memsetDecl, Function *func) {
+    if (!memsetDecl) return false;
     BasicBlock *preheader = loop.preheader;
     BasicBlock *exit = loop.singleExit();
     if (!preheader || !exit) return false;
@@ -1058,6 +1257,7 @@ bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
     auto *call = new CallInst(memsetDecl, args, preheader, true);
     preheader->add_instruction_before_terminator(call);
     preheader->setSemFlag(SemFlag::MemsetIdiomLoop);
+    debugIdiom(std::string("lowered loop to ") + memsetDecl->name_);
 
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi()) break;
@@ -1150,7 +1350,7 @@ bool IdiomRecognize::runOnFunction(Function *func, AnalysisManager &AM) {
             MemcpyMatch memcpyMatch;
             if (tryMatchMemcpyLoop(*loop, memcpyMatch)) {
                 Function *memcpyDecl =
-                    getOrInsertLibFunc(func->parent_, LibFunc::Memcpy);
+                    getOrInsertLibFunc(func->parent_, memcpyMatch.copyKind);
                 if (lowerMemcpyLoop(*loop, memcpyMatch, func->parent_, memcpyDecl,
                                      func)) {
                     changed = true;

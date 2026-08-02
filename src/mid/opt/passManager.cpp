@@ -36,6 +36,7 @@ static bool isLoopTransformPass(const std::string &name) {
     static const std::unordered_set<std::string> loopPasses = {
         "ScalarExpansion",
         "LoopDistribution",
+        "LoopInvariantReduction",
         "LoopSimplify",
         "LCSSA",
         "IndVarSimplify",
@@ -45,6 +46,7 @@ static bool isLoopTransformPass(const std::string &name) {
         "inductiveRangeCheckElimination",
         "LICM",
         "LoopDeletion",
+        "TriangularPanelize",
         "LoopFusion",
         "LoopInterchange",
         "ParallelizeLoops",

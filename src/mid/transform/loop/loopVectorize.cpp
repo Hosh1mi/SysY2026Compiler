@@ -556,9 +556,6 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         return reject("non-i32");
     if (lhs.kind == PackedOperand::GATHER && rhs.kind == PackedOperand::GATHER)
         return reject("two-gathers");
-    // 两路非不变载入的点积（acc += a[i]*b[i]）暂不向量化：后端向量 mla 的
-    // 取址有 loadAddr 缓存 bug（两路 ld1 撞同一暂存寄存器，算成 b*b）。
-    // 待后端修好该缓存问题后再放开。求和与 a[i]*const 不受影响。
     if (isAdd && !noMul &&
         lhs.kind != PackedOperand::INVARIANT &&
         rhs.kind != PackedOperand::INVARIANT)
@@ -1303,19 +1300,25 @@ bool LoopVectorize::emitVectorizedLoop(
         initialAddressForGroup[access.addressGroup] = initialPointer;
     }
 
-    // Hoist the signed-overflow proof and first full-vector test out of the
-    // vector loop.  Proving `init + vectorTrip - 1 < bound` also proves that
+    // Hoist the signed-overflow proof and profitable-entry test out of the
+    // vector loop.  Proving `init + minimumTrip - 1 < bound` also proves that
     // `bound - vectorTrip` is representable.  Once entered, therefore,
     // `iv <= bound - vectorTrip` is exactly the scalar `iv < bound` condition
     // for every lane.  Constant initial values make the entry test a single
     // comparison, which is the common canonical-loop form.
+    // A rotated one-block loop tests the incremented IV at the bottom.  Keep
+    // at least one scalar iteration for its epilogue; entering it with
+    // IV==bound would execute an extra iteration.
+    const int scalarTail = plan.rotatedSingleBlock ? 1 : 0;
+    const int minimumTrip =
+        std::max(vectorTrip + scalarTail, plan.minimumTripCount);
     Value *canEnterVector = nullptr;
     if (auto *constantInit =
             dynamic_cast<ConstantInt *>(plan.induction.init)) {
-        if (constantInit->value_ <= INT_MAX - (vectorTrip - 1)) {
+        if (constantInit->value_ <= INT_MAX - (minimumTrip - 1)) {
             auto *lastInitialLane = new ConstantInt(
                 module->int32_ty_,
-                constantInit->value_ + vectorTrip - 1);
+                constantInit->value_ + minimumTrip - 1);
             auto *initialFull = new ICmpInst(ICmpInst::ICMP_SLT,
                                              lastInitialLane,
                                              plan.induction.bound, preheader);
@@ -1326,13 +1329,13 @@ bool LoopVectorize::emitVectorizedLoop(
         }
     } else {
         auto *maxStart = new ConstantInt(
-            module->int32_ty_, INT_MAX - (vectorTrip - 1));
+            module->int32_ty_, INT_MAX - (minimumTrip - 1));
         auto *initAddSafe = new ICmpInst(ICmpInst::ICMP_SLE,
                                          plan.induction.init, maxStart,
                                          preheader);
         insertBeforePreheaderTerminator(initAddSafe);
         auto *lastOffset = new ConstantInt(module->int32_ty_,
-                                           vectorTrip - 1);
+                                           minimumTrip - 1);
         auto *lastInitialLane = new BinaryInst(
             module->int32_ty_, Instruction::Add, plan.induction.init,
             lastOffset, preheader, true);
@@ -1351,7 +1354,8 @@ bool LoopVectorize::emitVectorizedLoop(
     // Wrapping subtraction is defined even on the bypassed path.  The entry
     // proof above guarantees a mathematical (non-wrapping) value whenever
     // vecHeader is reached.
-    auto *trip = new ConstantInt(module->int32_ty_, vectorTrip);
+    auto *trip = new ConstantInt(module->int32_ty_,
+                                 vectorTrip + scalarTail);
     auto *vectorEnd = new BinaryInst(module->int32_ty_, Instruction::Sub,
                                      plan.induction.bound, trip, preheader,
                                      true);

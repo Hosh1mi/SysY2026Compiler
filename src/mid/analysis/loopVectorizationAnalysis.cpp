@@ -1,4 +1,5 @@
 #include "../../include/mid/analysis/loopVectorizationAnalysis.hpp"
+#include "../../include/mid/analysis/vectorizationCostModel.hpp"
 #include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
@@ -162,8 +163,7 @@ bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
     for (auto *inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->type_->tid_ != Type::IntegerTyID ||
-            compare->get_operand(0) != phi)
+        if (phi->type_->tid_ != Type::IntegerTyID)
             continue;
 
         Value *init = nullptr;
@@ -176,6 +176,11 @@ bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
         auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
         if (update->get_operand(0) != phi || !step || step->value_ != 1)
             continue;
+
+        bool comparesCurrent = compare->get_operand(0) == phi;
+        bool comparesNext = plan.rotatedSingleBlock &&
+                            compare->get_operand(0) == update;
+        if (!comparesCurrent && !comparesNext) continue;
 
         Value *bound = compare->get_operand(1);
         if (!isLoopInvariant(bound, loop))
@@ -377,6 +382,9 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         case Instruction::And:
         case Instruction::Or:
         case Instruction::Xor:
+        case Instruction::Shl:
+        case Instruction::LShr:
+        case Instruction::AShr:
         case Instruction::FAdd:
         case Instruction::FSub:
         case Instruction::FMul:
@@ -418,7 +426,17 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
                 continue;
             AliasResult alias = BAA_.alias(memoryPointer(a.inst),
                                            memoryPointer(b.inst));
-            if (alias == AliasResult::NoAlias) continue;
+            auto isExpansionScratch = [](Value *object) {
+                auto *alloca = dynamic_cast<AllocaInst *>(object);
+                return alloca && alloca->isLoopExpansionScratch();
+            };
+            bool distinctExpansionScratch =
+                a.underlyingObject && b.underlyingObject &&
+                a.underlyingObject != b.underlyingObject &&
+                (isExpansionScratch(a.underlyingObject) ||
+                 isExpansionScratch(b.underlyingObject));
+            if (alias == AliasResult::NoAlias || distinctExpansionScratch)
+                continue;
 
             // Equal lane-wise addresses preserve the scalar program order:
             // each vector memory instruction still appears in that order and
@@ -449,42 +467,75 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
 
 bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
                                                    std::string *reason) const {
-    int work = 0;
+    VectorizationCostModel costs;
+    int scalarLaneCost = 0;
+    int vectorPartCost = 0;
+    int livePerPart = 0;
+    std::set<Value *> splattedValues;
+    std::set<size_t> addressGroups;
+
+    for (const auto &access : plan.memoryAccesses)
+        if (access.addressKind != AddressKind::Uniform)
+            addressGroups.insert(access.addressGroup);
+
     for (auto *inst : plan.recipes) {
         if (inst->is_load() || inst->is_store() ||
-            dynamic_cast<BinaryInst *>(inst) ||
-            dynamic_cast<CallInst *>(inst))
-            ++work;
+            dynamic_cast<BinaryInst *>(inst) || dynamic_cast<CallInst *>(inst)) {
+            scalarLaneCost += costs.scalarInstructionCost(inst);
+            vectorPartCost += costs.vectorInstructionCost(inst);
+            if (!inst->is_store()) ++livePerPart;
+        }
+
+        auto *binary = dynamic_cast<BinaryInst *>(inst);
+        auto *call = dynamic_cast<CallInst *>(inst);
+        if (!binary && !call) continue;
+        unsigned valueOperands = call ? call->num_ops_ - 1 : inst->num_ops_;
+        for (unsigned i = 0; i < valueOperands; ++i) {
+            Value *operand = inst->get_operand(i);
+            if (isLoopInvariant(operand, *plan.loop))
+                splattedValues.insert(operand);
+        }
     }
-    // Cortex-A53 is an in-order, dual-issue core with 32 architectural SIMD
-    // registers.  Two independent vector parts hide load/use latency and halve
-    // branch overhead.  Keep the limit tied to the planned operation and
-    // memory-access counts: four memory values plus the arithmetic temporaries
-    // of a twelve-operation body still leave headroom for address generation
-    // and lowering scratch registers, while larger bodies stay at UF=1 to
-    // avoid spills.
-    if (work <= 12 && plan.memoryAccesses.size() <= 4)
+
+    if (scalarLaneCost <= 0 || vectorPartCost <= 0)
+        return reject(reason, "vector body has no costed work");
+
+    plan.setupCost = costs.setupCost(splattedValues.size(),
+                                     plan.runtimeMemoryChecks.size(),
+                                     addressGroups.size());
+    const int persistentVectors = static_cast<int>(splattedValues.size()) +
+                                  static_cast<int>(plan.pointerRecurrences.size()) +
+                                  static_cast<int>(addressGroups.size());
+    plan.estimatedLiveVectors = livePerPart + persistentVectors;
+
+    // UF=2 is useful on this in-order target only while two copies of the
+    // vector body leave ample room for persistent values and lowering
+    // temporaries.  Otherwise prefer UF=1 rather than relying on later spills.
+    const int unrolledLive = livePerPart * 2 + persistentVectors;
+    if (unrolledLive <= costs.maximumUnrolledLiveVectors())
         plan.unrollFactor = 2;
 
-    int lanesPerIteration = plan.vectorWidth * plan.unrollFactor;
-    plan.scalarCost = work * lanesPerIteration;
-    plan.vectorCost = work * plan.unrollFactor + 3;
-    if (plan.vectorCost >= plan.scalarCost)
+    auto setCandidate = [&](int unrollFactor) {
+        plan.unrollFactor = unrollFactor;
+        const int width = plan.vectorWidth * unrollFactor;
+        plan.scalarCost = scalarLaneCost * width;
+        plan.vectorCost = vectorPartCost * unrollFactor +
+                          costs.vectorLoopControlCost();
+        plan.minimumTripCount = costs.minimumProfitableTripCount(
+            scalarLaneCost, vectorPartCost, plan.setupCost, unrollFactor);
+    };
+    setCandidate(plan.unrollFactor);
+    if (plan.minimumTripCount == 0 || plan.vectorCost >= plan.scalarCost)
         return reject(reason, "estimated vector cost is not lower than scalar cost");
 
     auto *init = dynamic_cast<ConstantInt *>(plan.induction.init);
     auto *bound = dynamic_cast<ConstantInt *>(plan.induction.bound);
     if (init && bound) {
         long long trip = static_cast<long long>(bound->value_) - init->value_;
-        if (trip < 2LL * lanesPerIteration) {
-            if (plan.unrollFactor == 2 && trip >= 2LL * plan.vectorWidth) {
-                plan.unrollFactor = 1;
-                lanesPerIteration = plan.vectorWidth;
-                plan.scalarCost = work * lanesPerIteration;
-                plan.vectorCost = work + 3;
-            } else {
-                return reject(reason, "constant trip count is too small");
-            }
+        if (trip < plan.minimumTripCount && plan.unrollFactor == 2)
+            setCandidate(1);
+        if (trip < plan.minimumTripCount) {
+            return reject(reason, "constant trip count is too small");
         }
     }
     return true;
@@ -500,10 +551,9 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     plan.exit = loop.singleExit();
     if (loop.header && loop.header->hasSemFlag(SemFlag::VectorizedEpilogue))
         return reject(reason, "loop is already a vector epilogue");
-    if (!plan.preheader || !plan.latch || !plan.exit ||
-        plan.latch == plan.header)
+    if (!plan.preheader || !plan.latch || !plan.exit)
         return reject(reason, "loop lacks dedicated preheader, latch, or exit");
-    if (loop.blocks.size() < 2 || loop.blocks.size() > 3)
+    if (loop.blocks.empty() || loop.blocks.size() > 3)
         return reject(reason, "loop body is not a straight-line canonical body");
 
     auto *preTerm = plan.preheader->get_terminator();
@@ -518,10 +568,20 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     auto *bodyEntry = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
     if (!bodyEntry || !loop.blocks.count(bodyEntry))
         return reject(reason, "header does not enter the loop body");
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
-        latchTerm->get_operand(0) != plan.header)
+    const bool rotatedSingleBlock =
+        plan.header == plan.latch && bodyEntry == plan.header &&
+        loop.blocks.size() == 1;
+    if (rotatedSingleBlock &&
+        !plan.header->hasSemFlag(SemFlag::ScalarExpansionCompute))
+        return reject(reason, "rotated single-block loop is not a proved scalar-expansion compute loop");
+    plan.rotatedSingleBlock = rotatedSingleBlock;
+    if (!rotatedSingleBlock &&
+        (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+         latchTerm->get_operand(0) != plan.header))
         return reject(reason, "latch is not an unconditional backedge");
-    if (bodyEntry != plan.latch) {
+    if (rotatedSingleBlock) {
+        plan.body = plan.header;
+    } else if (bodyEntry != plan.latch) {
         auto *bodyTerm = bodyEntry->get_terminator();
         if (loop.blocks.size() != 3 || !bodyTerm || !bodyTerm->is_br() ||
             bodyTerm->num_ops_ != 1 || bodyTerm->get_operand(0) != plan.latch)
@@ -529,13 +589,14 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     } else if (loop.blocks.size() != 2) {
         return reject(reason, "loop contains an unexpected extra block");
     }
-    plan.body = bodyEntry;
+    if (!plan.body) plan.body = bodyEntry;
 
     if (!findInduction(loop, plan, reason) ||
         !findPointerRecurrences(plan, reason))
         return false;
 
-    std::vector<BasicBlock *> recipeBlocks{plan.header, plan.body};
+    std::vector<BasicBlock *> recipeBlocks{plan.header};
+    if (plan.body != plan.header) recipeBlocks.push_back(plan.body);
     if (plan.latch != plan.body) recipeBlocks.push_back(plan.latch);
     for (auto *bb : recipeBlocks) {
         for (auto *inst : bb->instr_list_) {
@@ -544,8 +605,23 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
         }
     }
 
-    return classifyMemory(plan, reason) &&
-           checkInstructions(plan, reason) &&
+    if (!classifyMemory(plan, reason)) return false;
+    if (plan.rotatedSingleBlock) {
+        bool hasExpansionScratch = false;
+        bool allI32 = true;
+        for (const auto &access : plan.memoryAccesses) {
+            auto *alloca = dynamic_cast<AllocaInst *>(access.underlyingObject);
+            hasExpansionScratch |=
+                alloca && alloca->isLoopExpansionScratch();
+            auto *integer = dynamic_cast<IntegerType *>(access.scalarType);
+            allI32 &= integer && integer->num_bits_ == 32;
+        }
+        if (!hasExpansionScratch || !allI32 ||
+            plan.memoryAccesses.size() < 3)
+            return reject(reason, "rotated scalar-expansion loop is not a profitable i32 scratch update");
+    }
+
+    return checkInstructions(plan, reason) &&
            checkMemoryDependences(plan, reason) &&
            checkProfitability(plan, reason);
 }

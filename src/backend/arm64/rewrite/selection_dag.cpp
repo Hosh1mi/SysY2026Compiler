@@ -2,6 +2,7 @@
 #include "../../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <set>
@@ -692,6 +693,14 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
     }
 }
 
+// Fusing vmul into fmla/fmls collapses two roundings into one, which can
+// change IEEE-754 results by a few ulps.  Kept behind an environment flag so
+// the default build stays bit-exact with the uncontracted code; enable only
+// when the application permits relaxed floating-point contraction.
+static bool fpContractionEnabled() {
+    return std::getenv("SYSY_ENABLE_FP_CONTRACT") != nullptr;
+}
+
 bool DAGCombiner::run(FunctionDAG &functionDAG,
                       bool enableOptimizations) const {
     if (!enableOptimizations)
@@ -710,7 +719,8 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
             SDNode &node = *owned;
             if (node.opcode() == SDOpcode::Add &&
                 node.operands().size() == 2 &&
-                node.resultTypes().front() == ValueType::I32) {
+                (node.resultTypes().front() == ValueType::I32 ||
+                 node.resultTypes().front() == ValueType::V4I32)) {
                 for (unsigned multiplyIndex = 0; multiplyIndex < 2;
                      ++multiplyIndex) {
                     SDNode *multiply = node.operands()[multiplyIndex].node;
@@ -727,12 +737,47 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
                 }
             } else if (node.opcode() == SDOpcode::Sub &&
                        node.operands().size() == 2 &&
-                       node.resultTypes().front() == ValueType::I32) {
+                       (node.resultTypes().front() == ValueType::I32 ||
+                        node.resultTypes().front() == ValueType::V4I32)) {
                 SDNode *multiply = node.operands()[1].node;
                 if (multiply && multiply->opcode() == SDOpcode::Mul &&
                     useCount[multiply] == 1) {
                     SDValue minuend = node.operands()[0];
                     node.setOpcode(SDOpcode::MSub);
+                    node.operands() = {multiply->operands()[0],
+                                       multiply->operands()[1], minuend};
+                    multiply->setOpcode(SDOpcode::Invalid);
+                    changed = true;
+                }
+            } else if (node.opcode() == SDOpcode::FAdd &&
+                       node.operands().size() == 2 &&
+                       node.resultTypes().front() == ValueType::V4F32 &&
+                       fpContractionEnabled()) {
+                for (unsigned multiplyIndex = 0; multiplyIndex < 2;
+                     ++multiplyIndex) {
+                    SDNode *multiply =
+                        node.operands()[multiplyIndex].node;
+                    if (!multiply ||
+                        multiply->opcode() != SDOpcode::FMul ||
+                        useCount[multiply] != 1)
+                        continue;
+                    SDValue addend = node.operands()[1 - multiplyIndex];
+                    node.setOpcode(SDOpcode::FMAdd);
+                    node.operands() = {multiply->operands()[0],
+                                       multiply->operands()[1], addend};
+                    multiply->setOpcode(SDOpcode::Invalid);
+                    changed = true;
+                    break;
+                }
+            } else if (node.opcode() == SDOpcode::FSub &&
+                       node.operands().size() == 2 &&
+                       node.resultTypes().front() == ValueType::V4F32 &&
+                       fpContractionEnabled()) {
+                SDNode *multiply = node.operands()[1].node;
+                if (multiply && multiply->opcode() == SDOpcode::FMul &&
+                    useCount[multiply] == 1) {
+                    SDValue minuend = node.operands()[0];
+                    node.setOpcode(SDOpcode::FMSub);
                     node.operands() = {multiply->operands()[0],
                                        multiply->operands()[1], minuend};
                     multiply->setOpcode(SDOpcode::Invalid);

@@ -377,6 +377,9 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     BasicBlock *storeBody = block("ldist.storeback.body");
     BasicBlock *storeLatch = block("ldist.storeback.latch");
 
+    innerHeader->setSemFlag(SemFlag::ScalarExpansionCompute);
+    innerLatch->setSemFlag(SemFlag::ScalarExpansionCompute);
+
     auto *zero = new ConstantInt(i32, 0);
     auto *one = new ConstantInt(i32, 1);
     Value *parentInit = P->inductionInit;
@@ -424,8 +427,10 @@ bool LoopDistribution::apply(const ScalarReductionNestInfo &info, Module *module
     innerHeader->add_instruction_front(innerIV);
 
     std::unordered_map<BasicBlock *, BasicBlock *> blockMap;
-    for (auto *oldBlock : originalBlocks)
+    for (auto *oldBlock : originalBlocks) {
         blockMap[oldBlock] = block("ldist.clone");
+        blockMap[oldBlock]->setSemFlag(SemFlag::ScalarExpansionCompute);
+    }
     BasicBlock *clonedEntry = blockMap[bodyEntry];
 
     ValueMap valueMap;
