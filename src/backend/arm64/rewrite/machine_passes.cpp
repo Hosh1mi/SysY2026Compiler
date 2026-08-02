@@ -2118,6 +2118,13 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
         std::int64_t extension = 0;
     };
 
+    std::unordered_map<VReg, unsigned> useCount;
+    for (const auto &block : function.blocks())
+        for (const MachineInstr &instruction : block->instructions())
+            for (const MachineOperand &operand : instruction.operands())
+                if (operand.isVirtualRegister() && !operand.isDef)
+                    ++useCount[operand.virtualRegister()];
+
     std::unordered_map<VReg, Address> memo;
     std::unordered_set<VReg> resolving;
     auto resolve = [&](auto &&self, VReg reg) -> Address {
@@ -2145,6 +2152,18 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
                 operands[1].isVirtualRegister() &&
                 operands[1].regClass() == RegClass::GPR64) {
                 form = self(self, operands[1].virtualRegister());
+                // A register-offset access carries both the base and index
+                // live until the memory instruction.  Folding a shared
+                // address trades one reusable address value for two longer
+                // live ranges and can introduce spills.  Require every COPY
+                // on the path to have a single consumer so the folded access
+                // replaces, rather than duplicates, the address computation.
+                if (form.kind == AddressKind::Index &&
+                    useCount[reg] != 1) {
+                    form = Address{};
+                    form.kind = AddressKind::Immediate;
+                    form.base = reg;
+                }
             } else if (definition->opcode() == Opcode::ADDXri &&
                        operands.size() == 3 &&
                        operands[1].isVirtualRegister() &&
@@ -2178,7 +2197,8 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
                         : extension == 2 &&
                               operands[2].regClass() == RegClass::GPR64;
                 if (base.kind == AddressKind::Immediate &&
-                    base.offset == 0 && validIndex) {
+                    base.offset == 0 && validIndex &&
+                    useCount[reg] == 1) {
                     form.kind = AddressKind::Index;
                     form.base = base.base;
                     form.index = operands[2];
