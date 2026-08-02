@@ -43,6 +43,7 @@
 #include "slpVectorize.hpp"
 #include "ifConversion.hpp"
 #include "loopInterchange.hpp"
+#include "loopSkewing.hpp"
 #include "splitGEP.hpp"
 #include "CFGSimplify.hpp"
 #include "unifyExitNodes.hpp"

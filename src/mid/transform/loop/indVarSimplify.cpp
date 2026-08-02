@@ -40,6 +40,140 @@ bool isZero(Value *value) {
     return constant && constant->value_ == 0;
 }
 
+bool computeConstantTripCount(const InductionDescriptor &control,
+                              long long &tripCount) {
+    auto *start = dynamic_cast<ConstantInt *>(control.start);
+    auto *bound = dynamic_cast<ConstantInt *>(control.bound);
+    if (!start || !bound || !control.constantStep)
+        return false;
+
+    const long long first = start->value_;
+    const long long limit = bound->value_;
+    const long long step = *control.constantStep;
+    __int128 trips = 0;
+
+    switch (control.predicate) {
+    case ICmpInst::ICMP_SLT:
+        if (step <= 0) return false;
+        if (first < limit)
+            trips = (static_cast<__int128>(limit) - first + step - 1) / step;
+        break;
+    case ICmpInst::ICMP_SLE:
+        if (step <= 0) return false;
+        if (first <= limit)
+            trips = (static_cast<__int128>(limit) - first) / step + 1;
+        break;
+    case ICmpInst::ICMP_SGT: {
+        if (step >= 0) return false;
+        const long long magnitude = -step;
+        if (first > limit)
+            trips = (static_cast<__int128>(first) - limit + magnitude - 1) /
+                    magnitude;
+        break;
+    }
+    case ICmpInst::ICMP_SGE: {
+        if (step >= 0) return false;
+        const long long magnitude = -step;
+        if (first >= limit)
+            trips = (static_cast<__int128>(first) - limit) / magnitude + 1;
+        break;
+    }
+    default:
+        return false;
+    }
+
+    if (trips < 0 || trips > std::numeric_limits<int>::max())
+        return false;
+
+    const __int128 finalValue =
+        static_cast<__int128>(first) + trips * step;
+    if (finalValue < std::numeric_limits<int>::min() ||
+        finalValue > std::numeric_limits<int>::max())
+        return false;
+
+    tripCount = static_cast<long long>(trips);
+    return true;
+}
+
+bool continuationIsTrue(const Loop &loop, const InductionDescriptor &control,
+                        bool &continuesOnTrue) {
+    BasicBlock *guard = control.guardPosition == InductionGuardPosition::Header
+                            ? loop.header
+                            : loop.singleLatch();
+    auto *branch = guard
+                       ? dynamic_cast<BranchInst *>(guard->get_terminator())
+                       : nullptr;
+    if (!branch || branch->num_ops_ != 3)
+        return false;
+    auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
+    auto *falseBlock = dynamic_cast<BasicBlock *>(branch->get_operand(2));
+    if (!trueBlock || !falseBlock)
+        return false;
+    const bool trueInside = loop.blocks.count(trueBlock) != 0;
+    const bool falseInside = loop.blocks.count(falseBlock) != 0;
+    if (trueInside == falseInside)
+        return false;
+    continuesOnTrue = trueInside;
+    return true;
+}
+
+bool canonicalizeConstantControl(Loop &loop, Module *module) {
+    const InductionDescriptor *control = loop.getInductionDescriptor();
+    if (!control || !module || !loop.preheader || !loop.singleLatch())
+        return false;
+    if (loop.canonicalIV)
+        return false;
+
+    if (!control->constantStep) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject canonical control header="
+                      << loop.header->name_ << ": dynamic step\n";
+        return false;
+    }
+
+    long long tripCount = 0;
+    if (!computeConstantTripCount(*control, tripCount)) {
+        if (debugEnabled())
+            std::cerr << "[IndVarSimplify] reject canonical control header="
+                      << loop.header->name_
+                      << ": trip count or exit arithmetic is not proven safe\n";
+        return false;
+    }
+
+    bool continuesOnTrue = false;
+    if (!continuationIsTrue(loop, *control, continuesOnTrue))
+        return false;
+
+    BasicBlock *header = loop.header;
+    BasicBlock *latch = loop.singleLatch();
+    auto *zero = new ConstantInt(module->int32_ty_, 0);
+    auto *one = new ConstantInt(module->int32_ty_, 1);
+    auto *trip = new ConstantInt(module->int32_ty_, tripCount);
+    auto *canonical = PhiInst::create_phi(module->int32_ty_, header);
+    canonical->add_phi_pair_operand(zero, loop.preheader);
+    header->add_instruction_front(canonical);
+
+    auto *next = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                canonical, one, latch, true);
+    latch->add_instruction_before_inst(next, control->update);
+    canonical->add_phi_pair_operand(next, latch);
+
+    Value *guardValue =
+        control->guardPosition == InductionGuardPosition::Header
+            ? static_cast<Value *>(canonical)
+            : static_cast<Value *>(next);
+    control->compare->set_operand(0, guardValue);
+    control->compare->set_operand(1, trip);
+    control->compare->icmp_op_ = continuesOnTrue ? ICmpInst::ICMP_SLT
+                                                  : ICmpInst::ICMP_SGE;
+
+    if (debugEnabled())
+        std::cerr << "[IndVarSimplify] canonicalized control header="
+                  << header->name_ << " step=" << *control->constantStep
+                  << " trips=" << tripCount << "\n";
+    return true;
+}
+
 bool isLoopInvariant(Value *value, const Loop &loop) {
     if (dynamic_cast<Constant *>(value) ||
         dynamic_cast<Argument *>(value) ||
@@ -667,7 +801,8 @@ bool rewriteConstantExitValues(Loop &loop, ScalarEvolution &scalarEvolution,
 
 bool simplifyLoop(Loop &loop, ScalarEvolution &scalarEvolution,
                   Module *module) {
-    bool changed = rewriteFirstIterationExitValues(loop);
+    bool changed = canonicalizeConstantControl(loop, module);
+    changed |= rewriteFirstIterationExitValues(loop);
     changed |= eliminateCongruentIVs(loop, scalarEvolution);
     changed |= simplifyRangeUsers(loop, scalarEvolution, module);
     changed |= rewriteConstantExitValues(loop, scalarEvolution, module);
@@ -693,7 +828,6 @@ PreservedAnalyses IndVarSimplify::execute(Module *module,
 
     PreservedAnalyses preserved;
     preserved.preserveBasicAA();
-    preserved.preserveLoopInfo();
     return preserved;
 }
 
