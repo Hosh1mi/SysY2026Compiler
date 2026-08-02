@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -23,6 +26,86 @@ unsigned log2Exact(unsigned value) {
         ++result;
     }
     return result;
+}
+
+// Advanced SIMD 32-bit replicated immediate: movi/mvni Vd.4s forms.
+struct NeonSplatImm {
+    enum class Kind : std::uint8_t { MoviLsl, MoviMsl, MvniLsl };
+    Kind kind = Kind::MoviLsl;
+    std::uint8_t imm8 = 0;
+    std::uint8_t shift = 0;
+};
+
+std::optional<NeonSplatImm> encodeMovi4s(std::uint32_t lane) {
+    for (unsigned shift : {0U, 8U, 16U, 24U}) {
+        std::uint32_t mask = 0xffU << shift;
+        if ((lane & ~mask) == 0) {
+            NeonSplatImm encoded;
+            encoded.kind = NeonSplatImm::Kind::MoviLsl;
+            encoded.imm8 =
+                static_cast<std::uint8_t>((lane >> shift) & 0xffU);
+            encoded.shift = static_cast<std::uint8_t>(shift);
+            return encoded;
+        }
+    }
+    for (unsigned msl : {8U, 16U}) {
+        std::uint32_t ones = (1U << msl) - 1U;
+        if ((lane & ones) != ones)
+            continue;
+        std::uint32_t high = lane >> msl;
+        if (high > 0xffU)
+            continue;
+        if (((high << msl) | ones) != lane)
+            continue;
+        NeonSplatImm encoded;
+        encoded.kind = NeonSplatImm::Kind::MoviMsl;
+        encoded.imm8 = static_cast<std::uint8_t>(high);
+        encoded.shift = static_cast<std::uint8_t>(msl);
+        return encoded;
+    }
+    std::uint32_t inverted = ~lane;
+    for (unsigned shift : {0U, 8U, 16U, 24U}) {
+        std::uint32_t mask = 0xffU << shift;
+        if ((inverted & ~mask) == 0) {
+            NeonSplatImm encoded;
+            encoded.kind = NeonSplatImm::Kind::MvniLsl;
+            encoded.imm8 =
+                static_cast<std::uint8_t>((inverted >> shift) & 0xffU);
+            encoded.shift = static_cast<std::uint8_t>(shift);
+            return encoded;
+        }
+    }
+    return std::nullopt;
+}
+
+bool isReplicatedByte(std::uint32_t lane, std::uint8_t &byte) {
+    std::uint8_t b0 = static_cast<std::uint8_t>(lane & 0xffU);
+    if (((lane >> 8) & 0xffU) != b0 ||
+        ((lane >> 16) & 0xffU) != b0 ||
+        ((lane >> 24) & 0xffU) != b0)
+        return false;
+    byte = b0;
+    return true;
+}
+
+// AArch64 fmov Vd.4s immediate: sign, 3-bit exp bias, 4-bit mantissa.
+bool isFMov4sImmediate(std::uint32_t bits) {
+    std::uint32_t mantissa = bits & 0x7fffffu;
+    if (mantissa & 0x7ffffu)
+        return false;
+    int exp = static_cast<int>((bits >> 23) & 0xffu) - 127;
+    return exp >= -3 && exp <= 4;
+}
+
+bool maskEquals(const std::array<int, 4> &mask,
+                std::initializer_list<int> expected) {
+    unsigned index = 0;
+    for (int value : expected) {
+        if (index >= mask.size() || mask[index] != value)
+            return false;
+        ++index;
+    }
+    return index == mask.size();
 }
 
 CondCode integerCondition(int predicate) {
@@ -348,63 +431,121 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
         [&](MachineBasicBlock &block, MachineOperand destination,
             const std::array<std::uint32_t, 4> &lanes,
             SDNode *definition = nullptr) {
-        std::vector<unsigned> nonzeroLanes;
-        for (unsigned lane = 0; lane < lanes.size(); ++lane)
-            if (lanes[lane])
-                nonzeroLanes.push_back(lane);
+        auto finishDefinition = [&](MachineInstr &inserted) {
+            if (!definition && destination.isVirtualRegister())
+                registerInfo.setDefinition(
+                    destination.virtualRegister(), &inserted);
+        };
 
-        if (nonzeroLanes.empty()) {
+        bool allEqual = lanes[0] == lanes[1] && lanes[1] == lanes[2] &&
+                        lanes[2] == lanes[3];
+        if (allEqual && lanes[0] == 0) {
             MachineInstr zero(Opcode::MOVIv4Zero);
             zero.addOperand(destination);
             MachineInstr &inserted =
                 append(block, std::move(zero), definition);
-            if (!definition && destination.isVirtualRegister())
-                registerInfo.setDefinition(
-                    destination.virtualRegister(), &inserted);
+            finishDefinition(inserted);
             return;
         }
 
-        VReg current = createTemporary(ValueType::V4I32);
-        MachineInstr zero(Opcode::MOVIv4Zero);
-        zero.addOperand(MachineOperand::vreg(
-            current, RegClass::NEON128, true));
-        MachineInstr &zeroDefinition = append(block, std::move(zero));
-        registerInfo.setDefinition(current, &zeroDefinition);
+        if (allEqual) {
+            std::uint8_t byte = 0;
+            if (isReplicatedByte(lanes[0], byte)) {
+                MachineInstr broadcast(Opcode::MOVIv16b);
+                broadcast.addOperand(destination)
+                    .addOperand(MachineOperand::immediate(byte));
+                MachineInstr &inserted =
+                    append(block, std::move(broadcast), definition);
+                finishDefinition(inserted);
+                return;
+            }
+            if (auto encoded = encodeMovi4s(lanes[0])) {
+                if (encoded->kind == NeonSplatImm::Kind::MoviLsl) {
+                    MachineInstr broadcast(Opcode::MOVIv4s);
+                    broadcast.addOperand(destination)
+                        .addOperand(
+                            MachineOperand::immediate(encoded->imm8))
+                        .addOperand(
+                            MachineOperand::immediate(encoded->shift));
+                    MachineInstr &inserted =
+                        append(block, std::move(broadcast), definition);
+                    finishDefinition(inserted);
+                    return;
+                }
+                if (encoded->kind == NeonSplatImm::Kind::MoviMsl) {
+                    MachineInstr broadcast(Opcode::MOVIv4sMsl);
+                    broadcast.addOperand(destination)
+                        .addOperand(
+                            MachineOperand::immediate(encoded->imm8))
+                        .addOperand(
+                            MachineOperand::immediate(encoded->shift));
+                    MachineInstr &inserted =
+                        append(block, std::move(broadcast), definition);
+                    finishDefinition(inserted);
+                    return;
+                }
+                MachineInstr broadcast(Opcode::MVNIv4s);
+                broadcast.addOperand(destination)
+                    .addOperand(MachineOperand::immediate(encoded->imm8))
+                    .addOperand(
+                        MachineOperand::immediate(encoded->shift));
+                MachineInstr &inserted =
+                    append(block, std::move(broadcast), definition);
+                finishDefinition(inserted);
+                return;
+            }
+            if (isFMov4sImmediate(lanes[0])) {
+                MachineInstr broadcast(Opcode::FMOVv4s);
+                broadcast.addOperand(destination)
+                    .addOperand(MachineOperand::floatingBits(lanes[0]));
+                MachineInstr &inserted =
+                    append(block, std::move(broadcast), definition);
+                finishDefinition(inserted);
+                return;
+            }
 
-        for (std::size_t index = 0;
-             index < nonzeroLanes.size(); ++index) {
-            unsigned lane = nonzeroLanes[index];
+            // Arbitrary identical lanes: scalar materialize + dup.
             VReg scalar = createTemporary(ValueType::I32);
             MachineInstr materialize(Opcode::MOVi32);
             materialize
                 .addOperand(MachineOperand::vreg(
                     scalar, RegClass::GPR32, true))
-                .addOperand(MachineOperand::immediate(lanes[lane]));
+                .addOperand(MachineOperand::immediate(
+                    static_cast<std::int64_t>(lanes[0])));
             MachineInstr &scalarDefinition =
                 append(block, std::move(materialize));
             registerInfo.setDefinition(scalar, &scalarDefinition);
-
-            bool last = index + 1 == nonzeroLanes.size();
-            VReg next = last && destination.isVirtualRegister()
-                            ? destination.virtualRegister()
-                            : createTemporary(ValueType::V4I32);
-            MachineInstr insert(Opcode::INSv4i32);
-            insert
-                .addOperand(MachineOperand::vreg(
-                    next, RegClass::NEON128, true))
-                .addOperand(MachineOperand::vreg(
-                    current, RegClass::NEON128))
-                .addOperand(MachineOperand::vreg(
-                    scalar, RegClass::GPR32))
-                .addOperand(MachineOperand::immediate(lane));
-            insert.operands()[1].tiedTo = 0;
-            MachineInstr &inserted = append(
-                block, std::move(insert),
-                last ? definition : nullptr);
-            if (!last || !definition)
-                registerInfo.setDefinition(next, &inserted);
-            current = next;
+            MachineInstr duplicate(Opcode::DUPv4i32);
+            duplicate.addOperand(destination)
+                .addOperand(
+                    MachineOperand::vreg(scalar, RegClass::GPR32));
+            MachineInstr &inserted =
+                append(block, std::move(duplicate), definition);
+            finishDefinition(inserted);
+            return;
         }
+
+        // Non-splat 128-bit immediates are cheaper from a pool load than
+        // from a chain of per-lane inserts.
+        const std::string &label =
+            machineFunction->getOrCreateVectorConstant(lanes);
+        VReg page = createTemporary(ValueType::Ptr);
+        MachineInstr adrp(Opcode::ADRP);
+        adrp.addOperand(
+                MachineOperand::vreg(page, RegClass::GPR64, true))
+            .addOperand(MachineOperand::global(label));
+        MachineInstr &pageDefinition = append(block, std::move(adrp));
+        registerInfo.setDefinition(page, &pageDefinition);
+        MachineInstr load(Opcode::LDRQlo);
+        load.addOperand(destination)
+            .addOperand(MachineOperand::vreg(page, RegClass::GPR64))
+            .addOperand(MachineOperand::global(label));
+        load.addMemoryOperand(MachineMemOperand{
+            MachineMemOperand::Access::Load, 16, 16, nullptr,
+            std::nullopt, 0, false});
+        MachineInstr &inserted =
+            append(block, std::move(load), definition);
+        finishDefinition(inserted);
     };
     unsigned nextParallelCopyGroup = 1;
     const unsigned entryArgumentCopyGroup = nextParallelCopyGroup++;
@@ -1599,6 +1740,19 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::Splat: {
+                SDNode *scalar = node.operands()[0].node;
+                if (scalar &&
+                    (scalar->opcode() == SDOpcode::Constant ||
+                     scalar->opcode() == SDOpcode::FPConstant)) {
+                    std::uint32_t lane =
+                        scalar->opcode() == SDOpcode::FPConstant
+                            ? scalar->floatingBits
+                            : static_cast<std::uint32_t>(scalar->integer);
+                    emitVectorConstant(
+                        block, define(node),
+                        {lane, lane, lane, lane}, &node);
+                    break;
+                }
                 MachineInstr duplicate(
                     node.resultTypes().front() == ValueType::V4F32
                         ? Opcode::DUPv4f32
@@ -1645,30 +1799,172 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::ShuffleVector: {
-                std::array<std::uint32_t, 4> packedMask{};
-                for (unsigned lane = 0; lane < packedMask.size(); ++lane) {
-                    int sourceLane =
+                std::array<int, 4> mask{};
+                for (unsigned lane = 0; lane < mask.size(); ++lane)
+                    mask[lane] =
                         lane < node.shuffleMask.size()
                             ? node.shuffleMask[lane]
                             : 0;
+
+                auto emitBinaryShuffle = [&](Opcode opcode) {
+                    MachineInstr shuffle(opcode);
+                    shuffle.addOperand(define(node))
+                        .addOperand(use(node.operands()[0]))
+                        .addOperand(use(node.operands()[1]));
+                    append(block, std::move(shuffle), &node);
+                };
+                auto emitUnaryShuffle = [&](Opcode opcode,
+                                            unsigned sourceOperand) {
+                    MachineInstr shuffle(opcode);
+                    shuffle.addOperand(define(node))
+                        .addOperand(use(node.operands()[sourceOperand]));
+                    append(block, std::move(shuffle), &node);
+                };
+                auto emitCopy = [&](unsigned sourceOperand) {
+                    MachineInstr copy(Opcode::COPY);
+                    copy.addOperand(define(node))
+                        .addOperand(use(node.operands()[sourceOperand]));
+                    append(block, std::move(copy), &node);
+                };
+                auto emitDupLane = [&](unsigned sourceOperand, int lane) {
+                    MachineInstr duplicate(Opcode::DUPv4sLane);
+                    duplicate.addOperand(define(node))
+                        .addOperand(use(node.operands()[sourceOperand]))
+                        .addOperand(MachineOperand::immediate(lane));
+                    append(block, std::move(duplicate), &node);
+                };
+                auto emitExt = [&](unsigned lowOperand, unsigned highOperand,
+                                   int byteOffset) {
+                    MachineInstr extend(Opcode::EXTv16b);
+                    extend.addOperand(define(node))
+                        .addOperand(use(node.operands()[lowOperand]))
+                        .addOperand(use(node.operands()[highOperand]))
+                        .addOperand(MachineOperand::immediate(byteOffset));
+                    append(block, std::move(extend), &node);
+                };
+
+                if (maskEquals(mask, {0, 1, 2, 3})) {
+                    emitCopy(0);
+                    break;
+                }
+                if (maskEquals(mask, {4, 5, 6, 7})) {
+                    emitCopy(1);
+                    break;
+                }
+                if (mask[0] == mask[1] && mask[1] == mask[2] &&
+                    mask[2] == mask[3] && mask[0] >= 0 && mask[0] <= 7) {
+                    emitDupLane(mask[0] < 4 ? 0U : 1U, mask[0] & 3);
+                    break;
+                }
+                if (maskEquals(mask, {0, 4, 1, 5})) {
+                    emitBinaryShuffle(Opcode::ZIP1v4s);
+                    break;
+                }
+                if (maskEquals(mask, {2, 6, 3, 7})) {
+                    emitBinaryShuffle(Opcode::ZIP2v4s);
+                    break;
+                }
+                if (maskEquals(mask, {0, 2, 4, 6})) {
+                    emitBinaryShuffle(Opcode::UZP1v4s);
+                    break;
+                }
+                if (maskEquals(mask, {1, 3, 5, 7})) {
+                    emitBinaryShuffle(Opcode::UZP2v4s);
+                    break;
+                }
+                if (maskEquals(mask, {0, 4, 2, 6})) {
+                    emitBinaryShuffle(Opcode::TRN1v4s);
+                    break;
+                }
+                if (maskEquals(mask, {1, 5, 3, 7})) {
+                    emitBinaryShuffle(Opcode::TRN2v4s);
+                    break;
+                }
+                if (maskEquals(mask, {1, 0, 3, 2})) {
+                    emitUnaryShuffle(Opcode::REV64v4s, 0);
+                    break;
+                }
+                if (maskEquals(mask, {5, 4, 7, 6})) {
+                    emitUnaryShuffle(Opcode::REV64v4s, 1);
+                    break;
+                }
+                if (maskEquals(mask, {3, 2, 1, 0})) {
+                    // rev64 + ext #8 reverses four .s lanes.
+                    VReg reversed = createTemporary(ValueType::V4I32);
+                    MachineInstr reverse(Opcode::REV64v4s);
+                    reverse
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128, true))
+                        .addOperand(use(node.operands()[0]));
+                    MachineInstr &reverseDefinition =
+                        append(block, std::move(reverse));
+                    registerInfo.setDefinition(reversed, &reverseDefinition);
+                    MachineInstr extend(Opcode::EXTv16b);
+                    extend.addOperand(define(node))
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128))
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128))
+                        .addOperand(MachineOperand::immediate(8));
+                    append(block, std::move(extend), &node);
+                    break;
+                }
+                if (maskEquals(mask, {7, 6, 5, 4})) {
+                    VReg reversed = createTemporary(ValueType::V4I32);
+                    MachineInstr reverse(Opcode::REV64v4s);
+                    reverse
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128, true))
+                        .addOperand(use(node.operands()[1]));
+                    MachineInstr &reverseDefinition =
+                        append(block, std::move(reverse));
+                    registerInfo.setDefinition(reversed, &reverseDefinition);
+                    MachineInstr extend(Opcode::EXTv16b);
+                    extend.addOperand(define(node))
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128))
+                        .addOperand(MachineOperand::vreg(
+                            reversed, RegClass::NEON128))
+                        .addOperand(MachineOperand::immediate(8));
+                    append(block, std::move(extend), &node);
+                    break;
+                }
+
+                bool matchedExt = false;
+                for (int start = 1; start <= 3; ++start) {
+                    std::array<int, 4> expected = {
+                        start, start + 1, start + 2, start + 3};
+                    if (mask != expected)
+                        continue;
+                    emitExt(0, 1, start * 4);
+                    matchedExt = true;
+                    break;
+                }
+                if (matchedExt)
+                    break;
+
+                // General fallback: byte tbl with a materialized index vector.
+                std::array<std::uint32_t, 4> packedMask{};
+                for (unsigned lane = 0; lane < packedMask.size(); ++lane) {
+                    int sourceLane = mask[lane];
                     for (unsigned byte = 0; byte < 4; ++byte)
                         packedMask[lane] |=
                             static_cast<std::uint32_t>(
                                 sourceLane * 4 + byte)
                             << (byte * 8);
                 }
-                VReg mask = createTemporary(ValueType::V4I32);
+                VReg maskReg = createTemporary(ValueType::V4I32);
                 emitVectorConstant(
                     block,
                     MachineOperand::vreg(
-                        mask, RegClass::NEON128, true),
+                        maskReg, RegClass::NEON128, true),
                     packedMask);
                 MachineInstr shuffle(Opcode::SHUFFLEv16i8);
                 shuffle.addOperand(define(node))
                     .addOperand(use(node.operands()[0]))
                     .addOperand(use(node.operands()[1]))
                     .addOperand(MachineOperand::vreg(
-                        mask, RegClass::NEON128));
+                        maskReg, RegClass::NEON128));
                 append(block, std::move(shuffle), &node);
                 break;
             }

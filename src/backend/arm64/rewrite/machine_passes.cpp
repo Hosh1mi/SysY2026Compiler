@@ -176,7 +176,12 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             bool constant =
                 it->opcode() == Opcode::MOVi32 ||
                 it->opcode() == Opcode::MOVi64 ||
-                it->opcode() == Opcode::MOVIv4Zero;
+                it->opcode() == Opcode::MOVIv4Zero ||
+                it->opcode() == Opcode::MOVIv4s ||
+                it->opcode() == Opcode::MOVIv4sMsl ||
+                it->opcode() == Opcode::MVNIv4s ||
+                it->opcode() == Opcode::MOVIv16b ||
+                it->opcode() == Opcode::FMOVv4s;
             if (!constant || it->operands().empty() ||
                 !it->operands()[0].isVirtualRegister() ||
                 !it->operands()[0].isDef) {
@@ -186,7 +191,33 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
 
             std::string key =
                 std::to_string(static_cast<unsigned>(it->opcode()));
-            if (it->opcode() != Opcode::MOVIv4Zero) {
+            if (it->opcode() == Opcode::MOVIv4Zero) {
+                // zero vector has no immediate payload
+            } else if (it->opcode() == Opcode::FMOVv4s) {
+                if (it->operands().size() != 2 ||
+                    it->operands()[1].kind() !=
+                        MachineOperand::Kind::FloatingBits) {
+                    ++it;
+                    continue;
+                }
+                key += ":" +
+                       std::to_string(it->operands()[1].floatingBits());
+            } else if (it->opcode() == Opcode::MOVIv4s ||
+                       it->opcode() == Opcode::MOVIv4sMsl ||
+                       it->opcode() == Opcode::MVNIv4s) {
+                if (it->operands().size() != 3 ||
+                    it->operands()[1].kind() !=
+                        MachineOperand::Kind::Immediate ||
+                    it->operands()[2].kind() !=
+                        MachineOperand::Kind::Immediate) {
+                    ++it;
+                    continue;
+                }
+                key += ":" +
+                       std::to_string(it->operands()[1].immediate()) +
+                       ":" +
+                       std::to_string(it->operands()[2].immediate());
+            } else {
                 if (it->operands().size() != 2 ||
                     it->operands()[1].kind() !=
                         MachineOperand::Kind::Immediate) {
@@ -442,6 +473,11 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             case Opcode::MOVi32:
             case Opcode::MOVi64:
             case Opcode::MOVIv4Zero:
+            case Opcode::MOVIv4s:
+            case Opcode::MOVIv4sMsl:
+            case Opcode::MVNIv4s:
+            case Opcode::MOVIv16b:
+            case Opcode::FMOVv4s:
             case Opcode::FMOVWS:
             case Opcode::FMOVSW:
             case Opcode::COPYXtoW:
@@ -727,6 +763,11 @@ bool MachineLICM::run(MachineFunction &function) const {
         case Opcode::MOVi32:
         case Opcode::MOVi64:
         case Opcode::MOVIv4Zero:
+        case Opcode::MOVIv4s:
+        case Opcode::MOVIv4sMsl:
+        case Opcode::MVNIv4s:
+        case Opcode::MOVIv16b:
+        case Opcode::FMOVv4s:
             return true;
         default:
             return false;

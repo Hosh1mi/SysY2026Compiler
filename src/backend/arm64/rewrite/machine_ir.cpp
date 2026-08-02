@@ -242,6 +242,19 @@ const MachineBasicBlock *MachineFunction::entryBlock() const {
     return blocks_.empty() ? nullptr : blocks_.front().get();
 }
 
+const std::string &MachineFunction::getOrCreateVectorConstant(
+    const std::array<std::uint32_t, 4> &lanes) {
+    for (const VectorConstantPoolEntry &entry : vectorConstantPool_)
+        if (entry.lanes == lanes)
+            return entry.label;
+    VectorConstantPoolEntry entry;
+    entry.lanes = lanes;
+    entry.label = ".LCPI_" + name_ + "_" +
+                  std::to_string(vectorConstantPool_.size());
+    vectorConstantPool_.push_back(std::move(entry));
+    return vectorConstantPool_.back().label;
+}
+
 bool MachineFunction::hasProperty(MachineProperty property) const {
     return properties_ & static_cast<std::uint32_t>(property);
 }

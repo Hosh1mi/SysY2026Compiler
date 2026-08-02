@@ -249,6 +249,11 @@ constexpr MachineProperty operator|(MachineProperty lhs, MachineProperty rhs) {
 
 class MachineFunction {
 public:
+    struct VectorConstantPoolEntry {
+        std::array<std::uint32_t, 4> lanes{};
+        std::string label;
+    };
+
     explicit MachineFunction(std::string name) : name_(std::move(name)) {}
 
     const std::string &name() const { return name_; }
@@ -265,6 +270,13 @@ public:
     MachineFrameInfo &frameInfo() { return frameInfo_; }
     const MachineFrameInfo &frameInfo() const { return frameInfo_; }
 
+    // Deduplicate 128-bit vector immediates into per-function .rodata labels.
+    const std::string &getOrCreateVectorConstant(
+        const std::array<std::uint32_t, 4> &lanes);
+    const std::vector<VectorConstantPoolEntry> &vectorConstantPool() const {
+        return vectorConstantPool_;
+    }
+
     bool hasProperty(MachineProperty property) const;
     void setProperty(MachineProperty property);
     void clearProperty(MachineProperty property);
@@ -274,6 +286,7 @@ private:
     std::vector<std::unique_ptr<MachineBasicBlock>> blocks_;
     MachineRegisterInfo registerInfo_;
     MachineFrameInfo frameInfo_;
+    std::vector<VectorConstantPoolEntry> vectorConstantPool_;
     std::uint32_t properties_ = 0;
 };
 
