@@ -36,5 +36,8 @@ private:
                                   BasicBlock *loopExit, Value *bound,
                                   Value *totalInit, Value *totalLatch,
                                   long long ivInit, long long ivStride);
+    bool tryFoldPiecewiseModularSum(Loop &loop, Module *module);
+    Function *getPiecewiseModSumDeclaration(Module *module);
     std::set<BasicBlock *> modFolded_; // 已折叠的 header，防止重扫无限折叠
+    Function *piecewiseModSumDecl_ = nullptr;
 };

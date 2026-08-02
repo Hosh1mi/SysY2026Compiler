@@ -128,10 +128,9 @@ bool insertPreheader(Loop *loop, Function *func) {
         return false;
 
     // ── 3. Check if we need a preheader at all ─────────────────────────
-    // If the header has only one predecessor total, it already has a unique
-    // entry point; no preheader needed (this is the entry-block-as-header case).
-    if (header->pre_bbs_.size() == 1)
-        return false;
+    // A unique outside predecessor is not necessarily a preheader: it may
+    // still have another successor. isExistingPreheader above is the
+    // authoritative test, so every remaining outside edge must be split.
 
     // ── 4. Create the preheader block ──────────────────────────────────
     std::string preheaderName = header->name_ + ".preheader";
