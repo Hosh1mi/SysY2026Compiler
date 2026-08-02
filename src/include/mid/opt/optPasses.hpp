@@ -44,6 +44,7 @@
 #include "ifConversion.hpp"
 #include "loopInterchange.hpp"
 #include "loopSkewing.hpp"
+#include "triangleInterchange.hpp"
 #include "splitGEP.hpp"
 #include "CFGSimplify.hpp"
 #include "unifyExitNodes.hpp"

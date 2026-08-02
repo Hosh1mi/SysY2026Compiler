@@ -21,6 +21,11 @@ void debugPar(const std::string &msg) {
         std::cerr << "[Parallelize] " << msg << "\n";
 }
 
+void debugWavefront(const std::string &msg) {
+    if (std::getenv("DEBUG_WAVEFRONT"))
+        std::cerr << "[WavefrontParallelize] " << msg << "\n";
+}
+
 // GEP 链回溯到基址
 Value *gepRootBase(Value *ptr) {
     return ArgumentAliasAnalysis::underlyingObject(ptr);
@@ -735,6 +740,13 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     // 否则两线程会命中同一地址。ScalarExpansion scratch 若完整局限在
     // 当前循环内，则可改成 worker 私有 alloca。
     ScalarEvolution &SE = AM->getScalarEvolution(func);
+    bool wavefrontCoincident =
+        loop.header->hasSemFlag(SemFlag::WavefrontCoincident);
+    if (wavefrontCoincident)
+        debugPar("wavefront coincidence proof accepted for loop=" +
+                 loopName(loop));
+    if (wavefrontCoincident)
+        debugWavefront("accepted coincident loop=" + loopName(loop));
     long long privBytes = 0;
     for (auto *s : stores) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(s->get_operand(1));
@@ -758,10 +770,15 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             privatize->insert(base);
             continue;
         }
-        if (!variesWithIV)
+        if (!variesWithIV && !wavefrontCoincident)
             return fail("store address does not vary with loop IV");
     }
 
+    // TriangleInterchange has already proved that every same-root read is from
+    // the current cell or an earlier wave.  Re-running a direction-vector test
+    // here loses the nested-loop inequalities used by that proof, so consume
+    // the narrowly-scoped coincidence certificate instead.  Unmarked loops
+    // retain the ordinary DOALL checks below.
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
 
     LoopInfo &LI = AM->getLoopInfo(func);
@@ -773,6 +790,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         return privatize->count(gepRootBase(ptr)) != 0;
     };
     for (auto *s : stores) {
+        if (wavefrontCoincident) break;
         if (basePriv(s)) continue;
         for (auto *a : accesses) {
             if (basePriv(a)) continue;
@@ -1075,6 +1093,9 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
 
     delete builder;
     bodies_.push_back(bodyFn);
+    if (loop.header->hasSemFlag(SemFlag::WavefrontCoincident))
+        debugWavefront("outlined func=" + func->name_ + " header=" +
+                       loop.header->name_ + " id=" + std::to_string(id));
     debugPar("parallelized func=" + func->name_ +
              " header=" + loop.header->name_ + " id=" + std::to_string(id));
 }

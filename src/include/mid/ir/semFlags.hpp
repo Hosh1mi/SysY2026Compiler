@@ -34,6 +34,8 @@ enum class SemFlag : uint32_t {
     KnownNonNegative = 1u << 15, // Value：所有到达该值的路径上均为非负 i32
     ScalarExpansionCompute = 1u << 16,
         // BasicBlock：标量展开后、依赖已由 scratch 分离的计算循环
+    WavefrontCoincident = 1u << 17,
+        // BasicBlock：三角调度已证明该循环维度内不存在跨迭代依赖
 };
 
 inline SemFlag operator|(SemFlag a, SemFlag b) {

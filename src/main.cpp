@@ -230,8 +230,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
     pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInvariantReduction>());
-    if (optLevel >= 2)
-        pm.addPass(std::make_unique<LoopSkewing>());
+    pm.addPass(std::make_unique<LoopSkewing>());
+    pm.addPass(std::make_unique<TriangleInterchange>());
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<IfConversion>());

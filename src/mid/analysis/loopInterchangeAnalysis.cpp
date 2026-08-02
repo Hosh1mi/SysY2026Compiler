@@ -13,6 +13,16 @@ bool hasHeaderIVGuard(Loop *loop) {
     return cmp->get_operand(0) == loop->canonicalIV;
 }
 
+bool containsWavefrontCoincidentLoop(Loop *loop) {
+    if (!loop) return false;
+    if (loop->header &&
+        loop->header->hasSemFlag(SemFlag::WavefrontCoincident))
+        return true;
+    for (Loop *child : loop->children)
+        if (containsWavefrontCoincidentLoop(child)) return true;
+    return false;
+}
+
 } // namespace
 
 bool LoopInterchangeAnalysis::isInterchangeLegal(
@@ -62,6 +72,10 @@ LoopInterchangeAnalysis::analyzeParallelSink(Loop *loop) const {
 
     if (!loop) {
         result.reason = "null loop";
+        return result;
+    }
+    if (containsWavefrontCoincidentLoop(loop)) {
+        result.reason = "wavefront schedule is fixed";
         return result;
     }
     if (loop->children.empty()) {
@@ -120,6 +134,10 @@ LoopInterchangeAnalysis::analyzeParallelFloat(Loop *loop) const {
 
     if (!loop) {
         result.reason = "null loop";
+        return result;
+    }
+    if (containsWavefrontCoincidentLoop(loop)) {
+        result.reason = "wavefront schedule is fixed";
         return result;
     }
     if (loop->children.empty()) {
