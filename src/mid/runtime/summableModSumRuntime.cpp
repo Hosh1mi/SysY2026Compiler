@@ -1,4 +1,4 @@
-#include "../../include/mid/runtime/piecewiseModSumRuntime.hpp"
+#include "../../include/mid/runtime/summableModSumRuntime.hpp"
 
 #include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -73,7 +73,7 @@ Function *makeFunction(Module *module, const std::string &name, Type *result,
 }
 
 Function *buildFloorDiv(Module *module) {
-    auto *function = makeFunction(module, "__compiler.pms.floor_div",
+    auto *function = makeFunction(module, "__compiler.sms.floor_div",
                                   module->int64_ty_, 2);
     RuntimeBuilder b(module, function);
     b.block("label_entry");
@@ -88,7 +88,7 @@ Function *buildFloorDiv(Module *module) {
 }
 
 Function *buildGCD(Module *module) {
-    auto *function = makeFunction(module, "__compiler.pms.gcd",
+    auto *function = makeFunction(module, "__compiler.sms.gcd",
                                   module->int64_ty_, 2);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -124,7 +124,7 @@ Function *buildGCD(Module *module) {
 }
 
 Function *buildFloorSum(Module *module, Function *floorDiv) {
-    auto *function = makeFunction(module, "__compiler.pms.floor_sum",
+    auto *function = makeFunction(module, "__compiler.sms.floor_sum",
                                   module->int64_ty_, 4);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -232,7 +232,7 @@ Function *buildFloorSum(Module *module, Function *floorDiv) {
 }
 
 Function *buildSumNonnegative(Module *module, Function *floorSum) {
-    auto *function = makeFunction(module, "__compiler.pms.sum_nonnegative",
+    auto *function = makeFunction(module, "__compiler.sms.sum_nonnegative",
                                   module->int64_ty_, 4);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -278,7 +278,7 @@ Function *buildSumNonnegative(Module *module, Function *floorSum) {
 }
 
 Function *buildSumSigned(Module *module, Function *sumNonnegative) {
-    auto *function = makeFunction(module, "__compiler.pms.sum_signed",
+    auto *function = makeFunction(module, "__compiler.sms.sum_signed",
                                   module->int64_ty_, 4);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -325,7 +325,7 @@ Function *buildSumSigned(Module *module, Function *sumNonnegative) {
 }
 
 Function *buildKey(Module *module, Function *floorDiv) {
-    auto *function = makeFunction(module, "__compiler.pms.key",
+    auto *function = makeFunction(module, "__compiler.sms.key",
                                   module->int64_ty_, 2);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -345,7 +345,7 @@ Function *buildKey(Module *module, Function *floorDiv) {
 }
 
 Function *buildEndOfKeyRun(Module *module, Function *key) {
-    auto *function = makeFunction(module, "__compiler.pms.end_key_run",
+    auto *function = makeFunction(module, "__compiler.sms.end_key_run",
                                   module->int64_ty_, 5);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -414,7 +414,7 @@ Function *buildEndOfKeyRun(Module *module, Function *key) {
 
 Function *buildSumMonotone(Module *module, Function *gcd,
                            Function *endKey, Function *sumSigned) {
-    auto *function = makeFunction(module, "__compiler.pms.sum_monotone",
+    auto *function = makeFunction(module, "__compiler.sms.sum_monotone",
                                   module->int64_ty_, 9);
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
@@ -657,7 +657,7 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     Value *s = b.sext(a[0]);
     Value *t = b.sext(a[1]);
     Value *d = b.sext(a[2]);
-    Value *piecewiseEnabled = a[3];
+    Value *selectionEnabled = a[3];
     Value *lhsMultiplier64 = b.sext(a[4]);
     Value *lhsConstant64 = b.sext(a[5]);
     Value *rhsMultiplier64 = b.sext(a[6]);
@@ -672,8 +672,8 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
     Value *additive64 = b.sext(a[15]);
     Value *outerModulus64 = b.sext(a[16]);
     Value *initial64 = b.sext(a[17]);
-    Value *piecewiseActive =
-        b.cmp(ICmpInst::ICMP_NE, piecewiseEnabled, b.i32(0));
+    Value *selectionActive =
+        b.cmp(ICmpInst::ICMP_NE, selectionEnabled, b.i32(0));
     Value *selectRight =
         b.cmp(ICmpInst::ICMP_NE, trueUsesRight, b.i32(0));
     Value *trueMultiplier = b.select(
@@ -715,7 +715,7 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
         rhsConstant64);
     Value *left = b.bin(
         Instruction::And,
-        piecewiseActive, b.cmp(ICmpInst::ICMP_SLT, lhs, rhs));
+        selectionActive, b.cmp(ICmpInst::ICMP_SLT, lhs, rhs));
     Value *initialLow = b.bin(Instruction::Add, first, b.i64(1));
     b.jump(splitCond);
 
@@ -743,7 +743,7 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
         b.bin(Instruction::Mul, rhsMultiplier64, middleX), rhsConstant64);
     Value *middleLeft = b.bin(
         Instruction::And,
-        piecewiseActive,
+        selectionActive,
         b.cmp(ICmpInst::ICMP_SLT, middleLhs, middleRhs));
     b.branch(b.cmp(ICmpInst::ICMP_EQ, middleLeft, left),
              splitRaise, splitLower);
@@ -836,7 +836,7 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
         Instruction::Add, b.bin(Instruction::Mul, a[6], tailX), a[7]);
     Value *useReflection = b.bin(
         Instruction::And,
-        piecewiseActive, b.cmp(ICmpInst::ICMP_SLT, tailLhs, tailRhs));
+        selectionActive, b.cmp(ICmpInst::ICMP_SLT, tailLhs, tailRhs));
     Value *tailTrue = b.select(selectRight, tailRhs, tailLhs);
     Value *tailFalse = b.select(selectRight, tailLhs, tailRhs);
     Value *tailU = b.select(useReflection, tailTrue, tailFalse);
@@ -868,10 +868,10 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
 
 } // namespace
 
-void materializePiecewiseModSumRuntime(Module *module) {
+void materializeSummableModSumRuntime(Module *module) {
     Function *entry = nullptr;
     for (auto *function : module->function_list_)
-        if (function->name_ == "__compiler.piecewise_mod_sum") {
+        if (function->name_ == "__compiler.summable_mod_sum") {
             entry = function;
             break;
         }

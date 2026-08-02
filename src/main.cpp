@@ -2,7 +2,7 @@
 #include "include/frontend/parser.hpp"
 
 #include "include/mid/ir/irGen.hpp"
-#include "include/mid/runtime/piecewiseModSumRuntime.hpp"
+#include "include/mid/runtime/summableModSumRuntime.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
@@ -332,9 +332,9 @@ int main(int argc, char **argv) {
     buildArm64Pipeline(pm, options.optLevel, m.get());
     pm.run(m.get());
 
-    materializePiecewiseModSumRuntime(m.get());
+    materializeSummableModSumRuntime(m.get());
     if (options.verifyIR)
-        m->verify("piecewise-runtime-materialization");
+        m->verify("summable-runtime-materialization");
 
     std::ofstream fout;
     std::ostream *out = nullptr;

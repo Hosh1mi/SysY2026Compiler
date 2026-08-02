@@ -26,7 +26,7 @@ bool debugReject(const char *reason) {
     return false;
 }
 
-struct PiecewiseModularSumMatch {
+struct SummableModularRecurrenceMatch {
     PhiInst *induction = nullptr;
     PhiInst *state = nullptr;
     Value *start = nullptr;
@@ -35,7 +35,7 @@ struct PiecewiseModularSumMatch {
     Value *initial = nullptr;
     BinaryInst *stateRemainder = nullptr;
     Value *remainderBase = nullptr;
-    int piecewiseEnabled = 0;
+    int affineSelectionEnabled = 0;
     int lhsMultiplier = 1;
     int lhsConstant = 0;
     int rhsMultiplier = 1;
@@ -240,13 +240,13 @@ bool matchExitModuloReconstruction(
     return true;
 }
 
-bool matchPiecewiseContribution(Value *value, PhiInst *induction,
-                                PiecewiseModularSumMatch &match) {
+bool matchSummableContribution(Value *value, PhiInst *induction,
+                               SummableModularRecurrenceMatch &match) {
     SummableExpressionAnalysis::LinearFloorExpression expression;
     if (!SummableExpressionAnalysis::analyzeModular(
             value, induction, expression))
         return false;
-    match.piecewiseEnabled = expression.piecewise ? 1 : 0;
+    match.affineSelectionEnabled = expression.hasAffineSelection ? 1 : 0;
     match.lhsMultiplier = expression.lhsMultiplier;
     match.lhsConstant = expression.lhsConstant;
     match.rhsMultiplier = expression.rhsMultiplier;
@@ -261,11 +261,11 @@ bool matchPiecewiseContribution(Value *value, PhiInst *induction,
     return true;
 }
 
-bool analyzePiecewiseModularSum(Loop &loop,
-                                PiecewiseModularSumMatch &match) {
+bool analyzeSummableModularRecurrence(
+    Loop &loop, SummableModularRecurrenceMatch &match) {
     auto reject = [&](const char *reason) {
         if (isLoopRepFoldDebugEnabled())
-            std::cerr << "[LoopRepFold] piecewise reject header="
+            std::cerr << "[LoopRepFold] summable reject header="
                       << loop.header->name_ << " reason=" << reason << "\n";
         return false;
     };
@@ -335,7 +335,7 @@ bool analyzePiecewiseModularSum(Loop &loop,
                  directConstant == match.additiveConstant)
             match.remainderBase = dividendAdd->get_operand(0);
     }
-    if (!matchPiecewiseContribution(contribution, match.induction, match))
+    if (!matchSummableContribution(contribution, match.induction, match))
         return reject("contribution-shape");
     // The helper combines contributions mathematically modulo outerModulus.
     // Prove that the original i32 add tree cannot wrap once the state is in
@@ -711,30 +711,31 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     return true;
 }
 
-Function *LoopRepFold::getPiecewiseModSumDeclaration(Module *module) {
-    if (piecewiseModSumDecl_)
-        return piecewiseModSumDecl_;
+Function *LoopRepFold::getSummableModSumDeclaration(Module *module) {
+    if (summableModSumDecl_)
+        return summableModSumDecl_;
     for (auto *function : module->function_list_)
-        if (function->name_ == "__compiler.piecewise_mod_sum") {
-            piecewiseModSumDecl_ = function;
+        if (function->name_ == "__compiler.summable_mod_sum") {
+            summableModSumDecl_ = function;
             return function;
         }
     std::vector<Type *> arguments(18, module->int32_ty_);
     auto *type = new FunctionType(module->int32_ty_, arguments);
-    piecewiseModSumDecl_ =
-        new Function(type, "__compiler.piecewise_mod_sum", module);
-    return piecewiseModSumDecl_;
+    summableModSumDecl_ =
+        new Function(type, "__compiler.summable_mod_sum", module);
+    return summableModSumDecl_;
 }
 
-bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
+bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
+                                                   Module *module) {
     auto reject = [&](const char *reason) {
         if (isLoopRepFoldDebugEnabled())
-            std::cerr << "[LoopRepFold] piecewise transform reject header="
+            std::cerr << "[LoopRepFold] summable transform reject header="
                       << loop.header->name_ << " reason=" << reason << "\n";
         return false;
     };
-    PiecewiseModularSumMatch match;
-    if (!analyzePiecewiseModularSum(loop, match)) return false;
+    SummableModularRecurrenceMatch match;
+    if (!analyzeSummableModularRecurrence(loop, match)) return false;
     if (modFolded_.count(loop.header)) return reject("already-folded");
     if (!loop.preheader) return reject("no-preheader");
     if (loop.exits.size() != 1 || loop.exiting.size() != 1 ||
@@ -942,18 +943,18 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
     for (auto it = guardChain.rbegin(); it != guardChain.rend(); ++it)
         preheader->add_instruction_before_terminator(*it);
 
-    Function *helper = getPiecewiseModSumDeclaration(module);
+    Function *helper = getSummableModSumDeclaration(module);
     Function *function = loop.header->parent_;
-    auto *fast = new BasicBlock(module, loop.header->name_ + ".pms.fast",
+    auto *fast = new BasicBlock(module, loop.header->name_ + ".sms.fast",
                                 function);
     auto *slowJoin = new BasicBlock(module,
-                                    loop.header->name_ + ".pms.slow",
+                                    loop.header->name_ + ".sms.slow",
                                     function);
     std::vector<Value *> arguments = {
         match.start,
         match.bound,
         match.step,
-        new ConstantInt(i32, match.piecewiseEnabled),
+        new ConstantInt(i32, match.affineSelectionEnabled),
         new ConstantInt(i32, match.lhsMultiplier),
         new ConstantInt(i32, match.lhsConstant),
         new ConstantInt(i32, match.rhsMultiplier),
@@ -1035,7 +1036,7 @@ bool LoopRepFold::tryFoldPiecewiseModularSum(Loop &loop, Module *module) {
 
     modFolded_.insert(loop.header);
     if (isLoopRepFoldDebugEnabled())
-        std::cerr << "[LoopRepFold] piecewise modular fold func="
+        std::cerr << "[LoopRepFold] summable modular fold func="
                   << function->name_ << " header=" << loop.header->name_
                   << " divisor=" << match.divisor
                   << " inner-mod=" << match.innerModulus
@@ -1055,7 +1056,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
                       << " reason=no-dedicated-preheader\n";
         return false;
     }
-    if (tryFoldPiecewiseModularSum(loop, module))
+    if (tryFoldSummableModularRecurrence(loop, module))
         return true;
     // Every supported closed form summarizes the number of iterations implied
     // by the header condition.  An additional exiting edge (for example a
@@ -1400,7 +1401,7 @@ void LoopRepFold::execute(Module *module) {
 }
 
 PreservedAnalyses LoopRepFold::execute(Module *module, AnalysisManager &AM) {
-    piecewiseModSumDecl_ = nullptr;
+    summableModSumDecl_ = nullptr;
     std::vector<Function *> functions = module->function_list_;
     for (auto func : functions) {
         if (!func->is_declaration())

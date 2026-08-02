@@ -148,7 +148,7 @@ bool analyzeAffine(Value *value, Value *symbol, AffineLine &result) {
     return analyzeAffine(value, symbol, result, visiting, 0);
 }
 
-struct PiecewiseBasis {
+struct AffineSelectionBasis {
     AffineLine lhs;
     AffineLine rhs;
     bool trueUsesRight = true;
@@ -197,8 +197,8 @@ bool matchRedundantReflectedMaximum(Value *value, PhiInst *induction,
     return true;
 }
 
-bool matchPiecewiseBasis(Value *value, PhiInst *induction,
-                         PiecewiseBasis &result) {
+bool matchAffineSelectionBasis(Value *value, PhiInst *induction,
+                               AffineSelectionBasis &result) {
     int reflectionConstant = 0;
     long long reflectedLowerBound = 0;
     if (value != induction &&
@@ -299,7 +299,7 @@ bool matchFloorTerm(Value *value, Value *basis, int &numeratorMultiplier,
 }
 
 bool analyzeWithBasis(Value *dividend, Value *basis, PhiInst *induction,
-                      const PiecewiseBasis *piecewise,
+                      const AffineSelectionBasis *selection,
                       int modulus, LinearFloorExpression &result) {
     std::vector<std::pair<Value *, int>> terms;
     int constant = 0;
@@ -307,13 +307,13 @@ bool analyzeWithBasis(Value *dividend, Value *basis, PhiInst *induction,
 
     LinearFloorExpression candidate;
     candidate.induction = induction;
-    if (piecewise) {
-        candidate.piecewise = true;
-        candidate.lhsMultiplier = piecewise->lhs.multiplier;
-        candidate.lhsConstant = piecewise->lhs.constant;
-        candidate.rhsMultiplier = piecewise->rhs.multiplier;
-        candidate.rhsConstant = piecewise->rhs.constant;
-        candidate.trueUsesRight = piecewise->trueUsesRight;
+    if (selection) {
+        candidate.hasAffineSelection = true;
+        candidate.lhsMultiplier = selection->lhs.multiplier;
+        candidate.lhsConstant = selection->lhs.constant;
+        candidate.rhsMultiplier = selection->rhs.multiplier;
+        candidate.rhsConstant = selection->rhs.constant;
+        candidate.trueUsesRight = selection->trueUsesRight;
     }
     candidate.constant = constant;
     candidate.modulus = modulus;
@@ -380,11 +380,11 @@ bool analyzeModular(Value *value, PhiInst *induction,
                          result))
         return true;
     for (Value *candidateBasis : values) {
-        PiecewiseBasis piecewise;
+        AffineSelectionBasis selection;
         if (candidateBasis == induction ||
-            !matchPiecewiseBasis(candidateBasis, induction, piecewise))
+            !matchAffineSelectionBasis(candidateBasis, induction, selection))
             continue;
-        if (analyzeWithBasis(dividend, candidateBasis, induction, &piecewise,
+        if (analyzeWithBasis(dividend, candidateBasis, induction, &selection,
                              modulus, result))
             return true;
     }

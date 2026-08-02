@@ -16,7 +16,7 @@ namespace SummableExpressionAnalysis {
 
 struct LinearFloorExpression {
     PhiInst *induction = nullptr;
-    bool piecewise = false;
+    bool hasAffineSelection = false;
     int lhsMultiplier = 1;
     int lhsConstant = 0;
     int rhsMultiplier = 1;
