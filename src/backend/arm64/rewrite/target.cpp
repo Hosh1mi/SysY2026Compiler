@@ -229,6 +229,10 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(UDIVWrr, "udiv", 1, 3, 12, SchedResource::Divide)
     SIMPLE_CASE(SMULLXrr, "smull", 1, 3, 3, SchedResource::MAC)
     SIMPLE_CASE(SMADDLXrrr, "smaddl", 1, 4, 3, SchedResource::MAC)
+    SIMPLE_CASE(SDIVXrr, "sdiv", 1, 3, 12, SchedResource::Divide)
+    SIMPLE_CASE(MSUBXrrr, "msub", 1, 4, 3, SchedResource::MAC)
+    SIMPLE_CASE(UMULHXrr, "umulh", 1, 3, 3, SchedResource::MAC)
+    SIMPLE_CASE(NEGX, "neg", 1, 2, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWrr, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWri, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ORRWrr, "orr", 1, 3, 1, SchedResource::ALU)
@@ -241,6 +245,8 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(ASRWri, "asr", 1, 3, 1, SchedResource::ALU)
     case Opcode::CMPWrr:
     case Opcode::CMPWri:
+    case Opcode::CMPXrr:
+    case Opcode::CMPXri:
     case Opcode::TSTWrr:
     case Opcode::TSTWri: {
         static const InstrDesc cmp{
@@ -249,6 +255,14 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         static const InstrDesc cmpi{
             Opcode::CMPWri, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpx{
+            Opcode::CMPXrr, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpxi{
+            Opcode::CMPXri, "cmp", 0, 2, false, false, false, false,
             false, false, false, false, true, false, 1,
             SchedResource::ALU};
         static const InstrDesc tst{
@@ -261,6 +275,8 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         return opcode == Opcode::CMPWrr ? cmp
              : opcode == Opcode::CMPWri ? cmpi
+             : opcode == Opcode::CMPXrr ? cmpx
+             : opcode == Opcode::CMPXri ? cmpxi
              : opcode == Opcode::TSTWrr ? tst : tsti;
     }
     SIMPLE_CASE(CLZW, "clz", 1, 2, 1, SchedResource::ALU)
@@ -623,6 +639,7 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
     case Opcode::ADDXri:
     case Opcode::SUBXri:
     case Opcode::CMPWri:
+    case Opcode::CMPXri:
     case Opcode::SUBSPri:
     case Opcode::ADDSPri:
         return immediate >= 0 && immediate <= 4095;

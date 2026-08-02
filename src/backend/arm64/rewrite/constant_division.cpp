@@ -76,4 +76,13 @@ MagicNumber computeSignedMagic(std::int32_t divisor) {
     return magic;
 }
 
+BarrettModulus64 computeBarrettModulus64(std::uint32_t modulus) {
+    assert(modulus > 1);
+    BarrettModulus64 info;
+    info.modulus = modulus;
+    info.mu = static_cast<std::uint64_t>(
+        (static_cast<__uint128_t>(1) << 64) / modulus);
+    return info;
+}
+
 } // namespace backend::aarch64::division

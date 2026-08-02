@@ -243,6 +243,30 @@ void printInstruction(const MachineFunction &function,
                << ", " << registerNameAs(operands[3], RegClass::GPR64)
                << '\n';
         break;
+    case Opcode::SDIVXrr:
+        output << "\tsdiv " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::MSUBXrrr:
+        output << "\tmsub " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << ", " << registerNameAs(operands[3], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::UMULHXrr:
+        output << "\tumulh " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::NEGX:
+        output << "\tneg " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << '\n';
+        break;
     case Opcode::ANDWrr: emitThreeRegisters(output, "and", instruction); break;
     case Opcode::ORRWrr: emitThreeRegisters(output, "orr", instruction); break;
     case Opcode::EORWrr: emitThreeRegisters(output, "eor", instruction); break;
@@ -306,6 +330,15 @@ void printInstruction(const MachineFunction &function,
     case Opcode::CMPWri:
         output << "\tcmp " << registerName(operands[0]) << ", #"
                << operands[1].immediate() << '\n';
+        break;
+    case Opcode::CMPXrr:
+        output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::CMPXri:
+        output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", #" << operands[1].immediate() << '\n';
         break;
     case Opcode::TSTWrr:
         output << "\ttst " << registerName(operands[0]) << ", "

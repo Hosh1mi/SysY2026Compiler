@@ -17,3 +17,7 @@ bool matchSignedMinMaxSelect(SelectInst *select,
                              SignedMinMaxIntrinsic &kind,
                              Value *&lhs,
                              Value *&rhs);
+
+// i32 (a * b) % m with a 64-bit intermediate product.
+Function *getOrInsertMulModIntrinsic(Module *module);
+bool isMulModIntrinsic(Function *function);

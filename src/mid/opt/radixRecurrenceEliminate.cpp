@@ -2,6 +2,7 @@
 
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
+#include "../../include/mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <array>
@@ -286,102 +287,73 @@ BinaryInst *binary(Module *module, BasicBlock *block, Instruction::OpID op,
     return new BinaryInst(module->int32_ty_, op, lhs, rhs, block);
 }
 
-Value *boundedSignedRem(Module *module, BasicBlock *block, Value *value,
-                        int modulus) {
-    auto constant = [&](int v) -> ConstantInt * {
-        return new ConstantInt(module->int32_ty_, v);
-    };
-
-    auto *minusMod = binary(module, block, Instruction::Sub,
-                            value, constant(modulus));
-    auto *geMod = new ICmpInst(ICmpInst::ICMP_SGE,
-                               value, constant(modulus), block);
-    auto *nonNegative = new SelectInst(geMod, minusMod, value, block);
-
-    auto *plusMod = binary(module, block, Instruction::Add,
-                           value, constant(modulus));
-    auto *leMinusMod = new ICmpInst(ICmpInst::ICMP_SLE,
-                                    value, constant(-modulus), block);
-    return new SelectInst(leMinusMod, plusMod, nonNegative, block);
-}
-
-Value *boundedNonNegativeRem(Module *module, BasicBlock *block, Value *value,
-                             int modulus) {
-    auto *mod = new ConstantInt(module->int32_ty_, modulus);
-    auto *minusMod = binary(module, block, Instruction::Sub, value, mod);
-    auto *geMod = new ICmpInst(ICmpInst::ICMP_SGE, value,
-                               new ConstantInt(module->int32_ty_, modulus),
-                               block);
-    return new SelectInst(geMod, minusMod, value, block);
-}
-
-Value *remOfDoubledRadixState(Module *module, BasicBlock *block,
-                              Value *doubled, int modulus) {
-    // The radix state is always the result of `srem x, modulus`, hence it is
-    // in (-(modulus - 1), modulus - 1).  For modulus <= 2^30, doubling cannot
-    // overflow i32 and the signed remainder is one conditional add/subtract.
-    if (modulus <= (1 << 30))
-        return boundedSignedRem(module, block, doubled, modulus);
-    return binary(module, block, Instruction::SRem,
-                  doubled, new ConstantInt(module->int32_ty_, modulus));
-}
-
 void rewrite(const Match &match, Module *module) {
     Function *function = match.function;
     Argument *addend = match.addend;
     Argument *digits = match.digits;
+    Function *mulMod = getOrInsertMulModIntrinsic(module);
+    if (!mulMod)
+        return;
+
     discardBody(function);
 
-    auto *entry = new BasicBlock(module, "label_radix_entry", function);
-    auto *zero = new BasicBlock(module, "label_radix_zero", function);
-    auto *init = new BasicBlock(module, "label_radix_init", function);
+    auto *entry = new BasicBlock(module, "label_mulmod_entry", function);
+    auto *zero = new BasicBlock(module, "label_mulmod_zero", function);
+    auto *fallbackInit =
+        new BasicBlock(module, "label_mulmod_fallback_init", function);
 
     auto constant = [&](int value) -> ConstantInt * {
         return new ConstantInt(module->int32_ty_, value);
     };
 
-    auto buildLoop = [&](const std::string &prefix, BasicBlock *initBlock,
-                         Value *initial, bool fastOdd) {
-        auto *loop = new BasicBlock(module, prefix + "_loop", function);
-        auto *body = new BasicBlock(module, prefix + "_body", function);
-        auto *odd = new BasicBlock(module, prefix + "_odd", function);
-        auto *latch = new BasicBlock(module, prefix + "_latch", function);
-        auto *exit = new BasicBlock(module, prefix + "_exit", function);
+    auto buildFallback = [&] {
+        auto *loop =
+            new BasicBlock(module, "label_mulmod_fallback_loop", function);
+        auto *body =
+            new BasicBlock(module, "label_mulmod_fallback_body", function);
+        auto *odd =
+            new BasicBlock(module, "label_mulmod_fallback_odd", function);
+        auto *latch =
+            new BasicBlock(module, "label_mulmod_fallback_latch", function);
+        auto *exit =
+            new BasicBlock(module, "label_mulmod_fallback_exit", function);
 
+        auto *initial = binary(module, fallbackInit, Instruction::SRem,
+                               addend, constant(match.modulus));
         auto *leadingZeros = new UnaryInst(module->int32_ty_, Instruction::Clz,
-                                           digits, initBlock);
-        auto *topShift = binary(module, initBlock, Instruction::Sub,
+                                           digits, fallbackInit);
+        auto *topShift = binary(module, fallbackInit, Instruction::Sub,
                                 constant(31), leadingZeros);
-        auto *topMask = binary(module, initBlock, Instruction::Shl,
+        auto *topMask = binary(module, fallbackInit, Instruction::Shl,
                                constant(1), topShift);
-        auto *initialMask = binary(module, initBlock, Instruction::LShr,
+        auto *initialMask = binary(module, fallbackInit, Instruction::LShr,
                                    topMask, constant(1));
-        new BranchInst(loop, initBlock);
+        new BranchInst(loop, fallbackInit);
 
         auto *current = PhiInst::create_phi(module->int32_ty_, loop);
         auto *mask = PhiInst::create_phi(module->int32_ty_, loop);
         loop->add_instruction(current);
         loop->add_instruction(mask);
-        current->add_phi_pair_operand(initial, initBlock);
-        mask->add_phi_pair_operand(initialMask, initBlock);
-        auto *hasMore = new ICmpInst(ICmpInst::ICMP_NE, mask, constant(0), loop);
+        current->add_phi_pair_operand(initial, fallbackInit);
+        mask->add_phi_pair_operand(initialMask, fallbackInit);
+        auto *hasMore = new ICmpInst(ICmpInst::ICMP_NE, mask,
+                                     constant(0), loop);
         new BranchInst(hasMore, body, exit, loop);
 
-        auto *doubled = binary(module, body, Instruction::Add, current, current);
-        Value *evenResult = fastOdd
-            ? boundedNonNegativeRem(module, body, doubled, match.modulus)
-            : remOfDoubledRadixState(module, body, doubled, match.modulus);
-        auto *selectedBit = binary(module, body, Instruction::And, digits, mask);
-        auto *isOdd = new ICmpInst(ICmpInst::ICMP_NE,
-                                   selectedBit, constant(0), body);
+        auto *doubled = binary(module, body, Instruction::Add,
+                               current, current);
+        auto *evenResult = binary(module, body, Instruction::SRem,
+                                  doubled, constant(match.modulus));
+        auto *selectedBit = binary(module, body, Instruction::And,
+                                   digits, mask);
+        auto *isOdd = new ICmpInst(ICmpInst::ICMP_NE, selectedBit,
+                                   constant(0), body);
         new BranchInst(isOdd, odd, latch, body);
 
         auto *withAddend = binary(module, odd, Instruction::Add,
                                   evenResult, addend);
-        Value *oddResult = fastOdd
-            ? boundedNonNegativeRem(module, odd, withAddend, match.modulus)
-            : binary(module, odd, Instruction::SRem,
-                     withAddend, constant(match.modulus));
+        auto *oddResult = binary(module, odd, Instruction::SRem,
+                                 withAddend, constant(match.modulus));
         new BranchInst(latch, odd);
 
         auto *next = PhiInst::create_phi(module->int32_ty_, latch);
@@ -397,34 +369,36 @@ void rewrite(const Match &match, Module *module) {
         new ReturnInst(current, exit);
     };
 
-    auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, digits, constant(0), entry);
-    if (match.modulus <= (1 << 30)) {
-        auto *nonNegativeCheck =
-            new BasicBlock(module, "label_radix_fast_nonneg_check", function);
-        auto *upperCheck =
-            new BasicBlock(module, "label_radix_fast_upper_check", function);
-        auto *fastInit =
-            new BasicBlock(module, "label_radix_fast_init", function);
+    auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, digits,
+                                  constant(0), entry);
 
-        new BranchInst(positive, nonNegativeCheck, zero, entry);
-        auto *nonNegative = new ICmpInst(ICmpInst::ICMP_SGE,
-                                         addend, constant(0),
-                                         nonNegativeCheck);
-        new BranchInst(nonNegative, upperCheck, init, nonNegativeCheck);
-        auto *belowMod = new ICmpInst(ICmpInst::ICMP_SLT,
-                                      addend, constant(match.modulus),
-                                      upperCheck);
-        new BranchInst(belowMod, fastInit, init, upperCheck);
-        buildLoop("label_radix_fast", fastInit, addend, true);
+    if (match.modulus <= (1 << 30)) {
+        // For |addend| < M, every remainder has the addend's sign and
+        // magnitude below M.  Doubling it or adding the addend therefore
+        // stays strictly between -2M and 2M, which fits i32 at this bound.
+        auto *rangeCheck =
+            new BasicBlock(module, "label_mulmod_range_check", function);
+        auto *fast = new BasicBlock(module, "label_mulmod_fast", function);
+
+        new BranchInst(positive, rangeCheck, zero, entry);
+        // Translate [-M + 1, M - 1] to [0, 2M - 2].  Since M <= 2^30,
+        // the unsigned comparison also rejects values that wrap below zero.
+        auto *biased = binary(module, rangeCheck, Instruction::Add, addend,
+                              constant(match.modulus - 1));
+        auto *inRange = new ICmpInst(ICmpInst::ICMP_ULT, biased,
+                                     constant(2 * match.modulus - 1),
+                                     rangeCheck);
+        new BranchInst(inRange, fast, fallbackInit, rangeCheck);
+
+        auto *result = new CallInst(
+            mulMod, {addend, digits, constant(match.modulus)}, fast);
+        new ReturnInst(result, fast);
     } else {
-        new BranchInst(positive, init, zero, entry);
+        new BranchInst(positive, fallbackInit, zero, entry);
     }
 
-    auto *initial = binary(module, init, Instruction::SRem,
-                           addend, constant(match.modulus));
-    buildLoop("label_radix", init, initial, false);
-
     new ReturnInst(constant(0), zero);
+    buildFallback();
 }
 
 } // namespace

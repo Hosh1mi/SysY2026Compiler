@@ -904,6 +904,219 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 append(block, std::move(select), &node);
                 break;
             }
+            case SDOpcode::MulMod: {
+                SDNode *modulusNode = node.operands()[2].node;
+                if (!modulusNode ||
+                    modulusNode->opcode() != SDOpcode::Constant ||
+                    modulusNode->integer == 0)
+                    throw std::logic_error(
+                        "mulmod intrinsic requires a non-zero constant modulus");
+
+                auto modulus =
+                    static_cast<std::int32_t>(modulusNode->integer);
+                division::SignedDivisorInfo info =
+                    division::analyzeSignedDivisor(modulus);
+
+                VReg productReg = createTemporary(ValueType::Ptr);
+                MachineInstr multiply(Opcode::SMULLXrr);
+                multiply
+                    .addOperand(MachineOperand::vreg(
+                        productReg, RegClass::GPR64, true))
+                    .addOperand(use(node.operands()[0]))
+                    .addOperand(use(node.operands()[1]));
+                MachineInstr &multiplyDef =
+                    append(block, std::move(multiply));
+                registerInfo.setDefinition(productReg, &multiplyDef);
+                MachineOperand product = MachineOperand::vreg(
+                    productReg, RegClass::GPR64);
+
+                auto emitXTemp = [&](Opcode opcode,
+                                     std::vector<MachineOperand> ops)
+                    -> MachineOperand {
+                    VReg reg = createTemporary(ValueType::Ptr);
+                    MachineInstr instruction(opcode);
+                    instruction.addOperand(MachineOperand::vreg(
+                        reg, RegClass::GPR64, true));
+                    for (MachineOperand &op : ops)
+                        instruction.addOperand(std::move(op));
+                    MachineInstr &inserted =
+                        append(block, std::move(instruction));
+                    registerInfo.setDefinition(reg, &inserted);
+                    return MachineOperand::vreg(reg, RegClass::GPR64);
+                };
+
+                // Fall back to a 64-bit sdiv for unsupported moduli.
+                if (!info.reducible || modulus < 0) {
+                    VReg modulusReg = createTemporary(ValueType::Ptr);
+                    MachineInstr materialize(Opcode::MOVi64);
+                    materialize
+                        .addOperand(MachineOperand::vreg(
+                            modulusReg, RegClass::GPR64, true))
+                        .addOperand(MachineOperand::immediate(
+                            static_cast<std::uint64_t>(modulus)));
+                    MachineInstr &modulusDef =
+                        append(block, std::move(materialize));
+                    registerInfo.setDefinition(modulusReg, &modulusDef);
+                    MachineOperand modulusOp = MachineOperand::vreg(
+                        modulusReg, RegClass::GPR64);
+
+                    MachineOperand quotient = emitXTemp(
+                        Opcode::SDIVXrr, {product, modulusOp});
+                    MachineOperand remainder = emitXTemp(
+                        Opcode::MSUBXrrr,
+                        {quotient, modulusOp, product});
+                    MachineInstr narrow(Opcode::COPYXtoW);
+                    narrow.addOperand(define(node)).addOperand(remainder);
+                    append(block, std::move(narrow), &node);
+                    break;
+                }
+
+                // Toward-zero rem: abs(product) mod |m|, then restore sign.
+                MachineInstr compareProduct(Opcode::CMPXri);
+                compareProduct.addOperand(product)
+                    .addOperand(MachineOperand::immediate(0))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, true, true));
+                append(block, std::move(compareProduct));
+
+                MachineOperand negatedProduct =
+                    emitXTemp(Opcode::NEGX, {product});
+                VReg absReg = createTemporary(ValueType::Ptr);
+                MachineInstr selectAbs(Opcode::CSELX);
+                selectAbs
+                    .addOperand(MachineOperand::vreg(
+                        absReg, RegClass::GPR64, true))
+                    .addOperand(negatedProduct)
+                    .addOperand(product)
+                    .addOperand(MachineOperand::condition(CondCode::LT))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, false, true));
+                MachineInstr &absDef =
+                    append(block, std::move(selectAbs));
+                registerInfo.setDefinition(absReg, &absDef);
+                MachineOperand absolute = MachineOperand::vreg(
+                    absReg, RegClass::GPR64);
+
+                MachineOperand remainderX;
+                if (info.powerOfTwo) {
+                    VReg absW = createTemporary(ValueType::I32);
+                    MachineInstr narrowAbs(Opcode::COPYXtoW);
+                    narrowAbs
+                        .addOperand(MachineOperand::vreg(
+                            absW, RegClass::GPR32, true))
+                        .addOperand(absolute);
+                    MachineInstr &absWDef =
+                        append(block, std::move(narrowAbs));
+                    registerInfo.setDefinition(absW, &absWDef);
+
+                    VReg remW = createTemporary(ValueType::I32);
+                    MachineInstr andMask(Opcode::ANDWri);
+                    andMask
+                        .addOperand(MachineOperand::vreg(
+                            remW, RegClass::GPR32, true))
+                        .addOperand(MachineOperand::vreg(
+                            absW, RegClass::GPR32))
+                        .addOperand(MachineOperand::immediate(
+                            static_cast<std::uint64_t>(info.magnitude - 1)));
+                    MachineInstr &remWDef =
+                        append(block, std::move(andMask));
+                    registerInfo.setDefinition(remW, &remWDef);
+
+                    remainderX = emitXTemp(
+                        Opcode::UXTW,
+                        {MachineOperand::vreg(remW, RegClass::GPR32)});
+                } else {
+                    division::BarrettModulus64 barrett =
+                        division::computeBarrettModulus64(info.magnitude);
+
+                    VReg muReg = createTemporary(ValueType::Ptr);
+                    MachineInstr materializeMu(Opcode::MOVi64);
+                    materializeMu
+                        .addOperand(MachineOperand::vreg(
+                            muReg, RegClass::GPR64, true))
+                        .addOperand(MachineOperand::immediate(barrett.mu));
+                    MachineInstr &muDef =
+                        append(block, std::move(materializeMu));
+                    registerInfo.setDefinition(muReg, &muDef);
+
+                    VReg modulusReg = createTemporary(ValueType::Ptr);
+                    MachineInstr materializeMod(Opcode::MOVi64);
+                    materializeMod
+                        .addOperand(MachineOperand::vreg(
+                            modulusReg, RegClass::GPR64, true))
+                        .addOperand(MachineOperand::immediate(
+                            static_cast<std::uint64_t>(info.magnitude)));
+                    MachineInstr &modDef =
+                        append(block, std::move(materializeMod));
+                    registerInfo.setDefinition(modulusReg, &modDef);
+                    MachineOperand modulusOp = MachineOperand::vreg(
+                        modulusReg, RegClass::GPR64);
+
+                    MachineOperand quotient = emitXTemp(
+                        Opcode::UMULHXrr,
+                        {absolute,
+                         MachineOperand::vreg(muReg, RegClass::GPR64)});
+                    MachineOperand provisional = emitXTemp(
+                        Opcode::MSUBXrrr,
+                        {quotient, modulusOp, absolute});
+
+                    MachineOperand adjusted = emitXTemp(
+                        Opcode::SUBXrr, {provisional, modulusOp});
+                    MachineInstr compareRem(Opcode::CMPXrr);
+                    compareRem.addOperand(provisional)
+                        .addOperand(modulusOp)
+                        .addOperand(MachineOperand::physReg(
+                            PhysReg::NZCV, RegClass::CCR, true, true));
+                    append(block, std::move(compareRem));
+
+                    VReg remReg = createTemporary(ValueType::Ptr);
+                    MachineInstr selectRem(Opcode::CSELX);
+                    selectRem
+                        .addOperand(MachineOperand::vreg(
+                            remReg, RegClass::GPR64, true))
+                        .addOperand(adjusted)
+                        .addOperand(provisional)
+                        .addOperand(
+                            MachineOperand::condition(CondCode::HS))
+                        .addOperand(MachineOperand::physReg(
+                            PhysReg::NZCV, RegClass::CCR, false, true));
+                    MachineInstr &remDef =
+                        append(block, std::move(selectRem));
+                    registerInfo.setDefinition(remReg, &remDef);
+                    remainderX =
+                        MachineOperand::vreg(remReg, RegClass::GPR64);
+                }
+
+                MachineOperand negatedRem =
+                    emitXTemp(Opcode::NEGX, {remainderX});
+                MachineInstr compareSign(Opcode::CMPXri);
+                compareSign.addOperand(product)
+                    .addOperand(MachineOperand::immediate(0))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, true, true));
+                append(block, std::move(compareSign));
+
+                VReg signedRem = createTemporary(ValueType::Ptr);
+                MachineInstr selectSign(Opcode::CSELX);
+                selectSign
+                    .addOperand(MachineOperand::vreg(
+                        signedRem, RegClass::GPR64, true))
+                    .addOperand(negatedRem)
+                    .addOperand(remainderX)
+                    .addOperand(MachineOperand::condition(CondCode::LT))
+                    .addOperand(MachineOperand::physReg(
+                        PhysReg::NZCV, RegClass::CCR, false, true));
+                MachineInstr &signedDef =
+                    append(block, std::move(selectSign));
+                registerInfo.setDefinition(signedRem, &signedDef);
+
+                MachineInstr narrow(Opcode::COPYXtoW);
+                narrow.addOperand(define(node))
+                    .addOperand(MachineOperand::vreg(
+                        signedRem, RegClass::GPR64));
+                append(block, std::move(narrow), &node);
+                break;
+            }
             case SDOpcode::SRem:
             case SDOpcode::URem: {
                 SDNode *rhs = node.operands()[1].node;
