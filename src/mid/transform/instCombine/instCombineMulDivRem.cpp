@@ -152,50 +152,28 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
                 break;
             }
         }
-        long long initLower = 0, initUpper = 0;
-        if (!init || !ModuloRecurrenceAnalysis::inferBounds(
-                         init, initLower, initUpper))
+        std::vector<PhiInst *> noLoopStates;
+        if (!ModuloRecurrenceAnalysis::inferContributionBounds(
+                recurrence, noLoopStates, nullptr))
+            continue;
+        ModuloRecurrenceAnalysis::Bounds initial;
+        if (!init || !ModuloRecurrenceAnalysis::inferBounds(init, initial))
             continue;
 
         const long long mod = recurrence.modulus->value_;
-        auto advanceByTerms = [&](long long &lower, long long &upper) {
-            for (const auto &term : recurrence.contributionTerms) {
-                long long termLower = 0, termUpper = 0;
-                if (!ModuloRecurrenceAnalysis::inferBounds(
-                        term.value, termLower, termUpper))
-                    return false;
-                __int128 nextLower =
-                    term.sign > 0
-                        ? static_cast<__int128>(lower) + termLower
-                        : static_cast<__int128>(lower) - termUpper;
-                __int128 nextUpper =
-                    term.sign > 0
-                        ? static_cast<__int128>(upper) + termUpper
-                        : static_cast<__int128>(upper) - termLower;
-                if (nextLower < std::numeric_limits<int>::min() ||
-                    nextUpper > std::numeric_limits<int>::max())
-                    return false;
-                lower = static_cast<long long>(nextLower);
-                upper = static_cast<long long>(nextUpper);
-            }
-            return true;
-        };
-
-        long long prefixLower = std::min(initLower, -mod + 1);
-        long long prefixUpper = std::max(initUpper, mod - 1);
-        bool safe = true;
+        ModuloRecurrenceAnalysis::Bounds prefix{
+            std::min(initial.lower, -mod + 1),
+            std::max(initial.upper, mod - 1)};
         // Cover every factor currently selected by LoopUnroll (4 or 8).
-        for (int iteration = 0; iteration < 7; ++iteration)
-            if (safe)
-                safe = advanceByTerms(prefixLower, prefixUpper);
-        long long finalLower = -mod + 1;
-        long long finalUpper = mod - 1;
+        bool safe = ModuloRecurrenceAnalysis::advanceBounds(
+            prefix, recurrence, 7);
+        ModuloRecurrenceAnalysis::Bounds final{-mod + 1, mod - 1};
         if (safe)
-            safe = advanceByTerms(finalLower, finalUpper);
+            safe = ModuloRecurrenceAnalysis::advanceBounds(final, recurrence);
         if (safe && ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-                        prefixLower, prefixUpper, mod) &&
+                        prefix.lower, prefix.upper, mod) &&
             ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-                finalLower, finalUpper, mod))
+                final.lower, final.upper, mod))
             return true;
     }
     return false;

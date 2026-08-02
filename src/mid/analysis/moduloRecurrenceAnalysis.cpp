@@ -239,9 +239,9 @@ bool dependsOn(Value *value, Value *target) {
     return dependsOnImpl(value, target, visiting, 0);
 }
 
-bool inferBounds(Value *value, long long &lower, long long &upper) {
+bool inferBounds(Value *value, Bounds &bounds) {
     std::set<Value *> visiting;
-    return inferBoundsImpl(value, lower, upper, visiting, 0);
+    return inferBoundsImpl(value, bounds.lower, bounds.upper, visiting, 0);
 }
 
 bool analyze(PhiInst *state, BinaryInst *remainder,
@@ -310,33 +310,73 @@ bool hasPrivateUpdateChain(const Recurrence &recurrence,
     return true;
 }
 
-bool contributionBounds(const Recurrence &recurrence,
-                        const std::vector<PhiInst *> &loopStates,
-                        PhiInst *inductionState,
-                        long long &lower, long long &upper) {
-    lower = 0;
-    upper = 0;
-    for (const SignedTerm &term : recurrence.contributionTerms) {
+bool inferContributionBounds(Recurrence &recurrence,
+                             const std::vector<PhiInst *> &loopStates,
+                             PhiInst *inductionState) {
+    Bounds bounds;
+    for (SignedTerm &term : recurrence.contributionTerms) {
         for (PhiInst *otherState : loopStates) {
             if (otherState != inductionState &&
                 dependsOn(term.value, otherState))
                 return false;
         }
-        long long termLower = 0, termUpper = 0;
-        if (!inferBounds(term.value, termLower, termUpper))
+        if (!inferBounds(term.value, term.bounds))
             return false;
+        term.hasBounds = true;
         long long nextLower = 0, nextUpper = 0;
         bool ok = term.sign > 0
-                      ? checkedAdd(lower, termLower, nextLower) &&
-                            checkedAdd(upper, termUpper, nextUpper)
-                      : checkedSub(lower, termUpper, nextLower) &&
-                            checkedSub(upper, termLower, nextUpper);
+                      ? checkedAdd(bounds.lower, term.bounds.lower, nextLower) &&
+                            checkedAdd(bounds.upper, term.bounds.upper, nextUpper)
+                      : checkedSub(bounds.lower, term.bounds.upper, nextLower) &&
+                            checkedSub(bounds.upper, term.bounds.lower, nextUpper);
         if (!ok)
             return false;
-        lower = nextLower;
-        upper = nextUpper;
+        bounds.lower = nextLower;
+        bounds.upper = nextUpper;
+    }
+    recurrence.contributionRange = bounds;
+    recurrence.hasContributionRange = true;
+    return true;
+}
+
+bool advanceBounds(Bounds &bounds, const Recurrence &recurrence,
+                   unsigned repetitions) {
+    for (unsigned iteration = 0; iteration < repetitions; ++iteration) {
+        for (const SignedTerm &term : recurrence.contributionTerms) {
+            if (!term.hasBounds)
+                return false;
+            long long nextLower = 0, nextUpper = 0;
+            bool ok = term.sign > 0
+                          ? checkedAdd(bounds.lower, term.bounds.lower,
+                                       nextLower) &&
+                                checkedAdd(bounds.upper, term.bounds.upper,
+                                           nextUpper)
+                          : checkedSub(bounds.lower, term.bounds.upper,
+                                       nextLower) &&
+                                checkedSub(bounds.upper, term.bounds.lower,
+                                           nextUpper);
+            if (!ok)
+                return false;
+            bounds.lower = nextLower;
+            bounds.upper = nextUpper;
+        }
     }
     return true;
+}
+
+bool proveNoI32UpdateWrap(Recurrence &recurrence,
+                          const std::vector<PhiInst *> &loopStates,
+                          PhiInst *inductionState, Value *initial) {
+    if (!inferContributionBounds(recurrence, loopStates, inductionState))
+        return false;
+    Bounds initialBounds;
+    if (!inferBounds(initial, initialBounds))
+        return false;
+    const long long modulus = recurrence.modulus->value_;
+    Bounds updateBounds{
+        std::min(initialBounds.lower, -modulus + 1),
+        std::max(initialBounds.upper, modulus - 1)};
+    return advanceBounds(updateBounds, recurrence);
 }
 
 bool fitsSignedI32(long long lower, long long upper) {

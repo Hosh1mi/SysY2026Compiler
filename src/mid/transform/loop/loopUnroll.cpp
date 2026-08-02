@@ -54,61 +54,43 @@ static bool prepareModuloRecurrence(
             analyzed, updateBlocks, allowExternalUses))
         return false;
 
+    if (!ModuloRecurrenceAnalysis::inferContributionBounds(
+            analyzed, loopStates, inductionState))
+        return false;
+
+    ModuloRecurrenceAnalysis::Bounds initial;
+    if (!ModuloRecurrenceAnalysis::inferBounds(initialValue, initial))
+        return false;
+
+    const long long modulus = analyzed.modulus->value_;
+    ModuloRecurrenceAnalysis::Bounds prefix{
+        std::min(initial.lower, -modulus + 1),
+        std::max(initial.upper, modulus - 1)};
+    if (!ModuloRecurrenceAnalysis::advanceBounds(
+            prefix, analyzed, static_cast<unsigned>(unrollFactor - 1)))
+        return false;
+
+    ModuloRecurrenceAnalysis::Bounds final{-modulus + 1, modulus - 1};
+    if (!ModuloRecurrenceAnalysis::advanceBounds(final, analyzed))
+        return false;
+    if (!ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+            prefix.lower, prefix.upper, modulus) ||
+        !ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+            final.lower, final.upper, modulus))
+        return false;
+
     UnrolledModuloRecurrence candidate;
     candidate.state = analyzed.state;
     candidate.remainder = analyzed.remainder;
     candidate.modulus = analyzed.modulus;
     candidate.contributionTerms = analyzed.contributionTerms;
     candidate.updateChain = analyzed.updateChain;
-    if (!ModuloRecurrenceAnalysis::contributionBounds(
-            analyzed, loopStates, inductionState,
-            candidate.contributionLower, candidate.contributionUpper))
-        return false;
-
-    long long initLower = 0, initUpper = 0;
-    if (!ModuloRecurrenceAnalysis::inferBounds(
-            initialValue, initLower, initUpper))
-        return false;
-
-    auto advanceByTerms = [&](long long &lower, long long &upper) {
-        for (const auto &term : candidate.contributionTerms) {
-            long long termLower = 0, termUpper = 0;
-            if (!ModuloRecurrenceAnalysis::inferBounds(
-                    term.value, termLower, termUpper))
-                return false;
-            __int128 nextLower = term.sign > 0
-                                     ? static_cast<__int128>(lower) + termLower
-                                     : static_cast<__int128>(lower) - termUpper;
-            __int128 nextUpper = term.sign > 0
-                                     ? static_cast<__int128>(upper) + termUpper
-                                     : static_cast<__int128>(upper) - termLower;
-            if (nextLower < std::numeric_limits<int>::min() ||
-                nextUpper > std::numeric_limits<int>::max())
-                return false;
-            lower = static_cast<long long>(nextLower);
-            upper = static_cast<long long>(nextUpper);
-        }
-        return true;
-    };
-
-    const long long modulus = candidate.modulus->value_;
-    candidate.prefixLower = std::min(initLower, -modulus + 1);
-    candidate.prefixUpper = std::max(initUpper, modulus - 1);
-    for (int prefix = 1; prefix < unrollFactor; ++prefix)
-        if (!advanceByTerms(candidate.prefixLower,
-                            candidate.prefixUpper))
-            return false;
-
-    candidate.finalLower = -modulus + 1;
-    candidate.finalUpper = modulus - 1;
-    if (!advanceByTerms(candidate.finalLower, candidate.finalUpper))
-        return false;
-    if (!ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-            candidate.prefixLower, candidate.prefixUpper, modulus) ||
-        !ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-            candidate.finalLower, candidate.finalUpper, modulus))
-        return false;
-
+    candidate.contributionLower = analyzed.contributionRange.lower;
+    candidate.contributionUpper = analyzed.contributionRange.upper;
+    candidate.prefixLower = prefix.lower;
+    candidate.prefixUpper = prefix.upper;
+    candidate.finalLower = final.lower;
+    candidate.finalUpper = final.upper;
     result = std::move(candidate);
     return true;
 }
