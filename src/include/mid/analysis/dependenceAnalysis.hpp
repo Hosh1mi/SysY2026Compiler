@@ -29,6 +29,16 @@ public:
     // 不设置时退回原保守行为（不同 global 才判不别名）。
     void setArgAlias(const ArgumentAliasAnalysis *argAA) { argAA_ = argAA; }
 
+    // Some transforms recognize a valid control IV in loop shapes that the
+    // legacy LoopInfo fields intentionally do not publish (for example a
+    // latch-tested loop comparing the pre-increment value).  Supplying that
+    // already-validated IV lets dependence direction analysis reason about
+    // the current loop without changing global trip-count semantics.
+    void setInductionOverride(const Loop *loop, PhiInst *iv) {
+        inductionOverrideLoop_ = loop;
+        inductionOverrideIV_ = iv;
+    }
+
     enum Dir : char {
         DIR_EQ  = '=',
         DIR_LT  = '<',
@@ -75,4 +85,6 @@ private:
     const LoopInfo  *LI_;
     AffineAnalysis  *AA_;
     const ArgumentAliasAnalysis *argAA_ = nullptr;
+    const Loop *inductionOverrideLoop_ = nullptr;
+    PhiInst *inductionOverrideIV_ = nullptr;
 };

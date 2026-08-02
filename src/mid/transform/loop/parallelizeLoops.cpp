@@ -768,6 +768,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     AffineAnalysis AA(LI);
     DependenceAnalysis DA(LI, AA);
     DA.setArgAlias(&argAA);
+    DA.setInductionOverride(&loop, shape.ivPhi);
     auto basePriv = [&](Instruction *acc) {
         Value *ptr = acc->is_store() ? acc->get_operand(1) : acc->get_operand(0);
         return privatize->count(gepRootBase(ptr)) != 0;
