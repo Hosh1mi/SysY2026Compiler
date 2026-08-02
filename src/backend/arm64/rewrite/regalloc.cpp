@@ -1011,12 +1011,7 @@ void GraphColoringRegisterAllocator::insertSpills(
         if (!definition ||
             (definition->opcode() != Opcode::MOVi32 &&
              definition->opcode() != Opcode::MOVi64 &&
-             definition->opcode() != Opcode::MOVIv4Zero &&
-             definition->opcode() != Opcode::MOVIv4s &&
-             definition->opcode() != Opcode::MOVIv4sMsl &&
-             definition->opcode() != Opcode::MVNIv4s &&
-             definition->opcode() != Opcode::MOVIv16b &&
-             definition->opcode() != Opcode::FMOVv4s) ||
+             definition->opcode() != Opcode::MOVIv4Zero) ||
             definition->operands().empty() ||
             !definition->operands()[0].isVirtualRegister() ||
             definition->operands()[0].virtualRegister() != reg)

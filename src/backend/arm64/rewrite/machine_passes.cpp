@@ -1,8 +1,10 @@
 #include "../../../include/backend/arm64/rewrite/machine_passes.hpp"
+#include "../../../include/backend/arm64/rewrite/vector_immediate.hpp"
 
 #include <deque>
 #include <algorithm>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -257,6 +259,108 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
         }
     }
 
+    // GPR vs NEON bank choice for splat immediates.
+    //
+    // ISel keeps Splat as DUP from a scalar so integer users can share the
+    // same MOVi.  When that scalar immediate has no non-broadcast users,
+    // rewrite the DUP into a NEON immediate.  Dead scalar materializations
+    // are left for Machine DCE; Machine LICM then places the NEON form.
+    {
+        std::unordered_map<VReg, unsigned> useCount;
+        for (const auto &block : function.blocks())
+            for (const MachineInstr &instruction : block->instructions())
+                for (const MachineOperand &operand : instruction.operands())
+                    if (operand.isVirtualRegister() && !operand.isDef)
+                        ++useCount[operand.virtualRegister()];
+
+        auto definitionOf = [&](VReg reg) -> MachineInstr * {
+            if (!function.registerInfo().contains(reg))
+                return nullptr;
+            return function.registerInfo().get(reg).definition;
+        };
+
+        auto onlyUsedAs = [&](VReg reg, Opcode opcode) {
+            if (!useCount.count(reg) || useCount[reg] == 0)
+                return false;
+            unsigned seen = 0;
+            for (const auto &block : function.blocks())
+                for (const MachineInstr &instruction :
+                     block->instructions())
+                    for (const MachineOperand &operand :
+                         instruction.operands()) {
+                        if (!operand.isVirtualRegister() ||
+                            operand.isDef ||
+                            operand.virtualRegister() != reg)
+                            continue;
+                        if (instruction.opcode() != opcode)
+                            return false;
+                        ++seen;
+                    }
+            return seen == useCount[reg];
+        };
+
+        for (auto &block : function.blocks()) {
+            auto &instructions = block->instructions();
+            for (auto it = instructions.begin();
+                 it != instructions.end(); ++it) {
+                const bool integerDup = it->opcode() == Opcode::DUPv4i32;
+                const bool floatDup = it->opcode() == Opcode::DUPv4f32;
+                if ((!integerDup && !floatDup) ||
+                    it->operands().size() != 2 ||
+                    !it->operands()[0].isVirtualRegister() ||
+                    !it->operands()[0].isDef ||
+                    !it->operands()[1].isVirtualRegister())
+                    continue;
+
+                VReg scalar = it->operands()[1].virtualRegister();
+                MachineInstr *scalarDef = definitionOf(scalar);
+                std::uint32_t bits = 0;
+                if (integerDup) {
+                    if (!scalarDef ||
+                        scalarDef->opcode() != Opcode::MOVi32 ||
+                        scalarDef->operands().size() != 2 ||
+                        scalarDef->operands()[1].kind() !=
+                            MachineOperand::Kind::Immediate ||
+                        !onlyUsedAs(scalar, Opcode::DUPv4i32))
+                        continue;
+                    bits = static_cast<std::uint32_t>(
+                        scalarDef->operands()[1].immediate());
+                } else {
+                    // Prefer FMOVSW -> DUP when the FPR value is broadcast
+                    // only.  Walk through an optional MOVi32 of the bit
+                    // pattern so float splats share the same policy.
+                    if (!scalarDef ||
+                        scalarDef->opcode() != Opcode::FMOVSW ||
+                        scalarDef->operands().size() != 2 ||
+                        !scalarDef->operands()[1].isVirtualRegister() ||
+                        !onlyUsedAs(scalar, Opcode::DUPv4f32))
+                        continue;
+                    VReg bitsReg =
+                        scalarDef->operands()[1].virtualRegister();
+                    MachineInstr *bitsDef = definitionOf(bitsReg);
+                    if (!bitsDef || bitsDef->opcode() != Opcode::MOVi32 ||
+                        bitsDef->operands().size() != 2 ||
+                        bitsDef->operands()[1].kind() !=
+                            MachineOperand::Kind::Immediate ||
+                        !onlyUsedAs(bitsReg, Opcode::FMOVSW))
+                        continue;
+                    bits = static_cast<std::uint32_t>(
+                        bitsDef->operands()[1].immediate());
+                }
+
+                auto immediate = classifyNeonSplatImmediate(bits);
+                if (!immediate)
+                    continue;
+                MachineOperand destination = it->operands()[0];
+                *it = makeNeonSplatImmediate(*immediate, destination);
+                if (destination.isVirtualRegister())
+                    function.registerInfo().setDefinition(
+                        destination.virtualRegister(), &*it);
+                changed = true;
+            }
+        }
+    }
+
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         for (auto it = instructions.begin(); it != instructions.end();) {
@@ -473,11 +577,6 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             case Opcode::MOVi32:
             case Opcode::MOVi64:
             case Opcode::MOVIv4Zero:
-            case Opcode::MOVIv4s:
-            case Opcode::MOVIv4sMsl:
-            case Opcode::MVNIv4s:
-            case Opcode::MOVIv16b:
-            case Opcode::FMOVv4s:
             case Opcode::FMOVWS:
             case Opcode::FMOVSW:
             case Opcode::COPYXtoW:
@@ -762,12 +861,10 @@ bool MachineLICM::run(MachineFunction &function) const {
         switch (opcode) {
         case Opcode::MOVi32:
         case Opcode::MOVi64:
-        case Opcode::MOVIv4Zero:
-        case Opcode::MOVIv4s:
-        case Opcode::MOVIv4sMsl:
-        case Opcode::MVNIv4s:
-        case Opcode::MOVIv16b:
-        case Opcode::FMOVv4s:
+            // Scalar immediates rematerialize cheaply, so lengthening their
+            // live ranges is fine.  Encoded NEON immediates (including
+            // movi #0) must stay near their uses: hoisting them occupies a
+            // vector register across nested loops and invites spill churn.
             return true;
         default:
             return false;

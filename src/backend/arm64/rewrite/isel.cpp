@@ -1,5 +1,6 @@
 #include "../../../include/backend/arm64/rewrite/isel.hpp"
 #include "../../../include/backend/arm64/rewrite/constant_division.hpp"
+#include "../../../include/backend/arm64/rewrite/vector_immediate.hpp"
 
 #include <algorithm>
 #include <array>
@@ -26,75 +27,6 @@ unsigned log2Exact(unsigned value) {
         ++result;
     }
     return result;
-}
-
-// Advanced SIMD 32-bit replicated immediate: movi/mvni Vd.4s forms.
-struct NeonSplatImm {
-    enum class Kind : std::uint8_t { MoviLsl, MoviMsl, MvniLsl };
-    Kind kind = Kind::MoviLsl;
-    std::uint8_t imm8 = 0;
-    std::uint8_t shift = 0;
-};
-
-std::optional<NeonSplatImm> encodeMovi4s(std::uint32_t lane) {
-    for (unsigned shift : {0U, 8U, 16U, 24U}) {
-        std::uint32_t mask = 0xffU << shift;
-        if ((lane & ~mask) == 0) {
-            NeonSplatImm encoded;
-            encoded.kind = NeonSplatImm::Kind::MoviLsl;
-            encoded.imm8 =
-                static_cast<std::uint8_t>((lane >> shift) & 0xffU);
-            encoded.shift = static_cast<std::uint8_t>(shift);
-            return encoded;
-        }
-    }
-    for (unsigned msl : {8U, 16U}) {
-        std::uint32_t ones = (1U << msl) - 1U;
-        if ((lane & ones) != ones)
-            continue;
-        std::uint32_t high = lane >> msl;
-        if (high > 0xffU)
-            continue;
-        if (((high << msl) | ones) != lane)
-            continue;
-        NeonSplatImm encoded;
-        encoded.kind = NeonSplatImm::Kind::MoviMsl;
-        encoded.imm8 = static_cast<std::uint8_t>(high);
-        encoded.shift = static_cast<std::uint8_t>(msl);
-        return encoded;
-    }
-    std::uint32_t inverted = ~lane;
-    for (unsigned shift : {0U, 8U, 16U, 24U}) {
-        std::uint32_t mask = 0xffU << shift;
-        if ((inverted & ~mask) == 0) {
-            NeonSplatImm encoded;
-            encoded.kind = NeonSplatImm::Kind::MvniLsl;
-            encoded.imm8 =
-                static_cast<std::uint8_t>((inverted >> shift) & 0xffU);
-            encoded.shift = static_cast<std::uint8_t>(shift);
-            return encoded;
-        }
-    }
-    return std::nullopt;
-}
-
-bool isReplicatedByte(std::uint32_t lane, std::uint8_t &byte) {
-    std::uint8_t b0 = static_cast<std::uint8_t>(lane & 0xffU);
-    if (((lane >> 8) & 0xffU) != b0 ||
-        ((lane >> 16) & 0xffU) != b0 ||
-        ((lane >> 24) & 0xffU) != b0)
-        return false;
-    byte = b0;
-    return true;
-}
-
-// AArch64 fmov Vd.4s immediate: sign, 3-bit exp bias, 4-bit mantissa.
-bool isFMov4sImmediate(std::uint32_t bits) {
-    std::uint32_t mantissa = bits & 0x7fffffu;
-    if (mantissa & 0x7ffffu)
-        return false;
-    int exp = static_cast<int>((bits >> 23) & 0xffu) - 127;
-    return exp >= -3 && exp <= 4;
 }
 
 bool maskEquals(const std::array<int, 4> &mask,
@@ -439,67 +371,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 
         bool allEqual = lanes[0] == lanes[1] && lanes[1] == lanes[2] &&
                         lanes[2] == lanes[3];
-        if (allEqual && lanes[0] == 0) {
-            MachineInstr zero(Opcode::MOVIv4Zero);
-            zero.addOperand(destination);
-            MachineInstr &inserted =
-                append(block, std::move(zero), definition);
-            finishDefinition(inserted);
-            return;
-        }
-
         if (allEqual) {
-            std::uint8_t byte = 0;
-            if (isReplicatedByte(lanes[0], byte)) {
-                MachineInstr broadcast(Opcode::MOVIv16b);
-                broadcast.addOperand(destination)
-                    .addOperand(MachineOperand::immediate(byte));
-                MachineInstr &inserted =
-                    append(block, std::move(broadcast), definition);
-                finishDefinition(inserted);
-                return;
-            }
-            if (auto encoded = encodeMovi4s(lanes[0])) {
-                if (encoded->kind == NeonSplatImm::Kind::MoviLsl) {
-                    MachineInstr broadcast(Opcode::MOVIv4s);
-                    broadcast.addOperand(destination)
-                        .addOperand(
-                            MachineOperand::immediate(encoded->imm8))
-                        .addOperand(
-                            MachineOperand::immediate(encoded->shift));
-                    MachineInstr &inserted =
-                        append(block, std::move(broadcast), definition);
-                    finishDefinition(inserted);
-                    return;
-                }
-                if (encoded->kind == NeonSplatImm::Kind::MoviMsl) {
-                    MachineInstr broadcast(Opcode::MOVIv4sMsl);
-                    broadcast.addOperand(destination)
-                        .addOperand(
-                            MachineOperand::immediate(encoded->imm8))
-                        .addOperand(
-                            MachineOperand::immediate(encoded->shift));
-                    MachineInstr &inserted =
-                        append(block, std::move(broadcast), definition);
-                    finishDefinition(inserted);
-                    return;
-                }
-                MachineInstr broadcast(Opcode::MVNIv4s);
-                broadcast.addOperand(destination)
-                    .addOperand(MachineOperand::immediate(encoded->imm8))
-                    .addOperand(
-                        MachineOperand::immediate(encoded->shift));
-                MachineInstr &inserted =
-                    append(block, std::move(broadcast), definition);
-                finishDefinition(inserted);
-                return;
-            }
-            if (isFMov4sImmediate(lanes[0])) {
-                MachineInstr broadcast(Opcode::FMOVv4s);
-                broadcast.addOperand(destination)
-                    .addOperand(MachineOperand::floatingBits(lanes[0]));
-                MachineInstr &inserted =
-                    append(block, std::move(broadcast), definition);
+            if (auto immediate = classifyNeonSplatImmediate(lanes[0])) {
+                MachineInstr &inserted = append(
+                    block,
+                    makeNeonSplatImmediate(*immediate, destination),
+                    definition);
                 finishDefinition(inserted);
                 return;
             }
@@ -1740,19 +1617,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::Splat: {
-                SDNode *scalar = node.operands()[0].node;
-                if (scalar &&
-                    (scalar->opcode() == SDOpcode::Constant ||
-                     scalar->opcode() == SDOpcode::FPConstant)) {
-                    std::uint32_t lane =
-                        scalar->opcode() == SDOpcode::FPConstant
-                            ? scalar->floatingBits
-                            : static_cast<std::uint32_t>(scalar->integer);
-                    emitVectorConstant(
-                        block, define(node),
-                        {lane, lane, lane, lane}, &node);
-                    break;
-                }
+                // Splat is broadcast-from-scalar, not vector-immediate
+                // materialization.  Shared scalar immediates must stay in
+                // GPR form so integer users can reuse them; the pre-RA
+                // peephole promotes orphaned mov+dup chains to NEON form.
                 MachineInstr duplicate(
                     node.resultTypes().front() == ValueType::V4F32
                         ? Opcode::DUPv4f32
