@@ -39,6 +39,14 @@ public:
     bool run(MachineFunction &function) const;
 };
 
+// Fold ADDXri / ADDXrs address arithmetic into LDR/STR scaled-immediate or
+// register-offset forms while virtual registers remain.  Dead address defs are
+// left for Machine DCE.
+class PreRAAddressingFolder {
+public:
+    bool run(MachineFunction &function) const;
+};
+
 class PostRAAddressingOptimizer {
 public:
     bool run(MachineFunction &function) const;

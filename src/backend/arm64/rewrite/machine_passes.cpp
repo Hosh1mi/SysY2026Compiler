@@ -2050,10 +2050,212 @@ bool PostRAInstructionExpansion::run(
     return changed;
 }
 
+namespace {
+
+unsigned scaledImmediateWidth(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWui: case Opcode::STRWui:
+    case Opcode::LDRSui: case Opcode::STRSui:
+        return 4;
+    case Opcode::LDRXui: case Opcode::STRXui:
+        return 8;
+    case Opcode::LDRQui: case Opcode::STRQui:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+Opcode registerOffsetOpcode(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWui: return Opcode::LDRWro;
+    case Opcode::STRWui: return Opcode::STRWro;
+    case Opcode::LDRSui: return Opcode::LDRSro;
+    case Opcode::STRSui: return Opcode::STRSro;
+    case Opcode::LDRXui: return Opcode::LDRXro;
+    case Opcode::STRXui: return Opcode::STRXro;
+    case Opcode::LDRQui: return Opcode::LDRQro;
+    case Opcode::STRQui: return Opcode::STRQro;
+    default: return Opcode::Invalid;
+    }
+}
+
+bool scaledImmediateEncodable(std::int64_t offset, unsigned width) {
+    return width != 0 && offset >= 0 && offset % width == 0 &&
+           static_cast<std::uint64_t>(offset / width) <= 4095;
+}
+
+unsigned registerOffsetShift(unsigned width) {
+    unsigned shift = 0;
+    while ((1U << shift) < width)
+        ++shift;
+    return shift;
+}
+
+bool isScaledImmediateMemory(Opcode opcode) {
+    return scaledImmediateWidth(opcode) != 0;
+}
+
+} // namespace
+
+bool PreRAAddressingFolder::run(MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::IsSSA) ||
+        !function.hasProperty(MachineProperty::Selected) ||
+        function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+
+    enum class AddressKind : std::uint8_t {
+        Invalid,
+        Immediate,
+        Index,
+    };
+    struct Address {
+        AddressKind kind = AddressKind::Invalid;
+        VReg base = 0;
+        MachineOperand index;
+        std::int64_t offset = 0;
+        std::int64_t shift = 0;
+        std::int64_t extension = 0;
+    };
+
+    std::unordered_map<VReg, Address> memo;
+    std::unordered_set<VReg> resolving;
+    auto resolve = [&](auto &&self, VReg reg) -> Address {
+        auto cached = memo.find(reg);
+        if (cached != memo.end())
+            return cached->second;
+
+        Address form;
+        form.kind = AddressKind::Immediate;
+        form.base = reg;
+        if (!function.registerInfo().contains(reg) ||
+            !resolving.insert(reg).second)
+            return Address{};
+
+        MachineInstr *definition =
+            function.registerInfo().get(reg).definition;
+        if (definition && !definition->operands().empty() &&
+            definition->operands()[0].isVirtualRegister() &&
+            definition->operands()[0].isDef &&
+            definition->operands()[0].virtualRegister() == reg &&
+            definition->operands()[0].regClass() == RegClass::GPR64) {
+            const auto &operands = definition->operands();
+            if (definition->opcode() == Opcode::COPY &&
+                operands.size() == 2 &&
+                operands[1].isVirtualRegister() &&
+                operands[1].regClass() == RegClass::GPR64) {
+                form = self(self, operands[1].virtualRegister());
+            } else if (definition->opcode() == Opcode::ADDXri &&
+                       operands.size() == 3 &&
+                       operands[1].isVirtualRegister() &&
+                       operands[1].regClass() == RegClass::GPR64 &&
+                       operands[2].kind() ==
+                           MachineOperand::Kind::Immediate) {
+                Address base =
+                    self(self, operands[1].virtualRegister());
+                std::int64_t combined = 0;
+                if (base.kind == AddressKind::Immediate &&
+                    !__builtin_add_overflow(
+                        base.offset, operands[2].immediate(), &combined)) {
+                    form = std::move(base);
+                    form.offset = combined;
+                }
+            } else if (definition->opcode() == Opcode::ADDXrs &&
+                       operands.size() == 5 &&
+                       operands[1].isVirtualRegister() &&
+                       operands[1].regClass() == RegClass::GPR64 &&
+                       operands[2].isVirtualRegister() &&
+                       operands[3].kind() ==
+                           MachineOperand::Kind::Immediate &&
+                       operands[4].kind() ==
+                           MachineOperand::Kind::Immediate) {
+                Address base =
+                    self(self, operands[1].virtualRegister());
+                std::int64_t extension = operands[4].immediate();
+                bool validIndex =
+                    (extension == 0 || extension == 1)
+                        ? operands[2].regClass() == RegClass::GPR32
+                        : extension == 2 &&
+                              operands[2].regClass() == RegClass::GPR64;
+                if (base.kind == AddressKind::Immediate &&
+                    base.offset == 0 && validIndex) {
+                    form.kind = AddressKind::Index;
+                    form.base = base.base;
+                    form.index = operands[2];
+                    form.index.isDef = false;
+                    form.shift = operands[3].immediate();
+                    form.extension = extension;
+                }
+            }
+        }
+
+        resolving.erase(reg);
+        memo.emplace(reg, form);
+        return form;
+    };
+
+    bool changed = false;
+    for (auto &block : function.blocks()) {
+        for (MachineInstr &instruction : block->instructions()) {
+            if (!isScaledImmediateMemory(instruction.opcode()) ||
+                instruction.operands().size() != 3 ||
+                !instruction.operands()[1].isVirtualRegister() ||
+                instruction.operands()[2].kind() !=
+                    MachineOperand::Kind::Immediate)
+                continue;
+
+            VReg address = instruction.operands()[1].virtualRegister();
+            std::int64_t memOffset =
+                instruction.operands()[2].immediate();
+            unsigned width = scaledImmediateWidth(instruction.opcode());
+            Address form = resolve(resolve, address);
+
+            if (form.kind == AddressKind::Immediate &&
+                (form.base != address || form.offset != 0)) {
+                std::int64_t folded = 0;
+                if (__builtin_add_overflow(form.offset, memOffset,
+                                           &folded) ||
+                    !scaledImmediateEncodable(folded, width))
+                    continue;
+                instruction.operands()[1] = MachineOperand::vreg(
+                    form.base, RegClass::GPR64);
+                instruction.operands()[2] =
+                    MachineOperand::immediate(folded);
+                changed = true;
+                continue;
+            }
+
+            if (form.kind != AddressKind::Index || memOffset != 0)
+                continue;
+            std::int64_t legalShift = static_cast<std::int64_t>(
+                registerOffsetShift(width));
+            if (form.shift != 0 && form.shift != legalShift)
+                continue;
+            Opcode ro = registerOffsetOpcode(instruction.opcode());
+            if (ro == Opcode::Invalid)
+                continue;
+            MachineOperand value = instruction.operands()[0];
+            instruction.setOpcode(ro);
+            instruction.operands().clear();
+            instruction.addOperand(std::move(value))
+                .addOperand(MachineOperand::vreg(
+                    form.base, RegClass::GPR64))
+                .addOperand(std::move(form.index))
+                .addOperand(MachineOperand::immediate(form.shift))
+                .addOperand(MachineOperand::immediate(form.extension));
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 bool PostRAAddressingOptimizer::run(
     MachineFunction &function) const {
     if (!function.hasProperty(MachineProperty::NoVRegs))
         return false;
+
+    bool changed = false;
+
     auto postIndexedOpcode = [](Opcode opcode) {
         switch (opcode) {
         case Opcode::LDRWui: return Opcode::LDRWpost;
@@ -2068,7 +2270,6 @@ bool PostRAAddressingOptimizer::run(
         }
     };
 
-    bool changed = false;
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         for (auto memory = instructions.begin();

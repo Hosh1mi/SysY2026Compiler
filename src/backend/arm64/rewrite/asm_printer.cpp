@@ -136,6 +136,43 @@ void emitPostIndexedMemory(std::ostream &output, const char *mnemonic,
            << instruction.operands()[2].immediate() << '\n';
 }
 
+// Mirror ADDXrs extend encoding: 0 = uxtw, 1 = sxtw, 2 = lsl (64-bit index).
+void emitRegisterOffsetMemory(std::ostream &output, const char *mnemonic,
+                              const MachineInstr &instruction) {
+    if (instruction.operands().size() != 5 ||
+        !instruction.operands()[0].isPhysicalRegister() ||
+        !instruction.operands()[1].isPhysicalRegister() ||
+        !instruction.operands()[2].isPhysicalRegister() ||
+        instruction.operands()[3].kind() !=
+            MachineOperand::Kind::Immediate ||
+        instruction.operands()[4].kind() !=
+            MachineOperand::Kind::Immediate)
+        throw std::logic_error("malformed register-offset memory instruction");
+    std::string value = registerName(instruction.operands()[0]);
+    if (instruction.operands()[0].regClass() == RegClass::NEON128)
+        value = "q" + value.substr(1);
+    std::int64_t shift = instruction.operands()[3].immediate();
+    std::int64_t extension = instruction.operands()[4].immediate();
+    unsigned width =
+        instruction.operands()[0].regClass() == RegClass::NEON128 ? 16
+        : instruction.operands()[0].regClass() == RegClass::GPR64 ? 8
+                                                                  : 4;
+    unsigned legalShift = 0;
+    while ((1U << legalShift) < width)
+        ++legalShift;
+    if (shift != 0 && shift != static_cast<std::int64_t>(legalShift))
+        throw std::logic_error(
+            "illegal register-offset shift reached assembly printer");
+    const char *extend =
+        extension == 2 ? "lsl" : extension ? "sxtw" : "uxtw";
+    output << '\t' << mnemonic << ' ' << value << ", ["
+           << registerName(instruction.operands()[1]) << ", "
+           << registerName(instruction.operands()[2]) << ", " << extend;
+    if (shift)
+        output << " #" << shift;
+    output << "]\n";
+}
+
 void emitThreeRegisters(std::ostream &output, const char *mnemonic,
                         const MachineInstr &instruction) {
     output << '\t' << mnemonic << ' '
@@ -414,6 +451,10 @@ void printInstruction(const MachineFunction &function,
     case Opcode::LDRXui:
         emitMemory(output, "ldr", instruction);
         break;
+    case Opcode::LDRWro: case Opcode::LDRSro: case Opcode::LDRQro:
+    case Opcode::LDRXro:
+        emitRegisterOffsetMemory(output, "ldr", instruction);
+        break;
     case Opcode::LDRWlo: case Opcode::LDRSlo: case Opcode::LDRQlo:
     case Opcode::LDRXlo:
         emitGlobalMemory(output, "ldr", instruction);
@@ -424,6 +465,10 @@ void printInstruction(const MachineFunction &function,
     case Opcode::STRWui: case Opcode::STRSui: case Opcode::STRQui:
     case Opcode::STRXui:
         emitMemory(output, "str", instruction);
+        break;
+    case Opcode::STRWro: case Opcode::STRSro: case Opcode::STRQro:
+    case Opcode::STRXro:
+        emitRegisterOffsetMemory(output, "str", instruction);
         break;
     case Opcode::STRWlo: case Opcode::STRSlo: case Opcode::STRQlo:
     case Opcode::STRXlo:
@@ -648,8 +693,6 @@ void printInstruction(const MachineFunction &function,
     case Opcode::ADJCALLSTACKUP:
     case Opcode::IMPLICIT_DEF:
     case Opcode::Invalid:
-    case Opcode::LDRWro: case Opcode::STRWro:
-    case Opcode::LDRSro: case Opcode::STRSro:
         throw std::logic_error(
             "unexpanded or unsupported opcode reached assembly printer");
     }

@@ -94,9 +94,18 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
     layoutObjects(true);
     layoutObjects(false);
     frame.stackSize = alignTo(cursor, 16);
+    bool hasFixedObject = false;
+    for (const StackObject &object : frame.objects())
+        if (object.fixed) {
+            hasFixedObject = true;
+            break;
+        }
+    // Incoming stack arguments are addressed from x29 after the FP/LR push.
+    // Even when the body needs no locals, spills, or callee-saves, a frame
+    // pointer is still required whenever those fixed objects exist.
     frame.usesFramePointer =
         frame.stackSize != 0 || frame.hasCalls ||
-        !frame.savedRegisters.empty();
+        !frame.savedRegisters.empty() || hasFixedObject;
 }
 
 void AArch64FrameLowering::eliminateFrameIndices(
