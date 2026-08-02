@@ -386,10 +386,12 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "str"; dynamic.explicitOperands = 5;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
         break;
+    case Opcode::LDPWi: case Opcode::LDPSi:
     case Opcode::LDPXi: case Opcode::LDPDi: case Opcode::LDPQi:
         dynamic.mnemonic = "ldp"; dynamic.explicitDefs = 2;
         dynamic.explicitOperands = 4; dynamic.mayLoad = true;
         dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::STPWi: case Opcode::STPSi:
     case Opcode::STPXi: case Opcode::STPDi: case Opcode::STPQi:
         dynamic.mnemonic = "stp"; dynamic.explicitOperands = 4;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;

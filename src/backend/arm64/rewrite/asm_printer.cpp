@@ -553,7 +553,9 @@ void printInstruction(const MachineFunction &function,
                << registerName(operands[2]) << "], #"
                << operands[3].immediate() << '\n';
         break;
+    case Opcode::LDPWi: case Opcode::LDPSi:
     case Opcode::LDPXi: case Opcode::LDPDi: case Opcode::LDPQi:
+    case Opcode::STPWi: case Opcode::STPSi:
     case Opcode::STPXi: case Opcode::STPDi: case Opcode::STPQi:
         {
         bool qPair =
@@ -562,8 +564,10 @@ void printInstruction(const MachineFunction &function,
         bool dPair =
             instruction.opcode() == Opcode::LDPDi ||
             instruction.opcode() == Opcode::STPDi;
+        unsigned scale = qPair ? 16U : (dPair ||
+            instruction.opcode() == Opcode::LDPXi ||
+            instruction.opcode() == Opcode::STPXi) ? 8U : 4U;
         std::int64_t offset = operands[3].immediate();
-        unsigned scale = qPair ? 16U : 8U;
         bool offsetEncodable =
             offset % scale == 0 && offset / scale >= -64 &&
             offset / scale <= 63;
@@ -576,11 +580,14 @@ void printInstruction(const MachineFunction &function,
         if (!offsetEncodable)
             throw std::logic_error(
                 "illegal pair offset reached assembly printer");
+        bool isLoad =
+            instruction.opcode() == Opcode::LDPWi ||
+            instruction.opcode() == Opcode::LDPSi ||
+            instruction.opcode() == Opcode::LDPXi ||
+            instruction.opcode() == Opcode::LDPDi ||
+            instruction.opcode() == Opcode::LDPQi;
         output << '\t'
-               << (instruction.opcode() == Opcode::LDPXi ||
-                           instruction.opcode() == Opcode::LDPDi ||
-                           instruction.opcode() == Opcode::LDPQi
-                       ? "ldp" : "stp")
+               << (isLoad ? "ldp" : "stp")
                << ' ' << pairRegister(operands[0]) << ", "
                << pairRegister(operands[1]) << ", ["
                << base;

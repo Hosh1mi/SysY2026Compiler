@@ -41,6 +41,9 @@ unsigned scaledMemoryWidth(Opcode opcode) {
 
 unsigned pairMemoryWidth(Opcode opcode) {
     switch (opcode) {
+    case Opcode::LDPWi: case Opcode::STPWi:
+    case Opcode::LDPSi: case Opcode::STPSi:
+        return 4;
     case Opcode::LDPXi: case Opcode::STPXi:
     case Opcode::LDPDi: case Opcode::STPDi:
         return 8;

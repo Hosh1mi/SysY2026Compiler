@@ -385,10 +385,35 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
         }
     }
 
+    // Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
+    // architectural scale (4/8/16): the pair offset must be a multiple of that
+    // scale and fit the signed 7-bit scaled immediate.
     struct AddressForm {
         VReg root = 0;
         std::int64_t offset = 0;
         bool valid = false;
+    };
+    struct PairKind {
+        Opcode loadOpcode;
+        Opcode storeOpcode;
+        Opcode pairLoadOpcode;
+        Opcode pairStoreOpcode;
+        std::int64_t stride;
+    };
+    static const PairKind kPairKinds[] = {
+        {Opcode::LDRWui, Opcode::STRWui, Opcode::LDPWi, Opcode::STPWi, 4},
+        {Opcode::LDRSui, Opcode::STRSui, Opcode::LDPSi, Opcode::STPSi, 4},
+        {Opcode::LDRXui, Opcode::STRXui, Opcode::LDPXi, Opcode::STPXi, 8},
+        {Opcode::LDRQui, Opcode::STRQui, Opcode::LDPQi, Opcode::STPQi, 16},
+    };
+    auto definesVirtual = [](const MachineInstr &instruction, VReg reg) {
+        if (!reg)
+            return false;
+        for (const MachineOperand &operand : instruction.operands())
+            if (operand.isVirtualRegister() && operand.isDef &&
+                operand.virtualRegister() == reg)
+                return true;
+        return false;
     };
     for (auto &block : function.blocks()) {
         bool fused = true;
@@ -413,6 +438,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             struct MemoryCandidate {
                 MachineBasicBlock::InstrList::iterator instruction;
                 AddressForm address;
+                const PairKind *kind = nullptr;
             };
             std::vector<MemoryCandidate> loads;
             std::vector<MemoryCandidate> stores;
@@ -446,10 +472,21 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                     }
                 }
 
-                bool load =
-                    it->opcode() == Opcode::LDRQui;
-                bool store =
-                    it->opcode() == Opcode::STRQui;
+                const PairKind *kind = nullptr;
+                bool load = false;
+                bool store = false;
+                for (const PairKind &candidate : kPairKinds) {
+                    if (it->opcode() == candidate.loadOpcode) {
+                        kind = &candidate;
+                        load = true;
+                        break;
+                    }
+                    if (it->opcode() == candidate.storeOpcode) {
+                        kind = &candidate;
+                        store = true;
+                        break;
+                    }
+                }
                 if ((!load && !store) ||
                     it->operands().size() != 3 ||
                     it->operands()[2].kind() !=
@@ -464,7 +501,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                 form.offset +=
                     it->operands()[2].immediate();
                 (load ? loads : stores).push_back(
-                    MemoryCandidate{it, form});
+                    MemoryCandidate{it, form, kind});
             }
 
             auto tryPair = [&](std::vector<MemoryCandidate> &candidates,
@@ -475,32 +512,58 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                          j < candidates.size(); ++j) {
                         auto &lhs = candidates[i];
                         auto &rhs = candidates[j];
-                        if (lhs.address.root !=
+                        if (lhs.kind != rhs.kind ||
+                            lhs.address.root !=
                                 rhs.address.root ||
                             std::llabs(
                                 lhs.address.offset -
-                                rhs.address.offset) != 16)
+                                rhs.address.offset) !=
+                                lhs.kind->stride)
                             continue;
+                        std::int64_t stride = lhs.kind->stride;
                         std::int64_t lowerOffset =
                             std::min(lhs.address.offset,
                                      rhs.address.offset);
-                        if (lowerOffset % 16 != 0 ||
-                            lowerOffset / 16 < -64 ||
-                            lowerOffset / 16 > 63)
+                        if (lowerOffset % stride != 0 ||
+                            lowerOffset / stride < -64 ||
+                            lowerOffset / stride > 63)
                             continue;
+
+                        // Loads are rewritten at the earlier instruction so
+                        // both values become available without moving uses.
+                        // Stores must stay at the later instruction so both
+                        // data operands are already defined.
+                        VReg earlyData = 0;
+                        if (!load &&
+                            lhs.instruction->operands()[0]
+                                .isVirtualRegister())
+                            earlyData = lhs.instruction->operands()[0]
+                                            .virtualRegister();
 
                         bool memoryBarrier = false;
                         for (auto scan =
                                  std::next(lhs.instruction);
-                             scan != rhs.instruction; ++scan)
+                             scan != rhs.instruction; ++scan) {
                             if (scan->isCall() ||
                                 scan->mayStore() ||
                                 (!load &&
-                                 scan->mayLoad())) {
+                                 scan->mayLoad()) ||
+                                definesVirtual(*scan,
+                                               lhs.address.root) ||
+                                (!load &&
+                                 definesVirtual(*scan,
+                                                earlyData))) {
                                 memoryBarrier = true;
                                 break;
                             }
+                        }
                         if (memoryBarrier)
+                            continue;
+
+                        // LDP with Rt == Rt2 is unpredictable.
+                        if (load &&
+                            sameRegister(lhs.instruction->operands()[0],
+                                         rhs.instruction->operands()[0]))
                             continue;
 
                         auto lower =
@@ -512,8 +575,8 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                                 ? rhs.instruction
                                 : lhs.instruction;
                         MachineInstr pair(
-                            load ? Opcode::LDPQi
-                                 : Opcode::STPQi);
+                            load ? lhs.kind->pairLoadOpcode
+                                 : lhs.kind->pairStoreOpcode);
                         pair.addOperand(
                                 lower->operands()[0])
                             .addOperand(
@@ -525,6 +588,10 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                             .addOperand(
                                 MachineOperand::immediate(
                                     lowerOffset));
+                        unsigned pairBytes =
+                            static_cast<unsigned>(stride * 2);
+                        unsigned align =
+                            static_cast<unsigned>(stride);
                         pair.addMemoryOperand(
                             MachineMemOperand{
                                 load
@@ -532,7 +599,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                                           Load
                                     : MachineMemOperand::Access::
                                           Store,
-                                32, 16, nullptr,
+                                pairBytes, align, nullptr,
                                 std::nullopt, lowerOffset,
                                 false});
 
