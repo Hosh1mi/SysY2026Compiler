@@ -261,6 +261,14 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
                 auto *call = static_cast<CallInst *>(inst);
                 auto *callee = dynamic_cast<Function *>(
                     call->get_operand(call->num_ops_ - 1));
+                // Intrinsics and other declarations can carry a proven pure
+                // contract even though they have no body to summarize.  Treat
+                // that contract before the generic declaration fallback;
+                // otherwise one pure intrinsic makes every transitive caller
+                // appear to have unknown memory effects.
+                if (callee && callee->is_declaration() &&
+                    callee->hasSemFlag(SemFlag::FnPure))
+                    continue;
                 auto it = callee ? summaries_.find(callee) : summaries_.end();
                 if (!callee || it == summaries_.end() || callee->is_declaration()) {
                     summary.pure = false;
