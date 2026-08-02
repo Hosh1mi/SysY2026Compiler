@@ -223,24 +223,37 @@ const InstrDesc &descriptor(Opcode opcode) {
         return value;
     }
     SIMPLE_CASE(MULWrr, "mul", 1, 3, 3, SchedResource::MAC)
+    SIMPLE_CASE(MULXrr, "mul", 1, 3, 3, SchedResource::MAC)
     SIMPLE_CASE(MADDWrrr, "madd", 1, 4, 3, SchedResource::MAC)
     SIMPLE_CASE(MSUBWrrr, "msub", 1, 4, 3, SchedResource::MAC)
+    SIMPLE_CASE(MSUBXrrr, "msub", 1, 4, 3, SchedResource::MAC)
     SIMPLE_CASE(SDIVWrr, "sdiv", 1, 3, 12, SchedResource::Divide)
     SIMPLE_CASE(UDIVWrr, "udiv", 1, 3, 12, SchedResource::Divide)
+    SIMPLE_CASE(SDIVXrr, "sdiv", 1, 3, 12, SchedResource::Divide)
+    SIMPLE_CASE(UDIVXrr, "udiv", 1, 3, 12, SchedResource::Divide)
     SIMPLE_CASE(SMULLXrr, "smull", 1, 3, 3, SchedResource::MAC)
     SIMPLE_CASE(SMADDLXrrr, "smaddl", 1, 4, 3, SchedResource::MAC)
     SIMPLE_CASE(ANDWrr, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWri, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ORRWrr, "orr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(EORWrr, "eor", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(ANDXrr, "and", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(ORRXrr, "orr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(EORXrr, "eor", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSLWrr, "lsl", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSLWri, "lsl", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSRWrr, "lsr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSRWri, "lsr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ASRWrr, "asr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ASRWri, "asr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(LSLXrr, "lsl", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(LSRXrr, "lsr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(ASRXrr, "asr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(LSRXri, "lsr", 1, 3, 1, SchedResource::ALU)
     case Opcode::CMPWrr:
     case Opcode::CMPWri:
+    case Opcode::CMPXrr:
+    case Opcode::CMPXri:
     case Opcode::TSTWrr:
     case Opcode::TSTWri: {
         static const InstrDesc cmp{
@@ -249,6 +262,14 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         static const InstrDesc cmpi{
             Opcode::CMPWri, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpx{
+            Opcode::CMPXrr, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpxi{
+            Opcode::CMPXri, "cmp", 0, 2, false, false, false, false,
             false, false, false, false, true, false, 1,
             SchedResource::ALU};
         static const InstrDesc tst{
@@ -261,6 +282,8 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         return opcode == Opcode::CMPWrr ? cmp
              : opcode == Opcode::CMPWri ? cmpi
+             : opcode == Opcode::CMPXrr ? cmpx
+             : opcode == Opcode::CMPXri ? cmpxi
              : opcode == Opcode::TSTWrr ? tst : tsti;
     }
     SIMPLE_CASE(CLZW, "clz", 1, 2, 1, SchedResource::ALU)
@@ -471,6 +494,7 @@ RegClass RegisterInfo::classForType(ValueType type) {
     case ValueType::I1:
     case ValueType::I32:
         return RegClass::GPR32;
+    case ValueType::I64:
     case ValueType::Ptr:
         return RegClass::GPR64;
     case ValueType::F32:
@@ -609,10 +633,13 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
     case Opcode::ADDXri:
     case Opcode::SUBXri:
     case Opcode::CMPWri:
+    case Opcode::CMPXri:
     case Opcode::SUBSPri:
     case Opcode::ADDSPri:
         return immediate >= 0 && immediate <= 4095;
     case Opcode::LSLXri:
+    case Opcode::LSRXri:
+    case Opcode::ASRXri:
         return immediate >= 0 && immediate <= 63;
     case Opcode::LSLWri:
     case Opcode::LSRWri:
@@ -631,10 +658,15 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
 bool InstrInfo::isCommutable(Opcode opcode) {
     switch (opcode) {
     case Opcode::ADDWrr:
+    case Opcode::ADDXrr:
     case Opcode::MULWrr:
+    case Opcode::MULXrr:
     case Opcode::ANDWrr:
+    case Opcode::ANDXrr:
     case Opcode::ORRWrr:
+    case Opcode::ORRXrr:
     case Opcode::EORWrr:
+    case Opcode::EORXrr:
     case Opcode::FADDS:
     case Opcode::FMULS:
     case Opcode::ADDv4i32:
