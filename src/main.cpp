@@ -241,6 +241,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopRepFold>());
+    pm.addPass(std::make_unique<LoopModuloDelay>());
     pm.addPass(std::make_unique<LoopUnroll>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
