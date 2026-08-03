@@ -36,7 +36,11 @@ public:
 
 class PostRAInstructionExpansion {
 public:
+    // Lower vector insert/accumulate into tied post-RA form.
     bool run(MachineFunction &function) const;
+    // Expand MOVi32/MOVi64 into MOVZ/MOVK pieces so the post-RA scheduler
+    // can interleave independent constant materializations.
+    bool expandConstantMaterializations(MachineFunction &function) const;
 };
 
 // Fold ADDXri / ADDXrs address arithmetic into LDR/STR scaled-immediate or

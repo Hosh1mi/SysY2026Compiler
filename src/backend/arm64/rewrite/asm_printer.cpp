@@ -39,37 +39,6 @@ std::string registerNameAs(const MachineOperand &operand,
         operand.physicalRegister(), view));
 }
 
-void emitIntegerConstant(std::ostream &output, const std::string &destination,
-                         std::uint64_t value, unsigned width) {
-    unsigned pieces = width / 16;
-    unsigned first = pieces;
-    for (unsigned i = 0; i < pieces; ++i)
-        if (((value >> (i * 16)) & 0xffffU) != 0) {
-            first = i;
-            break;
-        }
-    if (first == pieces) {
-        output << "\tmovz " << destination << ", #0\n";
-        return;
-    }
-    output << "\tmovz " << destination << ", #"
-           << ((value >> (first * 16)) & 0xffffU);
-    if (first)
-        output << ", lsl #" << first * 16;
-    output << '\n';
-    for (unsigned i = 0; i < pieces; ++i) {
-        if (i == first)
-            continue;
-        std::uint64_t piece = (value >> (i * 16)) & 0xffffU;
-        if (!piece)
-            continue;
-        output << "\tmovk " << destination << ", #" << piece;
-        if (i)
-            output << ", lsl #" << i * 16;
-        output << '\n';
-    }
-}
-
 void emitMemory(std::ostream &output, const char *mnemonic,
                 const MachineInstr &instruction) {
     std::string value = registerName(instruction.operands()[0]);
@@ -214,16 +183,33 @@ void printInstruction(const MachineFunction &function,
             output << "\tmov " << destination << ", " << source << '\n';
         break;
     }
-    case Opcode::MOVi32:
-        emitIntegerConstant(output, registerName(operands[0]),
-                            static_cast<std::uint32_t>(
-                                operands[1].immediate()), 32);
+    case Opcode::MOVZ: {
+        if (operands.size() != 3 ||
+            !operands[0].isPhysicalRegister() ||
+            operands[1].kind() != MachineOperand::Kind::Immediate ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed movz at assembly printing");
+        output << "\tmovz " << registerName(operands[0]) << ", #"
+               << operands[1].immediate();
+        if (operands[2].immediate())
+            output << ", lsl #" << operands[2].immediate();
+        output << '\n';
         break;
-    case Opcode::MOVi64:
-        emitIntegerConstant(output, registerName(operands[0]),
-                            static_cast<std::uint64_t>(
-                                operands[1].immediate()), 64);
+    }
+    case Opcode::MOVK: {
+        if (operands.size() != 4 ||
+            !operands[0].isPhysicalRegister() ||
+            !operands[1].isPhysicalRegister() ||
+            operands[2].kind() != MachineOperand::Kind::Immediate ||
+            operands[3].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed movk at assembly printing");
+        output << "\tmovk " << registerName(operands[0]) << ", #"
+               << operands[2].immediate();
+        if (operands[3].immediate())
+            output << ", lsl #" << operands[3].immediate();
+        output << '\n';
         break;
+    }
     case Opcode::MOVIv4Zero:
         output << "\tmovi " << registerName(operands[0])
                << ".4s, #0\n";
@@ -782,6 +768,8 @@ void printInstruction(const MachineFunction &function,
                << registerName(operands[2]) << ".16b\n";
         break;
     case Opcode::PHI:
+    case Opcode::MOVi32:
+    case Opcode::MOVi64:
     case Opcode::LEA_FRAME:
     case Opcode::SPILL_LOAD:
     case Opcode::SPILL_STORE:
@@ -800,9 +788,9 @@ void printInstruction(const MachineFunction &function,
 
 void AArch64AssemblyPrinter::printFunction(
     const MachineFunction &function, std::ostream &output) const {
-    // The printer is an MC-style encoder only.  It may expand one explicit
-    // destination constant pseudo into movz/movk pieces, but it must never
-    // perform instruction selection or invent a temporary register.
+    // The printer is an MC-style encoder only.  Integer immediates must
+    // already be expanded into MOVZ/MOVK; the printer must never perform
+    // instruction selection or invent a temporary register.
     if (!function.hasProperty(MachineProperty::Selected) ||
         !function.hasProperty(MachineProperty::NoVRegs) ||
         !function.hasProperty(MachineProperty::FrameFinalized))

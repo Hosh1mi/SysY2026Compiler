@@ -81,15 +81,17 @@ bool normalizeGuard(ICmpInst *compare, Value *candidate,
     return true;
 }
 
-// Recognize a finite latch-controlled unit-stride recurrence. The latch guard
-// compares the value at the beginning of the just-finished iteration, as in:
-//   n.next = n - 1
-//   if (n > bound) goto header
+// Recognize a finite unit-stride count recurrence whose only role is the
+// trip-count guard in guardBlock (latch for do-while, header for while):
+//   n.next = n +/- 1
+//   if (n </> bound) continue
 bool isFiniteControlPhi(const HeaderPhi &info, const Loop &loop,
-                        ICmpInst *guard) {
+                        ICmpInst *guard, BasicBlock *guardBlock) {
     auto *initial = dynamic_cast<ConstantInt *>(info.initial);
     auto *update = dynamic_cast<BinaryInst *>(info.backedge);
     if (!initial || !update || update->parent_ != loop.singleLatch())
+        return false;
+    if (!guard || !guardBlock || guard->parent_ != guardBlock)
         return false;
 
     int step = 0;
@@ -137,8 +139,27 @@ bool isFiniteControlPhi(const HeaderPhi &info, const Loop &loop,
     }
     for (const Use &use : guard->use_list_) {
         auto *user = dynamic_cast<BranchInst *>(use.val_);
-        if (!user || user != loop.singleLatch()->get_terminator() ||
+        if (!user || user != guardBlock->get_terminator() ||
             use.arg_no_ != 0)
+            return false;
+    }
+    return true;
+}
+
+// Header phi whose only user is its own backedge update forms a dead SSA
+// cycle. It cannot affect memory or live-outs, so it must not block
+// fixed-point detection (e.g. a leftover countdown of the original trip
+// count after IndVarSimplify introduced a canonical IV).
+bool isDeadSelfRecurrence(const HeaderPhi &info) {
+    auto *update = dynamic_cast<Instruction *>(info.backedge);
+    if (!update || !info.phi)
+        return false;
+    for (const Use &use : info.phi->use_list_) {
+        if (use.val_ != update)
+            return false;
+    }
+    for (const Use &use : update->use_list_) {
+        if (use.val_ != info.phi)
             return false;
     }
     return true;
@@ -167,6 +188,76 @@ bool memoryIsIterationIndependent(const Loop &loop, BasicAliasAnalysis &AA) {
         }
     }
     return true;
+}
+
+void replaceTerminatorWithCond(BasicBlock *bb, Value *cond,
+                               BasicBlock *trueSucc,
+                               BasicBlock *falseSucc) {
+    auto *term = bb->get_terminator();
+    std::vector<BasicBlock *> succs = bb->succ_bbs_;
+    for (auto *succ : succs)
+        succ->remove_pre_basic_block(bb);
+    bb->succ_bbs_.clear();
+    if (term)
+        bb->delete_instr(term);
+    new BranchInst(cond, trueSucc, falseSucc, bb);
+}
+
+// When early-exiting from the latch of a while loop, each exit phi that
+// currently receives a header value must also receive the matching
+// end-of-iteration (backedge) value along the new latch edge.
+bool addLatchIncomingToExitPhis(BasicBlock *exit, BasicBlock *header,
+                                BasicBlock *latch,
+                                const std::vector<HeaderPhi> &phis) {
+    std::vector<std::pair<PhiInst *, Value *>> updates;
+    for (auto *inst : exit->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(inst);
+        if (!phi)
+            break;
+        Value *fromHeader = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) == header) {
+                fromHeader = phi->get_operand(i);
+                break;
+            }
+        }
+        if (!fromHeader)
+            return false;
+
+        Value *fromLatch = fromHeader;
+        for (const HeaderPhi &info : phis) {
+            if (info.phi == fromHeader) {
+                fromLatch = info.backedge;
+                break;
+            }
+        }
+        updates.emplace_back(phi, fromLatch);
+    }
+    for (auto &[phi, fromLatch] : updates)
+        phi->addIncoming(fromLatch, latch);
+    return true;
+}
+
+Value *buildStateChanged(Type *i1, BasicBlock *latch,
+                         Instruction *before,
+                         const std::vector<HeaderPhi> &state) {
+    Value *stateChanged = new ConstantInt(i1, 0);
+    for (const HeaderPhi &info : state) {
+        auto *changed =
+            new ICmpInst(ICmpInst::ICMP_NE, info.backedge, info.phi,
+                         latch, true);
+        latch->add_instruction_before_inst(changed, before);
+        if (dynamic_cast<ConstantInt *>(stateChanged)) {
+            stateChanged = changed;
+        } else {
+            auto *eitherChanged =
+                new BinaryInst(i1, Instruction::Or, stateChanged, changed,
+                               latch, true);
+            latch->add_instruction_before_inst(eitherChanged, before);
+            stateChanged = eitherChanged;
+        }
+    }
+    return stateChanged;
 }
 
 } // namespace
@@ -219,18 +310,63 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     BasicBlock *preheader = loop.preheader;
     BasicBlock *latch = loop.singleLatch();
     BasicBlock *exit = loop.singleExit();
-    if (!preheader || !latch || !exit ||
-        loop.exiting.size() != 1 || loop.exiting.front() != latch)
+    if (!preheader || !latch || !exit || loop.exiting.size() != 1)
         return false;
 
-    auto *branch = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!branch || branch->num_ops_ != 3 ||
-        branch->get_operand(1) != loop.header ||
-        branch->get_operand(2) != exit)
+    BasicBlock *exiting = loop.exiting.front();
+    const bool latchExiting = exiting == latch;
+    const bool headerExiting = exiting == loop.header;
+    if (!latchExiting && !headerExiting)
         return false;
-    auto *guard = dynamic_cast<ICmpInst *>(branch->get_operand(0));
-    if (!guard || guard->parent_ != latch)
-        return false;
+
+    ICmpInst *guard = nullptr;
+    BasicBlock *guardBlock = nullptr;
+    BranchInst *latchBranch = nullptr;
+
+    if (latchExiting) {
+        latchBranch =
+            dynamic_cast<BranchInst *>(latch->get_terminator());
+        if (!latchBranch || latchBranch->num_ops_ != 3 ||
+            latchBranch->get_operand(1) != loop.header ||
+            latchBranch->get_operand(2) != exit)
+            return false;
+        guard = dynamic_cast<ICmpInst *>(latchBranch->get_operand(0));
+        if (!guard || guard->parent_ != latch)
+            return false;
+        guardBlock = latch;
+    } else {
+        // Top-tested while: header is the sole exiting block; latch is an
+        // unconditional backedge. Early exit is inserted on the latch.
+        auto *headerBranch =
+            dynamic_cast<BranchInst *>(loop.header->get_terminator());
+        if (!headerBranch || headerBranch->num_ops_ != 3)
+            return false;
+        auto *trueSucc =
+            dynamic_cast<BasicBlock *>(headerBranch->get_operand(1));
+        auto *falseSucc =
+            dynamic_cast<BasicBlock *>(headerBranch->get_operand(2));
+        if (!trueSucc || !falseSucc)
+            return false;
+        bool trueInLoop = loop.isInLoop(trueSucc);
+        bool falseInLoop = loop.isInLoop(falseSucc);
+        if (trueInLoop == falseInLoop)
+            return false;
+        BasicBlock *exitSucc = trueInLoop ? falseSucc : trueSucc;
+        if (exitSucc != exit)
+            return false;
+
+        auto *latchTerm =
+            dynamic_cast<BranchInst *>(latch->get_terminator());
+        if (!latchTerm || latchTerm->num_ops_ != 1 ||
+            latchTerm->get_operand(0) != loop.header)
+            return false;
+
+        guard = dynamic_cast<ICmpInst *>(headerBranch->get_operand(0));
+        if (!guard || guard->parent_ != loop.header)
+            return false;
+        guardBlock = loop.header;
+        latchBranch = latchTerm;
+    }
 
     std::vector<HeaderPhi> phis;
     for (auto *inst : loop.header->instr_list_) {
@@ -247,7 +383,7 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
 
     int controlIndex = -1;
     for (size_t i = 0; i < phis.size(); ++i) {
-        if (!isFiniteControlPhi(phis[i], loop, guard))
+        if (!isFiniteControlPhi(phis[i], loop, guard, guardBlock))
             continue;
         if (controlIndex >= 0)
             return false;
@@ -260,6 +396,8 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     for (size_t i = 0; i < phis.size(); ++i) {
         if (static_cast<int>(i) == controlIndex)
             continue;
+        if (isDeadSelfRecurrence(phis[i]))
+            continue;
         if (!isSupportedStateType(phis[i].phi))
             return false;
         state.push_back(phis[i]);
@@ -268,9 +406,8 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     if (!memoryIsIterationIndependent(loop, AA))
         return false;
 
-    // Reject any loop-local definition other than the control recurrence that
-    // escapes by a route not already represented on the latch exit. The
-    // existing exit edge remains unchanged, so ordinary live-outs are safe.
+    // Outside uses must already flow through exit phis. For while shape the
+    // latch gains an exit edge, so those phis are extended below.
     for (auto *bb : loop.blocksOrdered) {
         for (auto *inst : bb->instr_list_) {
             for (const Use &use : inst->use_list_) {
@@ -284,34 +421,31 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
         }
     }
 
-    Type *i1 = branch->get_operand(0)->type_;
-    Value *stateChanged = new ConstantInt(i1, 0);
-    for (const HeaderPhi &info : state) {
-        auto *changed =
-            new ICmpInst(ICmpInst::ICMP_NE, info.backedge, info.phi,
-                         latch, true);
-        latch->add_instruction_before_inst(changed, branch);
-        if (dynamic_cast<ConstantInt *>(stateChanged)) {
-            stateChanged = changed;
-        } else {
-            auto *eitherChanged =
-                new BinaryInst(i1, Instruction::Or, stateChanged, changed,
-                               latch, true);
-            latch->add_instruction_before_inst(eitherChanged, branch);
-            stateChanged = eitherChanged;
-        }
+    Type *i1 = guard->type_;
+    if (latchExiting) {
+        Value *stateChanged =
+            buildStateChanged(i1, latch, latchBranch, state);
+        auto *continueIfChanged =
+            new BinaryInst(i1, Instruction::And,
+                           latchBranch->get_operand(0), stateChanged,
+                           latch, true);
+        latch->add_instruction_before_inst(continueIfChanged,
+                                           latchBranch);
+        latchBranch->set_operand(0, continueIfChanged);
+    } else {
+        if (!addLatchIncomingToExitPhis(exit, loop.header, latch, phis))
+            return false;
+        Value *stateChanged =
+            buildStateChanged(i1, latch, latchBranch, state);
+        replaceTerminatorWithCond(latch, stateChanged, loop.header,
+                                  exit);
     }
-
-    auto *continueIfChanged =
-        new BinaryInst(i1, Instruction::And, branch->get_operand(0),
-                       stateChanged, latch, true);
-    latch->add_instruction_before_inst(continueIfChanged, branch);
-    branch->set_operand(0, continueIfChanged);
 
     if (std::getenv("DEBUG_LOOP_FIXED_POINT"))
         std::cerr << "[LoopFixedPointEliminate] function=" << func->name_
                   << " header=" << loop.header->name_
                   << " state=" << state.size()
-                  << " blocks=" << loop.blocks.size() << "\n";
+                  << " blocks=" << loop.blocks.size()
+                  << (headerExiting ? " shape=while\n" : " shape=do\n");
     return true;
 }
