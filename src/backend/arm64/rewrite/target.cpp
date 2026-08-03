@@ -175,15 +175,36 @@ const InstrDesc &descriptor(Opcode opcode) {
     }
     case Opcode::MOVi32:
     case Opcode::MOVi64:
-    case Opcode::MOVIv4Zero: {
+    case Opcode::MOVIv4Zero:
+    case Opcode::MOVIv4s:
+    case Opcode::MOVIv4sMsl:
+    case Opcode::MVNIv4s:
+    case Opcode::MOVIv16b:
+    case Opcode::FMOVv4s: {
         static const InstrDesc w = DESC(MOVi32, "MOVi32", 1, 2, 1,
                                         SchedResource::ALU);
         static const InstrDesc x = DESC(MOVi64, "MOVi64", 1, 2, 1,
                                         SchedResource::ALU);
         static const InstrDesc v = DESC(MOVIv4Zero, "movi", 1, 1, 2,
                                         SchedResource::FPALU);
+        static const InstrDesc movi4s = DESC(MOVIv4s, "movi", 1, 3, 2,
+                                             SchedResource::FPALU);
+        static const InstrDesc movimsl = DESC(MOVIv4sMsl, "movi", 1, 3, 2,
+                                              SchedResource::FPALU);
+        static const InstrDesc mvni4s = DESC(MVNIv4s, "mvni", 1, 3, 2,
+                                             SchedResource::FPALU);
+        static const InstrDesc movi16b = DESC(MOVIv16b, "movi", 1, 2, 2,
+                                              SchedResource::FPALU);
+        static const InstrDesc fmov4s = DESC(FMOVv4s, "fmov", 1, 2, 2,
+                                             SchedResource::FPALU);
         return opcode == Opcode::MOVi32 ? w
-             : opcode == Opcode::MOVi64 ? x : v;
+             : opcode == Opcode::MOVi64 ? x
+             : opcode == Opcode::MOVIv4Zero ? v
+             : opcode == Opcode::MOVIv4s ? movi4s
+             : opcode == Opcode::MOVIv4sMsl ? movimsl
+             : opcode == Opcode::MVNIv4s ? mvni4s
+             : opcode == Opcode::MOVIv16b ? movi16b
+                                         : fmov4s;
     }
     case Opcode::ADRP: {
         static const InstrDesc value = DESC(ADRP, "adrp", 1, 2, 1,
@@ -229,6 +250,10 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(UDIVWrr, "udiv", 1, 3, 12, SchedResource::Divide)
     SIMPLE_CASE(SMULLXrr, "smull", 1, 3, 3, SchedResource::MAC)
     SIMPLE_CASE(SMADDLXrrr, "smaddl", 1, 4, 3, SchedResource::MAC)
+    SIMPLE_CASE(SDIVXrr, "sdiv", 1, 3, 12, SchedResource::Divide)
+    SIMPLE_CASE(MSUBXrrr, "msub", 1, 4, 3, SchedResource::MAC)
+    SIMPLE_CASE(UMULHXrr, "umulh", 1, 3, 3, SchedResource::MAC)
+    SIMPLE_CASE(NEGX, "neg", 1, 2, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWrr, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWri, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ORRWrr, "orr", 1, 3, 1, SchedResource::ALU)
@@ -241,6 +266,8 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(ASRWri, "asr", 1, 3, 1, SchedResource::ALU)
     case Opcode::CMPWrr:
     case Opcode::CMPWri:
+    case Opcode::CMPXrr:
+    case Opcode::CMPXri:
     case Opcode::TSTWrr:
     case Opcode::TSTWri: {
         static const InstrDesc cmp{
@@ -249,6 +276,14 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         static const InstrDesc cmpi{
             Opcode::CMPWri, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpx{
+            Opcode::CMPXrr, "cmp", 0, 2, false, false, false, false,
+            false, false, false, false, true, false, 1,
+            SchedResource::ALU};
+        static const InstrDesc cmpxi{
+            Opcode::CMPXri, "cmp", 0, 2, false, false, false, false,
             false, false, false, false, true, false, 1,
             SchedResource::ALU};
         static const InstrDesc tst{
@@ -261,6 +296,8 @@ const InstrDesc &descriptor(Opcode opcode) {
             SchedResource::ALU};
         return opcode == Opcode::CMPWrr ? cmp
              : opcode == Opcode::CMPWri ? cmpi
+             : opcode == Opcode::CMPXrr ? cmpx
+             : opcode == Opcode::CMPXri ? cmpxi
              : opcode == Opcode::TSTWrr ? tst : tsti;
     }
     SIMPLE_CASE(CLZW, "clz", 1, 2, 1, SchedResource::ALU)
@@ -300,15 +337,21 @@ const InstrDesc &descriptor(Opcode opcode) {
     dynamic.latency = 1;
     dynamic.resource = SchedResource::ALU;
     switch (opcode) {
-    case Opcode::LDRWui: case Opcode::LDRWlo: case Opcode::LDRWro:
-    case Opcode::LDRWpost:
+    case Opcode::LDRWui: case Opcode::LDRWlo: case Opcode::LDRWpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::LDRSui: case Opcode::LDRSlo: case Opcode::LDRSro:
-    case Opcode::LDRSpost:
+    case Opcode::LDRWro:
+        dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 5; dynamic.mayLoad = true;
+        dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::LDRSui: case Opcode::LDRSlo: case Opcode::LDRSpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
+        dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::LDRSro:
+        dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 5; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
     case Opcode::LDRDui:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
@@ -318,24 +361,37 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::LDRQro:
+        dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 5; dynamic.mayLoad = true;
+        dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
     case Opcode::LDRXui: case Opcode::LDRXlo: case Opcode::LDRXpost:
         dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.mayLoad = true;
         dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
-    case Opcode::STRWui: case Opcode::STRWlo: case Opcode::STRWro:
-    case Opcode::STRWpost:
-    case Opcode::STRSui: case Opcode::STRSlo: case Opcode::STRSro:
-    case Opcode::STRSpost:
+    case Opcode::LDRXro:
+        dynamic.mnemonic = "ldr"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 5; dynamic.mayLoad = true;
+        dynamic.latency = 4; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::STRWui: case Opcode::STRWlo: case Opcode::STRWpost:
+    case Opcode::STRSui: case Opcode::STRSlo: case Opcode::STRSpost:
     case Opcode::STRDui:
     case Opcode::STRQui: case Opcode::STRQlo: case Opcode::STRQpost:
     case Opcode::STRXui: case Opcode::STRXlo: case Opcode::STRXpost:
         dynamic.mnemonic = "str"; dynamic.explicitOperands = 3;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
         break;
+    case Opcode::STRWro: case Opcode::STRSro:
+    case Opcode::STRQro: case Opcode::STRXro:
+        dynamic.mnemonic = "str"; dynamic.explicitOperands = 5;
+        dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
+        break;
+    case Opcode::LDPWi: case Opcode::LDPSi:
     case Opcode::LDPXi: case Opcode::LDPDi: case Opcode::LDPQi:
         dynamic.mnemonic = "ldp"; dynamic.explicitDefs = 2;
         dynamic.explicitOperands = 4; dynamic.mayLoad = true;
         dynamic.latency = 5; dynamic.resource = SchedResource::LoadStore; break;
+    case Opcode::STPWi: case Opcode::STPSi:
     case Opcode::STPXi: case Opcode::STPDi: case Opcode::STPQi:
         dynamic.mnemonic = "stp"; dynamic.explicitOperands = 4;
         dynamic.mayStore = true; dynamic.resource = SchedResource::LoadStore;
@@ -383,8 +439,11 @@ const InstrDesc &descriptor(Opcode opcode) {
         dynamic.mnemonic = "uxtw"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 2; break;
     case Opcode::DUPv4i32: case Opcode::DUPv4f32:
+    case Opcode::DUPv4sLane:
         dynamic.mnemonic = "dup"; dynamic.explicitDefs = 1;
-        dynamic.explicitOperands = 2; dynamic.latency = 6;
+        dynamic.explicitOperands =
+            opcode == Opcode::DUPv4sLane ? 3 : 2;
+        dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::INSv4i32: case Opcode::INSv4f32:
         dynamic.mnemonic = "ins"; dynamic.explicitDefs = 1;
@@ -393,6 +452,25 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::EXTRACTv4i32: case Opcode::EXTRACTv4f32:
         dynamic.mnemonic = "umov"; dynamic.explicitDefs = 1;
         dynamic.explicitOperands = 3; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::ZIP1v4s: case Opcode::ZIP2v4s:
+    case Opcode::UZP1v4s: case Opcode::UZP2v4s:
+    case Opcode::TRN1v4s: case Opcode::TRN2v4s:
+        dynamic.mnemonic =
+            opcode == Opcode::ZIP1v4s ? "zip1"
+            : opcode == Opcode::ZIP2v4s ? "zip2"
+            : opcode == Opcode::UZP1v4s ? "uzp1"
+            : opcode == Opcode::UZP2v4s ? "uzp2"
+            : opcode == Opcode::TRN1v4s ? "trn1" : "trn2";
+        dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
+        dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::EXTv16b:
+        dynamic.mnemonic = "ext"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::REV64v4s:
+        dynamic.mnemonic = "rev64"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
         dynamic.resource = SchedResource::FPALU; break;
     case Opcode::ADDv4i32: case Opcode::SUBv4i32:
     case Opcode::ADDv4f32: case Opcode::SUBv4f32:
@@ -623,6 +701,7 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
     case Opcode::ADDXri:
     case Opcode::SUBXri:
     case Opcode::CMPWri:
+    case Opcode::CMPXri:
     case Opcode::SUBSPri:
     case Opcode::ADDSPri:
         return immediate >= 0 && immediate <= 4095;

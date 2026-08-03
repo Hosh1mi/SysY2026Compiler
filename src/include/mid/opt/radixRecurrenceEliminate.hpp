@@ -9,11 +9,11 @@
 //   F(a, b) = (2 * F(a, b / 2)) srem M,
 //              optionally followed by `(result + a) srem M` when b % 2 == 1.
 //
-// The replacement walks the positive bits of b from most significant to least
-// significant and performs the original i32 add/srem operations in the same
-// order.  Negative b values retain the source recurrence's result of zero.
-// Recognition is structural: function names, call sites, and the modulus value
-// are not used as activation signals.
+// When the matched i32 additions are provably overflow-free, F(a, b) equals
+// (a * b) srem M and is lowered to the MulMod intrinsic.  Other positive-b
+// inputs use a bit-walking fallback that preserves the original i32 operation
+// order; non-positive b values retain the source result of zero.  Recognition
+// is structural: function names and call sites are not activation signals.
 class RadixRecurrenceEliminate : public Pass {
 public:
     void execute(Module *module) override;

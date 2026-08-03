@@ -39,6 +39,8 @@ public:
         None,
         SignedMin,
         SignedMax,
+        // (a * b) srem m with wide product; lowered by the backend.
+        MulMod,
     };
 
     Function(FunctionType* ty, const std::string& name, Module* parent) : Value(ty, name), parent_(parent), seq_cnt_(0), gep_cnt_(0) {

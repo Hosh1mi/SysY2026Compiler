@@ -29,6 +29,7 @@ private:
                                std::unordered_map<Value*, Value*> &valMap,
                                std::unordered_map<BasicBlock*, BasicBlock*> &bbMap,
                                std::vector<BasicBlock*> &newBBs);
+    bool isReachableFromEntry(Function *target, Module *module);
     bool reaches(Function *from, Function *target,
                  std::unordered_set<Function *> &visited);
 

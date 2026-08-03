@@ -61,6 +61,7 @@ void AArch64Backend::generate() {
     PostRAParallelCopyResolver parallelCopyResolver;
     PostRAInstructionExpansion instructionExpansion;
     PostRACopyPropagation copyPropagation;
+    PreRAAddressingFolder addressingFolder;
     PostRAAddressingOptimizer addressingOptimizer;
     MachineBlockPlacement blockPlacement;
     AArch64FrameLowering frameLowering;
@@ -96,6 +97,7 @@ void AArch64Backend::generate() {
         if (options_.optimizationLevel >= 1) {
             if (!options_.disablePeephole) {
                 preRAPeephole.run(*machineFunction);
+                addressingFolder.run(*machineFunction);
                 if (options_.verifyMachineIR && verifyEachMachinePass)
                     verifier.verifyOrThrow(*machineFunction,
                                            "pre-ra-peephole");

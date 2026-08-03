@@ -66,6 +66,7 @@ enum class SDOpcode : std::uint16_t {
     VectorReduceAdd,
     SMin,
     SMax,
+    MulMod,
 };
 
 class SDNode;

@@ -299,6 +299,8 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
     // coupled, opaque, or absent from the address remains conservatively ANY.
     for (Loop *loop : result.commonLoops) {
         PhiInst *iv = loop->getInductionIV();
+        if (!iv && loop == inductionOverrideLoop_)
+            iv = inductionOverrideIV_;
         if (!iv) {
             result.direction.push_back(DIR_ANY);
             continue;

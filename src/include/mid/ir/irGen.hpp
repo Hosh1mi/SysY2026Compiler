@@ -155,6 +155,8 @@ public:
         //   - debug_progress: fprintf(stderr, "[profile] seg%d\n", seg).
         //   - debug_text: prints a zero-terminated integer character array to
         //     stderr with a profiling prefix.
+        //   - profile_start/profile_stop: immediately print a labeled elapsed
+        //     time for a profiling segment.
         //     Useless on A53 (no console) and the extra UART traffic skews
         //     timing measurements.
         // Stock contest .sy programs must not call these; they are reserved
@@ -162,6 +164,8 @@ public:
         Function *redirect_stdin_fn = nullptr;
         Function *debug_progress_fn = nullptr;
         Function *debug_text_fn = nullptr;
+        Function *profile_start_fn = nullptr;
+        Function *profile_stop_fn = nullptr;
         {
             auto rs_ty = new FunctionType(TyVoid, {});
             redirect_stdin_fn = new Function(rs_ty, "redirect_stdin", module.get());
@@ -173,6 +177,11 @@ public:
             std::vector<Type *> dt_params{TyInt32Ptr};
             auto dt_ty = new FunctionType(TyVoid, dt_params);
             debug_text_fn = new Function(dt_ty, "debug_text", module.get());
+
+            std::vector<Type *> timer_params{TyInt32};
+            auto timer_ty = new FunctionType(TyVoid, timer_params);
+            profile_start_fn = new Function(timer_ty, "profile_start", module.get());
+            profile_stop_fn = new Function(timer_ty, "profile_stop", module.get());
         }
 #endif
 
@@ -199,6 +208,8 @@ public:
         scope.push("redirect_stdin", redirect_stdin_fn);
         scope.push("debug_progress", debug_progress_fn);
         scope.push("debug_text", debug_text_fn);
+        scope.push("profile_start", profile_start_fn);
+        scope.push("profile_stop", profile_stop_fn);
 #endif
     }
     std::unique_ptr<Module> getModule() {

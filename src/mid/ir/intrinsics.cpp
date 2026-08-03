@@ -87,6 +87,39 @@ bool isSignedMinMaxIntrinsic(Function *function,
     return true;
 }
 
+Function *getOrInsertMulModIntrinsic(Module *module) {
+    if (!module)
+        return nullptr;
+
+    for (auto *function : module->function_list_) {
+        if (function->intrinsicID() != Function::IntrinsicID::MulMod)
+            continue;
+        auto *functionType = dynamic_cast<FunctionType *>(function->type_);
+        if (!functionType || functionType->result_ != module->int32_ty_ ||
+            functionType->args_.size() != 3 ||
+            functionType->args_[0] != module->int32_ty_ ||
+            functionType->args_[1] != module->int32_ty_ ||
+            functionType->args_[2] != module->int32_ty_)
+            continue;
+        function->setSemFlag(SemFlag::FnPure);
+        return function;
+    }
+
+    auto *functionType = new FunctionType(
+        module->int32_ty_,
+        {module->int32_ty_, module->int32_ty_, module->int32_ty_});
+    auto *function =
+        new Function(functionType, "llvm.mulmod.i32", module);
+    function->setIntrinsicID(Function::IntrinsicID::MulMod);
+    function->setSemFlag(SemFlag::FnPure);
+    return function;
+}
+
+bool isMulModIntrinsic(Function *function) {
+    return function &&
+           function->intrinsicID() == Function::IntrinsicID::MulMod;
+}
+
 bool matchSignedMinMaxSelect(SelectInst *select,
                              SignedMinMaxIntrinsic &kind,
                              Value *&lhs,

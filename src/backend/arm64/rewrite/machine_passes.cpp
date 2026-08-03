@@ -1,8 +1,10 @@
 #include "../../../include/backend/arm64/rewrite/machine_passes.hpp"
+#include "../../../include/backend/arm64/rewrite/vector_immediate.hpp"
 
 #include <deque>
 #include <algorithm>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -176,7 +178,12 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             bool constant =
                 it->opcode() == Opcode::MOVi32 ||
                 it->opcode() == Opcode::MOVi64 ||
-                it->opcode() == Opcode::MOVIv4Zero;
+                it->opcode() == Opcode::MOVIv4Zero ||
+                it->opcode() == Opcode::MOVIv4s ||
+                it->opcode() == Opcode::MOVIv4sMsl ||
+                it->opcode() == Opcode::MVNIv4s ||
+                it->opcode() == Opcode::MOVIv16b ||
+                it->opcode() == Opcode::FMOVv4s;
             if (!constant || it->operands().empty() ||
                 !it->operands()[0].isVirtualRegister() ||
                 !it->operands()[0].isDef) {
@@ -186,7 +193,33 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
 
             std::string key =
                 std::to_string(static_cast<unsigned>(it->opcode()));
-            if (it->opcode() != Opcode::MOVIv4Zero) {
+            if (it->opcode() == Opcode::MOVIv4Zero) {
+                // zero vector has no immediate payload
+            } else if (it->opcode() == Opcode::FMOVv4s) {
+                if (it->operands().size() != 2 ||
+                    it->operands()[1].kind() !=
+                        MachineOperand::Kind::FloatingBits) {
+                    ++it;
+                    continue;
+                }
+                key += ":" +
+                       std::to_string(it->operands()[1].floatingBits());
+            } else if (it->opcode() == Opcode::MOVIv4s ||
+                       it->opcode() == Opcode::MOVIv4sMsl ||
+                       it->opcode() == Opcode::MVNIv4s) {
+                if (it->operands().size() != 3 ||
+                    it->operands()[1].kind() !=
+                        MachineOperand::Kind::Immediate ||
+                    it->operands()[2].kind() !=
+                        MachineOperand::Kind::Immediate) {
+                    ++it;
+                    continue;
+                }
+                key += ":" +
+                       std::to_string(it->operands()[1].immediate()) +
+                       ":" +
+                       std::to_string(it->operands()[2].immediate());
+            } else {
                 if (it->operands().size() != 2 ||
                     it->operands()[1].kind() !=
                         MachineOperand::Kind::Immediate) {
@@ -226,6 +259,108 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
         }
     }
 
+    // GPR vs NEON bank choice for splat immediates.
+    //
+    // ISel keeps Splat as DUP from a scalar so integer users can share the
+    // same MOVi.  When that scalar immediate has no non-broadcast users,
+    // rewrite the DUP into a NEON immediate.  Dead scalar materializations
+    // are left for Machine DCE; Machine LICM then places the NEON form.
+    {
+        std::unordered_map<VReg, unsigned> useCount;
+        for (const auto &block : function.blocks())
+            for (const MachineInstr &instruction : block->instructions())
+                for (const MachineOperand &operand : instruction.operands())
+                    if (operand.isVirtualRegister() && !operand.isDef)
+                        ++useCount[operand.virtualRegister()];
+
+        auto definitionOf = [&](VReg reg) -> MachineInstr * {
+            if (!function.registerInfo().contains(reg))
+                return nullptr;
+            return function.registerInfo().get(reg).definition;
+        };
+
+        auto onlyUsedAs = [&](VReg reg, Opcode opcode) {
+            if (!useCount.count(reg) || useCount[reg] == 0)
+                return false;
+            unsigned seen = 0;
+            for (const auto &block : function.blocks())
+                for (const MachineInstr &instruction :
+                     block->instructions())
+                    for (const MachineOperand &operand :
+                         instruction.operands()) {
+                        if (!operand.isVirtualRegister() ||
+                            operand.isDef ||
+                            operand.virtualRegister() != reg)
+                            continue;
+                        if (instruction.opcode() != opcode)
+                            return false;
+                        ++seen;
+                    }
+            return seen == useCount[reg];
+        };
+
+        for (auto &block : function.blocks()) {
+            auto &instructions = block->instructions();
+            for (auto it = instructions.begin();
+                 it != instructions.end(); ++it) {
+                const bool integerDup = it->opcode() == Opcode::DUPv4i32;
+                const bool floatDup = it->opcode() == Opcode::DUPv4f32;
+                if ((!integerDup && !floatDup) ||
+                    it->operands().size() != 2 ||
+                    !it->operands()[0].isVirtualRegister() ||
+                    !it->operands()[0].isDef ||
+                    !it->operands()[1].isVirtualRegister())
+                    continue;
+
+                VReg scalar = it->operands()[1].virtualRegister();
+                MachineInstr *scalarDef = definitionOf(scalar);
+                std::uint32_t bits = 0;
+                if (integerDup) {
+                    if (!scalarDef ||
+                        scalarDef->opcode() != Opcode::MOVi32 ||
+                        scalarDef->operands().size() != 2 ||
+                        scalarDef->operands()[1].kind() !=
+                            MachineOperand::Kind::Immediate ||
+                        !onlyUsedAs(scalar, Opcode::DUPv4i32))
+                        continue;
+                    bits = static_cast<std::uint32_t>(
+                        scalarDef->operands()[1].immediate());
+                } else {
+                    // Prefer FMOVSW -> DUP when the FPR value is broadcast
+                    // only.  Walk through an optional MOVi32 of the bit
+                    // pattern so float splats share the same policy.
+                    if (!scalarDef ||
+                        scalarDef->opcode() != Opcode::FMOVSW ||
+                        scalarDef->operands().size() != 2 ||
+                        !scalarDef->operands()[1].isVirtualRegister() ||
+                        !onlyUsedAs(scalar, Opcode::DUPv4f32))
+                        continue;
+                    VReg bitsReg =
+                        scalarDef->operands()[1].virtualRegister();
+                    MachineInstr *bitsDef = definitionOf(bitsReg);
+                    if (!bitsDef || bitsDef->opcode() != Opcode::MOVi32 ||
+                        bitsDef->operands().size() != 2 ||
+                        bitsDef->operands()[1].kind() !=
+                            MachineOperand::Kind::Immediate ||
+                        !onlyUsedAs(bitsReg, Opcode::FMOVSW))
+                        continue;
+                    bits = static_cast<std::uint32_t>(
+                        bitsDef->operands()[1].immediate());
+                }
+
+                auto immediate = classifyNeonSplatImmediate(bits);
+                if (!immediate)
+                    continue;
+                MachineOperand destination = it->operands()[0];
+                *it = makeNeonSplatImmediate(*immediate, destination);
+                if (destination.isVirtualRegister())
+                    function.registerInfo().setDefinition(
+                        destination.virtualRegister(), &*it);
+                changed = true;
+            }
+        }
+    }
+
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         for (auto it = instructions.begin(); it != instructions.end();) {
@@ -250,10 +385,35 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
         }
     }
 
+    // Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
+    // architectural scale (4/8/16): the pair offset must be a multiple of that
+    // scale and fit the signed 7-bit scaled immediate.
     struct AddressForm {
         VReg root = 0;
         std::int64_t offset = 0;
         bool valid = false;
+    };
+    struct PairKind {
+        Opcode loadOpcode;
+        Opcode storeOpcode;
+        Opcode pairLoadOpcode;
+        Opcode pairStoreOpcode;
+        std::int64_t stride;
+    };
+    static const PairKind kPairKinds[] = {
+        {Opcode::LDRWui, Opcode::STRWui, Opcode::LDPWi, Opcode::STPWi, 4},
+        {Opcode::LDRSui, Opcode::STRSui, Opcode::LDPSi, Opcode::STPSi, 4},
+        {Opcode::LDRXui, Opcode::STRXui, Opcode::LDPXi, Opcode::STPXi, 8},
+        {Opcode::LDRQui, Opcode::STRQui, Opcode::LDPQi, Opcode::STPQi, 16},
+    };
+    auto definesVirtual = [](const MachineInstr &instruction, VReg reg) {
+        if (!reg)
+            return false;
+        for (const MachineOperand &operand : instruction.operands())
+            if (operand.isVirtualRegister() && operand.isDef &&
+                operand.virtualRegister() == reg)
+                return true;
+        return false;
     };
     for (auto &block : function.blocks()) {
         bool fused = true;
@@ -278,6 +438,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
             struct MemoryCandidate {
                 MachineBasicBlock::InstrList::iterator instruction;
                 AddressForm address;
+                const PairKind *kind = nullptr;
             };
             std::vector<MemoryCandidate> loads;
             std::vector<MemoryCandidate> stores;
@@ -311,10 +472,21 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                     }
                 }
 
-                bool load =
-                    it->opcode() == Opcode::LDRQui;
-                bool store =
-                    it->opcode() == Opcode::STRQui;
+                const PairKind *kind = nullptr;
+                bool load = false;
+                bool store = false;
+                for (const PairKind &candidate : kPairKinds) {
+                    if (it->opcode() == candidate.loadOpcode) {
+                        kind = &candidate;
+                        load = true;
+                        break;
+                    }
+                    if (it->opcode() == candidate.storeOpcode) {
+                        kind = &candidate;
+                        store = true;
+                        break;
+                    }
+                }
                 if ((!load && !store) ||
                     it->operands().size() != 3 ||
                     it->operands()[2].kind() !=
@@ -329,7 +501,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                 form.offset +=
                     it->operands()[2].immediate();
                 (load ? loads : stores).push_back(
-                    MemoryCandidate{it, form});
+                    MemoryCandidate{it, form, kind});
             }
 
             auto tryPair = [&](std::vector<MemoryCandidate> &candidates,
@@ -340,32 +512,58 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                          j < candidates.size(); ++j) {
                         auto &lhs = candidates[i];
                         auto &rhs = candidates[j];
-                        if (lhs.address.root !=
+                        if (lhs.kind != rhs.kind ||
+                            lhs.address.root !=
                                 rhs.address.root ||
                             std::llabs(
                                 lhs.address.offset -
-                                rhs.address.offset) != 16)
+                                rhs.address.offset) !=
+                                lhs.kind->stride)
                             continue;
+                        std::int64_t stride = lhs.kind->stride;
                         std::int64_t lowerOffset =
                             std::min(lhs.address.offset,
                                      rhs.address.offset);
-                        if (lowerOffset % 16 != 0 ||
-                            lowerOffset / 16 < -64 ||
-                            lowerOffset / 16 > 63)
+                        if (lowerOffset % stride != 0 ||
+                            lowerOffset / stride < -64 ||
+                            lowerOffset / stride > 63)
                             continue;
+
+                        // Loads are rewritten at the earlier instruction so
+                        // both values become available without moving uses.
+                        // Stores must stay at the later instruction so both
+                        // data operands are already defined.
+                        VReg earlyData = 0;
+                        if (!load &&
+                            lhs.instruction->operands()[0]
+                                .isVirtualRegister())
+                            earlyData = lhs.instruction->operands()[0]
+                                            .virtualRegister();
 
                         bool memoryBarrier = false;
                         for (auto scan =
                                  std::next(lhs.instruction);
-                             scan != rhs.instruction; ++scan)
+                             scan != rhs.instruction; ++scan) {
                             if (scan->isCall() ||
                                 scan->mayStore() ||
                                 (!load &&
-                                 scan->mayLoad())) {
+                                 scan->mayLoad()) ||
+                                definesVirtual(*scan,
+                                               lhs.address.root) ||
+                                (!load &&
+                                 definesVirtual(*scan,
+                                                earlyData))) {
                                 memoryBarrier = true;
                                 break;
                             }
+                        }
                         if (memoryBarrier)
+                            continue;
+
+                        // LDP with Rt == Rt2 is unpredictable.
+                        if (load &&
+                            sameRegister(lhs.instruction->operands()[0],
+                                         rhs.instruction->operands()[0]))
                             continue;
 
                         auto lower =
@@ -377,8 +575,8 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                                 ? rhs.instruction
                                 : lhs.instruction;
                         MachineInstr pair(
-                            load ? Opcode::LDPQi
-                                 : Opcode::STPQi);
+                            load ? lhs.kind->pairLoadOpcode
+                                 : lhs.kind->pairStoreOpcode);
                         pair.addOperand(
                                 lower->operands()[0])
                             .addOperand(
@@ -390,6 +588,10 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                             .addOperand(
                                 MachineOperand::immediate(
                                     lowerOffset));
+                        unsigned pairBytes =
+                            static_cast<unsigned>(stride * 2);
+                        unsigned align =
+                            static_cast<unsigned>(stride);
                         pair.addMemoryOperand(
                             MachineMemOperand{
                                 load
@@ -397,7 +599,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                                           Load
                                     : MachineMemOperand::Access::
                                           Store,
-                                32, 16, nullptr,
+                                pairBytes, align, nullptr,
                                 std::nullopt, lowerOffset,
                                 false});
 
@@ -726,7 +928,10 @@ bool MachineLICM::run(MachineFunction &function) const {
         switch (opcode) {
         case Opcode::MOVi32:
         case Opcode::MOVi64:
-        case Opcode::MOVIv4Zero:
+            // Scalar immediates rematerialize cheaply, so lengthening their
+            // live ranges is fine.  Encoded NEON immediates (including
+            // movi #0) must stay near their uses: hoisting them occupies a
+            // vector register across nested loops and invites spill churn.
             return true;
         default:
             return false;
@@ -2050,10 +2255,232 @@ bool PostRAInstructionExpansion::run(
     return changed;
 }
 
+namespace {
+
+unsigned scaledImmediateWidth(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWui: case Opcode::STRWui:
+    case Opcode::LDRSui: case Opcode::STRSui:
+        return 4;
+    case Opcode::LDRXui: case Opcode::STRXui:
+        return 8;
+    case Opcode::LDRQui: case Opcode::STRQui:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+Opcode registerOffsetOpcode(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWui: return Opcode::LDRWro;
+    case Opcode::STRWui: return Opcode::STRWro;
+    case Opcode::LDRSui: return Opcode::LDRSro;
+    case Opcode::STRSui: return Opcode::STRSro;
+    case Opcode::LDRXui: return Opcode::LDRXro;
+    case Opcode::STRXui: return Opcode::STRXro;
+    case Opcode::LDRQui: return Opcode::LDRQro;
+    case Opcode::STRQui: return Opcode::STRQro;
+    default: return Opcode::Invalid;
+    }
+}
+
+bool scaledImmediateEncodable(std::int64_t offset, unsigned width) {
+    return width != 0 && offset >= 0 && offset % width == 0 &&
+           static_cast<std::uint64_t>(offset / width) <= 4095;
+}
+
+unsigned registerOffsetShift(unsigned width) {
+    unsigned shift = 0;
+    while ((1U << shift) < width)
+        ++shift;
+    return shift;
+}
+
+bool isScaledImmediateMemory(Opcode opcode) {
+    return scaledImmediateWidth(opcode) != 0;
+}
+
+} // namespace
+
+bool PreRAAddressingFolder::run(MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::IsSSA) ||
+        !function.hasProperty(MachineProperty::Selected) ||
+        function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+
+    enum class AddressKind : std::uint8_t {
+        Invalid,
+        Immediate,
+        Index,
+    };
+    struct Address {
+        AddressKind kind = AddressKind::Invalid;
+        VReg base = 0;
+        MachineOperand index;
+        std::int64_t offset = 0;
+        std::int64_t shift = 0;
+        std::int64_t extension = 0;
+    };
+
+    std::unordered_map<VReg, unsigned> useCount;
+    for (const auto &block : function.blocks())
+        for (const MachineInstr &instruction : block->instructions())
+            for (const MachineOperand &operand : instruction.operands())
+                if (operand.isVirtualRegister() && !operand.isDef)
+                    ++useCount[operand.virtualRegister()];
+
+    std::unordered_map<VReg, Address> memo;
+    std::unordered_set<VReg> resolving;
+    auto resolve = [&](auto &&self, VReg reg) -> Address {
+        auto cached = memo.find(reg);
+        if (cached != memo.end())
+            return cached->second;
+
+        Address form;
+        form.kind = AddressKind::Immediate;
+        form.base = reg;
+        if (!function.registerInfo().contains(reg) ||
+            !resolving.insert(reg).second)
+            return Address{};
+
+        MachineInstr *definition =
+            function.registerInfo().get(reg).definition;
+        if (definition && !definition->operands().empty() &&
+            definition->operands()[0].isVirtualRegister() &&
+            definition->operands()[0].isDef &&
+            definition->operands()[0].virtualRegister() == reg &&
+            definition->operands()[0].regClass() == RegClass::GPR64) {
+            const auto &operands = definition->operands();
+            if (definition->opcode() == Opcode::COPY &&
+                operands.size() == 2 &&
+                operands[1].isVirtualRegister() &&
+                operands[1].regClass() == RegClass::GPR64) {
+                form = self(self, operands[1].virtualRegister());
+                // A register-offset access carries both the base and index
+                // live until the memory instruction.  Folding a shared
+                // address trades one reusable address value for two longer
+                // live ranges and can introduce spills.  Require every COPY
+                // on the path to have a single consumer so the folded access
+                // replaces, rather than duplicates, the address computation.
+                if (form.kind == AddressKind::Index &&
+                    useCount[reg] != 1) {
+                    form = Address{};
+                    form.kind = AddressKind::Immediate;
+                    form.base = reg;
+                }
+            } else if (definition->opcode() == Opcode::ADDXri &&
+                       operands.size() == 3 &&
+                       operands[1].isVirtualRegister() &&
+                       operands[1].regClass() == RegClass::GPR64 &&
+                       operands[2].kind() ==
+                           MachineOperand::Kind::Immediate) {
+                Address base =
+                    self(self, operands[1].virtualRegister());
+                std::int64_t combined = 0;
+                if (base.kind == AddressKind::Immediate &&
+                    !__builtin_add_overflow(
+                        base.offset, operands[2].immediate(), &combined)) {
+                    form = std::move(base);
+                    form.offset = combined;
+                }
+            } else if (definition->opcode() == Opcode::ADDXrs &&
+                       operands.size() == 5 &&
+                       operands[1].isVirtualRegister() &&
+                       operands[1].regClass() == RegClass::GPR64 &&
+                       operands[2].isVirtualRegister() &&
+                       operands[3].kind() ==
+                           MachineOperand::Kind::Immediate &&
+                       operands[4].kind() ==
+                           MachineOperand::Kind::Immediate) {
+                Address base =
+                    self(self, operands[1].virtualRegister());
+                std::int64_t extension = operands[4].immediate();
+                bool validIndex =
+                    (extension == 0 || extension == 1)
+                        ? operands[2].regClass() == RegClass::GPR32
+                        : extension == 2 &&
+                              operands[2].regClass() == RegClass::GPR64;
+                if (base.kind == AddressKind::Immediate &&
+                    base.offset == 0 && validIndex &&
+                    useCount[reg] == 1) {
+                    form.kind = AddressKind::Index;
+                    form.base = base.base;
+                    form.index = operands[2];
+                    form.index.isDef = false;
+                    form.shift = operands[3].immediate();
+                    form.extension = extension;
+                }
+            }
+        }
+
+        resolving.erase(reg);
+        memo.emplace(reg, form);
+        return form;
+    };
+
+    bool changed = false;
+    for (auto &block : function.blocks()) {
+        for (MachineInstr &instruction : block->instructions()) {
+            if (!isScaledImmediateMemory(instruction.opcode()) ||
+                instruction.operands().size() != 3 ||
+                !instruction.operands()[1].isVirtualRegister() ||
+                instruction.operands()[2].kind() !=
+                    MachineOperand::Kind::Immediate)
+                continue;
+
+            VReg address = instruction.operands()[1].virtualRegister();
+            std::int64_t memOffset =
+                instruction.operands()[2].immediate();
+            unsigned width = scaledImmediateWidth(instruction.opcode());
+            Address form = resolve(resolve, address);
+
+            if (form.kind == AddressKind::Immediate &&
+                (form.base != address || form.offset != 0)) {
+                std::int64_t folded = 0;
+                if (__builtin_add_overflow(form.offset, memOffset,
+                                           &folded) ||
+                    !scaledImmediateEncodable(folded, width))
+                    continue;
+                instruction.operands()[1] = MachineOperand::vreg(
+                    form.base, RegClass::GPR64);
+                instruction.operands()[2] =
+                    MachineOperand::immediate(folded);
+                changed = true;
+                continue;
+            }
+
+            if (form.kind != AddressKind::Index || memOffset != 0)
+                continue;
+            std::int64_t legalShift = static_cast<std::int64_t>(
+                registerOffsetShift(width));
+            if (form.shift != 0 && form.shift != legalShift)
+                continue;
+            Opcode ro = registerOffsetOpcode(instruction.opcode());
+            if (ro == Opcode::Invalid)
+                continue;
+            MachineOperand value = instruction.operands()[0];
+            instruction.setOpcode(ro);
+            instruction.operands().clear();
+            instruction.addOperand(std::move(value))
+                .addOperand(MachineOperand::vreg(
+                    form.base, RegClass::GPR64))
+                .addOperand(std::move(form.index))
+                .addOperand(MachineOperand::immediate(form.shift))
+                .addOperand(MachineOperand::immediate(form.extension));
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 bool PostRAAddressingOptimizer::run(
     MachineFunction &function) const {
     if (!function.hasProperty(MachineProperty::NoVRegs))
         return false;
+
+    bool changed = false;
+
     auto postIndexedOpcode = [](Opcode opcode) {
         switch (opcode) {
         case Opcode::LDRWui: return Opcode::LDRWpost;
@@ -2068,7 +2495,6 @@ bool PostRAAddressingOptimizer::run(
         }
     };
 
-    bool changed = false;
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         for (auto memory = instructions.begin();

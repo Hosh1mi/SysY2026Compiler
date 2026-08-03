@@ -103,6 +103,12 @@ public:
     std::string print() const;
 };
 
+// Describe an equality-terminated control recurrence without publishing it
+// through Loop::controlInduction.  Existing clients of that field only expect
+// ordered predicates; transformations that understand eq/ne opt in here.
+bool describeEqualityControlInduction(const Loop &loop,
+                                      InductionDescriptor &descriptor);
+
 class LoopInfo {
 public:
     // 重新分析一个函数：清空旧状态后重新计算支配关系、循环、嵌套、IV

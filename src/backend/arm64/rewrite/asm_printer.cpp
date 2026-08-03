@@ -1,6 +1,7 @@
 #include "../../../include/backend/arm64/rewrite/asm_printer.hpp"
 
 #include <array>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -136,6 +137,43 @@ void emitPostIndexedMemory(std::ostream &output, const char *mnemonic,
            << instruction.operands()[2].immediate() << '\n';
 }
 
+// Mirror ADDXrs extend encoding: 0 = uxtw, 1 = sxtw, 2 = lsl (64-bit index).
+void emitRegisterOffsetMemory(std::ostream &output, const char *mnemonic,
+                              const MachineInstr &instruction) {
+    if (instruction.operands().size() != 5 ||
+        !instruction.operands()[0].isPhysicalRegister() ||
+        !instruction.operands()[1].isPhysicalRegister() ||
+        !instruction.operands()[2].isPhysicalRegister() ||
+        instruction.operands()[3].kind() !=
+            MachineOperand::Kind::Immediate ||
+        instruction.operands()[4].kind() !=
+            MachineOperand::Kind::Immediate)
+        throw std::logic_error("malformed register-offset memory instruction");
+    std::string value = registerName(instruction.operands()[0]);
+    if (instruction.operands()[0].regClass() == RegClass::NEON128)
+        value = "q" + value.substr(1);
+    std::int64_t shift = instruction.operands()[3].immediate();
+    std::int64_t extension = instruction.operands()[4].immediate();
+    unsigned width =
+        instruction.operands()[0].regClass() == RegClass::NEON128 ? 16
+        : instruction.operands()[0].regClass() == RegClass::GPR64 ? 8
+                                                                  : 4;
+    unsigned legalShift = 0;
+    while ((1U << legalShift) < width)
+        ++legalShift;
+    if (shift != 0 && shift != static_cast<std::int64_t>(legalShift))
+        throw std::logic_error(
+            "illegal register-offset shift reached assembly printer");
+    const char *extend =
+        extension == 2 ? "lsl" : extension ? "sxtw" : "uxtw";
+    output << '\t' << mnemonic << ' ' << value << ", ["
+           << registerName(instruction.operands()[1]) << ", "
+           << registerName(instruction.operands()[2]) << ", " << extend;
+    if (shift)
+        output << " #" << shift;
+    output << "]\n";
+}
+
 void emitThreeRegisters(std::ostream &output, const char *mnemonic,
                         const MachineInstr &instruction) {
     output << '\t' << mnemonic << ' '
@@ -190,6 +228,61 @@ void printInstruction(const MachineFunction &function,
         output << "\tmovi " << registerName(operands[0])
                << ".4s, #0\n";
         break;
+    case Opcode::MOVIv4s: {
+        if (operands.size() != 3 ||
+            operands[1].kind() != MachineOperand::Kind::Immediate ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed movi.4s");
+        output << "\tmovi " << registerName(operands[0]) << ".4s, #"
+               << operands[1].immediate();
+        if (operands[2].immediate())
+            output << ", lsl #" << operands[2].immediate();
+        output << '\n';
+        break;
+    }
+    case Opcode::MOVIv4sMsl: {
+        if (operands.size() != 3 ||
+            operands[1].kind() != MachineOperand::Kind::Immediate ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed movi.4s msl");
+        output << "\tmovi " << registerName(operands[0]) << ".4s, #"
+               << operands[1].immediate() << ", msl #"
+               << operands[2].immediate() << '\n';
+        break;
+    }
+    case Opcode::MVNIv4s: {
+        if (operands.size() != 3 ||
+            operands[1].kind() != MachineOperand::Kind::Immediate ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed mvni.4s");
+        output << "\tmvni " << registerName(operands[0]) << ".4s, #"
+               << operands[1].immediate();
+        if (operands[2].immediate())
+            output << ", lsl #" << operands[2].immediate();
+        output << '\n';
+        break;
+    }
+    case Opcode::MOVIv16b: {
+        if (operands.size() != 2 ||
+            operands[1].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed movi.16b");
+        output << "\tmovi " << registerName(operands[0])
+               << ".16b, #" << operands[1].immediate() << '\n';
+        break;
+    }
+    case Opcode::FMOVv4s: {
+        if (operands.size() != 2 ||
+            operands[1].kind() != MachineOperand::Kind::FloatingBits)
+            throw std::logic_error("malformed fmov.4s immediate");
+        float value = 0.0f;
+        std::uint32_t bits = operands[1].floatingBits();
+        std::memcpy(&value, &bits, sizeof(value));
+        std::ostringstream immediate;
+        immediate << std::setprecision(9) << value;
+        output << "\tfmov " << registerName(operands[0]) << ".4s, #"
+               << immediate.str() << '\n';
+        break;
+    }
     case Opcode::ADRP:
         output << "\tadrp " << registerName(operands[0]) << ", "
                << operands[1].symbol() << '\n';
@@ -241,6 +334,30 @@ void printInstruction(const MachineFunction &function,
                << ", " << registerNameAs(operands[1], RegClass::GPR32)
                << ", " << registerNameAs(operands[2], RegClass::GPR32)
                << ", " << registerNameAs(operands[3], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::SDIVXrr:
+        output << "\tsdiv " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::MSUBXrrr:
+        output << "\tmsub " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << ", " << registerNameAs(operands[3], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::UMULHXrr:
+        output << "\tumulh " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << ", " << registerNameAs(operands[2], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::NEGX:
+        output << "\tneg " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
                << '\n';
         break;
     case Opcode::ANDWrr: emitThreeRegisters(output, "and", instruction); break;
@@ -306,6 +423,15 @@ void printInstruction(const MachineFunction &function,
     case Opcode::CMPWri:
         output << "\tcmp " << registerName(operands[0]) << ", #"
                << operands[1].immediate() << '\n';
+        break;
+    case Opcode::CMPXrr:
+        output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", " << registerNameAs(operands[1], RegClass::GPR64)
+               << '\n';
+        break;
+    case Opcode::CMPXri:
+        output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
+               << ", #" << operands[1].immediate() << '\n';
         break;
     case Opcode::TSTWrr:
         output << "\ttst " << registerName(operands[0]) << ", "
@@ -381,6 +507,10 @@ void printInstruction(const MachineFunction &function,
     case Opcode::LDRXui:
         emitMemory(output, "ldr", instruction);
         break;
+    case Opcode::LDRWro: case Opcode::LDRSro: case Opcode::LDRQro:
+    case Opcode::LDRXro:
+        emitRegisterOffsetMemory(output, "ldr", instruction);
+        break;
     case Opcode::LDRWlo: case Opcode::LDRSlo: case Opcode::LDRQlo:
     case Opcode::LDRXlo:
         emitGlobalMemory(output, "ldr", instruction);
@@ -391,6 +521,10 @@ void printInstruction(const MachineFunction &function,
     case Opcode::STRWui: case Opcode::STRSui: case Opcode::STRQui:
     case Opcode::STRXui:
         emitMemory(output, "str", instruction);
+        break;
+    case Opcode::STRWro: case Opcode::STRSro: case Opcode::STRQro:
+    case Opcode::STRXro:
+        emitRegisterOffsetMemory(output, "str", instruction);
         break;
     case Opcode::STRWlo: case Opcode::STRSlo: case Opcode::STRQlo:
     case Opcode::STRXlo:
@@ -419,7 +553,9 @@ void printInstruction(const MachineFunction &function,
                << registerName(operands[2]) << "], #"
                << operands[3].immediate() << '\n';
         break;
+    case Opcode::LDPWi: case Opcode::LDPSi:
     case Opcode::LDPXi: case Opcode::LDPDi: case Opcode::LDPQi:
+    case Opcode::STPWi: case Opcode::STPSi:
     case Opcode::STPXi: case Opcode::STPDi: case Opcode::STPQi:
         {
         bool qPair =
@@ -428,8 +564,10 @@ void printInstruction(const MachineFunction &function,
         bool dPair =
             instruction.opcode() == Opcode::LDPDi ||
             instruction.opcode() == Opcode::STPDi;
+        unsigned scale = qPair ? 16U : (dPair ||
+            instruction.opcode() == Opcode::LDPXi ||
+            instruction.opcode() == Opcode::STPXi) ? 8U : 4U;
         std::int64_t offset = operands[3].immediate();
-        unsigned scale = qPair ? 16U : 8U;
         bool offsetEncodable =
             offset % scale == 0 && offset / scale >= -64 &&
             offset / scale <= 63;
@@ -442,11 +580,14 @@ void printInstruction(const MachineFunction &function,
         if (!offsetEncodable)
             throw std::logic_error(
                 "illegal pair offset reached assembly printer");
+        bool isLoad =
+            instruction.opcode() == Opcode::LDPWi ||
+            instruction.opcode() == Opcode::LDPSi ||
+            instruction.opcode() == Opcode::LDPXi ||
+            instruction.opcode() == Opcode::LDPDi ||
+            instruction.opcode() == Opcode::LDPQi;
         output << '\t'
-               << (instruction.opcode() == Opcode::LDPXi ||
-                           instruction.opcode() == Opcode::LDPDi ||
-                           instruction.opcode() == Opcode::LDPQi
-                       ? "ldp" : "stp")
+               << (isLoad ? "ldp" : "stp")
                << ' ' << pairRegister(operands[0]) << ", "
                << pairRegister(operands[1]) << ", ["
                << base;
@@ -495,6 +636,14 @@ void printInstruction(const MachineFunction &function,
                              ".s[0]"
                        : registerName(operands[1]))
                << '\n';
+        break;
+    case Opcode::DUPv4sLane:
+        if (operands.size() != 3 ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed dup lane");
+        output << "\tdup " << vectorView(operands[0]) << ", "
+               << registerName(operands[1]) << ".s["
+               << operands[2].immediate() << "]\n";
         break;
     case Opcode::INSv4i32:
     case Opcode::INSv4f32:
@@ -591,6 +740,33 @@ void printInstruction(const MachineFunction &function,
                << registerName(operands[3]) << ".16b\n";
         break;
     }
+    case Opcode::ZIP1v4s: case Opcode::ZIP2v4s:
+    case Opcode::UZP1v4s: case Opcode::UZP2v4s:
+    case Opcode::TRN1v4s: case Opcode::TRN2v4s:
+        output << '\t'
+               << (instruction.opcode() == Opcode::ZIP1v4s ? "zip1"
+                   : instruction.opcode() == Opcode::ZIP2v4s ? "zip2"
+                   : instruction.opcode() == Opcode::UZP1v4s ? "uzp1"
+                   : instruction.opcode() == Opcode::UZP2v4s ? "uzp2"
+                   : instruction.opcode() == Opcode::TRN1v4s ? "trn1"
+                                                             : "trn2")
+               << ' ' << vectorView(operands[0]) << ", "
+               << vectorView(operands[1]) << ", "
+               << vectorView(operands[2]) << '\n';
+        break;
+    case Opcode::EXTv16b:
+        if (operands.size() != 4 ||
+            operands[3].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error("malformed ext");
+        output << "\text " << registerName(operands[0]) << ".16b, "
+               << registerName(operands[1]) << ".16b, "
+               << registerName(operands[2]) << ".16b, #"
+               << operands[3].immediate() << '\n';
+        break;
+    case Opcode::REV64v4s:
+        output << "\trev64 " << vectorView(operands[0]) << ", "
+               << vectorView(operands[1]) << '\n';
+        break;
     case Opcode::ADDVv4i32:
         output << "\taddv " << registerName(operands[0]) << ", "
                << vectorView(operands[1]) << '\n';
@@ -615,8 +791,6 @@ void printInstruction(const MachineFunction &function,
     case Opcode::ADJCALLSTACKUP:
     case Opcode::IMPLICIT_DEF:
     case Opcode::Invalid:
-    case Opcode::LDRWro: case Opcode::STRWro:
-    case Opcode::LDRSro: case Opcode::STRSro:
         throw std::logic_error(
             "unexpanded or unsupported opcode reached assembly printer");
     }
@@ -646,6 +820,17 @@ void AArch64AssemblyPrinter::printFunction(
     }
     output << "\t.size " << function.name() << ", .-"
            << function.name() << "\n";
+    const auto &pool = function.vectorConstantPool();
+    if (!pool.empty()) {
+        output << "\t.section .rodata\n";
+        for (const MachineFunction::VectorConstantPoolEntry &entry : pool) {
+            output << "\t.p2align 4\n" << entry.label << ":\n";
+            for (std::uint32_t word : entry.lanes)
+                output << "\t.word 0x" << std::hex << word << std::dec
+                       << '\n';
+        }
+        output << "\t.text\n";
+    }
 }
 
 std::string AArch64AssemblyPrinter::printFunction(

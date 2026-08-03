@@ -50,7 +50,7 @@ const char *opcodeName(SDOpcode opcode) {
     NAME(Splat); NAME(InsertElement); NAME(ExtractElement);
     NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(TailCall); NAME(Branch);
     NAME(BranchCond); NAME(Return); NAME(MAdd); NAME(MSub);
-    NAME(VectorReduceAdd); NAME(SMin); NAME(SMax);
+    NAME(VectorReduceAdd); NAME(SMin); NAME(SMax); NAME(MulMod);
 #undef NAME
     }
     return "Invalid";
@@ -541,6 +541,16 @@ SelectionDAGBuilder::build(Function *function) const {
                                 : SDOpcode::SMax,
                             {valueType(instruction->type_)},
                             {operand(0), operand(1)});
+                        break;
+                    }
+                    if (isMulModIntrinsic(callee)) {
+                        if (instruction->num_ops_ != 4)
+                            throw std::logic_error(
+                                "mulmod intrinsic must have three operands");
+                        created = &dag.createNode(
+                            SDOpcode::MulMod,
+                            {valueType(instruction->type_)},
+                            {operand(0), operand(1), operand(2)});
                         break;
                     }
                     auto *callInst = static_cast<CallInst *>(instruction);
