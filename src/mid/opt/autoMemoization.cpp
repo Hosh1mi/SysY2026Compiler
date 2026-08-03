@@ -358,7 +358,7 @@ void AutoMemoization::transform(Function *f,
 
     // ── fillFn: body + optional store ──
     {
-        auto *fEntry = new BasicBlock(m, "label_entry", fillFn);
+        auto *fEntry = new BasicBlock(m, "entry", fillFn);
         auto *fStore = new BasicBlock(m, "memo_store", fillFn);
         auto *fRet = new BasicBlock(m, "memo_ret", fillFn);
         auto *fb = new IRStmtBuilder(fEntry, m);
@@ -384,7 +384,7 @@ void AutoMemoization::transform(Function *f,
 
     // ── wrapper f: 薄查表；miss 只 tail-call 式 call fill ──
     {
-        auto *entry = new BasicBlock(m, "label_entry", f);
+        auto *entry = new BasicBlock(m, "entry", f);
         auto *checkBB = new BasicBlock(m, "memo_check", f);
         auto *hitBB = new BasicBlock(m, "memo_hit", f);
         auto *missBB = new BasicBlock(m, "memo_miss", f);
@@ -436,7 +436,7 @@ void AutoMemoization::transform(Function *f,
     auto *hashGV = new GlobalVariable("__memo_hash_" + f->name_, m, arrTy,
                                        false, new ConstantZero(arrTy));
 
-    auto *entry = new BasicBlock(m, "label_entry", f);
+    auto *entry = new BasicBlock(m, "entry", f);
     auto *checkKey = new BasicBlock(m, "memo_check_key", f);
     auto *hitBB = new BasicBlock(m, "memo_hit", f);
     auto *missBB = new BasicBlock(m, "memo_miss", f);

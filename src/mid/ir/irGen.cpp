@@ -1,5 +1,7 @@
+// AST → 基础 IR：局部量走 entry alloca 槽，非 void 函数统一经 %retval 返回。
 #include "../../include/mid/ir/irGen.hpp"
-#include<iostream>
+#include <iostream>
+#include <vector>
 
 #define CONST_INT(num) new ConstantInt(module->int32_ty_, num)
 #define CONST_FLOAT(num) new ConstantFloat(module->float32_ty_, num)
@@ -10,25 +12,129 @@
 #define INT32PTR_T (module->get_pointer_type(module->int32_ty_))
 #define FLOATPTR_T (module->get_pointer_type(module->float32_ty_))
 
-// store temporary value
-Type* curType;                          //当前decl类型
-bool isConst;                           //当前decl是否是const
-bool useConst = false;                  //计算是否使用常量
-std::vector<Type *> params;             //函数形参类型表
-std::vector<std::string> paramNames;    //函数形参名表
-Value *retAlloca = nullptr;             //返回值
-BasicBlock *retBB = nullptr;            //返回语句块
-bool isNewFunc = false;                 //判断是否为新函数，用来处理函数作用域问题
-bool requireLVal = false;               //告诉LVal节点不需要发射load指令
-Function *currentFunction = nullptr;    //当前函数
-Value *recentVal = nullptr;             //最近的表达式的value
-BasicBlock *whileCondBB = nullptr;      //while语句cond分支
-BasicBlock *trueBB = nullptr;           //通用true分支，即while和if为真时所跳转的基本块
-BasicBlock *falseBB = nullptr;          //通用false分支，即while和if为假时所跳转的基本块
-BasicBlock * whileFalseBB;              //while语句false分支，用于break跳转
-int id = 1;                             //recent标号
-bool has_br = false;                    //一个BB中是否已经出现了br
-bool is_single_exp = false;             //作为单独的exp语句出现，形如 "exp;"
+Type* curType;                          // 当前 decl 类型
+bool isConst;                           // 当前 decl 是否是 const
+bool useConst = false;                  // 计算是否使用常量
+std::vector<Type *> params;             // 函数形参类型表
+std::vector<std::string> paramNames;    // 函数形参名表
+Value *retAlloca = nullptr;             // 统一返回值槽（非 void）
+BasicBlock *retBB = nullptr;            // 统一返回块
+bool isNewFunc = false;                 // 函数体首层 block 不再重复 enter scope
+bool requireLVal = false;               // LVal 只需地址，不发射 load
+Function *currentFunction = nullptr;
+Value *recentVal = nullptr;
+BasicBlock *whileCondBB = nullptr;
+BasicBlock *trueBB = nullptr;
+BasicBlock *falseBB = nullptr;
+BasicBlock *whileFalseBB = nullptr;     // break 目标
+bool has_br = false;                    // 当前 BB 已发射终止指令
+bool is_single_exp = false;             // 形如 "exp;" 的独立表达式语句
+
+// 在函数内创建带语义名的基本块；同名冲突时加数字后缀（if.then → if.then1）。
+static BasicBlock *createNamedBB(Module *m, Function *func,
+                                 const std::string &base) {
+    std::string name = base;
+    int suffix = 1;
+    auto taken = [&](const std::string &n) {
+        for (auto *bb : func->basic_blocks_)
+            if (bb->name_ == n)
+                return true;
+        return false;
+    };
+    while (taken(name))
+        name = base + std::to_string(suffix++);
+    return new BasicBlock(m, name, func);
+}
+
+// 将返回值写到 %retval 前做必要的 i32/float 转换。
+static Value *coerceToReturnType(IRStmtBuilder *builder, Value *val, Type *retTy,
+                                 Type *intTy, Type *floatTy) {
+    if (val->type_ == floatTy && retTy == intTy)
+        return builder->create_fptosi(val, intTy);
+    if (val->type_ == intTy && retTy == floatTy)
+        return builder->create_sitofp(val, floatTy);
+    return val;
+}
+
+// 若 %retval 已无 load，删掉其上全部 store 与 alloca（避免留下死 store）。
+static void eraseDeadRetvalSlot(Value *&slot) {
+    if (!slot) return;
+    for (auto &use : slot->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (user && user->is_load())
+            return;
+    }
+    std::vector<Instruction *> deadStores;
+    for (auto &use : slot->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (user && user->is_store())
+            deadStores.push_back(user);
+    }
+    for (auto *st : deadStores) {
+        if (st->parent_)
+            st->parent_->delete_instr(st);
+    }
+    auto *alloca = dynamic_cast<AllocaInst *>(slot);
+    if (alloca && alloca->parent_)
+        alloca->parent_->delete_instr(alloca);
+    slot = nullptr;
+}
+
+// store %v, %retval ; %t = load %retval → 用 %v 替换 %t；
+// 若槽上再无 load，连同死 store / alloca 一并清掉。
+static void foldRetvalStoreLoad(BasicBlock *bb, Value *&slot,
+                                const std::vector<Instruction *> &moved) {
+    if (!slot) return;
+    for (auto *inst : moved) {
+        if (!inst->is_load() || inst->get_operand(0) != slot)
+            continue;
+        if (!inst->parent_)
+            continue;
+        Value *storedVal = nullptr;
+        Instruction *srcStore = nullptr;
+        for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
+            if (*rit == inst) continue;
+            if ((*rit)->is_store() && (*rit)->get_operand(1) == slot) {
+                storedVal = (*rit)->get_operand(0);
+                srcStore = *rit;
+                break;
+            }
+            if ((*rit)->is_load() && (*rit)->get_operand(0) == slot)
+                break;
+        }
+        if (!storedVal) continue;
+        inst->replace_all_use_with(storedVal);
+        bb->delete_instr(inst);
+        // 转发后该 store 若已无其它用途，随整槽清理一并删除
+        (void)srcStore;
+    }
+    eraseDeadRetvalSlot(slot);
+}
+
+// 若 retBB 只有一个无条件前驱，把它并入该前驱并折叠 %retval 转发。
+static void tryMergeTrivialRetBlock(Function *func, BasicBlock *retBlock,
+                                    Value *&slot) {
+    if (!retBlock || retBlock->pre_bbs_.size() != 1)
+        return;
+    BasicBlock *pred = retBlock->pre_bbs_[0];
+    auto *term = pred->get_terminator();
+    auto *br = dynamic_cast<BranchInst *>(term);
+    if (!br || br->num_ops_ != 1 || br->get_operand(0) != retBlock)
+        return;
+
+    pred->delete_instr(br);
+    std::vector<Instruction *> moved(retBlock->instr_list_.begin(),
+                                     retBlock->instr_list_.end());
+    for (auto *inst : moved) {
+        retBlock->remove_instr(inst);
+        if (inst->is_alloca())
+            pred->add_instruction_front(inst);
+        else
+            pred->add_instruction(inst);
+    }
+    func->remove_bb(retBlock);
+    foldRetvalStoreLoad(pred, slot, moved);
+}
 
 
 //判断得到的赋值与声明类型是否一致，并做转换
@@ -191,9 +297,9 @@ void GenIR::visit(DefAST &ast) {
         // 对于大数组，使用 IR 循环逐元素清零，避免生成百万级指令导致编译超时
         // （19 维 [2][2]...[2] 有 2^19 = 524288 个元素）
         if (elemCnt > 256) {
-            auto zeroCondBB = new BasicBlock(module.get(), "label_zero_cond_" + to_string(id++), currentFunction);
-            auto zeroBodyBB = new BasicBlock(module.get(), "label_zero_body_" + to_string(id++), currentFunction);
-            auto zeroEndBB  = new BasicBlock(module.get(), "label_zero_end_" + to_string(id++), currentFunction);
+            auto zeroCondBB = createNamedBB(module.get(), currentFunction, "zero.cond");
+            auto zeroBodyBB = createNamedBB(module.get(), currentFunction, "zero.body");
+            auto zeroEndBB  = createNamedBB(module.get(), currentFunction, "zero.end");
 
             // 在 entry 块中分配循环计数器并初始化
             auto idxAlloca = builder->create_alloca(INT32_T);
@@ -361,102 +467,57 @@ void GenIR::visit(FuncDefAST &ast) {
     else if (ast.funcType == TYPE_FLOAT) retType = FLOAT_T;
     else retType = VOID_T;
 
-    //获取参数列表
-    for (auto &funcFParam:ast.funcFParamList) {
+    for (auto &funcFParam : ast.funcFParamList)
         funcFParam->accept(*this);
-    }
-    //获取函数类型
+
     auto funTy = new FunctionType(retType, params);
-    //添加函数
     auto func = new Function(funTy, *ast.id, module.get());
     currentFunction = func;
-    scope.push(*ast.id, func); //在进入新的作用域之前添加到符号表中
-    //进入函数(进入新的作用域)
+    scope.push(*ast.id, func);
     scope.enter();
 
-    std::vector<Value *> args; // 获取函数的形参,通过Function中的iterator
-    for (auto arg = func->arguments_.begin(); arg != func->arguments_.end(); arg++)
+    std::vector<Value *> args;
+    for (auto arg = func->arguments_.begin(); arg != func->arguments_.end(); ++arg)
         args.push_back(*arg);
 
-    auto bb = new BasicBlock(module.get(), "label_entry", func);
-    builder->BB_ = bb;
-    // 第一遍：alloca，全部放到 entry 块顶部
-    for (int i = 0; i < (int)(paramNames.size()); i++) {
-        auto alloc = builder->create_alloca(params[i]);
+    auto *entry = createNamedBB(module.get(), func, "entry");
+    builder->BB_ = entry;
+
+    // 形参：先全部 alloca，再全部 store（alloca 会聚到 entry 顶部）
+    for (int i = 0; i < (int)paramNames.size(); i++) {
+        auto *alloc = builder->create_alloca(params[i]);
         alloc->name_ = paramNames[i];
         scope.push(paramNames[i], alloc);
     }
-    // 第二遍：store，放在 alloca 之后
-    for (int i = 0; i < (int)(paramNames.size()); i++) {
-        auto alloc = scope.find(paramNames[i]);
-        builder->create_store(args[i], alloc);
-    }
-    //创建统一return分支
-    retBB = new BasicBlock(module.get(), "label_ret", func);
+    for (int i = 0; i < (int)paramNames.size(); i++)
+        builder->create_store(args[i], scope.find(paramNames[i]));
+
+    // 统一返回块；非 void 在 entry 建 %retval 并默认置 0
+    retBB = createNamedBB(module.get(), func, "return");
+    retAlloca = nullptr;
     if (retType == VOID_T) {
-        // void类型无需返回值
         builder->BB_ = retBB;
         builder->create_void_ret();
     } else {
-        retAlloca = builder->create_alloca(retType); // 在内存中分配返回值的位置
+        retAlloca = builder->create_alloca(retType);
         retAlloca->name_ = "retval";
+        Value *zero = (retType == FLOAT_T) ? (Value *)CONST_FLOAT(0.0f)
+                                           : (Value *)CONST_INT(0);
+        builder->create_store(zero, retAlloca);
         builder->BB_ = retBB;
-        auto retLoad = builder->create_load(retAlloca);
-        builder->create_ret(retLoad);
+        builder->create_ret(builder->create_load(retAlloca));
     }
-    //重新回到函数开始
-    builder->BB_ = bb;
+
+    builder->BB_ = entry;
     has_br = false;
     ast.block->accept(*this);
 
-    //处理没有return的空块
     if (!builder->BB_->get_terminator())
         builder->create_br(retBB);
 
-    // 如果retBB只有一个前驱且该前驱无条件跳转到retBB，则合并两个块
-    if (retBB->pre_bbs_.size() == 1) {
-        BasicBlock *pred = retBB->pre_bbs_[0];
-        auto *term = pred->get_terminator();
-        if (auto *br = dynamic_cast<BranchInst*>(term)) {
-            if (br->num_ops_ == 1 && br->get_operand(0) == retBB) {
-                // 移除无条件分支
-                pred->delete_instr(br);
-                // 收集retBB的指令，移到pred（alloca移到开头，其余保持顺序）
-                std::vector<Instruction*> insts(retBB->instr_list_.begin(), retBB->instr_list_.end());
-                for (auto *inst : insts) {
-                    retBB->remove_instr(inst);
-                    if (inst->is_alloca())
-                        pred->add_instruction_front(inst);
-                    else
-                        pred->add_instruction(inst);
-                }
-                // 移除retBB（同时清理CFG边）
-                func->remove_bb(retBB);
-
-                // 合并后，将store->retAlloca再load回来的冗余转发掉
-                // 例如 store %v1, %retval ; %v2 = load %retval  → 直接用 %v1 替换 %v2
-                if (retAlloca) {
-                    for (auto *inst : insts) {
-                        if (inst->is_load() && inst->get_operand(0) == retAlloca) {
-                            // 在pred中向前查找最近的对retAlloca的store
-                            Value *storedVal = nullptr;
-                            for (auto rit = pred->instr_list_.rbegin(); rit != pred->instr_list_.rend(); ++rit) {
-                                if (*rit == inst) continue;
-                                if ((*rit)->is_store() && (*rit)->get_operand(1) == retAlloca) {
-                                    storedVal = (*rit)->get_operand(0);
-                                    break;
-                                }
-                            }
-                            if (storedVal) {
-                                inst->replace_all_use_with(storedVal);
-                                pred->delete_instr(inst);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    tryMergeTrivialRetBlock(func, retBB, retAlloca);
+    retBB = nullptr;
+    retAlloca = nullptr;
 }
 
 void GenIR::visit(FuncFParamAST &ast) {
@@ -554,22 +615,14 @@ void GenIR::visit(StmtAST &ast) {
 }
 
 void GenIR::visit(ReturnStmtAST &ast) {
-    if (ast.exp == nullptr) {
-        recentVal = builder->create_br(retBB);
-    } else {
-        //先把返回值store在retAlloca中，再跳转到统一的返回入口
+    if (ast.exp != nullptr) {
         ast.exp->accept(*this);
-        //类型转换
-        if (recentVal->type_ == FLOAT_T && currentFunction->get_return_type() == INT32_T) {
-            auto temp = builder->create_fptosi(recentVal, INT32_T);
-            builder->create_store(temp, retAlloca);
-        } else if (recentVal->type_ == INT32_T && currentFunction->get_return_type() == FLOAT_T) {
-            auto temp = builder->create_sitofp(recentVal, FLOAT_T);
-            builder->create_store(temp, retAlloca);
-        } else
-            builder->create_store(recentVal, retAlloca);
-        recentVal = builder->create_br(retBB);
+        Value *retVal = coerceToReturnType(builder, recentVal,
+                                           currentFunction->get_return_type(),
+                                           INT32_T, FLOAT_T);
+        builder->create_store(retVal, retAlloca);
     }
+    recentVal = builder->create_br(retBB);
     has_br = true;
 }
 
@@ -578,11 +631,16 @@ void GenIR::visit(SelectStmtAST &ast) {
     auto tempTrue = trueBB;
     auto tempFalse = falseBB;
 
-    trueBB = new BasicBlock(module.get(), "label_if_then_" + to_string(id++), currentFunction);
-    falseBB = new BasicBlock(module.get(), "label_if_else_" + to_string(id++), currentFunction);
-    BasicBlock* nextIf; // if语句后的基本块
-    if (ast.elseStmt == nullptr) nextIf = falseBB;
-    else nextIf = new BasicBlock(module.get(), "label_if_end_" + to_string(id++), currentFunction);
+    trueBB = createNamedBB(module.get(), currentFunction, "if.then");
+    BasicBlock *nextIf;
+    if (ast.elseStmt == nullptr) {
+        // 无 else：假出口就是汇合点
+        falseBB = createNamedBB(module.get(), currentFunction, "if.end");
+        nextIf = falseBB;
+    } else {
+        falseBB = createNamedBB(module.get(), currentFunction, "if.else");
+        nextIf = createNamedBB(module.get(), currentFunction, "if.end");
+    }
     bool nextIfReachable = false;
     ast.cond->accept(*this);
     //检查是否是i1，不是则进行比较
@@ -641,9 +699,9 @@ void GenIR::visit(IterationStmtAST &ast) {
     auto tempCond = whileCondBB;
     auto tempWhileFalseBB = whileFalseBB; //break只跳while的false，而不跳全局false
 
-    whileCondBB = new BasicBlock(module.get(), "label_while_cond_" + to_string(id++), currentFunction);
-    trueBB = new BasicBlock(module.get(), "label_while_body_" + to_string(id++), currentFunction);
-    falseBB = new BasicBlock(module.get(), "label_while_end_" + to_string(id++), currentFunction);
+    whileCondBB = createNamedBB(module.get(), currentFunction, "while.cond");
+    trueBB = createNamedBB(module.get(), currentFunction, "while.body");
+    falseBB = createNamedBB(module.get(), currentFunction, "while.end");
     whileFalseBB = falseBB;
 
     builder->create_br(whileCondBB);
@@ -1090,7 +1148,7 @@ void GenIR::visit(LAndExpAST &ast) {
         return;
     }
     auto tempTrue = trueBB; //防止嵌套and导致原trueBB丢失。用于生成短路模块
-    trueBB = new BasicBlock(module.get(), "label_and_" + to_string(id++), currentFunction);
+    trueBB = createNamedBB(module.get(), currentFunction, "land.rhs");
     ast.lAndExp->accept(*this);
 
     if (recentVal->type_ == INT32_T) {
@@ -1112,7 +1170,7 @@ void GenIR::visit(LOrExpAST &ast) {
         return;
     }
     auto tempFalse = falseBB; //防止嵌套and导致原trueBB丢失。用于生成短路模块
-    falseBB = new BasicBlock(module.get(), "label_or_" + to_string(id++), currentFunction);
+    falseBB = createNamedBB(module.get(), currentFunction, "lor.rhs");
     ast.lOrExp->accept(*this);
     if (recentVal->type_ == INT32_T) {
         recentVal = builder->create_icmp_ne(recentVal, CONST_INT(0));

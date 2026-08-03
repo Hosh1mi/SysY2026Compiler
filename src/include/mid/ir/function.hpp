@@ -85,10 +85,12 @@ public:
     std::vector<BasicBlock*> basic_blocks_;
     std::vector<Argument*> arguments_;
     Module* parent_;
-    unsigned seq_cnt_;                        // 命名序号计数器
-    unsigned gep_cnt_;                        // GEP 独立命名计数器
+    unsigned seq_cnt_;                        // 命名序号计数器（遗留，print 时不再依赖）
+    unsigned gep_cnt_;                        // GEP 独立命名计数器（遗留）
     std::vector<std::set<Value*>> vreg_set_; // 虚拟寄存器集合（优化用）
     int use_ret_cnt;                          // 返回值的实际使用次数
+    // create_alloca 用：指向 entry 中最近一次插入的 alloca，保证 O(1) 追加到 alloca 段
+    class AllocaInst *lastEntryAlloca_ = nullptr;
 
 private:
     void computeDominatorInfo();

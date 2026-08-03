@@ -75,8 +75,32 @@ public:
         return new LoadInst(ptr, this->BB_);
     }
 
-    // 栈分配
-    AllocaInst* create_alloca(Type* ty) { return new AllocaInst(ty, this->BB_); }
+    // 栈分配：始终插入到当前函数 entry 块的 alloca 段末尾（与插入点无关）。
+    // 通过 Function::lastEntryAlloca_ 做 O(1) 追加；缓存失效时再线性扫描一次。
+    AllocaInst* create_alloca(Type* ty) {
+        Function* func = BB_->parent_;
+        BasicBlock* entry = func->basic_blocks_.front();
+        auto* inst = new AllocaInst(ty, entry, /*no_insert=*/true);
+
+        AllocaInst* last = func->lastEntryAlloca_;
+        if (last && last->parent_ == entry && last->is_alloca()) {
+            entry->add_instruction_after_inst(inst, last);
+        } else {
+            Instruction* insertBefore = nullptr;
+            for (auto* existing : entry->instr_list_) {
+                if (!existing->is_alloca()) {
+                    insertBefore = existing;
+                    break;
+                }
+            }
+            if (insertBefore)
+                entry->add_instruction_before_inst(inst, insertBefore);
+            else
+                entry->add_instruction(inst);
+        }
+        func->lastEntryAlloca_ = inst;
+        return inst;
+    }
 
     // 类型转换
     ZextInst* create_zext(Value* val, Type* ty) { return new ZextInst(Instruction::ZExt, val, ty, this->BB_); }

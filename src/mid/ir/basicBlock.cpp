@@ -119,6 +119,22 @@ bool BasicBlock::add_instruction_before_inst(Instruction* new_instr, Instruction
     }
 }
 
+// 在指定指令后插入新指令
+bool BasicBlock::add_instruction_after_inst(Instruction* new_instr, Instruction* instr) {
+    if ((!instr) || instr->pos_in_bb.size() != 1 || instr->parent_ != this)
+        return false;
+    if (new_instr->pos_in_bb.size() != 0)
+        return false;
+    if (instr_list_.empty())
+        return false;
+    auto it = instr->pos_in_bb.back();
+    ++it;
+    auto inserted = instr_list_.emplace(it, new_instr);
+    new_instr->pos_in_bb.emplace_back(inserted);
+    new_instr->parent_ = this;
+    return true;
+}
+
 // 从 BB 中移出指令（保留 use 关系，用于跨 BB 移动）
 bool BasicBlock::remove_instr(Instruction* instr) {
     if ((!instr) || instr->pos_in_bb.size() != 1 || instr->parent_ != this)

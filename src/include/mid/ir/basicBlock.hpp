@@ -18,11 +18,12 @@ public:
     explicit BasicBlock(Module* m, const std::string& name, Function* parent)
         : Value(m->label_ty_, name), parent_(parent) { parent_->add_basic_block(this); }
 
-    // 在末尾/开头/终止指令前/指定指令前插入指令
+    // 在末尾/开头/终止指令前/指定指令前/指定指令后插入指令
     bool add_instruction(Instruction* instr);
     bool add_instruction_front(Instruction* instr);
     bool add_instruction_before_terminator(Instruction* instr);
     bool add_instruction_before_inst(Instruction* new_inst, Instruction* inst);
+    bool add_instruction_after_inst(Instruction* new_inst, Instruction* inst);
 
     void add_pre_basic_block(BasicBlock* bb) {
         if (std::find(pre_bbs_.begin(), pre_bbs_.end(), bb) == pre_bbs_.end())
@@ -39,11 +40,13 @@ public:
         succ_bbs_.erase(std::remove(succ_bbs_.begin(), succ_bbs_.end(), bb), succ_bbs_.end());
     }
 
-    // 判断 this 是否支配 bb2（沿 idom 链向上查找）
+    // 判断 this 是否支配 bb2（沿 idom 链向上查找，不依赖块名）
     int isDominate(BasicBlock* bb2) {
         if (!bb2 || this->parent_ != bb2->parent_)
             return -1;
-        while (bb2->name_ != "label_entry") {
+        if (this == bb2)
+            return 1;
+        while (bb2->idom_) {
             if (bb2->idom_ == this)
                 return 1;
             bb2 = bb2->idom_;

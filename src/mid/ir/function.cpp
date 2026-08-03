@@ -99,62 +99,80 @@ BasicBlock* Function::getRetBB() {
     return nullptr;
 }
 
-// 统一为所有匿名 Value（参数/BB/指令）分配 IR 名称，便于输出。
-// 对于已有名称的值，检查冲突并添加后缀以保证唯一性。
+// 统一为所有匿名 Value（参数/指令）分配 IR 名称。
+// 已命名的值（alloca 源名、%retval、%cmp 等）做冲突消解；其余按出现顺序编号为 %0,%1,...
 void Function::set_instr_name() {
-    std::map<Value*, int> seq;
     std::set<std::string> used_names;
+    unsigned next_num = 0;
 
     auto uniquify = [&](std::string &name) {
-        if (used_names.count(name)) {
-            std::string base = name;
-            int suffix = 1;
-            do {
-                name = base + "." + std::to_string(suffix++);
-            } while (used_names.count(name));
+        if (!used_names.count(name)) {
+            used_names.insert(name);
+            return;
         }
+        std::string base = name;
+        int suffix = 1;
+        do {
+            name = base + std::to_string(suffix++);
+        } while (used_names.count(name));
         used_names.insert(name);
     };
 
-    for (auto arg : this->arguments_) {
-        if (!seq.count(arg)) {
-            auto seq_num = seq.size() + seq_cnt_;
-            if (arg->name_ == "") {
-                arg->name_ = "arg_" + std::to_string(seq_num);
-                seq.insert({arg, seq_num});
-            }
+    auto assign_numeric = [&](Value *v) {
+        std::string name;
+        do {
+            name = std::to_string(next_num++);
+        } while (used_names.count(name));
+        v->name_ = name;
+        used_names.insert(name);
+    };
+
+    // 与常见前端一致的助记名；冲突时由 uniquify 加后缀（cmp → cmp1）
+    auto mnemonic = [](Instruction *instr) -> std::string {
+        if (instr->is_gep()) return "arrayidx";
+        if (instr->is_cmp() || instr->is_fcmp()) return "cmp";
+        if (instr->is_add() || instr->is_fadd()) return "add";
+        if (instr->is_sub() || instr->is_fsub()) return "sub";
+        if (instr->is_mul() || instr->is_fmul()) return "mul";
+        if (instr->is_div() || instr->is_fdiv()) return "div";
+        if (instr->is_rem()) return "rem";
+        if (instr->is_zext()) return "zext";
+        if (instr->is_sitofp()) return "sitofp";
+        if (instr->is_fptosi()) return "fptosi";
+        if (instr->is_phi()) return "phi";
+        return "";
+    };
+
+    for (auto *arg : this->arguments_) {
+        if (arg->name_.empty())
+            assign_numeric(arg);
+        else
             uniquify(arg->name_);
-        }
     }
-    for (auto bb : basic_blocks_) {
-        if (!seq.count(bb)) {
-            auto seq_num = seq.size() + seq_cnt_;
-            if (bb->name_.length() <= 6 || bb->name_.substr(0, 6) != "label_") {
-                bb->name_ = "label_" + std::to_string(seq_num);
-                seq.insert({bb, seq_num});
-            }
+
+    for (auto *bb : basic_blocks_) {
+        // 保留前端/优化给的语义名（entry、if.then 等）；空名再编号
+        if (bb->name_.empty())
+            assign_numeric(bb);
+        else
             uniquify(bb->name_);
-        }
-        for (auto instr : bb->instr_list_) {
-            if (instr->type_->tid_ != Type::VoidTyID && !seq.count(instr)) {
-                auto seq_num = seq.size() + seq_cnt_;
-                if (instr->name_ == "") {
-                    if (instr->is_gep()) {
-                        if (gep_cnt_ == 0)
-                            instr->name_ = "arrayidx";
-                        else
-                            instr->name_ = "arrayidx" + std::to_string(gep_cnt_);
-                        gep_cnt_++;
-                    } else {
-                        instr->name_ = "v" + std::to_string(seq_num);
-                    }
-                    seq.insert({instr, seq_num});
-                }
+
+        for (auto *instr : bb->instr_list_) {
+            if (instr->type_->tid_ == Type::VoidTyID)
+                continue;
+            if (!instr->name_.empty()) {
                 uniquify(instr->name_);
+                continue;
+            }
+            std::string hint = mnemonic(instr);
+            if (!hint.empty()) {
+                instr->name_ = hint;
+                uniquify(instr->name_);
+            } else {
+                assign_numeric(instr);
             }
         }
     }
-    seq_cnt_ += seq.size();
 }
 
 // 沿 idom 链向上查找，判断 a 是否支配 b
