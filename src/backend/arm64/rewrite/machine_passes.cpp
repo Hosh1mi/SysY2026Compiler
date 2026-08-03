@@ -2257,6 +2257,98 @@ bool PostRAInstructionExpansion::run(
 
 namespace {
 
+// Expand one MOVi32/MOVi64 into MOVZ + MOVK pieces.  Matches the historical
+// asm-printer encoding: first non-zero 16-bit slice becomes MOVZ, remaining
+// non-zero slices become MOVK.  An all-zero immediate becomes `movz #0`.
+void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
+                            MachineBasicBlock::InstrList::iterator materialize) {
+    if (materialize->operands().size() != 2 ||
+        !materialize->operands()[0].isPhysicalRegister() ||
+        !materialize->operands()[0].isDef ||
+        materialize->operands()[1].kind() !=
+            MachineOperand::Kind::Immediate)
+        throw std::logic_error(
+            "malformed integer materialization after register allocation");
+
+    const MachineOperand &destination = materialize->operands()[0];
+    const PhysReg reg = destination.physicalRegister();
+    const RegClass regClass = destination.regClass();
+    const bool wide = materialize->opcode() == Opcode::MOVi64;
+    if ((wide && regClass != RegClass::GPR64) ||
+        (!wide && regClass != RegClass::GPR32))
+        throw std::logic_error(
+            "integer materialization register class mismatch");
+
+    const std::uint64_t value = wide
+        ? static_cast<std::uint64_t>(materialize->operands()[1].immediate())
+        : static_cast<std::uint32_t>(materialize->operands()[1].immediate());
+    const unsigned pieces = wide ? 4U : 2U;
+
+    unsigned first = pieces;
+    for (unsigned i = 0; i < pieces; ++i)
+        if (((value >> (i * 16)) & 0xffffU) != 0) {
+            first = i;
+            break;
+        }
+
+    auto emitMovz = [&](unsigned slice, std::uint64_t imm) {
+        MachineInstr movz(Opcode::MOVZ);
+        movz.addOperand(MachineOperand::physReg(reg, regClass, true));
+        movz.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(imm)));
+        movz.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
+        instructions.insert(materialize, std::move(movz));
+    };
+    auto emitMovk = [&](unsigned slice, std::uint64_t imm) {
+        MachineInstr movk(Opcode::MOVK);
+        movk.addOperand(MachineOperand::physReg(reg, regClass, true));
+        MachineOperand use = MachineOperand::physReg(reg, regClass);
+        use.tiedTo = 0;
+        use.isKill = true;
+        movk.addOperand(std::move(use));
+        movk.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(imm)));
+        movk.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
+        instructions.insert(materialize, std::move(movk));
+    };
+
+    if (first == pieces) {
+        emitMovz(0, 0);
+    } else {
+        emitMovz(first, (value >> (first * 16)) & 0xffffU);
+        for (unsigned i = 0; i < pieces; ++i) {
+            if (i == first)
+                continue;
+            const std::uint64_t piece = (value >> (i * 16)) & 0xffffU;
+            if (!piece)
+                continue;
+            emitMovk(i, piece);
+        }
+    }
+    instructions.erase(materialize);
+}
+
+} // namespace
+
+bool PostRAInstructionExpansion::expandConstantMaterializations(
+    MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+    bool changed = false;
+    for (auto &block : function.blocks()) {
+        auto &instructions = block->instructions();
+        for (auto it = instructions.begin(); it != instructions.end();) {
+            auto current = it++;
+            if (current->opcode() != Opcode::MOVi32 &&
+                current->opcode() != Opcode::MOVi64)
+                continue;
+            expandIntegerImmediate(instructions, current);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+namespace {
+
 unsigned scaledImmediateWidth(Opcode opcode) {
     switch (opcode) {
     case Opcode::LDRWui: case Opcode::STRWui:
