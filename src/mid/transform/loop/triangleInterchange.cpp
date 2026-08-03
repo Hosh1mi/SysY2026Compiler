@@ -1,3 +1,17 @@
+// TriangleInterchange recognizes the two-level triangular loop used by a
+// wavefront dynamic program.  For a domain such as
+//
+//     0 <= distance < row <= extent
+//
+// it replaces the original descending-row / increasing-distance traversal
+// with an increasing-distance outer loop and a lane loop over the independent
+// cells in that wave.  The cell body is cloned into the new CFG, while the
+// dependence check proves that every table load reads the current wave or an
+// earlier one.  This exposes the lane loop to later parallelization/vector
+// passes without changing the order of dependent waves.  Patterns that do
+// not have the required affine indices, aliasing facts, or loop shape are
+// left unchanged.
+
 #include "../../../include/mid/opt/triangleInterchange.hpp"
 
 #include "../../../include/mid/analysis/affineAnalysis.hpp"
