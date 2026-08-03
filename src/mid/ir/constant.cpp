@@ -31,7 +31,7 @@ std::string ConstantInt::print() {
     if (this->type_->tid_ == Type::IntegerTyID && static_cast<IntegerType*>(this->type_)->num_bits_ == 1) {
         const_ir += (this->value_ == 0) ? "0" : "1";  // i1
     } else
-        const_ir += std::to_string(this->value_);      // i32
+        const_ir += std::to_string(this->value_);      // i32 / i64
     return const_ir;
 }
 

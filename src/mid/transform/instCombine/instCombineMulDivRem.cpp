@@ -1,4 +1,5 @@
 #include "instCombineInternal.hpp"
+#include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -108,6 +109,75 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper,
 bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
     std::set<Value *> visiting;
     return inferSignedBounds(value, lower, upper, visiting);
+}
+
+// Keep a loop-carried remainder intact until loop transforms have had a
+// chance to combine several unrolled recurrence steps.  A later InstCombine
+// run can still lower the remaining remainder to bounded corrections.
+bool isLoopCarriedRemainder(BinaryInst *remainder) {
+    for (const auto &use : remainder->use_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(use.val_);
+        if (!phi || use.arg_no_ % 2 != 0 ||
+            use.arg_no_ + 1 >= phi->num_ops_ || phi->num_ops_ != 4)
+            continue;
+        auto *backedge = dynamic_cast<BasicBlock *>(
+            phi->get_operand(use.arg_no_ + 1));
+        BasicBlock *header = phi->parent_;
+        Function *function = header ? header->parent_ : nullptr;
+        if (!function || !backedge || !remainder->parent_ ||
+            !function->dominates(header, remainder->parent_) ||
+            !function->dominates(remainder->parent_, backedge))
+            continue;
+        // The remainder need not be in the latch itself.  Preserve it when it
+        // is on every path from the loop header to the PHI's backedge; this is
+        // the cross-block form consumed by CFG-region loop unrolling.
+        std::set<BasicBlock *> updateBlocks;
+        for (BasicBlock *block : function->basic_blocks_) {
+            if (function->dominates(header, block) &&
+                function->dominates(block, backedge))
+                updateBlocks.insert(block);
+        }
+        if (!updateBlocks.count(remainder->parent_))
+            continue;
+        ModuloRecurrenceAnalysis::Recurrence recurrence;
+        if (!ModuloRecurrenceAnalysis::analyze(
+                phi, remainder, updateBlocks, recurrence) ||
+            !ModuloRecurrenceAnalysis::hasPrivateUpdateChain(
+                recurrence, updateBlocks, true))
+            continue;
+
+        Value *init = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            if (phi->get_operand(i + 1) != backedge) {
+                init = phi->get_operand(i);
+                break;
+            }
+        }
+        std::vector<PhiInst *> noLoopStates;
+        if (!ModuloRecurrenceAnalysis::inferContributionBounds(
+                recurrence, noLoopStates, nullptr))
+            continue;
+        ModuloRecurrenceAnalysis::Bounds initial;
+        if (!init || !ModuloRecurrenceAnalysis::inferBounds(init, initial))
+            continue;
+
+        const long long mod = recurrence.modulus->value_;
+        ModuloRecurrenceAnalysis::Bounds prefix{
+            std::min(initial.lower, -mod + 1),
+            std::max(initial.upper, mod - 1)};
+        // Cover every factor currently selected by LoopUnroll (4 or 8).
+        bool safe = ModuloRecurrenceAnalysis::advanceBounds(
+            prefix, recurrence, 7);
+        ModuloRecurrenceAnalysis::Bounds final{-mod + 1, mod - 1};
+        if (safe)
+            safe = ModuloRecurrenceAnalysis::advanceBounds(final, recurrence);
+        if (safe && ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+                        prefix.lower, prefix.upper, mod) &&
+            ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
+                final.lower, final.upper, mod))
+            return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -393,6 +463,9 @@ Value* visitSRem(BinaryInst *inst) {
         if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
             return x;
     }
+
+    if (cy && cy->value_ > 0 && isLoopCarriedRemainder(inst))
+        return nullptr;
 
     // A value already known to lie in (-2M, 2M) needs at most one signed
     // correction in either direction.  This is especially valuable for

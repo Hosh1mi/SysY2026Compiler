@@ -509,8 +509,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         .addOperand(MachineOperand::frameIndex(fixed));
                     load.addMemoryOperand(MachineMemOperand{
                         MachineMemOperand::Access::Load,
-                        regClass == RegClass::NEON128 ? 16U : 4U,
-                        regClass == RegClass::NEON128 ? 16U : 4U,
+                        regClass == RegClass::NEON128 ? 16U
+                            : regClass == RegClass::GPR64 ? 8U : 4U,
+                        regClass == RegClass::NEON128 ? 16U
+                            : regClass == RegClass::GPR64 ? 8U : 4U,
                         nullptr, fixed, 0, false});
                     append(block, std::move(load), &node);
                 }
@@ -529,7 +531,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         block, define(node), lanes, &node);
                     break;
                 }
-                Opcode opcode = type == ValueType::Ptr
+                Opcode opcode = (type == ValueType::Ptr ||
+                                 type == ValueType::I64)
                                     ? Opcode::MOVi64
                                     : Opcode::MOVi32;
                 MachineInstr materialize(opcode);
@@ -607,6 +610,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 ValueType resultType = node.resultTypes().front();
                 bool integerVector = resultType == ValueType::V4I32;
                 bool floatingVector = resultType == ValueType::V4F32;
+                bool integer64 = resultType == ValueType::I64;
                 Opcode opcode = Opcode::Invalid;
                 if (integerVector) {
                     switch (node.opcode()) {
@@ -631,17 +635,17 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     }
                 } else {
                     switch (node.opcode()) {
-                    case SDOpcode::Add: opcode = Opcode::ADDWrr; break;
-                    case SDOpcode::Sub: opcode = Opcode::SUBWrr; break;
-                    case SDOpcode::Mul: opcode = Opcode::MULWrr; break;
-                    case SDOpcode::SDiv: opcode = Opcode::SDIVWrr; break;
-                    case SDOpcode::UDiv: opcode = Opcode::UDIVWrr; break;
-                    case SDOpcode::And: opcode = Opcode::ANDWrr; break;
-                    case SDOpcode::Or: opcode = Opcode::ORRWrr; break;
-                    case SDOpcode::Xor: opcode = Opcode::EORWrr; break;
-                    case SDOpcode::Shl: opcode = Opcode::LSLWrr; break;
-                    case SDOpcode::LShr: opcode = Opcode::LSRWrr; break;
-                    case SDOpcode::AShr: opcode = Opcode::ASRWrr; break;
+                    case SDOpcode::Add: opcode = integer64 ? Opcode::ADDXrr : Opcode::ADDWrr; break;
+                    case SDOpcode::Sub: opcode = integer64 ? Opcode::SUBXrr : Opcode::SUBWrr; break;
+                    case SDOpcode::Mul: opcode = integer64 ? Opcode::MULXrr : Opcode::MULWrr; break;
+                    case SDOpcode::SDiv: opcode = integer64 ? Opcode::SDIVXrr : Opcode::SDIVWrr; break;
+                    case SDOpcode::UDiv: opcode = integer64 ? Opcode::UDIVXrr : Opcode::UDIVWrr; break;
+                    case SDOpcode::And: opcode = integer64 ? Opcode::ANDXrr : Opcode::ANDWrr; break;
+                    case SDOpcode::Or: opcode = integer64 ? Opcode::ORRXrr : Opcode::ORRWrr; break;
+                    case SDOpcode::Xor: opcode = integer64 ? Opcode::EORXrr : Opcode::EORWrr; break;
+                    case SDOpcode::Shl: opcode = integer64 ? Opcode::LSLXrr : Opcode::LSLWrr; break;
+                    case SDOpcode::LShr: opcode = integer64 ? Opcode::LSRXrr : Opcode::LSRWrr; break;
+                    case SDOpcode::AShr: opcode = integer64 ? Opcode::ASRXrr : Opcode::ASRWrr; break;
                     case SDOpcode::FAdd: opcode = Opcode::FADDS; break;
                     case SDOpcode::FSub: opcode = Opcode::FSUBS; break;
                     case SDOpcode::FMul: opcode = Opcode::FMULS; break;
@@ -655,7 +659,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 
                 SDNode *rhs = node.operands()[1].node;
                 SDNode *lhs = node.operands()[0].node;
-                if (!integerVector && !floatingVector &&
+                if (!integerVector && !floatingVector && !integer64 &&
                     node.opcode() == SDOpcode::Mul) {
                     SDNode *constant = nullptr;
                     SDValue variable;
@@ -768,7 +772,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         }
                     }
                 }
-                if (!integerVector && !floatingVector &&
+                if (!integerVector && !floatingVector && !integer64 &&
                     node.opcode() == SDOpcode::SDiv && rhs &&
                     rhs->opcode() == SDOpcode::Constant &&
                     emitSignedConstantDivision(
@@ -837,22 +841,27 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 Opcode immediateOpcode = Opcode::Invalid;
                 if (!integerVector && !floatingVector &&
                     node.opcode() == SDOpcode::Add)
-                    immediateOpcode = Opcode::ADDWri;
+                    immediateOpcode = integer64 ? Opcode::ADDXri
+                                                : Opcode::ADDWri;
                 else if (!integerVector && !floatingVector &&
                          node.opcode() == SDOpcode::Sub)
-                    immediateOpcode = Opcode::SUBWri;
-                else if (!integerVector && !floatingVector &&
+                    immediateOpcode = integer64 ? Opcode::SUBXri
+                                                : Opcode::SUBWri;
+                else if (!integerVector && !floatingVector && !integer64 &&
                          node.opcode() == SDOpcode::And)
                     immediateOpcode = Opcode::ANDWri;
                 else if (!integerVector && !floatingVector &&
                          node.opcode() == SDOpcode::Shl)
-                    immediateOpcode = Opcode::LSLWri;
+                    immediateOpcode = integer64 ? Opcode::LSLXri
+                                                : Opcode::LSLWri;
                 else if (!integerVector && !floatingVector &&
                          node.opcode() == SDOpcode::LShr)
-                    immediateOpcode = Opcode::LSRWri;
+                    immediateOpcode = integer64 ? Opcode::LSRXri
+                                                : Opcode::LSRWri;
                 else if (!integerVector && !floatingVector &&
                          node.opcode() == SDOpcode::AShr)
-                    immediateOpcode = Opcode::ASRWri;
+                    immediateOpcode = integer64 ? Opcode::ASRXri
+                                                : Opcode::ASRWri;
 
                 MachineInstr instruction(opcode);
                 instruction.addOperand(define(node))
@@ -1137,8 +1146,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             }
             case SDOpcode::SRem:
             case SDOpcode::URem: {
+                bool integer64 =
+                    node.resultTypes().front() == ValueType::I64;
                 SDNode *rhs = node.operands()[1].node;
-                if (node.opcode() == SDOpcode::SRem && rhs &&
+                if (!integer64 && node.opcode() == SDOpcode::SRem && rhs &&
                     rhs->opcode() == SDOpcode::Constant) {
                     auto divisor =
                         static_cast<std::int32_t>(rhs->integer);
@@ -1213,19 +1224,24 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         break;
                     }
                 }
-                VReg quotient = createTemporary(ValueType::I32);
+                ValueType quotientType = integer64 ? ValueType::I64
+                                                   : ValueType::I32;
+                RegClass quotientClass = integer64 ? RegClass::GPR64
+                                                   : RegClass::GPR32;
+                VReg quotient = createTemporary(quotientType);
                 MachineOperand quotientDef = MachineOperand::vreg(
-                    quotient, RegClass::GPR32, true);
+                    quotient, quotientClass, true);
                 bool reduced =
-                    node.opcode() == SDOpcode::SRem && rhs &&
+                    !integer64 && node.opcode() == SDOpcode::SRem && rhs &&
                     rhs->opcode() == SDOpcode::Constant &&
                     emitSignedConstantDivision(
                         block, quotientDef, use(node.operands()[0]),
                         static_cast<std::int32_t>(rhs->integer));
                 if (!reduced) {
-                    MachineInstr divide(node.opcode() == SDOpcode::SRem
-                                            ? Opcode::SDIVWrr
-                                            : Opcode::UDIVWrr);
+                    MachineInstr divide(
+                        node.opcode() == SDOpcode::SRem
+                            ? (integer64 ? Opcode::SDIVXrr : Opcode::SDIVWrr)
+                            : (integer64 ? Opcode::UDIVXrr : Opcode::UDIVWrr));
                     divide.addOperand(quotientDef)
                         .addOperand(use(node.operands()[0]))
                         .addOperand(use(node.operands()[1]));
@@ -1234,10 +1250,11 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     registerInfo.setDefinition(quotient,
                                                &quotientDefinition);
                 }
-                MachineInstr remainder(Opcode::MSUBWrrr);
+                MachineInstr remainder(integer64 ? Opcode::MSUBXrrr
+                                                  : Opcode::MSUBWrrr);
                 remainder.addOperand(define(node))
                     .addOperand(MachineOperand::vreg(
-                        quotient, RegClass::GPR32))
+                        quotient, quotientClass))
                     .addOperand(use(node.operands()[1]))
                     .addOperand(use(node.operands()[0]));
                 append(block, std::move(remainder), &node);
@@ -1299,6 +1316,9 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             case SDOpcode::ICmp:
             case SDOpcode::FCmp: {
                 bool floating = node.opcode() == SDOpcode::FCmp;
+                bool integer64 = !floating && node.operands()[0].node &&
+                    node.operands()[0].node->resultTypes().front() ==
+                        ValueType::I64;
                 auto floatingPredicate =
                     static_cast<FCmpInst::FCmpOp>(node.predicate);
                 if (floating &&
@@ -1316,16 +1336,19 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     !floating && rhs &&
                     rhs->opcode() == SDOpcode::Constant &&
                     InstrInfo::acceptsImmediate(
-                        Opcode::CMPWri, rhs->integer);
+                        integer64 ? Opcode::CMPXri : Opcode::CMPWri,
+                        rhs->integer);
                 bool floatingZero =
                     floating && rhs &&
                     rhs->opcode() == SDOpcode::FPConstant &&
                     rhs->floatingBits == 0;
                 MachineInstr compare(
-                    integerImmediate ? Opcode::CMPWri
+                    integerImmediate ? (integer64 ? Opcode::CMPXri
+                                                  : Opcode::CMPWri)
                     : floatingZero ? Opcode::FCMPZS
                     : floating ? Opcode::FCMPSrr
-                               : Opcode::CMPWrr);
+                               : (integer64 ? Opcode::CMPXrr
+                                            : Opcode::CMPWrr));
                 compare.addOperand(use(node.operands()[0]));
                 if (integerImmediate)
                     compare.addOperand(
@@ -1592,7 +1615,32 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::ZExt:
+            case SDOpcode::SExt:
+            case SDOpcode::Trunc:
             case SDOpcode::Bitcast: {
+                ValueType resultType = node.resultTypes().front();
+                ValueType sourceType =
+                    node.operands()[0].node->resultTypes().front();
+                if (resultType == ValueType::I64 &&
+                    (sourceType == ValueType::I32 ||
+                     sourceType == ValueType::I1)) {
+                    MachineInstr extend(node.opcode() == SDOpcode::SExt
+                                            ? Opcode::SXTW
+                                            : Opcode::UXTW);
+                    extend.addOperand(define(node))
+                        .addOperand(use(node.operands()[0]));
+                    append(block, std::move(extend), &node);
+                    break;
+                }
+                if ((resultType == ValueType::I32 ||
+                     resultType == ValueType::I1) &&
+                    sourceType == ValueType::I64) {
+                    MachineInstr truncate(Opcode::COPYXtoW);
+                    truncate.addOperand(define(node))
+                        .addOperand(use(node.operands()[0]));
+                    append(block, std::move(truncate), &node);
+                    break;
+                }
                 MachineInstr copy(Opcode::COPY);
                 copy.addOperand(define(node))
                     .addOperand(use(node.operands()[0]));
@@ -1889,7 +1937,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                             alignment * alignment;
                         stackArguments.push_back(StackArgument{
                             node.operands()[i], outgoingStackSize,
-                            regClass == RegClass::NEON128 ? 16U : 4U,
+                            regClass == RegClass::NEON128 ? 16U
+                                : regClass == RegClass::GPR64 ? 8U : 4U,
                             alignment});
                         outgoingStackSize += alignment;
                     }
@@ -1910,7 +1959,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 for (const StackArgument &argument : stackArguments) {
                     RegClass regClass = valueClass(argument.value);
                     unsigned width =
-                        regClass == RegClass::NEON128 ? 16U : 4U;
+                        regClass == RegClass::NEON128 ? 16U
+                            : regClass == RegClass::GPR64 ? 8U : 4U;
                     bool encodable =
                         argument.offset % width == 0 &&
                         argument.offset / width <= 4095;
@@ -1951,6 +2001,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     Opcode storeOpcode =
                         regClass == RegClass::FPR32 ? Opcode::STRSui
                         : regClass == RegClass::NEON128 ? Opcode::STRQui
+                        : regClass == RegClass::GPR64 ? Opcode::STRXui
                                                        : Opcode::STRWui;
                     MachineInstr store(storeOpcode);
                     store.addOperand(use(argument.value))

@@ -1,6 +1,7 @@
 #include "../../../include/mid/opt/loopRepFold.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/recurrenceAnalysis.hpp"
+#include "../../../include/mid/analysis/summableExpressionAnalysis.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -22,6 +24,335 @@ bool debugReject(const char *reason) {
     if (isLoopRepFoldDebugEnabled())
         std::cerr << "[LoopRepFold] affine reject: " << reason << "\n";
     return false;
+}
+
+struct SummableModularRecurrenceMatch {
+    PhiInst *induction = nullptr;
+    PhiInst *state = nullptr;
+    Value *start = nullptr;
+    Value *bound = nullptr;
+    Value *step = nullptr;
+    Value *initial = nullptr;
+    BinaryInst *stateRemainder = nullptr;
+    Value *remainderBase = nullptr;
+    int affineSelectionEnabled = 0;
+    int lhsMultiplier = 1;
+    int lhsConstant = 0;
+    int rhsMultiplier = 1;
+    int rhsConstant = 0;
+    int trueUsesRight = 1;
+    int linearMultiplier = 0;
+    int multiplier = 0;
+    int divisor = 0;
+    int quotientMultiplier = 0;
+    int contributionConstant = 0;
+    int innerModulus = 0;
+    int additiveConstant = 0;
+    int outerModulus = 0;
+};
+
+bool constantI32(Value *value, int &result) {
+    auto *constant = dynamic_cast<ConstantInt *>(value);
+    if (!constant || constant->value_ < std::numeric_limits<int>::min() ||
+        constant->value_ > std::numeric_limits<int>::max())
+        return false;
+    result = static_cast<int>(constant->value_);
+    return true;
+}
+
+bool flattenAdd(Value *value, std::vector<Value *> &terms,
+                long long &constant) {
+    if (auto *integer = dynamic_cast<ConstantInt *>(value)) {
+        constant += integer->value_;
+        return constant >= std::numeric_limits<int>::min() &&
+               constant <= std::numeric_limits<int>::max();
+    }
+    auto *binary = dynamic_cast<BinaryInst *>(value);
+    if (binary && binary->is_add())
+        return flattenAdd(binary->get_operand(0), terms, constant) &&
+               flattenAdd(binary->get_operand(1), terms, constant);
+    terms.push_back(value);
+    return true;
+}
+
+bool matchAddConstant(Value *value, Value *base, int constant) {
+    auto *add = dynamic_cast<BinaryInst *>(value);
+    if (!add) return false;
+    int candidate = 0;
+    if (add->is_add())
+        return (add->get_operand(0) == base &&
+                constantI32(add->get_operand(1), candidate) &&
+                candidate == constant) ||
+               (add->get_operand(1) == base &&
+                constantI32(add->get_operand(0), candidate) &&
+                candidate == constant);
+    return add->is_sub() && add->get_operand(0) == base &&
+           constantI32(add->get_operand(1), candidate) &&
+           -static_cast<std::int64_t>(candidate) == constant;
+}
+
+bool matchCompareConstant(Value *value, ICmpInst::ICmpOp predicate,
+                          Value *lhs, int rhs) {
+    auto *compare = dynamic_cast<ICmpInst *>(value);
+    int constant = 0;
+    return compare && compare->icmp_op_ == predicate &&
+           compare->get_operand(0) == lhs &&
+           constantI32(compare->get_operand(1), constant) && constant == rhs;
+}
+
+// Recognize the exact one-step signed modulo lowering emitted by
+// buildBoundedModulo for (base + additive) % modulus.  All intermediate nodes
+// must be private to the lowering, so replacing base by a congruent fast-path
+// representative cannot change any independently observable value.
+bool matchExitModuloReconstruction(
+    Value *base, int additive, int modulus, BasicBlock *exit,
+    std::unordered_set<Instruction *> &chain) {
+    auto reject = [&](const char *reason) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] exit modulo reject reason="
+                      << reason << "\n";
+        return false;
+    };
+    std::int64_t highThresholdWide =
+        static_cast<std::int64_t>(modulus) - additive;
+    std::int64_t reducedAddWide =
+        static_cast<std::int64_t>(additive) - modulus;
+    if (highThresholdWide < std::numeric_limits<int>::min() ||
+        highThresholdWide > std::numeric_limits<int>::max() ||
+        reducedAddWide < std::numeric_limits<int>::min() ||
+        reducedAddWide > std::numeric_limits<int>::max())
+        return reject("constant-overflow");
+    int highThreshold = static_cast<int>(highThresholdWide);
+    int reducedAdd = static_cast<int>(reducedAddWide);
+
+    Value *exitBase = base;
+    for (Instruction *instruction : exit->instr_list_) {
+        if (!instruction->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instruction);
+        if (phi->num_ops_ == 2 && phi->get_operand(0) == base) {
+            exitBase = phi;
+            break;
+        }
+    }
+    Value *dividend = additive == 0 ? exitBase : nullptr;
+    Instruction *highCompare = nullptr;
+    Instruction *highReduced = nullptr;
+    SelectInst *highSelect = nullptr;
+    Instruction *lowCompare = nullptr;
+    Instruction *lowAdjusted = nullptr;
+    SelectInst *lowSelect = nullptr;
+
+    for (auto *instruction : exit->instr_list_) {
+        if (!dividend && matchAddConstant(instruction, exitBase, additive))
+            dividend = instruction;
+        if (!highCompare &&
+            (matchCompareConstant(instruction, ICmpInst::ICMP_SGE, exitBase,
+                                  highThreshold)))
+            highCompare = instruction;
+        if (!highReduced &&
+            matchAddConstant(instruction, exitBase, reducedAdd))
+            highReduced = instruction;
+    }
+    if (!dividend) return reject("missing-dividend");
+
+    for (auto *instruction : exit->instr_list_) {
+        auto *remainder = dynamic_cast<BinaryInst *>(instruction);
+        int candidateModulus = 0;
+        if (!remainder || !remainder->is_rem() ||
+            remainder->get_operand(0) != dividend ||
+            !constantI32(remainder->get_operand(1), candidateModulus) ||
+            candidateModulus != modulus)
+            continue;
+        chain.clear();
+        if (auto *instruction = dynamic_cast<Instruction *>(dividend);
+            instruction && instruction->parent_ == exit)
+            chain.insert(instruction);
+        chain.insert(remainder);
+        for (const auto &use : dividend->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ == exit && user != remainder)
+                return reject("exact-dividend-extra-use");
+        }
+        for (const auto &use : exitBase->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ == exit && user != dividend)
+                return reject("exact-base-extra-use");
+        }
+        return true;
+    }
+
+    if (!highCompare || !highReduced)
+        return reject("missing-high-correction");
+
+    for (auto *instruction : exit->instr_list_) {
+        auto *select = dynamic_cast<SelectInst *>(instruction);
+        if (select && select->get_operand(0) == highCompare &&
+            select->get_operand(1) == highReduced &&
+            select->get_operand(2) == dividend) {
+            highSelect = select;
+            break;
+        }
+    }
+    if (!highSelect) return reject("missing-high-select");
+
+    for (auto *instruction : exit->instr_list_) {
+        if (!lowCompare &&
+            matchCompareConstant(instruction, ICmpInst::ICMP_SLE, highSelect,
+                                 -modulus))
+            lowCompare = instruction;
+        if (!lowAdjusted && matchAddConstant(instruction, highSelect, modulus))
+            lowAdjusted = instruction;
+    }
+    if (!lowCompare || !lowAdjusted)
+        return reject("missing-low-correction");
+    for (auto *instruction : exit->instr_list_) {
+        auto *select = dynamic_cast<SelectInst *>(instruction);
+        if (select && select->get_operand(0) == lowCompare &&
+            select->get_operand(1) == lowAdjusted &&
+            select->get_operand(2) == highSelect) {
+            lowSelect = select;
+            break;
+        }
+    }
+    if (!lowSelect) return reject("missing-low-select");
+
+    chain.clear();
+    if (auto *instruction = dynamic_cast<Instruction *>(dividend);
+        instruction && instruction->parent_ == exit)
+        chain.insert(instruction);
+    for (Instruction *instruction : std::vector<Instruction *>{
+             highCompare, highReduced, highSelect,
+             lowCompare, lowAdjusted, lowSelect})
+        chain.insert(instruction);
+    for (Instruction *instruction : chain) {
+        if (instruction == lowSelect) continue;
+        for (const auto &use : instruction->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (!user || !chain.count(user))
+                return reject("correction-chain-extra-use");
+        }
+    }
+    for (const auto &use : exitBase->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (user && user->parent_ == exit && !chain.count(user))
+            return reject("base-extra-use");
+    }
+    return true;
+}
+
+bool matchSummableContribution(Value *value, PhiInst *induction,
+                               SummableModularRecurrenceMatch &match) {
+    SummableExpressionAnalysis::LinearFloorExpression expression;
+    if (!SummableExpressionAnalysis::analyzeModular(
+            value, induction, expression))
+        return false;
+    match.affineSelectionEnabled = expression.hasAffineSelection ? 1 : 0;
+    match.lhsMultiplier = expression.lhsMultiplier;
+    match.lhsConstant = expression.lhsConstant;
+    match.rhsMultiplier = expression.rhsMultiplier;
+    match.rhsConstant = expression.rhsConstant;
+    match.trueUsesRight = expression.trueUsesRight ? 1 : 0;
+    match.linearMultiplier = expression.linearMultiplier;
+    match.multiplier = expression.divisionMultiplier;
+    match.divisor = expression.divisor;
+    match.quotientMultiplier = expression.quotientMultiplier;
+    match.contributionConstant = expression.constant;
+    match.innerModulus = expression.modulus;
+    return true;
+}
+
+bool analyzeSummableModularRecurrence(
+    Loop &loop, SummableModularRecurrenceMatch &match) {
+    auto reject = [&](const char *reason) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] summable reject header="
+                      << loop.header->name_ << " reason=" << reason << "\n";
+        return false;
+    };
+    const InductionDescriptor *control = loop.getInductionDescriptor();
+    if (!control || control->stepNegated ||
+        control->predicate != ICmpInst::ICMP_SLT ||
+        control->guardPosition != InductionGuardPosition::Latch ||
+        !control->comparesUpdate || loop.blocks.size() != 1 ||
+        loop.singleLatch() != loop.header)
+        return reject("control-induction");
+    match.induction = control->phi;
+    match.start = control->start;
+    match.bound = control->bound;
+    match.step = control->step;
+
+    std::vector<PhiInst *> phis;
+    for (auto *instruction : loop.header->instr_list_) {
+        if (!instruction->is_phi()) break;
+        phis.push_back(static_cast<PhiInst *>(instruction));
+    }
+    if (phis.size() != 2) return reject("phi-count");
+    match.state = phis[0] == match.induction ? phis[1] : phis[0];
+    if (match.state == match.induction ||
+        match.state->type_->tid_ != Type::IntegerTyID)
+        return reject("state-type");
+    Value *back = nullptr;
+    for (unsigned index = 0; index < match.state->num_ops_; index += 2) {
+        auto *block = static_cast<BasicBlock *>(
+            match.state->get_operand(index + 1));
+        if (block == loop.preheader)
+            match.initial = match.state->get_operand(index);
+        else if (block == loop.header)
+            back = match.state->get_operand(index);
+    }
+    match.stateRemainder = dynamic_cast<BinaryInst *>(back);
+    if (!match.initial || !match.stateRemainder ||
+        !match.stateRemainder->is_rem() ||
+        !constantI32(match.stateRemainder->get_operand(1),
+                     match.outerModulus) ||
+        match.outerModulus <= match.innerModulus ||
+        match.outerModulus >= std::numeric_limits<int>::max())
+        return reject("outer-remainder");
+
+    std::vector<Value *> terms;
+    long long additive = 0;
+    if (!flattenAdd(match.stateRemainder->get_operand(0), terms, additive) ||
+        terms.size() != 2)
+        return reject("outer-add-tree");
+    Value *contribution = nullptr;
+    if (terms[0] == match.state)
+        contribution = terms[1];
+    else if (terms[1] == match.state)
+        contribution = terms[0];
+    else
+        return reject("state-not-in-add-tree");
+    match.additiveConstant = static_cast<int>(additive);
+    auto *dividendAdd = dynamic_cast<BinaryInst *>(
+        match.stateRemainder->get_operand(0));
+    if (match.additiveConstant == 0) {
+        match.remainderBase = match.stateRemainder->get_operand(0);
+    } else if (dividendAdd && dividendAdd->is_add()) {
+        int directConstant = 0;
+        if (constantI32(dividendAdd->get_operand(0), directConstant) &&
+            directConstant == match.additiveConstant)
+            match.remainderBase = dividendAdd->get_operand(1);
+        else if (constantI32(dividendAdd->get_operand(1), directConstant) &&
+                 directConstant == match.additiveConstant)
+            match.remainderBase = dividendAdd->get_operand(0);
+    }
+    if (!matchSummableContribution(contribution, match.induction, match))
+        return reject("contribution-shape");
+    // The helper combines contributions mathematically modulo outerModulus.
+    // Prove that the original i32 add tree cannot wrap once the state is in
+    // the signed remainder range; otherwise wrapping by 2^32 would change the
+    // residue for a general modulus.
+    std::int64_t minimumDividend =
+        -static_cast<std::int64_t>(match.outerModulus - 1) -
+        static_cast<std::int64_t>(match.innerModulus - 1) +
+        match.additiveConstant;
+    std::int64_t maximumDividend =
+        static_cast<std::int64_t>(match.outerModulus - 1) +
+        static_cast<std::int64_t>(match.innerModulus - 1) +
+        match.additiveConstant;
+    if (minimumDividend < std::numeric_limits<int>::min() ||
+        maximumDividend > std::numeric_limits<int>::max())
+        return reject("state-update-may-wrap");
+    return true;
 }
 
 } // namespace
@@ -380,13 +711,353 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     return true;
 }
 
+Function *LoopRepFold::getSummableModSumDeclaration(Module *module) {
+    if (summableModSumDecl_)
+        return summableModSumDecl_;
+    for (auto *function : module->function_list_)
+        if (function->name_ == "__compiler.summable_mod_sum") {
+            summableModSumDecl_ = function;
+            return function;
+        }
+    std::vector<Type *> arguments(18, module->int32_ty_);
+    auto *type = new FunctionType(module->int32_ty_, arguments);
+    summableModSumDecl_ =
+        new Function(type, "__compiler.summable_mod_sum", module);
+    return summableModSumDecl_;
+}
+
+bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
+                                                   Module *module) {
+    auto reject = [&](const char *reason) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] summable transform reject header="
+                      << loop.header->name_ << " reason=" << reason << "\n";
+        return false;
+    };
+    SummableModularRecurrenceMatch match;
+    if (!analyzeSummableModularRecurrence(loop, match)) return false;
+    if (modFolded_.count(loop.header)) return reject("already-folded");
+    if (!loop.preheader) return reject("no-preheader");
+    if (loop.exits.size() != 1 || loop.exiting.size() != 1 ||
+        loop.exiting.front() != loop.header)
+        return reject("non-unique-exit");
+    BasicBlock *exit = loop.singleExit();
+    if (!exit || exit->pre_bbs_.size() != 1 ||
+        exit->pre_bbs_.front() != loop.header)
+        return reject("non-dedicated-exit");
+
+    for (auto *instruction : loop.header->instr_list_)
+        if (instruction->is_store() || instruction->is_call())
+            return reject("side-effecting-instruction");
+
+    std::unordered_set<Instruction *> updateExpression;
+    std::function<void(Value *)> collectExpression = [&](Value *value) {
+        auto *instruction = dynamic_cast<Instruction *>(value);
+        if (!instruction || !loop.blocks.count(instruction->parent_) ||
+            !updateExpression.insert(instruction).second)
+            return;
+        for (unsigned index = 0; index < instruction->num_ops_; ++index)
+            collectExpression(instruction->get_operand(index));
+    };
+    collectExpression(match.stateRemainder);
+    for (const auto &use : match.state->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user || !user->parent_) continue;
+        if (loop.blocks.count(user->parent_)) {
+            if (!updateExpression.count(user))
+                return reject("state-extra-use");
+        } else {
+            return reject("state-escapes");
+        }
+    }
+
+    std::unordered_set<Instruction *> remainderExitChain;
+    bool remainderBaseEscapes = false;
+    if (match.remainderBase) {
+        for (const auto &use : match.remainderBase->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
+                remainderBaseEscapes = true;
+                break;
+            }
+        }
+    }
+    if (remainderBaseEscapes &&
+        !matchExitModuloReconstruction(
+            match.remainderBase, match.additiveConstant,
+            match.outerModulus, exit, remainderExitChain))
+        return reject("unsupported-remainder-export");
+
+    // The fast path exports only the accumulator.  Any other loop-defined
+    // value escaping would require reconstructing its exact final iteration.
+    for (auto *instruction : loop.header->instr_list_) {
+        if (instruction == match.state) continue;
+        for (const auto &use : instruction->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ &&
+                !loop.blocks.count(user->parent_)) {
+                bool exportedRemainderBase =
+                    instruction == match.remainderBase &&
+                    user->parent_ == exit && remainderExitChain.count(user);
+                if (exportedRemainderBase)
+                    continue;
+                if (isLoopRepFoldDebugEnabled())
+                    std::cerr << "[LoopRepFold] escaping value="
+                              << instruction->name_ << " user=" << user->name_
+                              << " user-block=" << user->parent_->name_ << "\n";
+                return reject("loop-value-escapes");
+            }
+        }
+    }
+
+    enum class ExitValueKind { RemainderBase, Invariant };
+    struct ExitPhiPlan {
+        PhiInst *phi;
+        Value *incoming;
+        ExitValueKind kind;
+    };
+    std::vector<ExitPhiPlan> exitPlans;
+    PhiInst *remainderBaseExitPhi = nullptr;
+    for (auto *instruction : exit->instr_list_) {
+        if (!instruction->is_phi()) break;
+        auto *phi = static_cast<PhiInst *>(instruction);
+        if (phi->num_ops_ != 2 || phi->get_operand(1) != loop.header)
+            return reject("unsupported-exit-phi");
+        Value *incoming = phi->get_operand(0);
+        if (incoming == match.remainderBase) {
+            remainderBaseExitPhi = phi;
+            exitPlans.push_back(
+                {phi, incoming, ExitValueKind::RemainderBase});
+        } else if (isLoopInvariant(incoming, loop.blocks)) {
+            exitPlans.push_back({phi, incoming, ExitValueKind::Invariant});
+        } else {
+            return reject("unsupported-exit-value");
+        }
+    }
+
+    BasicBlock *preheader = loop.preheader;
+    auto *oldBranch = preheader->get_terminator();
+    if (!oldBranch || !oldBranch->is_br() || oldBranch->num_ops_ != 1 ||
+        oldBranch->get_operand(0) != loop.header)
+        return reject("invalid-preheader-branch");
+
+    auto *i32 = module->int32_ty_;
+    auto *i1 = module->int1_ty_;
+    auto *zero = new ConstantInt(i32, 0);
+    auto *strideLimit = new ConstantInt(i32, 65535);
+    auto *intMax = new ConstantInt(i32, std::numeric_limits<int>::max());
+    auto *one = new ConstantInt(i32, 1);
+    auto *stepPositive = new ICmpInst(ICmpInst::ICMP_SGT, match.step, zero,
+                                      preheader, true);
+    auto *stepSmall = new ICmpInst(ICmpInst::ICMP_SLE, match.step,
+                                   strideLimit, preheader, true);
+    auto *startNonnegative = new ICmpInst(ICmpInst::ICMP_SGE, match.start,
+                                          zero, preheader, true);
+    auto *startBeforeBound = new ICmpInst(ICmpInst::ICMP_SLT, match.start,
+                                          match.bound, preheader, true);
+    auto *minimumState = new ConstantInt(i32, -match.outerModulus + 1);
+    auto *maximumState = new ConstantInt(i32, match.outerModulus - 1);
+    auto *initialInLowerRange = new ICmpInst(
+        ICmpInst::ICMP_SGE, match.initial, minimumState, preheader, true);
+    auto *initialInUpperRange = new ICmpInst(
+        ICmpInst::ICMP_SLE, match.initial, maximumState, preheader, true);
+    auto *maxMinusStep = new BinaryInst(i32, Instruction::Sub, intMax,
+                                        match.step, preheader, true);
+    auto *safeBound = new BinaryInst(i32, Instruction::Add, maxMinusStep,
+                                     one, preheader, true);
+    auto *boundSafe = new ICmpInst(ICmpInst::ICMP_SLE, match.bound,
+                                   safeBound, preheader, true);
+    std::vector<Value *> affineSafetyConditions;
+    std::vector<Instruction *> affineSafetyInstructions;
+    {
+        auto *i64 = module->int64_ty_;
+        auto remember = [&](Instruction *instruction) -> Instruction * {
+            affineSafetyInstructions.push_back(instruction);
+            return instruction;
+        };
+        auto *start64 = static_cast<Value *>(remember(new ZextInst(
+            Instruction::SExt, match.start, i64, preheader, true)));
+        auto *bound64 = static_cast<Value *>(remember(new ZextInst(
+            Instruction::SExt, match.bound, i64, preheader, true)));
+        auto *last64 = static_cast<Value *>(remember(new BinaryInst(
+            i64, Instruction::Sub, bound64, new ConstantInt(i64, 1),
+            preheader, true)));
+        auto addLineSafety = [&](int multiplier, int constant) {
+            auto evaluate = [&](Value *x) -> Value * {
+                auto *product = static_cast<Value *>(remember(new BinaryInst(
+                    i64, Instruction::Mul, x,
+                    new ConstantInt(i64, multiplier), preheader, true)));
+                return static_cast<Value *>(remember(new BinaryInst(
+                    i64, Instruction::Add, product,
+                    new ConstantInt(i64, constant), preheader, true)));
+            };
+            for (Value *value : {evaluate(start64), evaluate(last64)}) {
+                auto *lower = static_cast<Value *>(remember(new ICmpInst(
+                    ICmpInst::ICMP_SGE, value,
+                    new ConstantInt(i64, std::numeric_limits<int>::min()),
+                    preheader, true)));
+                auto *upper = static_cast<Value *>(remember(new ICmpInst(
+                    ICmpInst::ICMP_SLE, value,
+                    new ConstantInt(i64, std::numeric_limits<int>::max()),
+                    preheader, true)));
+                affineSafetyConditions.push_back(lower);
+                affineSafetyConditions.push_back(upper);
+            }
+        };
+        addLineSafety(match.lhsMultiplier, match.lhsConstant);
+        addLineSafety(match.rhsMultiplier, match.rhsConstant);
+    }
+    Value *guard = stepPositive;
+    for (auto *condition : {static_cast<Value *>(stepSmall),
+                            static_cast<Value *>(startNonnegative),
+                            static_cast<Value *>(startBeforeBound),
+                            static_cast<Value *>(initialInLowerRange),
+                            static_cast<Value *>(initialInUpperRange),
+                            static_cast<Value *>(boundSafe)})
+        guard = new BinaryInst(i1, Instruction::And, guard, condition,
+                               preheader, true);
+    for (Value *condition : affineSafetyConditions)
+        guard = new BinaryInst(i1, Instruction::And, guard, condition,
+                               preheader, true);
+    for (auto *instruction : {static_cast<Instruction *>(stepPositive),
+                              static_cast<Instruction *>(stepSmall),
+                              static_cast<Instruction *>(startNonnegative),
+                              static_cast<Instruction *>(startBeforeBound),
+                              static_cast<Instruction *>(initialInLowerRange),
+                              static_cast<Instruction *>(initialInUpperRange),
+                              static_cast<Instruction *>(maxMinusStep),
+                              static_cast<Instruction *>(safeBound),
+                              static_cast<Instruction *>(boundSafe)})
+        preheader->add_instruction_before_terminator(instruction);
+    for (Instruction *instruction : affineSafetyInstructions)
+        preheader->add_instruction_before_terminator(instruction);
+    // The guard's AND chain was created without insertion.  Insert it in
+    // dependency order by walking backwards from the final node.
+    std::vector<Instruction *> guardChain;
+    for (Value *cursor = guard;;) {
+        auto *binary = dynamic_cast<BinaryInst *>(cursor);
+        if (!binary || binary->op_id_ != Instruction::And) break;
+        guardChain.push_back(binary);
+        cursor = binary->get_operand(0);
+    }
+    for (auto it = guardChain.rbegin(); it != guardChain.rend(); ++it)
+        preheader->add_instruction_before_terminator(*it);
+
+    Function *helper = getSummableModSumDeclaration(module);
+    Function *function = loop.header->parent_;
+    auto *fast = new BasicBlock(module, loop.header->name_ + ".sms.fast",
+                                function);
+    auto *slowJoin = new BasicBlock(module,
+                                    loop.header->name_ + ".sms.slow",
+                                    function);
+    std::vector<Value *> arguments = {
+        match.start,
+        match.bound,
+        match.step,
+        new ConstantInt(i32, match.affineSelectionEnabled),
+        new ConstantInt(i32, match.lhsMultiplier),
+        new ConstantInt(i32, match.lhsConstant),
+        new ConstantInt(i32, match.rhsMultiplier),
+        new ConstantInt(i32, match.rhsConstant),
+        new ConstantInt(i32, match.trueUsesRight),
+        new ConstantInt(i32, match.linearMultiplier),
+        new ConstantInt(i32, match.multiplier),
+        new ConstantInt(i32, match.divisor),
+        new ConstantInt(i32, match.quotientMultiplier),
+        new ConstantInt(i32, match.contributionConstant),
+        new ConstantInt(i32, match.innerModulus),
+        new ConstantInt(i32, match.additiveConstant),
+        new ConstantInt(i32, match.outerModulus),
+        match.initial,
+    };
+    auto *result = new CallInst(helper, arguments, fast);
+    Value *fastRemainderBase = result;
+    if (match.remainderBase) {
+        auto *adjusted = new BinaryInst(
+            i32, Instruction::Sub, result,
+            new ConstantInt(i32, match.additiveConstant), fast, true);
+        fast->add_instruction(adjusted);
+        fastRemainderBase = adjusted;
+    }
+    auto *success = new ICmpInst(
+        ICmpInst::ICMP_NE, result,
+        new ConstantInt(i32, std::numeric_limits<int>::min()), fast);
+    new BranchInst(success, exit, slowJoin, fast);
+    new BranchInst(loop.header, slowJoin);
+
+    preheader->delete_instr(oldBranch);
+    preheader->remove_succ_basic_block(loop.header);
+    loop.header->remove_pre_basic_block(preheader);
+    new BranchInst(guard, fast, slowJoin, preheader);
+
+    for (auto *phi : {match.induction, match.state})
+        for (unsigned index = 0; index < phi->num_ops_; index += 2)
+            if (phi->get_operand(index + 1) == preheader) {
+                phi->set_operand(index + 1, slowJoin);
+                break;
+            }
+
+    for (const auto &plan : exitPlans) {
+        Value *fastIncoming = plan.incoming;
+        if (plan.kind == ExitValueKind::RemainderBase)
+            fastIncoming = fastRemainderBase;
+        plan.phi->add_phi_pair_operand(fastIncoming, fast);
+    }
+    if (match.remainderBase && !remainderBaseExitPhi) {
+        bool hasExternalUse = false;
+        for (const auto &use : match.remainderBase->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
+                hasExternalUse = true;
+                break;
+            }
+        }
+        if (hasExternalUse) {
+            std::vector<Value *> values = {match.remainderBase,
+                                           fastRemainderBase};
+            std::vector<BasicBlock *> blocks = {loop.header, fast};
+            remainderBaseExitPhi = new PhiInst(Instruction::PHI, values,
+                                                blocks, i32, exit);
+            exit->add_instruction_front(remainderBaseExitPhi);
+        }
+    }
+
+    if (remainderBaseExitPhi) {
+        std::vector<std::pair<Instruction *, unsigned>> baseExternalUses;
+        for (const auto &use : match.remainderBase->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user != remainderBaseExitPhi && user->parent_ &&
+                !loop.blocks.count(user->parent_))
+                baseExternalUses.push_back({user, use.arg_no_});
+        }
+        for (auto &[user, operand] : baseExternalUses)
+            user->set_operand(operand, remainderBaseExitPhi);
+    }
+
+    modFolded_.insert(loop.header);
+    if (isLoopRepFoldDebugEnabled())
+        std::cerr << "[LoopRepFold] summable modular fold func="
+                  << function->name_ << " header=" << loop.header->name_
+                  << " divisor=" << match.divisor
+                  << " inner-mod=" << match.innerModulus
+                  << " outer-mod=" << match.outerModulus << "\n";
+    return true;
+}
+
 // ── 主变换 ──────────────────────────────────────────────────────────────────
 
 bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (isLoopRepFoldDebugEnabled())
         std::cerr << "[LoopRepFold] inspect header=" << loop.header->name_
                   << " blocks=" << loop.blocks.size() << "\n";
-    if (!loop.preheader) return false;
+    if (!loop.preheader) {
+        if (isLoopRepFoldDebugEnabled())
+            std::cerr << "[LoopRepFold] reject header=" << loop.header->name_
+                      << " reason=no-dedicated-preheader\n";
+        return false;
+    }
+    if (tryFoldSummableModularRecurrence(loop, module))
+        return true;
     // Every supported closed form summarizes the number of iterations implied
     // by the header condition.  An additional exiting edge (for example a
     // while-body break) can terminate earlier, so the summary is invalid even
@@ -730,7 +1401,9 @@ void LoopRepFold::execute(Module *module) {
 }
 
 PreservedAnalyses LoopRepFold::execute(Module *module, AnalysisManager &AM) {
-    for (auto func : module->function_list_) {
+    summableModSumDecl_ = nullptr;
+    std::vector<Function *> functions = module->function_list_;
+    for (auto func : functions) {
         if (!func->is_declaration())
             runOnFunction(func, &AM);
     }

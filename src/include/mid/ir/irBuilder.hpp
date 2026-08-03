@@ -104,6 +104,8 @@ public:
 
     // 类型转换
     ZextInst* create_zext(Value* val, Type* ty) { return new ZextInst(Instruction::ZExt, val, ty, this->BB_); }
+    ZextInst* create_sext(Value* val, Type* ty) { return new ZextInst(Instruction::SExt, val, ty, this->BB_); }
+    ZextInst* create_trunc(Value* val, Type* ty) { return new ZextInst(Instruction::Trunc, val, ty, this->BB_); }
     FpToSiInst* create_fptosi(Value* val, Type* ty) { return new FpToSiInst(Instruction::FPtoSI, val, ty, this->BB_); }
     SiToFpInst* create_sitofp(Value* val, Type* ty) { return new SiToFpInst(Instruction::SItoFP, val, ty, this->BB_); }
     Bitcast* create_bitcast(Value* val, Type* ty) { return new Bitcast(Instruction::BitCast, val, ty, this->BB_); }

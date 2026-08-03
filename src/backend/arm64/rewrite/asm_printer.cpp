@@ -320,8 +320,10 @@ void printInstruction(const MachineFunction &function,
                << registerName(operands[1]) << '\n';
         break;
     case Opcode::MULWrr: emitThreeRegisters(output, "mul", instruction); break;
+    case Opcode::MULXrr: emitThreeRegisters(output, "mul", instruction); break;
     case Opcode::SDIVWrr: emitThreeRegisters(output, "sdiv", instruction); break;
     case Opcode::UDIVWrr: emitThreeRegisters(output, "udiv", instruction); break;
+    case Opcode::UDIVXrr: emitThreeRegisters(output, "udiv", instruction); break;
     case Opcode::SMULLXrr:
         output << "\tsmull " << registerNameAs(operands[0], RegClass::GPR64)
                << ", " << registerNameAs(operands[1], RegClass::GPR32)
@@ -363,9 +365,15 @@ void printInstruction(const MachineFunction &function,
     case Opcode::ANDWrr: emitThreeRegisters(output, "and", instruction); break;
     case Opcode::ORRWrr: emitThreeRegisters(output, "orr", instruction); break;
     case Opcode::EORWrr: emitThreeRegisters(output, "eor", instruction); break;
+    case Opcode::ANDXrr: emitThreeRegisters(output, "and", instruction); break;
+    case Opcode::ORRXrr: emitThreeRegisters(output, "orr", instruction); break;
+    case Opcode::EORXrr: emitThreeRegisters(output, "eor", instruction); break;
     case Opcode::LSLWrr: emitThreeRegisters(output, "lsl", instruction); break;
     case Opcode::LSRWrr: emitThreeRegisters(output, "lsr", instruction); break;
     case Opcode::ASRWrr: emitThreeRegisters(output, "asr", instruction); break;
+    case Opcode::LSLXrr: emitThreeRegisters(output, "lsl", instruction); break;
+    case Opcode::LSRXrr: emitThreeRegisters(output, "lsr", instruction); break;
+    case Opcode::ASRXrr: emitThreeRegisters(output, "asr", instruction); break;
     case Opcode::ADDXrr: emitThreeRegisters(output, "add", instruction); break;
     case Opcode::SUBXrr: emitThreeRegisters(output, "sub", instruction); break;
     case Opcode::ADDWri: emitThreeWithImmediate(output, "add", instruction); break;
@@ -378,6 +386,7 @@ void printInstruction(const MachineFunction &function,
     case Opcode::SUBXri: emitThreeWithImmediate(output, "sub", instruction); break;
     case Opcode::LSLXri: emitThreeWithImmediate(output, "lsl", instruction); break;
     case Opcode::ASRXri: emitThreeWithImmediate(output, "asr", instruction); break;
+    case Opcode::LSRXri: emitThreeWithImmediate(output, "lsr", instruction); break;
     case Opcode::COPYXtoW:
         if (!RegisterInfo::aliases(
                 operands[0].physicalRegister(),

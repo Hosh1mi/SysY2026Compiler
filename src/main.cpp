@@ -2,6 +2,7 @@
 #include "include/frontend/parser.hpp"
 
 #include "include/mid/ir/irGen.hpp"
+#include "include/mid/runtime/summableModSumRuntime.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
@@ -245,7 +246,9 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<IndVarStrengthReduce>());
     pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<IfConversion>());
+    pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopRepFold>());
+    pm.addPass(std::make_unique<LoopModuloDelay>());
     pm.addPass(std::make_unique<LoopUnroll>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
@@ -335,6 +338,10 @@ int main(int argc, char **argv) {
     pm.setVerifyIR(options.verifyIR);
     buildArm64Pipeline(pm, options.optLevel, m.get());
     pm.run(m.get());
+
+    materializeSummableModSumRuntime(m.get());
+    if (options.verifyIR)
+        m->verify("summable-runtime-materialization");
 
     std::ofstream fout;
     std::ostream *out = nullptr;

@@ -24,7 +24,7 @@ public:
         Alloca, Load, Store,                     // 内存操作
         Select,                                  // select i1 cond, T val1, F val2
         GetElementPtr,                           // 地址计算
-        ZExt, FPtoSI, SItoFP, BitCast, Clz,       // 类型转换 + 内建
+        ZExt, SExt, Trunc, FPtoSI, SItoFP, BitCast, Clz, // 类型转换 + 内建
         InsertElement,                            // insertelement <4 x i32> %vec, i32 %val, i32 %idx
         ExtractElement,                           // extractelement <4 x i32> %vec, i32 %idx
         ShuffleVector,                            // shufflevector <4 x i32> %v1, <4 x i32> %v2, <4 x i32> <mask>
@@ -100,6 +100,8 @@ public:
     bool is_call() { return op_id_ == Call; }
     bool is_gep() { return op_id_ == GetElementPtr; }
     bool is_zext() { return op_id_ == ZExt; }
+    bool is_sext() { return op_id_ == SExt; }
+    bool is_trunc() { return op_id_ == Trunc; }
     bool is_fptosi() { return op_id_ == FPtoSI; }
     bool is_sitofp() { return op_id_ == SItoFP; }
     bool is_int_binary() { return (is_add() || is_sub() || is_mul() || is_div() || is_rem()) && (num_ops_ == 2); }

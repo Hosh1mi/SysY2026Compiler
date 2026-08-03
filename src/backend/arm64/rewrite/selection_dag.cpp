@@ -46,6 +46,7 @@ const char *opcodeName(SDOpcode opcode) {
     NAME(FAdd); NAME(FSub); NAME(FMul); NAME(FDiv); NAME(FNeg); NAME(Shl);
     NAME(LShr); NAME(AShr); NAME(And); NAME(Or); NAME(Xor); NAME(ICmp);
     NAME(FCmp); NAME(Select); NAME(GEP); NAME(Load); NAME(Store); NAME(ZExt);
+    NAME(SExt); NAME(Trunc);
     NAME(FPToSI); NAME(SIToFP); NAME(Bitcast); NAME(Clz);
     NAME(Splat); NAME(InsertElement); NAME(ExtractElement);
     NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(TailCall); NAME(Branch);
@@ -60,6 +61,7 @@ const char *typeName(ValueType type) {
     switch (type) {
     case ValueType::I1: return "i1";
     case ValueType::I32: return "i32";
+    case ValueType::I64: return "i64";
     case ValueType::F32: return "f32";
     case ValueType::Ptr: return "ptr";
     case ValueType::V4I32: return "v4i32";
@@ -71,6 +73,7 @@ const char *typeName(ValueType type) {
 
 bool isSupportedValueType(ValueType type) {
     return type == ValueType::I1 || type == ValueType::I32 ||
+           type == ValueType::I64 ||
            type == ValueType::F32 || type == ValueType::Ptr ||
            type == ValueType::V4I32 || type == ValueType::V4F32 ||
            type == ValueType::Flags;
@@ -217,6 +220,8 @@ ValueType SelectionDAGBuilder::valueType(Type *type) {
             return ValueType::I1;
         if (integer->num_bits_ == 32)
             return ValueType::I32;
+        if (integer->num_bits_ == 64)
+            return ValueType::I64;
         return ValueType::Invalid;
     }
     if (type->tid_ == Type::FloatTyID)
@@ -472,6 +477,16 @@ SelectionDAGBuilder::build(Function *function) const {
                 case Instruction::ZExt:
                     created = &dag.createNode(
                         SDOpcode::ZExt, {valueType(instruction->type_)},
+                        {operand(0)});
+                    break;
+                case Instruction::SExt:
+                    created = &dag.createNode(
+                        SDOpcode::SExt, {valueType(instruction->type_)},
+                        {operand(0)});
+                    break;
+                case Instruction::Trunc:
+                    created = &dag.createNode(
+                        SDOpcode::Trunc, {valueType(instruction->type_)},
                         {operand(0)});
                     break;
                 case Instruction::FPtoSI:

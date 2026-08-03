@@ -60,3 +60,4 @@
 #include "tailDuplication.hpp"
 #include "analysisDump.hpp"
 #include "parallelizeLoops.hpp"
+#include "loopModuloDelay.hpp"

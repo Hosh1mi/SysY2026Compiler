@@ -45,6 +45,8 @@ enum class SDOpcode : std::uint16_t {
     Load,
     Store,
     ZExt,
+    SExt,
+    Trunc,
     FPToSI,
     SIToFP,
     Bitcast,
