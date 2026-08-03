@@ -63,7 +63,7 @@
     EqExpAST* eqExp;
     LAndExpAST* lAndExp;
     LOrExpAST* lOrExp;
-    TYPE ty;
+    TypeSpec* type_spec;
     UOP op;
     string* token;
     int int_val;
@@ -101,7 +101,7 @@
 %type <lAndExp> LAndExp
 %type <lOrExp> Cond LOrExp
 
-%type <ty> BType VoidType
+%type <type_spec> BType VoidType VecType
 %type <op> UnaryOp
 
 // %token 定义终结符的语义值类型
@@ -110,6 +110,9 @@
 %token <token> ID              // 指定ID
 %token GTE LTE GT LT EQ NEQ    // 关系运算
 %token INTTYPE FLOATTYPE VOID  // 数据类型
+%token <int_val> INTVECTYPE FLOATVECTYPE VECWIDTH
+%token VECTOR
+%token DYNINTVECTYPE DYNFLOATVECTYPE
 %token CONST RETURN IF ELSE WHILE BREAK CONTINUE
 %token LP RP LB RB LC RC COMMA SEMICOLON
 // 用bison对该文件编译时，带参数-d，生成的exp.tab.h中给这些单词进行编码，可在lex.l中包含parser.tab.h使用这些单词种类码
@@ -164,29 +167,117 @@ Decl:
     CONST BType DefList SEMICOLON {
         $$ = make_node<DeclAST>();
         $$->isConst = true;
-        $$->bType = $2;
+        $$->bType = *$2;
+        delete $2;
         $$->defList.swap($3->list);
     }|
     BType DefList SEMICOLON {
         $$ = make_node<DeclAST>();
         $$->isConst = false;
-        $$->bType = $1;
+        $$->bType = *$1;
+        delete $1;
         $$->defList.swap($2->list);
     };
 
 // 基本类型
 BType:
     INTTYPE {
-        $$ = TYPE_INT;
+        $$ = new TypeSpec(TYPE_INT);
     }|
     FLOATTYPE {
-        $$ = TYPE_FLOAT;
+        $$ = new TypeSpec(TYPE_FLOAT);
+    }|
+    VecType {
+        $$ = $1;
+    };
+
+// Compatibility grammar for the plausible contest spellings.  Every branch
+// produces exactly the same TypeSpec, so deleting aliases after publication is
+// a parser-only change.
+VecType:
+    INTVECTYPE {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $1));
+    }|
+    FLOATVECTYPE {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
+    }|
+    VECTOR LT INTTYPE COMMA INT GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    }|
+    VECTOR LT FLOATTYPE COMMA INT GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    }|
+    VECTOR LT INT COMMA INTTYPE GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    }|
+    VECTOR LT INT COMMA FLOATTYPE GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    }|
+    VECTOR LP INTTYPE COMMA INT RP {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    }|
+    VECTOR LP FLOATTYPE COMMA INT RP {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    }|
+    VECTOR LB INTTYPE COMMA INT RB {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    }|
+    VECTOR LB FLOATTYPE COMMA INT RB {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    }|
+    VECWIDTH LT INTTYPE GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $1));
+    }|
+    VECWIDTH LT FLOATTYPE GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
+    }|
+    INTTYPE LT INT GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    }|
+    FLOATTYPE LT INT GT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    }|
+    INTTYPE LB INT RB {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    }|
+    FLOATTYPE LB INT RB {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    }|
+    VECTOR LT INTTYPE GT {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
+    }|
+    VECTOR LT FLOATTYPE GT {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    }|
+    VECTOR LP INTTYPE RP {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
+    }|
+    VECTOR LP FLOATTYPE RP {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    }|
+    DYNINTVECTYPE {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
+    }|
+    DYNFLOATVECTYPE {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    }|
+    INTTYPE LT GT {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
+    }|
+    FLOATTYPE LT GT {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    }|
+    INTTYPE LB RB {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
+    }|
+    FLOATTYPE LB RB {
+        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     };
 
 // 空类型
 VoidType:
     VOID {
-        $$ = TYPE_VOID;
+        $$ = new TypeSpec(TYPE_VOID);
     };
 
 // 定义列表
@@ -264,27 +355,31 @@ InitValList:
 FuncDef:
     BType ID LP FuncFParamList RP Block {
         $$ = make_node<FuncDefAST>();
-        $$->funcType = $1;
+        $$->funcType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->funcFParamList.swap($4->list);
         $$->block = unique_ptr<BlockAST>($6);
     }|
     BType ID LP RP Block {
         $$ = make_node<FuncDefAST>();
-        $$->funcType = $1;
+        $$->funcType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->block = unique_ptr<BlockAST>($5);
     }|
     VoidType ID LP FuncFParamList RP Block {
         $$ = make_node<FuncDefAST>();
-        $$->funcType = $1;
+        $$->funcType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->funcFParamList.swap($4->list);
         $$->block = unique_ptr<BlockAST>($6);
     }|
     VoidType ID LP RP Block {
         $$ = make_node<FuncDefAST>();
-        $$->funcType = $1;
+        $$->funcType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->block = unique_ptr<BlockAST>($5);
     };
@@ -304,19 +399,22 @@ FuncFParamList:
 FuncFParam:
     BType ID {
         $$ = make_node<FuncFParamAST>();
-        $$->bType = $1;
+        $$->bType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->isArray = false;
     }|
     BType ID LB RB {
         $$ = make_node<FuncFParamAST>();
-        $$->bType = $1;
+        $$->bType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->isArray = true;
     }|
     BType ID LB RB Arrays {
         $$ = make_node<FuncFParamAST>();
-        $$->bType = $1;
+        $$->bType = *$1;
+        delete $1;
         $$->id = unique_ptr<string>($2);
         $$->isArray = true;
         $$->arrays.swap($5->list);

@@ -15,6 +15,47 @@ enum ROP   { ROP_GTE, ROP_LTE, ROP_GT, ROP_LT };
 enum EOP   { EOP_EQ, EOP_NEQ };
 enum TYPE  { TYPE_VOID, TYPE_INT, TYPE_FLOAT, TYPE_BOOL };
 
+// Source-level type descriptor.  Keeping spelling out of the AST lets every
+// candidate VecType grammar lower to the same semantic representation.
+enum class VECTOR_EXTENT { SCALAR, FIXED, DYNAMIC };
+
+struct TypeSpec {
+  TYPE element = TYPE_VOID;
+  VECTOR_EXTENT extent = VECTOR_EXTENT::SCALAR;
+  unsigned lanes = 1;
+
+  TypeSpec() = default;
+  TypeSpec(TYPE scalar) : element(scalar) {}
+
+  static TypeSpec fixed(TYPE element, unsigned lanes) {
+    TypeSpec result(element);
+    result.extent = VECTOR_EXTENT::FIXED;
+    result.lanes = lanes;
+    return result;
+  }
+
+  static TypeSpec dynamic(TYPE element) {
+    TypeSpec result(element);
+    result.extent = VECTOR_EXTENT::DYNAMIC;
+    result.lanes = 0;
+    return result;
+  }
+
+  bool isScalar() const { return extent == VECTOR_EXTENT::SCALAR; }
+  bool isFixedVector() const { return extent == VECTOR_EXTENT::FIXED; }
+  bool isDynamicVector() const { return extent == VECTOR_EXTENT::DYNAMIC; }
+  bool isVector() const { return !isScalar(); }
+
+  // These operators retain source compatibility with scalar-only checker code
+  // while it is incrementally taught the vector-specific rules.
+  bool operator==(TYPE rhs) const { return isScalar() && element == rhs; }
+  bool operator!=(TYPE rhs) const { return !(*this == rhs); }
+  bool operator==(const TypeSpec &rhs) const {
+    return element == rhs.element && extent == rhs.extent && lanes == rhs.lanes;
+  }
+  bool operator!=(const TypeSpec &rhs) const { return !(*this == rhs); }
+};
+
 class BaseAST;
 
 class CompUnitAST;
@@ -74,7 +115,7 @@ public:
 // 声明类
 class DeclAST : public BaseAST {
 public:
-  TYPE bType = TYPE_VOID;
+  TypeSpec bType = TypeSpec(TYPE_VOID);
   bool isConst = false;
   vector<unique_ptr<DefAST>> defList;
   void accept(Visitor &visitor) override;
@@ -112,7 +153,7 @@ public:
 
 class FuncDefAST : public BaseAST {
 public:
-  TYPE funcType = TYPE_VOID;
+  TypeSpec funcType = TypeSpec(TYPE_VOID);
   unique_ptr<string> id;
   vector<unique_ptr<FuncFParamAST>> funcFParamList;
   unique_ptr<BlockAST> block = nullptr;
@@ -126,7 +167,7 @@ public:
 
 class FuncFParamAST : public BaseAST {
 public:
-  TYPE bType;
+  TypeSpec bType;
   unique_ptr<string> id;
   bool isArray =
       false; // 用于区分是否是数组参数，此时一维数组和多维数组expArrays都是empty

@@ -262,6 +262,64 @@ struct Verifier {
     }
 
     void verifyInst(Function *func, BasicBlock *bb, Instruction *inst) {
+        auto verifyConstantIndex = [&](Value *index, unsigned lanes,
+                                       const char *operation) {
+            auto *constant = dynamic_cast<ConstantInt *>(index);
+            if (constant &&
+                (constant->value_ < 0 ||
+                 static_cast<unsigned>(constant->value_) >= lanes))
+                report(func, std::string(operation) + " in '" + bb->name_ +
+                                 "' has an out-of-range constant lane");
+        };
+
+        if (auto *binary = dynamic_cast<BinaryInst *>(inst)) {
+            if (auto *vectorTy = dynamic_cast<VectorType *>(inst->type_)) {
+                if (vectorTy->num_elements_ == 0)
+                    report(func, "vector binary in '" + bb->name_ +
+                                     "' has zero lanes");
+                if (binary->get_operand(0)->type_ != vectorTy ||
+                    binary->get_operand(1)->type_ != vectorTy)
+                    report(func, "vector binary in '" + bb->name_ +
+                                     "' has mismatched operand types");
+                const bool integerLane =
+                    vectorTy->contained_->tid_ == Type::IntegerTyID;
+                const bool floatLane =
+                    vectorTy->contained_->tid_ == Type::FloatTyID;
+                const bool floatOpcode =
+                    inst->op_id_ == Instruction::FAdd ||
+                    inst->op_id_ == Instruction::FSub ||
+                    inst->op_id_ == Instruction::FMul ||
+                    inst->op_id_ == Instruction::FDiv;
+                if ((!integerLane && !floatLane) ||
+                    (floatLane != floatOpcode))
+                    report(func, "vector binary in '" + bb->name_ +
+                                     "' has an opcode/lane-type mismatch");
+            }
+        }
+        if (inst->op_id_ == Instruction::InsertElement) {
+            if (inst->num_ops_ != 3) {
+                report(func, "insertelement in '" + bb->name_ +
+                                 "' has wrong operand count");
+            } else {
+                auto *vectorTy = dynamic_cast<VectorType *>(
+                    inst->get_operand(0)->type_);
+                if (!vectorTy) {
+                    report(func, "insertelement in '" + bb->name_ +
+                                     "' operand 0 is not a vector");
+                } else {
+                    if (inst->type_ != vectorTy ||
+                        inst->get_operand(1)->type_ != vectorTy->contained_)
+                        report(func, "insertelement in '" + bb->name_ +
+                                         "' has incompatible value types");
+                    verifyConstantIndex(inst->get_operand(2),
+                                        vectorTy->num_elements_,
+                                        "insertelement");
+                }
+                if (inst->get_operand(2)->type_->tid_ != Type::IntegerTyID)
+                    report(func, "insertelement in '" + bb->name_ +
+                                     "' index is not integer typed");
+            }
+        }
         if (inst->op_id_ == Instruction::ExtractElement) {
             if (inst->num_ops_ != 2) {
                 report(func, "extractelement in '" + bb->name_ +
@@ -275,10 +333,36 @@ struct Verifier {
                 } else if (inst->type_ != vectorTy->contained_) {
                     report(func, "extractelement in '" + bb->name_ +
                            "' result type does not match the lane type");
+                } else {
+                    verifyConstantIndex(inst->get_operand(1),
+                                        vectorTy->num_elements_,
+                                        "extractelement");
                 }
                 if (inst->get_operand(1)->type_->tid_ != Type::IntegerTyID)
                     report(func, "extractelement in '" + bb->name_ +
                            "' index is not integer typed");
+            }
+        }
+        if (inst->op_id_ == Instruction::ShuffleVector) {
+            auto *shuffle = static_cast<ShuffleVectorInst *>(inst);
+            auto *vectorTy = dynamic_cast<VectorType *>(inst->type_);
+            if (!vectorTy || inst->num_ops_ != 3) {
+                report(func, "shufflevector in '" + bb->name_ +
+                                 "' is malformed");
+            } else {
+                if (inst->get_operand(0)->type_ != vectorTy ||
+                    inst->get_operand(1)->type_ != vectorTy)
+                    report(func, "shufflevector in '" + bb->name_ +
+                                     "' has mismatched input types");
+                if (shuffle->mask().size() != vectorTy->num_elements_)
+                    report(func, "shufflevector in '" + bb->name_ +
+                                     "' has the wrong mask width");
+                for (int lane : shuffle->mask())
+                    if (lane < 0 ||
+                        static_cast<unsigned>(lane) >=
+                            2 * vectorTy->num_elements_)
+                        report(func, "shufflevector in '" + bb->name_ +
+                                         "' has an out-of-range mask lane");
             }
         }
         for (unsigned i = 0; i < inst->num_ops_; ++i) {

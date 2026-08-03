@@ -16,11 +16,11 @@ public:
     void set_insert_point(BasicBlock* bb) { this->BB_ = bb; }
 
     // 整数二元运算
-    BinaryInst* create_iadd(Value* v1, Value* v2) { return new BinaryInst(this->m_->int32_ty_, Instruction::Add, v1, v2, this->BB_); }
-    BinaryInst* create_isub(Value* v1, Value* v2) { return new BinaryInst(this->m_->int32_ty_, Instruction::Sub, v1, v2, this->BB_); }
-    BinaryInst* create_imul(Value* v1, Value* v2) { return new BinaryInst(this->m_->int32_ty_, Instruction::Mul, v1, v2, this->BB_); }
-    BinaryInst* create_isdiv(Value* v1, Value* v2) { return new BinaryInst(this->m_->int32_ty_, Instruction::SDiv, v1, v2, this->BB_); }
-    BinaryInst* create_isrem(Value* v1, Value* v2) { return new BinaryInst(this->m_->int32_ty_, Instruction::SRem, v1, v2, this->BB_); }
+    BinaryInst* create_iadd(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::Add, v1, v2, this->BB_); }
+    BinaryInst* create_isub(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::Sub, v1, v2, this->BB_); }
+    BinaryInst* create_imul(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::Mul, v1, v2, this->BB_); }
+    BinaryInst* create_isdiv(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::SDiv, v1, v2, this->BB_); }
+    BinaryInst* create_isrem(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::SRem, v1, v2, this->BB_); }
 
     // 整数比较
     ICmpInst* create_icmp_eq(Value* v1, Value* v2) { return new ICmpInst(ICmpInst::ICMP_EQ, v1, v2, this->BB_); }
@@ -31,10 +31,10 @@ public:
     ICmpInst* create_icmp_le(Value* v1, Value* v2) { return new ICmpInst(ICmpInst::ICMP_SLE, v1, v2, this->BB_); }
 
     // 浮点二元运算
-    BinaryInst* create_fadd(Value* v1, Value* v2) { return new BinaryInst(this->m_->float32_ty_, Instruction::FAdd, v1, v2, this->BB_); }
-    BinaryInst* create_fsub(Value* v1, Value* v2) { return new BinaryInst(this->m_->float32_ty_, Instruction::FSub, v1, v2, this->BB_); }
-    BinaryInst* create_fmul(Value* v1, Value* v2) { return new BinaryInst(this->m_->float32_ty_, Instruction::FMul, v1, v2, this->BB_); }
-    BinaryInst* create_fdiv(Value* v1, Value* v2) { return new BinaryInst(this->m_->float32_ty_, Instruction::FDiv, v1, v2, this->BB_); }
+    BinaryInst* create_fadd(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::FAdd, v1, v2, this->BB_); }
+    BinaryInst* create_fsub(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::FSub, v1, v2, this->BB_); }
+    BinaryInst* create_fmul(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::FMul, v1, v2, this->BB_); }
+    BinaryInst* create_fdiv(Value* v1, Value* v2) { return new BinaryInst(v1->type_, Instruction::FDiv, v1, v2, this->BB_); }
 
     // 浮点比较
     FCmpInst* create_fcmp_eq(Value* v1, Value* v2) { return new FCmpInst(FCmpInst::FCMP_UEQ, v1, v2, this->BB_); }

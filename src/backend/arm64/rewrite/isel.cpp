@@ -1811,29 +1811,65 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 if (matchedExt)
                     break;
 
-                // General fallback: byte tbl with a materialized index vector.
-                std::array<std::uint32_t, 4> packedMask{};
-                for (unsigned lane = 0; lane < packedMask.size(); ++lane) {
-                    int sourceLane = mask[lane];
-                    for (unsigned byte = 0; byte < 4; ++byte)
-                        packedMask[lane] |=
-                            static_cast<std::uint32_t>(
-                                sourceLane * 4 + byte)
-                            << (byte * 8);
-                }
-                VReg maskReg = createTemporary(ValueType::V4I32);
+                // A two-register TBL table requires consecutive physical
+                // registers, a constraint the general allocator cannot
+                // represent.  Keep common permutations above as native
+                // shuffles and scalarize only the uncommon fallback.
+                const ValueType vectorType = node.resultTypes().front();
+                const ValueType laneType =
+                    vectorType == ValueType::V4F32
+                        ? ValueType::F32 : ValueType::I32;
+                VReg current = createTemporary(vectorType);
                 emitVectorConstant(
                     block,
                     MachineOperand::vreg(
-                        maskReg, RegClass::NEON128, true),
-                    packedMask);
-                MachineInstr shuffle(Opcode::SHUFFLEv16i8);
-                shuffle.addOperand(define(node))
-                    .addOperand(use(node.operands()[0]))
-                    .addOperand(use(node.operands()[1]))
-                    .addOperand(MachineOperand::vreg(
-                        maskReg, RegClass::NEON128));
-                append(block, std::move(shuffle), &node);
+                        current, RegClass::NEON128, true),
+                    std::array<std::uint32_t, 4>{});
+                for (unsigned lane = 0; lane < mask.size(); ++lane) {
+                    const int selected = mask[lane];
+                    const unsigned sourceOperand = selected < 4 ? 0 : 1;
+                    const int sourceLane = selected < 4
+                                               ? selected : selected - 4;
+                    VReg scalar = createTemporary(laneType);
+                    MachineInstr extract(
+                        laneType == ValueType::F32
+                            ? Opcode::EXTRACTv4f32
+                            : Opcode::EXTRACTv4i32);
+                    extract
+                        .addOperand(MachineOperand::vreg(
+                            scalar, RegisterInfo::classForType(laneType),
+                            true))
+                        .addOperand(use(node.operands()[sourceOperand]))
+                        .addOperand(MachineOperand::immediate(sourceLane));
+                    MachineInstr &extractDefinition =
+                        append(block, std::move(extract));
+                    registerInfo.setDefinition(scalar, &extractDefinition);
+
+                    const bool finalLane = lane + 1 == mask.size();
+                    VReg next = finalLane
+                                    ? 0 : createTemporary(vectorType);
+                    MachineOperand destination = finalLane
+                        ? define(node)
+                        : MachineOperand::vreg(
+                              next, RegClass::NEON128, true);
+                    MachineInstr insert(
+                        laneType == ValueType::F32
+                            ? Opcode::INSv4f32 : Opcode::INSv4i32);
+                    insert.addOperand(destination)
+                        .addOperand(MachineOperand::vreg(
+                            current, RegClass::NEON128))
+                        .addOperand(MachineOperand::vreg(
+                            scalar, RegisterInfo::classForType(laneType)))
+                        .addOperand(MachineOperand::immediate(lane));
+                    insert.operands()[1].tiedTo = 0;
+                    MachineInstr &insertDefinition = append(
+                        block, std::move(insert),
+                        finalLane ? &node : nullptr);
+                    if (!finalLane) {
+                        registerInfo.setDefinition(next, &insertDefinition);
+                        current = next;
+                    }
+                }
                 break;
             }
             case SDOpcode::VectorReduceAdd: {

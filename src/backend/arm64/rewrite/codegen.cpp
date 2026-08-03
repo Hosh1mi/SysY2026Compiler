@@ -231,6 +231,13 @@ void AArch64Backend::emitGlobal(GlobalVariable *global) {
                     [&](Constant *element) {
                         return isAllZero(element);
                     });
+            if (auto *vector =
+                    dynamic_cast<ConstantVector *>(constant))
+                return std::all_of(
+                    vector->elements_.begin(), vector->elements_.end(),
+                    [&](Constant *element) {
+                        return isAllZero(element);
+                    });
             return false;
         };
     std::function<void(Constant *, Type *)> emitConstant =
@@ -251,6 +258,15 @@ void AArch64Backend::emitGlobal(GlobalVariable *global) {
                         "constant array has non-array type");
                 for (Constant *element : array->const_array)
                     emitConstant(element, arrayType->contained_);
+            } else if (auto *vector =
+                           dynamic_cast<ConstantVector *>(constant)) {
+                auto *vectorType = dynamic_cast<VectorType *>(type);
+                if (!vectorType || vector->elements_.size() !=
+                                       vectorType->num_elements_)
+                    throw std::logic_error(
+                        "constant vector has incompatible vector type");
+                for (Constant *element : vector->elements_)
+                    emitConstant(element, vectorType->contained_);
             } else if (dynamic_cast<ConstantZero *>(constant)) {
                 output_ << "\t.zero " << globalTypeSize(type) << '\n';
             } else {

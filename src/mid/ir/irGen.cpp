@@ -13,6 +13,7 @@
 #define FLOATPTR_T (module->get_pointer_type(module->float32_ty_))
 
 Type* curType;                          // 当前 decl 类型
+TypeSpec curSourceType;                 // 当前 decl 的源级向量形态
 bool isConst;                           // 当前 decl 是否是 const
 bool useConst = false;                  // 计算是否使用常量
 std::vector<Type *> params;             // 函数形参类型表
@@ -29,6 +30,175 @@ BasicBlock *falseBB = nullptr;
 BasicBlock *whileFalseBB = nullptr;     // break 目标
 bool has_br = false;                    // 当前 BB 已发射终止指令
 bool is_single_exp = false;             // 形如 "exp;" 的独立表达式语句
+Value *vectorLaneBase = nullptr;         // lane 左值所属的向量地址
+Value *vectorLaneIndex = nullptr;        // lane 左值的动态/常量下标
+
+static Type *scalarType(Module *module, TYPE element) {
+    return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
+}
+
+static Type *lowerFixedType(Module *module, const TypeSpec &type) {
+    if (!type.isFixedVector())
+        return scalarType(module, type.element);
+    if (type.lanes != 4) {
+        std::cerr << "unsupported fixed vector width " << type.lanes
+                  << "; this AArch64 lowering currently accepts 4 lanes\n";
+        std::exit(1);
+    }
+    return module->get_vector_type(scalarType(module, type.element), type.lanes);
+}
+
+static bool isIntegerValueType(Type *type) {
+    if (type->tid_ == Type::IntegerTyID)
+        return true;
+    auto *vector = dynamic_cast<VectorType *>(type);
+    return vector && vector->contained_->tid_ == Type::IntegerTyID;
+}
+
+static Constant *zeroScalar(Module *module, Type *type) {
+    if (type == module->float32_ty_)
+        return new ConstantFloat(module->float32_ty_, 0.0f);
+    return new ConstantInt(module->int32_ty_, 0);
+}
+
+static Value *coerceScalar(IRStmtBuilder *builder, Module *module, Value *value,
+                           Type *target) {
+    if (value->type_ == target)
+        return value;
+    if (value->type_ == module->int32_ty_ && target == module->float32_ty_) {
+        if (auto *constant = dynamic_cast<ConstantInt *>(value))
+            return new ConstantFloat(module->float32_ty_, constant->value_);
+        return builder->create_sitofp(value, target);
+    }
+    if (value->type_ == module->float32_ty_ && target == module->int32_ty_) {
+        if (auto *constant = dynamic_cast<ConstantFloat *>(value))
+            return new ConstantInt(module->int32_ty_, (int)constant->value_);
+        return builder->create_fptosi(value, target);
+    }
+    std::cerr << "incompatible scalar/vector value in initializer or assignment\n";
+    std::exit(1);
+}
+
+static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
+                                     VectorType *vectorType) {
+    if (!init || (init->exp == nullptr && init->initValList.empty()))
+        return new ConstantZero(vectorType);
+    if (init->exp) {
+        init->exp->accept(*gen);
+        if (recentVal->type_ != vectorType) {
+            std::cerr << "a fixed vector copy initializer must have the same type\n";
+            std::exit(1);
+        }
+        return recentVal;
+    }
+    if (init->initValList.size() > vectorType->num_elements_) {
+        std::cerr << "too many elements in fixed vector initializer\n";
+        std::exit(1);
+    }
+
+    std::vector<Value *> lanes;
+    bool allConstant = true;
+    for (auto &item : init->initValList) {
+        if (!item->exp) {
+            std::cerr << "nested braces are not valid for a one-dimensional vector\n";
+            std::exit(1);
+        }
+        item->exp->accept(*gen);
+        Value *lane = coerceScalar(gen->builder, gen->module.get(), recentVal,
+                                   vectorType->contained_);
+        allConstant &= dynamic_cast<Constant *>(lane) != nullptr;
+        lanes.push_back(lane);
+    }
+    while (lanes.size() < vectorType->num_elements_)
+        lanes.push_back(zeroScalar(gen->module.get(), vectorType->contained_));
+
+    if (allConstant) {
+        std::vector<Constant *> constants;
+        for (auto *lane : lanes)
+            constants.push_back(static_cast<Constant *>(lane));
+        return new ConstantVector(vectorType, constants);
+    }
+
+    Value *result = new ConstantZero(vectorType);
+    for (unsigned i = 0; i < lanes.size(); ++i)
+        result = new InsertElementInst(result, lanes[i],
+                                       new ConstantInt(gen->module->int32_ty_, i),
+                                       gen->builder->BB_);
+    return result;
+}
+
+static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
+                          VectorType *type) {
+    value = coerceScalar(builder, module, value, type->contained_);
+    if (auto *constant = dynamic_cast<Constant *>(value)) {
+        std::vector<Constant *> lanes(type->num_elements_, constant);
+        return new ConstantVector(type, lanes);
+    }
+    Value *result = new ConstantZero(type);
+    for (unsigned lane = 0; lane < type->num_elements_; ++lane)
+        result = new InsertElementInst(
+            result, value, new ConstantInt(module->int32_ty_, lane),
+            builder->BB_);
+    return result;
+}
+
+static ConstantVector *foldConstantVector(Module *module,
+                                          Instruction::OpID op,
+                                          ConstantVector *lhs,
+                                          ConstantVector *rhs) {
+    auto *type = static_cast<VectorType *>(lhs->type_);
+    if (rhs->type_ != type || lhs->elements_.size() != rhs->elements_.size())
+        return nullptr;
+    std::vector<Constant *> result;
+    for (unsigned i = 0; i < lhs->elements_.size(); ++i) {
+        if (type->contained_ == module->int32_ty_) {
+            auto *a = dynamic_cast<ConstantInt *>(lhs->elements_[i]);
+            auto *b = dynamic_cast<ConstantInt *>(rhs->elements_[i]);
+            if (!a || !b)
+                return nullptr;
+            int value = 0;
+            switch (op) {
+            case Instruction::Add: value = a->value_ + b->value_; break;
+            case Instruction::Sub: value = a->value_ - b->value_; break;
+            case Instruction::Mul: value = a->value_ * b->value_; break;
+            case Instruction::SDiv:
+                if (b->value_ == 0) return nullptr;
+                value = a->value_ / b->value_;
+                break;
+            case Instruction::SRem:
+                if (b->value_ == 0) return nullptr;
+                value = a->value_ % b->value_;
+                break;
+            default: return nullptr;
+            }
+            result.push_back(new ConstantInt(type->contained_, value));
+        } else {
+            auto *a = dynamic_cast<ConstantFloat *>(lhs->elements_[i]);
+            auto *b = dynamic_cast<ConstantFloat *>(rhs->elements_[i]);
+            if (!a || !b)
+                return nullptr;
+            float value = 0.0f;
+            switch (op) {
+            case Instruction::FAdd: value = a->value_ + b->value_; break;
+            case Instruction::FSub: value = a->value_ - b->value_; break;
+            case Instruction::FMul: value = a->value_ * b->value_; break;
+            case Instruction::FDiv: value = a->value_ / b->value_; break;
+            default: return nullptr;
+            }
+            result.push_back(new ConstantFloat(type->contained_, value));
+        }
+    }
+    return new ConstantVector(type, result);
+}
+
+static Value *vectorLanePointer(GenIR *gen, Value *vectorPointer,
+                                Value *index, VectorType *type) {
+    Type *elementPointerType =
+        gen->module->get_pointer_type(type->contained_);
+    Value *elements = gen->builder->create_bitcast(vectorPointer,
+                                                   elementPointerType);
+    return gen->builder->create_gep(elements, {index});
+}
 
 // 在函数内创建带语义名的基本块；同名冲突时加数字后缀（if.then → if.then1）。
 static BasicBlock *createNamedBB(Module *m, Function *func,
@@ -172,17 +342,110 @@ void GenIR::visit(DeclDefAST &ast) {
 
 void GenIR::visit(DeclAST &ast) {
     isConst = ast.isConst;
-    curType = ast.bType == TYPE_INT ? INT32_T : FLOAT_T;
+    curSourceType = ast.bType;
+    curType = ast.bType.isDynamicVector()
+                  ? scalarType(module.get(), ast.bType.element)
+                  : lowerFixedType(module.get(), ast.bType);
     for (auto &def : ast.defList) {
+        if (curSourceType.isDynamicVector() && def->arrays.empty()) {
+            std::cerr << "a dynamic vector object requires an explicit storage length, "
+                         "for example vector<int> a[n]\n";
+            std::exit(1);
+        }
         def->accept(*this);
     }
 }
 
 void GenIR::visit(DefAST &ast) {
     string varName = *ast.id;
+    if (auto *vectorType = dynamic_cast<VectorType *>(curType);
+        vectorType && !ast.arrays.empty()) {
+        if (ast.arrays.size() != 1) {
+            std::cerr << "multidimensional arrays of fixed vectors are not yet legalized\n";
+            std::exit(1);
+        }
+        bool wasUseConst = useConst;
+        useConst = true;
+        ast.arrays[0]->accept(*this);
+        auto *lengthValue = dynamic_cast<ConstantInt *>(recentVal);
+        useConst = wasUseConst;
+        if (!lengthValue || lengthValue->value_ <= 0) {
+            std::cerr << "fixed vector array length must be a positive constant\n";
+            std::exit(1);
+        }
+        unsigned length = lengthValue->value_;
+        auto *arrayType = module->get_array_type(vectorType, length);
+
+        if (scope.in_global()) {
+            Constant *initializer = nullptr;
+            if (!ast.initVal || ast.initVal->initValList.empty()) {
+                initializer = new ConstantZero(arrayType);
+            } else {
+                if (ast.initVal->initValList.size() > length) {
+                    std::cerr << "too many vectors in array initializer\n";
+                    std::exit(1);
+                }
+                std::vector<Constant *> elements;
+                bool oldConst = useConst;
+                useConst = true;
+                for (auto &item : ast.initVal->initValList) {
+                    Value *value = buildVectorInitializer(this, item.get(), vectorType);
+                    auto *constant = dynamic_cast<Constant *>(value);
+                    if (!constant) {
+                        std::cerr << "global vector array initializer is not constant\n";
+                        std::exit(1);
+                    }
+                    elements.push_back(constant);
+                }
+                useConst = oldConst;
+                while (elements.size() < length)
+                    elements.push_back(new ConstantZero(vectorType));
+                initializer = new ConstantArray(arrayType, elements);
+            }
+            auto *global = new GlobalVariable(varName, module.get(), arrayType,
+                                              isConst, initializer);
+            if (isConst)
+                global->setSemFlag(SemFlag::ImmutableObject);
+            scope.push(varName, global);
+            return;
+        }
+
+        auto *slot = builder->create_alloca(arrayType);
+        slot->name_ = varName;
+        if (isConst)
+            slot->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
+        scope.push(varName, slot);
+        for (unsigned i = 0; i < length; ++i) {
+            Value *value = new ConstantZero(vectorType);
+            if (ast.initVal && i < ast.initVal->initValList.size())
+                value = buildVectorInitializer(
+                    this, ast.initVal->initValList[i].get(), vectorType);
+            auto *element = builder->create_gep(
+                slot, {CONST_INT(0), CONST_INT((int)i)});
+            builder->create_store(value, element);
+        }
+        return;
+    }
     //全局变量或常量
     if (scope.in_global()) {
         if (ast.arrays.empty()) {   //不是数组，即全局量
+            if (auto *vectorType = dynamic_cast<VectorType *>(curType)) {
+                bool oldConst = useConst;
+                useConst = true;
+                Value *initializer = buildVectorInitializer(this, ast.initVal.get(), vectorType);
+                useConst = oldConst;
+                auto *constant = dynamic_cast<Constant *>(initializer);
+                if (!constant) {
+                    std::cerr << "global vector initializer is not constant\n";
+                    std::exit(1);
+                }
+                if (isConst)
+                    scope.push(varName, constant);
+                else
+                    scope.push(varName, new GlobalVariable(varName, module.get(),
+                                                           curType, false, constant));
+                return;
+            }
             if (ast.initVal == nullptr) { //无初始化
                 if (isConst) cout << "no initVal when define const!" << endl; //无初始化全局常量报错
                 //无初始化全局量一定是变量
@@ -241,6 +504,18 @@ void GenIR::visit(DefAST &ast) {
 
     //局部变量或常量
     if (ast.arrays.empty()) {   //不是数组，即普通局部量
+        if (auto *vectorType = dynamic_cast<VectorType *>(curType)) {
+            Value *initializer = buildVectorInitializer(this, ast.initVal.get(), vectorType);
+            if (isConst) {
+                scope.push(varName, initializer);
+            } else {
+                auto *slot = builder->create_alloca(curType);
+                slot->name_ = varName;
+                scope.push(varName, slot);
+                builder->create_store(initializer, slot);
+            }
+            return;
+        }
         if (ast.initVal == nullptr) {   //无初始化
             if (isConst) cout << "no initVal when define const!" << endl;   //无初始化局部常量报错
             else { //无初始化变量
@@ -463,9 +738,14 @@ void GenIR::visit(FuncDefAST &ast) {
     params.clear();
     paramNames.clear();
     Type *retType;
-    if (ast.funcType == TYPE_INT) retType = INT32_T;
-    else if (ast.funcType == TYPE_FLOAT) retType = FLOAT_T;
-    else retType = VOID_T;
+    if (ast.funcType.isDynamicVector()) {
+        std::cerr << "dynamic vectors are non-owning views and cannot be returned by value\n";
+        std::exit(1);
+    } else if (ast.funcType == TYPE_VOID) {
+        retType = VOID_T;
+    } else {
+        retType = lowerFixedType(module.get(), ast.funcType);
+    }
 
     for (auto &funcFParam : ast.funcFParamList)
         funcFParam->accept(*this);
@@ -501,8 +781,12 @@ void GenIR::visit(FuncDefAST &ast) {
     } else {
         retAlloca = builder->create_alloca(retType);
         retAlloca->name_ = "retval";
-        Value *zero = (retType == FLOAT_T) ? (Value *)CONST_FLOAT(0.0f)
-                                           : (Value *)CONST_INT(0);
+        Value *zero;
+        if (retType->tid_ == Type::VectorTyID)
+            zero = new ConstantZero(retType);
+        else
+            zero = (retType == FLOAT_T) ? (Value *)CONST_FLOAT(0.0f)
+                                        : (Value *)CONST_INT(0);
         builder->create_store(zero, retAlloca);
         builder->BB_ = retBB;
         builder->create_ret(builder->create_load(retAlloca));
@@ -523,8 +807,15 @@ void GenIR::visit(FuncDefAST &ast) {
 void GenIR::visit(FuncFParamAST &ast) {
     //获取参数类型
     Type *paramType;
-    if (ast.bType == TYPE_INT) paramType = INT32_T;
-    else paramType = FLOAT_T;
+    if (ast.bType.isDynamicVector()) {
+        if (!ast.isArray) {
+            std::cerr << "a dynamic vector parameter must use view syntax name[]\n";
+            std::exit(1);
+        }
+        paramType = scalarType(module.get(), ast.bType.element);
+    } else {
+        paramType = lowerFixedType(module.get(), ast.bType);
+    }
     //是否为数组
     if (ast.isArray) {
         useConst = true; //数组维度是整型常量
@@ -571,11 +862,27 @@ void GenIR::visit(StmtAST &ast) {
             break;
         case ASS: {
             is_single_exp = true;
+            vectorLaneBase = nullptr;
+            vectorLaneIndex = nullptr;
             requireLVal = true;  
             ast.lVal->accept(*this);
             auto var = recentVal;
             ast.exp->accept(*this);
             auto expval = recentVal;
+            if (vectorLaneBase) {
+                auto *vectorType = static_cast<VectorType *>(
+                    static_cast<PointerType *>(vectorLaneBase->type_)->contained_);
+                expval = coerceScalar(builder, module.get(), expval,
+                                      vectorType->contained_);
+                auto *oldVector = builder->create_load(vectorLaneBase);
+                auto *newVector = new InsertElementInst(oldVector, expval,
+                                                        vectorLaneIndex,
+                                                        builder->BB_);
+                builder->create_store(newVector, vectorLaneBase);
+                vectorLaneBase = nullptr;
+                vectorLaneIndex = nullptr;
+                break;
+            }
             Type* varElemType = static_cast<PointerType*>(var->type_)->contained_;
             if (varElemType == FLOAT_T && expval->type_ == INT32_T) {
                 expval = builder->create_sitofp(expval, FLOAT_T);
@@ -763,6 +1070,19 @@ void GenIR::checkCalType(Value* val[]) {
     if (val[1]->type_ == INT32_T && val[0]->type_ == FLOAT_T) {
         val[1] = builder->create_sitofp(val[1], FLOAT_T);
     }
+    auto *leftVector = dynamic_cast<VectorType *>(val[0]->type_);
+    auto *rightVector = dynamic_cast<VectorType *>(val[1]->type_);
+    if (leftVector && !rightVector) {
+        val[1] = splatScalar(builder, module.get(), val[1], leftVector);
+        rightVector = leftVector;
+    } else if (!leftVector && rightVector) {
+        val[0] = splatScalar(builder, module.get(), val[0], rightVector);
+        leftVector = rightVector;
+    }
+    if (leftVector && rightVector && leftVector != rightVector) {
+        std::cerr << "vector operands must have the same element type and width\n";
+        std::exit(1);
+    }
 }
 
 void GenIR::visit(AddExpAST &ast) {
@@ -778,7 +1098,8 @@ void GenIR::visit(AddExpAST &ast) {
     val[1] = recentVal;
 
     //若都是常量
-    if (useConst) {
+    if (useConst && val[0]->type_->tid_ != Type::VectorTyID &&
+        val[1]->type_->tid_ != Type::VectorTyID) {
         int intVal[3]; //lInt, rInt, relInt;
         float floatVal[3]; // lFloat, rFloat, relFloat;
         bool resultIsInt = checkCalType(val, intVal, floatVal);
@@ -799,7 +1120,21 @@ void GenIR::visit(AddExpAST &ast) {
 
     //若不是常量，进行计算，输出指令
     checkCalType(val);
-    if (val[0]->type_ == INT32_T) {
+    if (useConst) {
+        auto *lhs = dynamic_cast<ConstantVector *>(val[0]);
+        auto *rhs = dynamic_cast<ConstantVector *>(val[1]);
+        Instruction::OpID op = ast.op == AOP_ADD ? Instruction::Add
+                                                  : Instruction::Sub;
+        if (lhs && lhs->type_->tid_ == Type::VectorTyID &&
+            static_cast<VectorType *>(lhs->type_)->contained_ == FLOAT_T)
+            op = ast.op == AOP_ADD ? Instruction::FAdd : Instruction::FSub;
+        if (lhs && rhs) {
+            recentVal = foldConstantVector(module.get(), op, lhs, rhs);
+            if (recentVal)
+                return;
+        }
+    }
+    if (isIntegerValueType(val[0]->type_)) {
         switch (ast.op) {
             case AOP_ADD:
                 recentVal = builder->create_iadd(val[0], val[1]);
@@ -833,7 +1168,8 @@ void GenIR::visit(MulExpAST &ast) {
     val[1] = recentVal;
 
     //若都是常量
-    if (useConst) {
+    if (useConst && val[0]->type_->tid_ != Type::VectorTyID &&
+        val[1]->type_->tid_ != Type::VectorTyID) {
         int intVal[3]; //lInt, rInt, relInt;
         float floatVal[3]; // lFloat, rFloat, relFloat;
         bool resultIsInt = checkCalType(val, intVal, floatVal);
@@ -857,7 +1193,24 @@ void GenIR::visit(MulExpAST &ast) {
 
     //若不是常量，进行计算，输出指令
     checkCalType(val);
-    if (val[0]->type_ == INT32_T) {
+    if (useConst) {
+        auto *lhs = dynamic_cast<ConstantVector *>(val[0]);
+        auto *rhs = dynamic_cast<ConstantVector *>(val[1]);
+        Instruction::OpID op = Instruction::Mul;
+        if (lhs && static_cast<VectorType *>(lhs->type_)->contained_ == FLOAT_T) {
+            op = ast.op == MOP_MUL ? Instruction::FMul : Instruction::FDiv;
+        } else if (ast.op == MOP_DIV) {
+            op = Instruction::SDiv;
+        } else if (ast.op == MOP_MOD) {
+            op = Instruction::SRem;
+        }
+        if (lhs && rhs) {
+            recentVal = foldConstantVector(module.get(), op, lhs, rhs);
+            if (recentVal)
+                return;
+        }
+    }
+    if (isIntegerValueType(val[0]->type_)) {
         switch (ast.op) {
             case MOP_MUL:
                 recentVal = builder->create_imul(val[0], val[1]);
@@ -922,10 +1275,14 @@ void GenIR::visit(UnaryExpAST &ast) {
         else if (recentVal->type_ == INT1_T) // INT1-->INT32
             recentVal = builder->create_zext(recentVal, INT32_T);
 
-        if (recentVal->type_ == INT32_T) {
+        if (isIntegerValueType(recentVal->type_)) {
             switch (ast.op) {
                 case UOP_MINUS:
-                    recentVal = builder->create_isub(CONST_INT(0), recentVal);
+                    recentVal = builder->create_isub(
+                        recentVal->type_->tid_ == Type::VectorTyID
+                            ? (Value *)new ConstantZero(recentVal->type_)
+                            : (Value *)CONST_INT(0),
+                        recentVal);
                     break;
                 case UOP_NOT:
                     recentVal = builder->create_icmp_eq(recentVal, CONST_INT(0));
@@ -936,7 +1293,11 @@ void GenIR::visit(UnaryExpAST &ast) {
         } else {
             switch (ast.op) {
                 case UOP_MINUS:
-                    recentVal = builder->create_fsub(CONST_FLOAT(0), recentVal);
+                    recentVal = builder->create_fsub(
+                        recentVal->type_->tid_ == Type::VectorTyID
+                            ? (Value *)new ConstantZero(recentVal->type_)
+                            : (Value *)CONST_FLOAT(0),
+                        recentVal);
                     break;
                 case UOP_NOT:
                     recentVal = builder->create_fcmp_eq(recentVal, CONST_FLOAT(0));
@@ -969,6 +1330,21 @@ void GenIR::visit(LValAST &ast) {
             recentVal = var;
             return;
         }
+        if (auto *vector = dynamic_cast<ConstantVector *>(var)) {
+            if (ast.arrays.size() != 1) {
+                std::cerr << "a fixed vector requires exactly one lane index\n";
+                std::exit(1);
+            }
+            ast.arrays[0]->accept(*this);
+            auto *index = dynamic_cast<ConstantInt *>(recentVal);
+            if (!index || index->value_ < 0 ||
+                (unsigned)index->value_ >= vector->elements_.size()) {
+                std::cerr << "constant vector lane index is out of range\n";
+                std::exit(1);
+            }
+            recentVal = vector->elements_[index->value_];
+            return;
+        }
         //若是数组，则var一定是全局常量数组
         vector<int> index;
         for (auto &exp : ast.arrays) {
@@ -990,6 +1366,12 @@ void GenIR::visit(LValAST &ast) {
             }
             if (dynamic_cast<ConstantArray*>(recentVal)) {
                 recentVal = ((ConstantArray*)recentVal)->const_array[i];
+            } else if (auto *vector = dynamic_cast<ConstantVector *>(recentVal)) {
+                if (i < 0 || (unsigned)i >= vector->elements_.size()) {
+                    std::cerr << "constant vector lane index is out of range\n";
+                    std::exit(1);
+                }
+                recentVal = vector->elements_[i];
             }
         }
         return;
@@ -1000,8 +1382,135 @@ void GenIR::visit(LValAST &ast) {
         recentVal = var;
         return;
     }
+    if (auto *constantVector = dynamic_cast<ConstantVector *>(var)) {
+        if (ast.arrays.empty()) {
+            recentVal = constantVector;
+            return;
+        }
+        if (ast.arrays.size() != 1) {
+            std::cerr << "a fixed vector requires exactly one lane index\n";
+            std::exit(1);
+        }
+        ast.arrays[0]->accept(*this);
+        auto *constantIndex = dynamic_cast<ConstantInt *>(recentVal);
+        if (constantIndex) {
+            if (constantIndex->value_ < 0 ||
+                (unsigned)constantIndex->value_ >= constantVector->elements_.size()) {
+                std::cerr << "constant vector lane index is out of range\n";
+                std::exit(1);
+            }
+            recentVal = constantVector->elements_[constantIndex->value_];
+        } else {
+            auto *slot = builder->create_alloca(constantVector->type_);
+            builder->create_store(constantVector, slot);
+            auto *type = static_cast<VectorType *>(constantVector->type_);
+            Value *lanePointer = vectorLanePointer(this, slot, recentVal, type);
+            recentVal = builder->create_load(lanePointer);
+        }
+        return;
+    }
     // 不是常量那么var一定是指针类型
     Type* varType = static_cast<PointerType*>(var->type_)->contained_; //所指的类型
+    if (varType->tid_ == Type::VectorTyID) {
+        if (ast.arrays.empty()) {
+            recentVal = isTrueLVal ? var : (Value *)builder->create_load(var);
+            return;
+        }
+        if (ast.arrays.size() != 1) {
+            std::cerr << "a fixed vector requires exactly one lane index\n";
+            std::exit(1);
+        }
+        ast.arrays[0]->accept(*this);
+        Value *index = recentVal;
+        auto *constantIndex = dynamic_cast<ConstantInt *>(index);
+        auto *type = static_cast<VectorType *>(varType);
+        if (constantIndex &&
+            (constantIndex->value_ < 0 ||
+             (unsigned)constantIndex->value_ >= type->num_elements_)) {
+            std::cerr << "constant vector lane index is out of range\n";
+            std::exit(1);
+        }
+        if (!constantIndex) {
+            Value *lanePointer = vectorLanePointer(this, var, index, type);
+            recentVal = isTrueLVal ? lanePointer
+                                   : (Value *)builder->create_load(lanePointer);
+            return;
+        }
+        if (isTrueLVal) {
+            vectorLaneBase = var;
+            vectorLaneIndex = index;
+            recentVal = var;
+        } else {
+            recentVal = new ExtractElementInst(builder->create_load(var), index,
+                                               builder->BB_);
+        }
+        return;
+    }
+    if (!ast.arrays.empty()) {
+        bool parameterArray = varType->tid_ == Type::PointerTyID;
+        Value *base = var;
+        Type *aggregateType = varType;
+        if (parameterArray) {
+            base = builder->create_load(var);
+            aggregateType = static_cast<PointerType *>(varType)->contained_;
+        }
+        unsigned arrayDepth = 0;
+        Type *tail = aggregateType;
+        while (tail->tid_ == Type::ArrayTyID) {
+            ++arrayDepth;
+            tail = static_cast<ArrayType *>(tail)->contained_;
+        }
+        if (tail->tid_ == Type::VectorTyID) {
+            std::vector<Value *> sourceIndices;
+            for (auto &exp : ast.arrays) {
+                exp->accept(*this);
+                sourceIndices.push_back(recentVal);
+            }
+            unsigned objectIndices = arrayDepth + (parameterArray ? 1 : 0);
+            if (sourceIndices.size() != objectIndices &&
+                sourceIndices.size() != objectIndices + 1) {
+                std::cerr << "fixed vector array access has the wrong number of indices\n";
+                std::exit(1);
+            }
+            std::vector<Value *> gepIndices(sourceIndices.begin(),
+                                            sourceIndices.begin() + objectIndices);
+            if (!parameterArray)
+                gepIndices.insert(gepIndices.begin(), CONST_INT(0));
+            Value *vectorPointer = builder->create_gep(base, gepIndices);
+            if (sourceIndices.size() == objectIndices) {
+                recentVal = isTrueLVal ? vectorPointer
+                                       : (Value *)builder->create_load(vectorPointer);
+                return;
+            }
+            Value *laneIndex = sourceIndices.back();
+            auto *vectorType = static_cast<VectorType *>(tail);
+            auto *constantIndex = dynamic_cast<ConstantInt *>(laneIndex);
+            if (constantIndex &&
+                (constantIndex->value_ < 0 ||
+                 (unsigned)constantIndex->value_ >=
+                     vectorType->num_elements_)) {
+                std::cerr << "constant vector lane index is out of range\n";
+                std::exit(1);
+            }
+            if (!constantIndex) {
+                Value *lanePointer = vectorLanePointer(
+                    this, vectorPointer, laneIndex, vectorType);
+                recentVal = isTrueLVal
+                                ? lanePointer
+                                : (Value *)builder->create_load(lanePointer);
+                return;
+            }
+            if (isTrueLVal) {
+                vectorLaneBase = vectorPointer;
+                vectorLaneIndex = laneIndex;
+                recentVal = vectorPointer;
+            } else {
+                recentVal = new ExtractElementInst(
+                    builder->create_load(vectorPointer), laneIndex, builder->BB_);
+            }
+            return;
+        }
+    }
     if (!ast.arrays.empty()) { //说明是数组
         vector<Value *> idxs;
         for (auto &exp : ast.arrays) {
