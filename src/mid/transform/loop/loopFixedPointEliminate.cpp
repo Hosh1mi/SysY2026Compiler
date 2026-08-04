@@ -318,6 +318,13 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     const bool headerExiting = exiting == loop.header;
     if (!latchExiting && !headerExiting)
         return false;
+    // Adding a latch-to-exit edge to a top-tested non-leaf loop also changes
+    // the LCSSA boundary of every contained loop.  This pass does not rebuild
+    // the nested loop forest and its exit phis after each rewrite, so only
+    // apply that CFG-changing form to leaf loops.  Latch-exiting loops keep
+    // their existing edges and remain safe for nested regions.
+    if (headerExiting && !loop.children.empty())
+        return false;
 
     ICmpInst *guard = nullptr;
     BasicBlock *guardBlock = nullptr;

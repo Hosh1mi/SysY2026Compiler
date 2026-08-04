@@ -12,6 +12,8 @@
 //   - the unit-stride count recurrence must be finite and used only by the
 //     trip-count guard (in the latch for do-while, or in the header for
 //     while);
+//   - adding an early latch exit to a header-tested while is limited to leaf
+//     loops, because nested-loop LCSSA boundaries would otherwise change;
 //   - the loop may not contain calls;
 //   - loop stores must not alias any loop load;
 //   - every live non-control header phi is compared with its backedge value;
