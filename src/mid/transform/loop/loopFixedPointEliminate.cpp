@@ -287,19 +287,38 @@ LoopFixedPointEliminate::execute(Module *module, AnalysisManager &AM) {
 
 bool LoopFixedPointEliminate::runOnFunction(Function *func,
                                             BasicAliasAnalysis &AA) {
-    LoopInfo LI;
-    LI.analyze(func);
-    std::vector<Loop *> loops;
-    for (const auto &loop : LI.allLoops())
-        loops.push_back(loop.get());
-    std::sort(loops.begin(), loops.end(),
-              [](Loop *lhs, Loop *rhs) {
-                  return lhs->depth < rhs->depth;
-              });
-
     bool changed = false;
-    for (auto *loop : loops)
-        changed |= tryTransform(*loop, func, AA);
+    for (;;) {
+        // A top-tested fixed-point rewrite adds a new latch-to-exit edge.
+        // Rebuild the loop forest after every successful rewrite instead of
+        // continuing with child Loop objects whose CFG view is now stale.
+        LoopInfo LI;
+        LI.analyze(func);
+        std::vector<Loop *> loops;
+        for (const auto &loop : LI.allLoops())
+            loops.push_back(loop.get());
+        std::sort(loops.begin(), loops.end(),
+                  [](Loop *lhs, Loop *rhs) {
+                      return lhs->depth < rhs->depth;
+                  });
+
+        bool transformed = false;
+        bool transformedNonLeaf = false;
+        for (auto *loop : loops) {
+            if (!tryTransform(*loop, func, AA))
+                continue;
+            changed = true;
+            transformed = true;
+            transformedNonLeaf = !loop->children.empty();
+            break;
+        }
+        // Rewriting an outer top-tested loop can make its children appear to
+        // satisfy the fixed-point shape through newly extended exit phis.
+        // Those children were not independently proven against the original
+        // loop nest, so do not cascade into them in the same function run.
+        if (!transformed || transformedNonLeaf)
+            break;
+    }
     if (changed)
         func->set_instr_name();
     return changed;
@@ -318,14 +337,6 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     const bool headerExiting = exiting == loop.header;
     if (!latchExiting && !headerExiting)
         return false;
-    // Adding a latch-to-exit edge to a top-tested non-leaf loop also changes
-    // the LCSSA boundary of every contained loop.  This pass does not rebuild
-    // the nested loop forest and its exit phis after each rewrite, so only
-    // apply that CFG-changing form to leaf loops.  Latch-exiting loops keep
-    // their existing edges and remain safe for nested regions.
-    if (headerExiting && !loop.children.empty())
-        return false;
-
     ICmpInst *guard = nullptr;
     BasicBlock *guardBlock = nullptr;
     BranchInst *latchBranch = nullptr;
