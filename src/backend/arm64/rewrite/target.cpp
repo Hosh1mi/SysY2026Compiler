@@ -175,6 +175,8 @@ const InstrDesc &descriptor(Opcode opcode) {
     }
     case Opcode::MOVi32:
     case Opcode::MOVi64:
+    case Opcode::MOVZ:
+    case Opcode::MOVK:
     case Opcode::MOVIv4Zero:
     case Opcode::MOVIv4s:
     case Opcode::MOVIv4sMsl:
@@ -185,6 +187,10 @@ const InstrDesc &descriptor(Opcode opcode) {
                                         SchedResource::ALU);
         static const InstrDesc x = DESC(MOVi64, "MOVi64", 1, 2, 1,
                                         SchedResource::ALU);
+        static const InstrDesc movz = DESC(MOVZ, "movz", 1, 3, 1,
+                                           SchedResource::ALU);
+        static const InstrDesc movk = DESC(MOVK, "movk", 1, 4, 1,
+                                           SchedResource::ALU);
         static const InstrDesc v = DESC(MOVIv4Zero, "movi", 1, 1, 2,
                                         SchedResource::FPALU);
         static const InstrDesc movi4s = DESC(MOVIv4s, "movi", 1, 3, 2,
@@ -199,6 +205,8 @@ const InstrDesc &descriptor(Opcode opcode) {
                                              SchedResource::FPALU);
         return opcode == Opcode::MOVi32 ? w
              : opcode == Opcode::MOVi64 ? x
+             : opcode == Opcode::MOVZ ? movz
+             : opcode == Opcode::MOVK ? movk
              : opcode == Opcode::MOVIv4Zero ? v
              : opcode == Opcode::MOVIv4s ? movi4s
              : opcode == Opcode::MOVIv4sMsl ? movimsl

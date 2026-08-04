@@ -155,11 +155,14 @@ void AArch64Backend::generate() {
             if (!options_.disablePeephole)
                 addressingOptimizer.run(*machineFunction);
             blockPlacement.run(*machineFunction);
-            // The A53 post-RA scheduler is terminal: later stages only
-            // verify and lower the already explicit MIR to assembly.
-            if (!options_.disableSchedule)
-                scheduler.run(*machineFunction);
         }
+        // Expand integer immediates into MOVZ/MOVK before scheduling and
+        // printing so the scheduler can interleave independent pieces.
+        instructionExpansion.expandConstantMaterializations(
+            *machineFunction);
+        if (options_.optimizationLevel >= 1 &&
+            !options_.disableSchedule)
+            scheduler.run(*machineFunction);
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "frame-lowering");
         if (options_.dumpMachineIR)

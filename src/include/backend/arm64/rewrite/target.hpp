@@ -65,6 +65,10 @@ enum class Opcode : std::uint16_t {
     CSETW,
     MOVi32,
     MOVi64,
+    // Real constant pieces produced by PostRA expansion of MOVi32/MOVi64.
+    // MOVZ: dst(def), imm16, shift.  MOVK: dst(def), dst(use), imm16, shift.
+    MOVZ,
+    MOVK,
     MOVIv4Zero,
     MOVIv4s,
     MOVIv4sMsl,

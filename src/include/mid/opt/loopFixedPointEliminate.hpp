@@ -10,10 +10,13 @@
 //
 // The transform is deliberately conservative:
 //   - the unit-stride count recurrence must be finite and used only by the
-//     latch guard;
+//     trip-count guard (in the latch for do-while, or in the header for
+//     while);
 //   - the loop may not contain calls;
 //   - loop stores must not alias any loop load;
-//   - every other header phi is compared with its backedge value.
+//   - every live non-control header phi is compared with its backedge value;
+//   - header phis that only feed their own update (dead self-recurrences)
+//     are ignored — they cannot affect observable state.
 //
 // If the state is unchanged, another iteration has identical scalar inputs
 // and cannot observe memory written by the previous iteration. It therefore
