@@ -6,8 +6,8 @@
 
 ## 1. 入口与物化时机
 
-- 接口：[`summableModSumRuntime.hpp`](../../include/mid/runtime/summableModSumRuntime.hpp)
-- 实现：[`summableModSumRuntime.cpp`](summableModSumRuntime.cpp)
+- 接口：[`summableModSumRuntime.hpp`](../src/include/mid/runtime/summableModSumRuntime.hpp)
+- 实现：[`summableModSumRuntime.cpp`](../src/mid/runtime/summableModSumRuntime.cpp)
 - 唯一公开入口：`materializeSummableModSumRuntime(Module*)`
 
 `LoopRepFold` 只在匹配成功时声明并调用 `__compiler.summable_mod_sum`。所有 O1 pass

@@ -10,7 +10,7 @@
 !.proto/
 !docs/
 docs/*
-!docs/backend.md
+!docs/*.md
 .agents/
 test/*
 

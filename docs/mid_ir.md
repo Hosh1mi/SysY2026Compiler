@@ -7,10 +7,10 @@ LLVM IR，但对象模型、类型集和指令语义以本项目实现为准。
 
 ## 1. 目录与对象模型
 
-- 实现位于 [`src/mid/ir`](.)。
-- 公共接口位于 [`src/include/mid/ir`](../../include/mid/ir)。
-- 聚合头文件 [`ir.hpp`](../../include/mid/ir/ir.hpp) 引入主要 IR 类；
-  [`irBuilder.hpp`](../../include/mid/ir/irBuilder.hpp) 提供带插入点的构建接口。
+- 实现位于 [`src/mid/ir`](../src/mid/ir)。
+- 公共接口位于 [`src/include/mid/ir`](../src/include/mid/ir)。
+- 聚合头文件 [`ir.hpp`](../src/include/mid/ir/ir.hpp) 引入主要 IR 类；
+  [`irBuilder.hpp`](../src/include/mid/ir/irBuilder.hpp) 提供带插入点的构建接口。
 
 顶层关系是：
 
@@ -42,19 +42,19 @@ pass 可以对不同种类的值使用相同的替换与查询接口。
 
 | 实现文件 | 内容 |
 | --- | --- |
-| [`type.cpp`](type.cpp)、[`constant.cpp`](constant.cpp)、[`globalVariable.cpp`](globalVariable.cpp) | 类型与常量、全局对象的文本表示 |
-| [`value.cpp`](value.cpp)、[`instruction.cpp`](instruction.cpp) | use-def 维护与指令实现 |
-| [`basicBlock.cpp`](basicBlock.cpp)、[`function.cpp`](function.cpp) | 指令链表、CFG、支配信息与命名 |
-| [`module.cpp`](module.cpp) | 模块输出与入口函数查询 |
-| [`intrinsics.cpp`](intrinsics.cpp) | signed min/max 与 `mulmod` 内建函数 |
-| [`irGen.cpp`](irGen.cpp) | AST 到基础 IR 的降低 |
-| [`verify.cpp`](verify.cpp) | IR 结构与 SSA 不变式验证 |
+| [`type.cpp`](../src/mid/ir/type.cpp)、[`constant.cpp`](../src/mid/ir/constant.cpp)、[`globalVariable.cpp`](../src/mid/ir/globalVariable.cpp) | 类型与常量、全局对象的文本表示 |
+| [`value.cpp`](../src/mid/ir/value.cpp)、[`instruction.cpp`](../src/mid/ir/instruction.cpp) | use-def 维护与指令实现 |
+| [`basicBlock.cpp`](../src/mid/ir/basicBlock.cpp)、[`function.cpp`](../src/mid/ir/function.cpp) | 指令链表、CFG、支配信息与命名 |
+| [`module.cpp`](../src/mid/ir/module.cpp) | 模块输出与入口函数查询 |
+| [`intrinsics.cpp`](../src/mid/ir/intrinsics.cpp) | signed min/max 与 `mulmod` 内建函数 |
+| [`irGen.cpp`](../src/mid/ir/irGen.cpp) | AST 到基础 IR 的降低 |
+| [`verify.cpp`](../src/mid/ir/verify.cpp) | IR 结构与 SSA 不变式验证 |
 
 ## 2. 类型、常量和语义标记
 
 ### 2.1 类型系统
 
-[`type.hpp`](../../include/mid/ir/type.hpp) 定义以下类型：
+[`type.hpp`](../src/include/mid/ir/type.hpp) 定义以下类型：
 
 - `void` 和 `label`；
 - `i1`、`i32` 和内部 `i64`；
@@ -71,7 +71,7 @@ pass 可以对不同种类的值使用相同的替换与查询接口。
 
 ### 2.2 常量
 
-[`constant.hpp`](../../include/mid/ir/constant.hpp) 包含：
+[`constant.hpp`](../src/include/mid/ir/constant.hpp) 包含：
 
 - `ConstantInt`：用 `int64_t` 存放 `i1`/`i32`/`i64` 字面量；
 - `ConstantFloat`：按 IR 所需的十六进制形式打印；
@@ -83,7 +83,7 @@ IR。
 
 ### 2.3 SemFlag
 
-[`semFlags.hpp`](../../include/mid/ir/semFlags.hpp) 把不适合临时重算的事实持久化在 `Value`
+[`semFlags.hpp`](../src/include/mid/ir/semFlags.hpp) 把不适合临时重算的事实持久化在 `Value`
 上。当前标记大致分为：
 
 - 内存不变性：`ImmutableObject`、`ImmutableLoad`、`SrcConstArray`；
@@ -127,7 +127,7 @@ use-to-def 的反向索引。`Instruction::use_pos_[i]` 保存自己在对方 `u
 
 ## 4. 指令集
 
-[`instruction.hpp`](../../include/mid/ir/instruction.hpp) 的 `OpID` 是中端和后端共享的指令分类。
+[`instruction.hpp`](../src/include/mid/ir/instruction.hpp) 的 `OpID` 是中端和后端共享的指令分类。
 
 | 类别 | 指令 |
 | --- | --- |
@@ -150,7 +150,7 @@ PHI 操作数始终交错保存为：
 数组层级。需要拆 GEP 时应使用 `create_split_suffix_gep`，否则返回指针类型可能错一层。
 
 `Function::IntrinsicID` 目前标识 signed min/max 和宽位 `mulmod`。
-[`intrinsics.cpp`](intrinsics.cpp) 负责插入声明、识别 select 形式并在标量/向量类型间统一语义。
+[`intrinsics.cpp`](../src/mid/ir/intrinsics.cpp) 负责插入声明、识别 select 形式并在标量/向量类型间统一语义。
 
 ## 5. CFG、支配树和命名
 
@@ -183,7 +183,7 @@ CFG 变更后必须调用 `invalidateDominatorInfo`；`add_basic_block` 和 `rem
 
 ## 6. AST 到基础 IR
 
-[`irGen.cpp`](irGen.cpp) 以 `GenIR` Visitor 遍历 SysY AST。`Scope` 使用 map 栈实现词法作用域，
+[`irGen.cpp`](../src/mid/ir/irGen.cpp) 以 `GenIR` Visitor 遍历 SysY AST。`Scope` 使用 map 栈实现词法作用域，
 每个声明映射到对应 `Value`。
 
 基础 lowering 的主要约定是：
@@ -207,7 +207,7 @@ CFG 变更后必须调用 `invalidateDominatorInfo`；`add_basic_block` 和 `rem
 build/compiler -O1 --dump-ir --verify-ir -c input.sy -o /tmp/out.ir
 ```
 
-[`verify.cpp`](verify.cpp) 不信任待验证的 CFG 缓存，而是从 terminator 独立推导边，并重新
+[`verify.cpp`](../src/mid/ir/verify.cpp) 不信任待验证的 CFG 缓存，而是从 terminator 独立推导边，并重新
 计算支配关系。它在 `--verify-ir` 模式下于每个 pass 后检查：
 
 1. 每个块非空、仅末尾存在 `br`/`ret`；

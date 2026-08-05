@@ -42,9 +42,9 @@ LOOP_VERIFY_STRICT=1 build/compiler -O1 --verify-ir -c input.sy -o /tmp/out.ir
 
 ## 2. PassManager 与 O1 顺序
 
-接口在 [`pass.hpp`](../../include/mid/opt/pass.hpp) 和
-[`passManager.hpp`](../../include/mid/opt/passManager.hpp)，实现在
-[`passManager.cpp`](passManager.cpp)。一个 pass 至少实现无参分析版本的
+接口在 [`pass.hpp`](../src/include/mid/opt/pass.hpp) 和
+[`passManager.hpp`](../src/include/mid/opt/passManager.hpp)，实现在
+[`passManager.cpp`](../src/mid/opt/passManager.cpp)。一个 pass 至少实现无参分析版本的
 `execute(Module*)`。需要复用分析缓存时，可以重载：
 
 ```cpp
@@ -53,7 +53,7 @@ PreservedAnalyses execute(Module *module, AnalysisManager &AM)
 
 约定是“没有改动 IR 就返回 `all()`”。默认实现不知道 pass 做了什么，按最保守方式
 返回 `none()`。返回值交给 `AnalysisManager` 清除 LoopInfo、SCEV、LVI 或 BasicAA
-缓存，详细规则见 [`src/mid/analysis/README.md`](../analysis/README.md)。
+缓存，详细规则见 [`docs/mid_analysis.md`](mid_analysis.md)。
 
 ### 2.1 重复组
 
@@ -102,8 +102,8 @@ clone 进来的局部 alloca 和算术 DAG 回到常规 SSA 形状。
 
 ### 3.1 Mem2Reg
 
-实现：[`mem2reg.hpp`](../../include/mid/opt/mem2reg.hpp)、
-[`mem2reg.cpp`](mem2reg.cpp)。
+实现：[`mem2reg.hpp`](../src/include/mid/opt/mem2reg.hpp)、
+[`mem2reg.cpp`](../src/mid/opt/mem2reg.cpp)。
 
 Mem2Reg 的入口按函数工作。它先收集可提升的 `alloca`，然后按由简单到复杂的顺序处理：
 
@@ -124,7 +124,7 @@ PHI 是正常结果，不是 Mem2Reg 失败。
 
 ### 3.2 SCCP
 
-实现：[`sccp.hpp`](../../include/mid/opt/sccp.hpp)、[`sccp.cpp`](sccp.cpp)。
+实现：[`sccp.hpp`](../src/include/mid/opt/sccp.hpp)、[`sccp.cpp`](../src/mid/opt/sccp.cpp)。
 
 SCCP 使用 `UNDEF`、常量和 `OVERDEF` 三态 lattice。它一边沿 SSA use 更新值状态，
 一边只把确定可达的 CFG edge 放进工作表。二元整数操作的常量计算使用本文件自己的
@@ -136,9 +136,9 @@ SCCP 使用 `UNDEF`、常量和 `OVERDEF` 三态 lattice。它一边沿 SSA use 
 
 ### 3.3 EarlyCSE 与 GVN
 
-实现：[`earlyCSE.hpp`](../../include/mid/opt/earlyCSE.hpp)、
-[`earlyCSE.cpp`](earlyCSE.cpp)、[`gvn.hpp`](../../include/mid/opt/gvn.hpp)、
-[`gvn.cpp`](gvn.cpp)，公共签名工具在 [`cse_common.hpp`](../../include/mid/opt/cse_common.hpp)。
+实现：[`earlyCSE.hpp`](../src/include/mid/opt/earlyCSE.hpp)、
+[`earlyCSE.cpp`](../src/mid/opt/earlyCSE.cpp)、[`gvn.hpp`](../src/include/mid/opt/gvn.hpp)、
+[`gvn.cpp`](../src/mid/opt/gvn.cpp)，公共签名工具在 [`cse_common.hpp`](../src/include/mid/opt/cse_common.hpp)。
 
 两者都用表达式签名做值编号。签名包含 opcode、结果类型、比较谓词和经过已有 value
 number 替换的 operands；可交换整数/浮点操作会先稳定 operand 顺序，常量会被
@@ -159,10 +159,10 @@ GVN 在支配树上做更完整的全局编号。除普通纯表达式外，它�
 
 ### 3.4 Reassociate 与 LocalCopyPropagation
 
-实现：[`reassociate.hpp`](../../include/mid/opt/reassociate.hpp)、
-[`reassociate.cpp`](reassociate.cpp)、
-[`localCopyPropagation.hpp`](../../include/mid/opt/localCopyPropagation.hpp)、
-[`localCopyPropagation.cpp`](localCopyPropagation.cpp)。
+实现：[`reassociate.hpp`](../src/include/mid/opt/reassociate.hpp)、
+[`reassociate.cpp`](../src/mid/opt/reassociate.cpp)、
+[`localCopyPropagation.hpp`](../src/include/mid/opt/localCopyPropagation.hpp)、
+[`localCopyPropagation.cpp`](../src/mid/opt/localCopyPropagation.cpp)。
 
 Reassociate 有两条路径。普通路径按 RPO rank 排序加法/乘法树，把常量和低 rank 值靠近
 一起，便于下一次 CSE。另一条线性路径把 i32 add/sub/mul-by-constant 收成带系数的
@@ -176,12 +176,12 @@ LocalCopyPropagation 很小，只消除本地 identity copy，例如可安全移
 
 ### 3.5 DeadCodeEliminate、DeadStoreEliminate 与 LateValueCleanup
 
-实现：[`deadCodeEliminate.hpp`](../../include/mid/opt/deadCodeEliminate.hpp)、
-[`deadCodeEliminate.cpp`](deadCodeEliminate.cpp)、
-[`deadStoreEliminate.hpp`](../../include/mid/opt/deadStoreEliminate.hpp)、
-[`deadStoreEliminate.cpp`](deadStoreEliminate.cpp)、
-[`lateValueCleanup.hpp`](../../include/mid/opt/lateValueCleanup.hpp)、
-[`lateValueCleanup.cpp`](lateValueCleanup.cpp)。
+实现：[`deadCodeEliminate.hpp`](../src/include/mid/opt/deadCodeEliminate.hpp)、
+[`deadCodeEliminate.cpp`](../src/mid/opt/deadCodeEliminate.cpp)、
+[`deadStoreEliminate.hpp`](../src/include/mid/opt/deadStoreEliminate.hpp)、
+[`deadStoreEliminate.cpp`](../src/mid/opt/deadStoreEliminate.cpp)、
+[`lateValueCleanup.hpp`](../src/include/mid/opt/lateValueCleanup.hpp)、
+[`lateValueCleanup.cpp`](../src/mid/opt/lateValueCleanup.cpp)。
 
 DCE 不只删无 use 的二元运算，模块级还会从入口函数出发删除不可达函数，删除不再被
 引用的 global；函数内再删没有 required effect 的指令和 trivial PHI。并行 loop body
@@ -200,8 +200,8 @@ LateValueCleanup 放在较晚的位置，只看“单前驱块里与前驱已经
 
 ### 4.1 CFGSimplify
 
-实现：[`CFGSimplify.hpp`](../../include/mid/opt/CFGSimplify.hpp)、
-[`CFGSimplify.cpp`](CFGSimplify.cpp)。
+实现：[`CFGSimplify.hpp`](../src/include/mid/opt/CFGSimplify.hpp)、
+[`CFGSimplify.cpp`](../src/mid/opt/CFGSimplify.cpp)。
 
 CFGSimplify 是本目录里改 CFG 最广的一项，循环扫描直到没有新的局部机会。它做的事情
 包括：折叠常量条件、删除不可达分支、合并空跳转块、合并线性块、修补 PHI incoming
@@ -214,10 +214,10 @@ edge，以及在可以证明安全时外提 loop-invariant branch。
 
 ### 4.2 CorrelatedValuePropagation 与 JumpThreadingLite
 
-实现：[`correlatedValuePropagation.hpp`](../../include/mid/opt/correlatedValuePropagation.hpp)、
-[`correlatedValuePropagation.cpp`](correlatedValuePropagation.cpp)、
-[`jumpThreadingLite.hpp`](../../include/mid/opt/jumpThreadingLite.hpp)、
-[`jumpThreadingLite.cpp`](jumpThreadingLite.cpp)。
+实现：[`correlatedValuePropagation.hpp`](../src/include/mid/opt/correlatedValuePropagation.hpp)、
+[`correlatedValuePropagation.cpp`](../src/mid/opt/correlatedValuePropagation.cpp)、
+[`jumpThreadingLite.hpp`](../src/include/mid/opt/jumpThreadingLite.hpp)、
+[`jumpThreadingLite.cpp`](../src/mid/opt/jumpThreadingLite.cpp)。
 
 CorrelatedValuePropagation 从 `LazyValueInfo` 取得当前块或 edge 上的条件事实。它会折叠
 确定的 select、icmp 和 trivial PHI，也会把已确定的条件分支改写为无条件分支。因为
@@ -235,10 +235,10 @@ terminator operands 为真相重算可达性，再删除死块与 PHI incoming�
 
 ### 4.3 线性块、尾部和出口
 
-实现：[`linearBlockMerge.hpp`](../../include/mid/opt/linearBlockMerge.hpp)、
-[`linearBlockMerge.cpp`](linearBlockMerge.cpp)、[`tailDuplication.hpp`](../../include/mid/opt/tailDuplication.hpp)、
-[`tailDuplication.cpp`](tailDuplication.cpp)、[`unifyExitNodes.hpp`](../../include/mid/opt/unifyExitNodes.hpp)、
-[`unifyExitNodes.cpp`](unifyExitNodes.cpp)。
+实现：[`linearBlockMerge.hpp`](../src/include/mid/opt/linearBlockMerge.hpp)、
+[`linearBlockMerge.cpp`](../src/mid/opt/linearBlockMerge.cpp)、[`tailDuplication.hpp`](../src/include/mid/opt/tailDuplication.hpp)、
+[`tailDuplication.cpp`](../src/mid/opt/tailDuplication.cpp)、[`unifyExitNodes.hpp`](../src/include/mid/opt/unifyExitNodes.hpp)、
+[`unifyExitNodes.cpp`](../src/mid/opt/unifyExitNodes.cpp)。
 
 LinearBlockMerge 合并唯一前驱/唯一后继的线性块，并替换后继 PHI 的 predecessor。它不
 承担不可达块删除，通常由前后的 CFGSimplify/DCE 完成。
@@ -253,10 +253,10 @@ memoization 和 tail-call 识别不必对每个 return 块重复处理。该 pas
 
 ### 4.4 CodeSink、PhiOpSink 与 IfConversion
 
-实现：[`codeSink.hpp`](../../include/mid/opt/codeSink.hpp)、
-[`codeSink.cpp`](codeSink.cpp)、[`phiOpSink.hpp`](../../include/mid/opt/phiOpSink.hpp)、
-[`phiOpSink.cpp`](phiOpSink.cpp)、[`ifConversion.hpp`](../../include/mid/opt/ifConversion.hpp)、
-[`ifConversion.cpp`](ifConversion.cpp)。
+实现：[`codeSink.hpp`](../src/include/mid/opt/codeSink.hpp)、
+[`codeSink.cpp`](../src/mid/opt/codeSink.cpp)、[`phiOpSink.hpp`](../src/include/mid/opt/phiOpSink.hpp)、
+[`phiOpSink.cpp`](../src/mid/opt/phiOpSink.cpp)、[`ifConversion.hpp`](../src/include/mid/opt/ifConversion.hpp)、
+[`ifConversion.cpp`](../src/mid/opt/ifConversion.cpp)。
 
 CodeSink 在所有 use 汇聚到一个更深或更晚的 block 时下沉纯指令。它检查 operands 在
 目标位置支配可用，并比较 LoopInfo 给出的 loop depth，避免把原本只算一次的值错误地
@@ -277,8 +277,8 @@ PHI 用 `select` 表达，四块压成三块。store/call/div、不能投机的�
 
 ### 5.1 InlineExpand
 
-实现：[`inlineExpand.hpp`](../../include/mid/opt/inlineExpand.hpp)、
-[`inlineExpand.cpp`](inlineExpand.cpp)。
+实现：[`inlineExpand.hpp`](../src/include/mid/opt/inlineExpand.hpp)、
+[`inlineExpand.cpp`](../src/mid/opt/inlineExpand.cpp)。
 
 InlineExpand 从调用点出发，检查 callee 是否可达、是否自递归、调用
 是否位于循环内，以及 clone 后的 weighted instruction cost。头文件中的阈值体现当前
@@ -292,9 +292,9 @@ block 通过两张映射表重写，所有 return 汇到 continuation。新的 c
 
 ### 5.2 TailRecursionEliminate 与 TailCallOpt
 
-实现：[`tailRecursionEliminate.hpp`](../../include/mid/opt/tailRecursionEliminate.hpp)、
-[`tailRecursionEliminate.cpp`](tailRecursionEliminate.cpp)、[`tailCallOpt.hpp`](../../include/mid/opt/tailCallOpt.hpp)、
-[`tailCallOpt.cpp`](tailCallOpt.cpp)。
+实现：[`tailRecursionEliminate.hpp`](../src/include/mid/opt/tailRecursionEliminate.hpp)、
+[`tailRecursionEliminate.cpp`](../src/mid/opt/tailRecursionEliminate.cpp)、[`tailCallOpt.hpp`](../src/include/mid/opt/tailCallOpt.hpp)、
+[`tailCallOpt.cpp`](../src/mid/opt/tailCallOpt.cpp)。
 
 TailRecursionEliminate 只处理 self call 已经处在 return tail 的函数。它识别直接
 `call + ret`，也识别 call 后先跳到只返回结果的块；随后建立循环入口、参数 PHI 与
@@ -307,10 +307,10 @@ CallInst 上设置 tail 标记，供 ARM64 后端在 ABI 条件满足时使用 `
 
 ### 5.3 GlobalScalarPromotion 与 SemanticMarkerStamp
 
-实现：[`globalScalarPromotion.hpp`](../../include/mid/opt/globalScalarPromotion.hpp)、
-[`globalScalarPromotion.cpp`](globalScalarPromotion.cpp)、
-[`semanticMarkerStamp.hpp`](../../include/mid/opt/semanticMarkerStamp.hpp)、
-[`semanticMarkerStamp.cpp`](semanticMarkerStamp.cpp)。
+实现：[`globalScalarPromotion.hpp`](../src/include/mid/opt/globalScalarPromotion.hpp)、
+[`globalScalarPromotion.cpp`](../src/mid/opt/globalScalarPromotion.cpp)、
+[`semanticMarkerStamp.hpp`](../src/include/mid/opt/semanticMarkerStamp.hpp)、
+[`semanticMarkerStamp.cpp`](../src/mid/opt/semanticMarkerStamp.cpp)。
 
 GlobalScalarPromotion 只处理整数 scalar global。函数入口把 global 读入一个局部 alloca，
 函数内读写转到该镜像，所有 return 前把镜像写回 global；紧接着的 Mem2Reg 再把镜像
@@ -325,8 +325,8 @@ flag：`FnPure`、`FnReadOnly`、`ArgReadOnly`、`ArgNoCapture`，以及满足�
 
 ### 5.4 AutoMemoization
 
-实现：[`autoMemoization.hpp`](../../include/mid/opt/autoMemoization.hpp)、
-[`autoMemoization.cpp`](autoMemoization.cpp)。
+实现：[`autoMemoization.hpp`](../src/include/mid/opt/autoMemoization.hpp)、
+[`autoMemoization.cpp`](../src/mid/opt/autoMemoization.cpp)。
 
 模块先用 `moduleHasAnyCandidate` 预扫描，完全没有候选就不把 pass 加入 O1。候选函数
 需要是内部可调用的递归函数，参数和返回类型受限，且函数体不能依赖未冻结的全局内存。
@@ -340,10 +340,10 @@ flag：`FnPure`、`FnReadOnly`、`ArgReadOnly`、`ArgNoCapture`，以及满足�
 
 ### 5.5 RadixRecurrenceEliminate 与 BitFuncRecognize
 
-实现：[`radixRecurrenceEliminate.hpp`](../../include/mid/opt/radixRecurrenceEliminate.hpp)、
-[`radixRecurrenceEliminate.cpp`](radixRecurrenceEliminate.cpp)、
-[`bitFuncRecognize.hpp`](../../include/mid/opt/bitFuncRecognize.hpp)、
-[`bitFuncRecognize.cpp`](bitFuncRecognize.cpp)。
+实现：[`radixRecurrenceEliminate.hpp`](../src/include/mid/opt/radixRecurrenceEliminate.hpp)、
+[`radixRecurrenceEliminate.cpp`](../src/mid/opt/radixRecurrenceEliminate.cpp)、
+[`bitFuncRecognize.hpp`](../src/include/mid/opt/bitFuncRecognize.hpp)、
+[`bitFuncRecognize.cpp`](../src/mid/opt/bitFuncRecognize.cpp)。
 
 RadixRecurrenceEliminate 匹配纯 radix-2 自递归：`F(a,0)=0`，`F(a,1)=a srem M`，
 递归分支由 `F(a,b/2)` 乘二取模组成，奇数分支可再加 `a` 取模。匹配是 CFG 和指令
@@ -359,9 +359,9 @@ site。无法得到完整 bit-vector 或闭式不在支持集合时不改写。
 
 ### 6.1 IdiomRecognize 和 libFunc
 
-实现：[`idiomRecognize.hpp`](../../include/mid/opt/idiomRecognize.hpp)、
-[`idiomRecognize.cpp`](idiomRecognize.cpp)、[`libFunc.hpp`](../../include/mid/opt/libFunc.hpp)、
-[`libFunc.cpp`](libFunc.cpp)。
+实现：[`idiomRecognize.hpp`](../src/include/mid/opt/idiomRecognize.hpp)、
+[`idiomRecognize.cpp`](../src/mid/opt/idiomRecognize.cpp)、[`libFunc.hpp`](../src/include/mid/opt/libFunc.hpp)、
+[`libFunc.cpp`](../src/mid/opt/libFunc.cpp)。
 
 IdiomRecognize 目前识别两类循环：连续填充和连续复制。它会先验证 counting IV、loop
 header/latch/body 形态、store/load 地址的 unit element stride，以及外层二维填充时的
@@ -373,12 +373,12 @@ canonical nested shape。memset 还要求写入常量可转换为填充 byte；m
 返回空而不是把用户定义的函数当 libc 调用。不能证明范围、地址或循环形状时，原循环
 完整保留。
 
-`DEBUG_IDIOM` 特别适合看“为什么只是看上去像 memcpy 却没有被替换”：常见原因是
+`DEBUG_IDIOM` 适合看“为什么只是看上去像 memcpy 却没有被替换”：常见原因是
 动态 byte count、非单位跨度、含嵌套循环或地址 base 不稳定。
 
 ### 6.2 SplitGEP
 
-实现：[`splitGEP.hpp`](../../include/mid/opt/splitGEP.hpp)、[`splitGEP.cpp`](splitGEP.cpp)。
+实现：[`splitGEP.hpp`](../src/include/mid/opt/splitGEP.hpp)、[`splitGEP.cpp`](../src/mid/opt/splitGEP.cpp)。
 
 多维 `A[i][j]` 在中端常表现为一个 GEP，外层 `i * rowStride` 直到后端展开地址时才
 显形。SplitGEP 在 loop preheader 中先建立固定行的 row-base GEP，再把循环内访问改成
@@ -393,8 +393,8 @@ canonical nested shape。memset 还要求写入常量可转换为填充 byte；m
 
 ### SLPVectorize
 
-实现：[`slpVectorize.hpp`](../../include/mid/opt/slpVectorize.hpp)、
-[`slpVectorize.cpp`](slpVectorize.cpp)。
+实现：[`slpVectorize.hpp`](../src/include/mid/opt/slpVectorize.hpp)、
+[`slpVectorize.cpp`](../src/mid/opt/slpVectorize.cpp)。
 
 SLP 与 loop vectorizer 的入口不同：它在一个 basic block 内从相邻 store 开始，而不是
 从 induction variable 开始。当前固定 `VF=4`，面向 A53 NEON 的 `<4 x i32>` 和
@@ -417,8 +417,8 @@ setup 成本，`isProfitable` 会拒绝发射。
 
 ### 8.1 AnalysisDump
 
-实现：[`analysisDump.hpp`](../../include/mid/opt/analysisDump.hpp)、
-[`analysisDump.cpp`](analysisDump.cpp)。
+实现：[`analysisDump.hpp`](../src/include/mid/opt/analysisDump.hpp)、
+[`analysisDump.cpp`](../src/mid/opt/analysisDump.cpp)。
 
 AnalysisDump为每个函数打印 LoopInfo、归纳变量、
 访存 GEP、dependence direction、可能的参数 no-alias 事实和 live-out recurrence。
@@ -427,15 +427,15 @@ AnalysisDump为每个函数打印 LoopInfo、归纳变量、
 
 ### 8.2 共享头文件
 
-- [`branchFactUtils.hpp`](../../include/mid/opt/branchFactUtils.hpp)：布尔条件和 icmp
+- [`branchFactUtils.hpp`](../src/include/mid/opt/branchFactUtils.hpp)：布尔条件和 icmp
   事实的 key、取反与传播，供路径优化复用。
-- [`cfgUtils.hpp`](../../include/mid/opt/cfgUtils.hpp)：从 terminator 重新计算可达块的
+- [`cfgUtils.hpp`](../src/include/mid/opt/cfgUtils.hpp)：从 terminator 重新计算可达块的
   工具，避免直接相信暂时过期的 CFG 邻接表。
-- [`cse_common.hpp`](../../include/mid/opt/cse_common.hpp)：EarlyCSE/GVN 共用的常量
+- [`cse_common.hpp`](../src/include/mid/opt/cse_common.hpp)：EarlyCSE/GVN 共用的常量
   归一化、表达式签名和可消除指令判断。
-- [`deadCodeDelete.hpp`](../../include/mid/opt/deadCodeDelete.hpp)：兼容旧调用点的轻量
+- [`deadCodeDelete.hpp`](../src/include/mid/opt/deadCodeDelete.hpp)：兼容旧调用点的轻量
   声明；实际的 module/function 级删除逻辑在 `DeadCodeEliminate`。
-- [`optPasses.hpp`](../../include/mid/opt/optPasses.hpp)：供 `main.cpp` 使用的 umbrella
+- [`optPasses.hpp`](../src/include/mid/opt/optPasses.hpp)：供 `main.cpp` 使用的 umbrella
   header，汇总本目录 pass 和位于 loop transform 的 pass 声明。
 
 这些文件通常没有独立的优化实验结果，但它们决定了上层 pass 在遇到 PHI、边事实、
@@ -461,43 +461,43 @@ AnalysisDump为每个函数打印 LoopInfo、归纳变量、
 
 ### 有 `.cpp` 实现的 pass 与辅助文件
 
-- [`CFGSimplify.cpp`](CFGSimplify.cpp)
-- [`analysisDump.cpp`](analysisDump.cpp)
-- [`autoMemoization.cpp`](autoMemoization.cpp)
-- [`bitFuncRecognize.cpp`](bitFuncRecognize.cpp)
-- [`branchFactUtils.cpp`](branchFactUtils.cpp)
-- [`cfgUtils.cpp`](cfgUtils.cpp)
-- [`codeSink.cpp`](codeSink.cpp)
-- [`correlatedValuePropagation.cpp`](correlatedValuePropagation.cpp)
-- [`deadCodeEliminate.cpp`](deadCodeEliminate.cpp)
-- [`deadStoreEliminate.cpp`](deadStoreEliminate.cpp)
-- [`earlyCSE.cpp`](earlyCSE.cpp)
-- [`globalScalarPromotion.cpp`](globalScalarPromotion.cpp)
-- [`gvn.cpp`](gvn.cpp)
-- [`idiomRecognize.cpp`](idiomRecognize.cpp)
-- [`ifConversion.cpp`](ifConversion.cpp)
-- [`inlineExpand.cpp`](inlineExpand.cpp)
-- [`jumpThreadingLite.cpp`](jumpThreadingLite.cpp)
-- [`lateValueCleanup.cpp`](lateValueCleanup.cpp)
-- [`libFunc.cpp`](libFunc.cpp)
-- [`linearBlockMerge.cpp`](linearBlockMerge.cpp)
-- [`localCopyPropagation.cpp`](localCopyPropagation.cpp)
-- [`mem2reg.cpp`](mem2reg.cpp)
-- [`passManager.cpp`](passManager.cpp)
-- [`phiOpSink.cpp`](phiOpSink.cpp)
-- [`radixRecurrenceEliminate.cpp`](radixRecurrenceEliminate.cpp)
-- [`reassociate.cpp`](reassociate.cpp)
-- [`sccp.cpp`](sccp.cpp)
-- [`semanticMarkerStamp.cpp`](semanticMarkerStamp.cpp)
-- [`slpVectorize.cpp`](slpVectorize.cpp)
-- [`splitGEP.cpp`](splitGEP.cpp)
-- [`tailCallOpt.cpp`](tailCallOpt.cpp)
-- [`tailDuplication.cpp`](tailDuplication.cpp)
-- [`tailRecursionEliminate.cpp`](tailRecursionEliminate.cpp)
-- [`unifyExitNodes.cpp`](unifyExitNodes.cpp)
+- [`CFGSimplify.cpp`](../src/mid/opt/CFGSimplify.cpp)
+- [`analysisDump.cpp`](../src/mid/opt/analysisDump.cpp)
+- [`autoMemoization.cpp`](../src/mid/opt/autoMemoization.cpp)
+- [`bitFuncRecognize.cpp`](../src/mid/opt/bitFuncRecognize.cpp)
+- [`branchFactUtils.cpp`](../src/mid/opt/branchFactUtils.cpp)
+- [`cfgUtils.cpp`](../src/mid/opt/cfgUtils.cpp)
+- [`codeSink.cpp`](../src/mid/opt/codeSink.cpp)
+- [`correlatedValuePropagation.cpp`](../src/mid/opt/correlatedValuePropagation.cpp)
+- [`deadCodeEliminate.cpp`](../src/mid/opt/deadCodeEliminate.cpp)
+- [`deadStoreEliminate.cpp`](../src/mid/opt/deadStoreEliminate.cpp)
+- [`earlyCSE.cpp`](../src/mid/opt/earlyCSE.cpp)
+- [`globalScalarPromotion.cpp`](../src/mid/opt/globalScalarPromotion.cpp)
+- [`gvn.cpp`](../src/mid/opt/gvn.cpp)
+- [`idiomRecognize.cpp`](../src/mid/opt/idiomRecognize.cpp)
+- [`ifConversion.cpp`](../src/mid/opt/ifConversion.cpp)
+- [`inlineExpand.cpp`](../src/mid/opt/inlineExpand.cpp)
+- [`jumpThreadingLite.cpp`](../src/mid/opt/jumpThreadingLite.cpp)
+- [`lateValueCleanup.cpp`](../src/mid/opt/lateValueCleanup.cpp)
+- [`libFunc.cpp`](../src/mid/opt/libFunc.cpp)
+- [`linearBlockMerge.cpp`](../src/mid/opt/linearBlockMerge.cpp)
+- [`localCopyPropagation.cpp`](../src/mid/opt/localCopyPropagation.cpp)
+- [`mem2reg.cpp`](../src/mid/opt/mem2reg.cpp)
+- [`passManager.cpp`](../src/mid/opt/passManager.cpp)
+- [`phiOpSink.cpp`](../src/mid/opt/phiOpSink.cpp)
+- [`radixRecurrenceEliminate.cpp`](../src/mid/opt/radixRecurrenceEliminate.cpp)
+- [`reassociate.cpp`](../src/mid/opt/reassociate.cpp)
+- [`sccp.cpp`](../src/mid/opt/sccp.cpp)
+- [`semanticMarkerStamp.cpp`](../src/mid/opt/semanticMarkerStamp.cpp)
+- [`slpVectorize.cpp`](../src/mid/opt/slpVectorize.cpp)
+- [`splitGEP.cpp`](../src/mid/opt/splitGEP.cpp)
+- [`tailCallOpt.cpp`](../src/mid/opt/tailCallOpt.cpp)
+- [`tailDuplication.cpp`](../src/mid/opt/tailDuplication.cpp)
+- [`tailRecursionEliminate.cpp`](../src/mid/opt/tailRecursionEliminate.cpp)
+- [`unifyExitNodes.cpp`](../src/mid/opt/unifyExitNodes.cpp)
 
 ### 仅在调度关系中出现的声明
 
-[`src/include/mid/opt`](../../include/mid/opt) 中还包含 LoopSimplify、LCSSA、LICM、
+[`src/include/mid/opt`](../src/include/mid/opt) 中还包含 LoopSimplify、LCSSA、LICM、
 LoopInterchange、ParallelizeLoops、LoopVectorize、LoopUnroll 等声明。它们的实现不在
 本目录，属于 `src/mid/transform/loop`；本次记录不展开其实现细节。

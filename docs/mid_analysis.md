@@ -7,8 +7,8 @@
 
 ### 1.1 目录结构
 
-- 实现位于 [`src/mid/analysis`](.)。
-- 公共接口位于 [`src/include/mid/analysis`](../../include/mid/analysis)。
+- 实现位于 [`src/mid/analysis`](../src/lib/mid/analysis)。
+- 公共接口位于 [`src/include/mid/analysis`](../src/include/mid/analysis)。
 - `analysisManager.hpp`、`preservedAnalyses.hpp`、`constantEvaluator.hpp`、
   `loopUtils.hpp`、`valueFacts.hpp` 主要是接口或 header-only 工具，没有对应的
   `.cpp` 实现。
@@ -41,8 +41,8 @@
 
 ### 1.2 AnalysisManager
 
-[`analysisManager.hpp`](../../include/mid/analysis/analysisManager.hpp) 和
-[`analysisManager.cpp`](analysisManager.cpp) 实现统一分析入口。
+[`analysisManager.hpp`](../src/include/mid/analysis/analysisManager.hpp) 和
+[`analysisManager.cpp`](../src/mid/analysis/analysisManager.cpp) 实现统一分析入口。
 
 `AnalysisManager` 的缓存分两级：
 
@@ -67,7 +67,7 @@ Function
 
 ### 1.3 PreservedAnalyses 与失效
 
-[`preservedAnalyses.hpp`](../../include/mid/analysis/preservedAnalyses.hpp) 用 bit mask
+[`preservedAnalyses.hpp`](../src/include/mid/analysis/preservedAnalyses.hpp) 用 bit mask
 记录以下分析是否仍然有效：
 
 - `BasicAA`
@@ -97,8 +97,8 @@ Function
 
 ### 2.1 BasicAliasAnalysis
 
-实现：[`basicAliasAnalysis.hpp`](../../include/mid/analysis/basicAliasAnalysis.hpp)、
-[`basicAliasAnalysis.cpp`](basicAliasAnalysis.cpp)。
+实现：[`basicAliasAnalysis.hpp`](../src/include/mid/analysis/basicAliasAnalysis.hpp)、
+[`basicAliasAnalysis.cpp`](../src/mid/analysis/basicAliasAnalysis.cpp)。
 
 #### 内存位置和指针解析
 
@@ -146,8 +146,8 @@ pointer = base + constant byte offset
 
 ### 2.2 ArgumentAliasAnalysis
 
-实现：[`argumentAliasAnalysis.hpp`](../../include/mid/analysis/argumentAliasAnalysis.hpp)、
-[`argumentAliasAnalysis.cpp`](argumentAliasAnalysis.cpp)。
+实现：[`argumentAliasAnalysis.hpp`](../src/include/mid/analysis/argumentAliasAnalysis.hpp)、
+[`argumentAliasAnalysis.cpp`](../src/mid/analysis/argumentAliasAnalysis.cpp)。
 
 BasicAA 无法仅凭两个形参证明它们不同，因为调用方可能把同一对象传给两个形参。
 ArgumentAliasAnalysis 扫描模块内所有对目标函数的调用，建立：
@@ -167,7 +167,7 @@ false，因此该分析只能减少保守性，不能制造新的 alias 保证�
 
 ### 2.3 ConstantEvaluator
 
-实现：[`constantEvaluator.hpp`](../../include/mid/analysis/constantEvaluator.hpp)。
+实现：[`constantEvaluator.hpp`](../src/include/mid/analysis/constantEvaluator.hpp)。
 
 这是 namespace 级的 header-only 常量折叠工具，不负责遍历 CFG。整数二元运算使用
 32 位 wrap 语义实现 add/sub/mul；除法和取模检查除数为零，并拒绝
@@ -178,8 +178,8 @@ false，因此该分析只能减少保守性，不能制造新的 alias 保证�
 
 ### 2.4 LazyValueInfo
 
-实现：[`lazyValueInfo.hpp`](../../include/mid/analysis/lazyValueInfo.hpp)、
-[`lazyValueInfo.cpp`](lazyValueInfo.cpp)。
+实现：[`lazyValueInfo.hpp`](../src/include/mid/analysis/lazyValueInfo.hpp)、
+[`lazyValueInfo.cpp`](../src/mid/analysis/lazyValueInfo.cpp)。
 
 LVI 查询某个值在 block、block edge 或指定指令上下文中的事实：
 
@@ -196,8 +196,8 @@ LVI 查询某个值在 block、block edge 或指定指令上下文中的事实�
 
 ### 3.1 LoopInfo
 
-实现：[`loopInfo.hpp`](../../include/mid/analysis/loopInfo.hpp)、
-[`loopInfo.cpp`](loopInfo.cpp)。
+实现：[`loopInfo.hpp`](../src/include/mid/analysis/loopInfo.hpp)、
+[`loopInfo.cpp`](../src/mid/analysis/loopInfo.cpp)。
 
 `LoopInfo::analyze(Function*)` 依次执行：
 
@@ -224,7 +224,7 @@ header。`singleLatch()` 和 `singleExit()` 也只在数量恰好为一时成功
 
 ### 3.2 loopUtils
 
-实现：[`loopUtils.hpp`](../../include/mid/analysis/loopUtils.hpp)。
+实现：[`loopUtils.hpp`](../src/include/mid/analysis/loopUtils.hpp)。
 
 `getSemanticUseBlock` 处理普通指令和 PHI 的使用位置：普通 operand 的使用块是 user
 所在块，而 PHI incoming value 的语义使用块是对应 incoming predecessor。这一点在
@@ -232,8 +232,8 @@ header。`singleLatch()` 和 `singleExit()` 也只在数量恰好为一时成功
 
 ### 3.3 LoopVerify
 
-实现：[`loopVerify.hpp`](../../include/mid/analysis/loopVerify.hpp)、
-[`loopVerify.cpp`](loopVerify.cpp)。
+实现：[`loopVerify.hpp`](../src/include/mid/analysis/loopVerify.hpp)、
+[`loopVerify.cpp`](../src/mid/analysis/loopVerify.cpp)。
 
 `verifyLoopForms` 分三层检查循环规范形：
 
@@ -249,8 +249,8 @@ header。`singleLatch()` 和 `singleExit()` 也只在数量恰好为一时成功
 
 ### 4.1 ScalarEvolution
 
-实现：[`scalarEvolution.hpp`](../../include/mid/analysis/scalarEvolution.hpp)、
-[`scalarEvolution.cpp`](scalarEvolution.cpp)。
+实现：[`scalarEvolution.hpp`](../src/include/mid/analysis/scalarEvolution.hpp)、
+[`scalarEvolution.cpp`](../src/mid/analysis/scalarEvolution.cpp)。
 
 SCEV 是针对 SSA 值的结构化表达式，当前支持：
 
@@ -274,8 +274,8 @@ SCEV 是针对 SSA 值的结构化表达式，当前支持：
 
 ### 4.2 RangeAnalysis
 
-实现：[`rangeAnalysis.hpp`](../../include/mid/analysis/rangeAnalysis.hpp)、
-[`rangeAnalysis.cpp`](rangeAnalysis.cpp)。
+实现：[`rangeAnalysis.hpp`](../src/include/mid/analysis/rangeAnalysis.hpp)、
+[`rangeAnalysis.cpp`](../src/mid/analysis/rangeAnalysis.cpp)。
 
 `IntRange` 有四种状态：
 
@@ -327,8 +327,8 @@ BasicAA 清除受影响的 pointer/element facts。多前驱合流使用 meet，
 
 ### 4.3 AffineAnalysis
 
-实现：[`affineAnalysis.hpp`](../../include/mid/analysis/affineAnalysis.hpp)、
-[`affineAnalysis.cpp`](affineAnalysis.cpp)。
+实现：[`affineAnalysis.hpp`](../src/include/mid/analysis/affineAnalysis.hpp)、
+[`affineAnalysis.cpp`](../src/mid/analysis/affineAnalysis.cpp)。
 
 `AffineExpr` 表示：
 
@@ -348,8 +348,8 @@ DependenceAnalysis 和 CostModel 用于区分“索引存在但不随当前 IV �
 
 ### 5.1 LoopAccessAnalysis
 
-实现：[`loopAccessAnalysis.hpp`](../../include/mid/analysis/loopAccessAnalysis.hpp)、
-[`loopAccessAnalysis.cpp`](loopAccessAnalysis.cpp)。
+实现：[`loopAccessAnalysis.hpp`](../src/include/mid/analysis/loopAccessAnalysis.hpp)、
+[`loopAccessAnalysis.cpp`](../src/mid/analysis/loopAccessAnalysis.cpp)。
 
 `collect(Loop*)` 收集循环内：
 
@@ -364,8 +364,8 @@ DependenceAnalysis 和 CostModel 用于区分“索引存在但不随当前 IV �
 
 ### 5.2 DependenceAnalysis
 
-实现：[`dependenceAnalysis.hpp`](../../include/mid/analysis/dependenceAnalysis.hpp)、
-[`dependenceAnalysis.cpp`](dependenceAnalysis.cpp)。
+实现：[`dependenceAnalysis.hpp`](../src/include/mid/analysis/dependenceAnalysis.hpp)、
+[`dependenceAnalysis.cpp`](../src/mid/analysis/dependenceAnalysis.cpp)。
 
 `test(acc1, acc2)` 的步骤是：
 
@@ -394,8 +394,8 @@ DIR_ANY = 无法证明方向
 
 ### 5.3 ReductionAnalysis
 
-实现：[`reductionAnalysis.hpp`](../../include/mid/analysis/reductionAnalysis.hpp)、
-[`reductionAnalysis.cpp`](reductionAnalysis.cpp)。
+实现：[`reductionAnalysis.hpp`](../src/include/mid/analysis/reductionAnalysis.hpp)、
+[`reductionAnalysis.cpp`](../src/mid/analysis/reductionAnalysis.cpp)。
 
 `detectScalarExpandableNest` 识别内层循环向外层每个迭代写一个 reduction cell 的
 形态，记录：
@@ -411,8 +411,8 @@ global/argument、下标维度和 affine 访问是否满足 scalar expansion 的
 
 ### 5.4 RecurrenceAnalysis
 
-实现：[`recurrenceAnalysis.hpp`](../../include/mid/analysis/recurrenceAnalysis.hpp)、
-[`recurrenceAnalysis.cpp`](recurrenceAnalysis.cpp)。
+实现：[`recurrenceAnalysis.hpp`](../src/include/mid/analysis/recurrenceAnalysis.hpp)、
+[`recurrenceAnalysis.cpp`](../src/mid/analysis/recurrenceAnalysis.cpp)。
 
 该分析在 ScalarEvolution 之上识别：
 
@@ -426,8 +426,8 @@ value = coeff * iv + constant
 
 ### 5.5 ModuloRecurrenceAnalysis
 
-实现：[`moduloRecurrenceAnalysis.hpp`](../../include/mid/analysis/moduloRecurrenceAnalysis.hpp)、
-[`moduloRecurrenceAnalysis.cpp`](moduloRecurrenceAnalysis.cpp)。
+实现：[`moduloRecurrenceAnalysis.hpp`](../src/include/mid/analysis/moduloRecurrenceAnalysis.hpp)、
+[`moduloRecurrenceAnalysis.cpp`](../src/mid/analysis/moduloRecurrenceAnalysis.cpp)。
 
 这是一组 namespace 级查询，不由 `AnalysisManager` 缓存。它处理的不是任意取模，
 而是循环携带状态的下列形式：
@@ -470,10 +470,10 @@ next = (state + term0 - term1 + ...) srem positive_constant
 
 ### 5.6 SummableExpressionAnalysis
 
-实现：[`summableExpressionAnalysis.hpp`](../../include/mid/analysis/summableExpressionAnalysis.hpp)、
-[`summableExpressionAnalysis.cpp`](summableExpressionAnalysis.cpp)。
+实现：[`summableExpressionAnalysis.hpp`](../src/include/mid/analysis/summableExpressionAnalysis.hpp)、
+[`summableExpressionAnalysis.cpp`](../src/lib/mid/analysis/summableExpressionAnalysis.cpp)。
 
-`SummableExpressionAnalysis` 也不是一个会遍历函数的 pass；它为 LoopRepFold 提供一个
+`SummableExpressionAnalysis` 为 LoopRepFold 提供一个
 可组合的表达式摘要。成功时 `LinearFloorExpression` 表示：
 
 ```text
@@ -506,8 +506,8 @@ i32 范围。分析还会尝试识别 `select` 配合有序 signed compare 的 m
 
 ### 6.1 CostModel
 
-实现：[`costModel.hpp`](../../include/mid/analysis/costModel.hpp)、
-[`costModel.cpp`](costModel.cpp)。
+实现：[`costModel.hpp`](../src/include/mid/analysis/costModel.hpp)、
+[`costModel.cpp`](../src/mid/analysis/costModel.cpp)。
 
 `strideAlong(gep, iv)` 使用 AffineAnalysis 展开 GEP 的每个索引，再从嵌套
 `PointerType/ArrayType` 计算维度大小，得到 IV 每增加一单位时的字节跨度。无法得到
@@ -519,8 +519,8 @@ i32 范围。分析还会尝试识别 `select` 配合有序 signed compare 的 m
 
 ### 6.2 LoopInterchangeAnalysis
 
-实现：[`loopInterchangeAnalysis.hpp`](../../include/mid/analysis/loopInterchangeAnalysis.hpp)、
-[`loopInterchangeAnalysis.cpp`](loopInterchangeAnalysis.cpp)。
+实现：[`loopInterchangeAnalysis.hpp`](../src/include/mid/analysis/loopInterchangeAnalysis.hpp)、
+[`loopInterchangeAnalysis.cpp`](../src/mid/analysis/loopInterchangeAnalysis.cpp)。
 
 `isInterchangeLegal` 使用 DependenceAnalysis 检查交换后是否会把合法方向向量
 `(>, <)` 反转为非法形式。`estimateCost` 比较交换前后的内层 IV stride。
@@ -535,8 +535,8 @@ i32 范围。分析还会尝试识别 `select` 配合有序 signed compare 的 m
 
 ### 6.3 LoopVectorizationAnalysis
 
-实现：[`loopVectorizationAnalysis.hpp`](../../include/mid/analysis/loopVectorizationAnalysis.hpp)、
-[`loopVectorizationAnalysis.cpp`](loopVectorizationAnalysis.cpp)。
+实现：[`loopVectorizationAnalysis.hpp`](../src/include/mid/analysis/loopVectorizationAnalysis.hpp)、
+[`loopVectorizationAnalysis.cpp`](../src/mid/analysis/loopVectorizationAnalysis.cpp)。
 
 这是 transformation-independent 的 plan 构造器，默认 vector width 为 4。`buildPlan`
 按以下阶段建立 `Plan`：
@@ -559,8 +559,8 @@ live vector 数量和是否为 rotated single-block loop。
 
 ### 6.4 VectorizationCostModel
 
-实现：[`vectorizationCostModel.hpp`](../../include/mid/analysis/vectorizationCostModel.hpp)、
-[`vectorizationCostModel.cpp`](vectorizationCostModel.cpp)。
+实现：[`vectorizationCostModel.hpp`](../src/include/mid/analysis/vectorizationCostModel.hpp)、
+[`vectorizationCostModel.cpp`](../src/mid/analysis/vectorizationCostModel.cpp)。
 
 模型提供：
 
@@ -624,50 +624,50 @@ SCEV 或 range result。尤其是以下修改通常至少会使 LoopInfo/SCEV �
 
 ### 接口与 header-only 工具
 
-- [`analysisManager.hpp`](../../include/mid/analysis/analysisManager.hpp)
-- [`preservedAnalyses.hpp`](../../include/mid/analysis/preservedAnalyses.hpp)
-- [`basicAliasAnalysis.hpp`](../../include/mid/analysis/basicAliasAnalysis.hpp)
-- [`argumentAliasAnalysis.hpp`](../../include/mid/analysis/argumentAliasAnalysis.hpp)
-- [`lazyValueInfo.hpp`](../../include/mid/analysis/lazyValueInfo.hpp)
-- [`constantEvaluator.hpp`](../../include/mid/analysis/constantEvaluator.hpp)
-- [`valueFacts.hpp`](../../include/mid/analysis/valueFacts.hpp)
-- [`loopInfo.hpp`](../../include/mid/analysis/loopInfo.hpp)
-- [`loopUtils.hpp`](../../include/mid/analysis/loopUtils.hpp)
-- [`loopVerify.hpp`](../../include/mid/analysis/loopVerify.hpp)
-- [`scalarEvolution.hpp`](../../include/mid/analysis/scalarEvolution.hpp)
-- [`rangeAnalysis.hpp`](../../include/mid/analysis/rangeAnalysis.hpp)
-- [`affineAnalysis.hpp`](../../include/mid/analysis/affineAnalysis.hpp)
-- [`dependenceAnalysis.hpp`](../../include/mid/analysis/dependenceAnalysis.hpp)
-- [`loopAccessAnalysis.hpp`](../../include/mid/analysis/loopAccessAnalysis.hpp)
-- [`reductionAnalysis.hpp`](../../include/mid/analysis/reductionAnalysis.hpp)
-- [`recurrenceAnalysis.hpp`](../../include/mid/analysis/recurrenceAnalysis.hpp)
-- [`moduloRecurrenceAnalysis.hpp`](../../include/mid/analysis/moduloRecurrenceAnalysis.hpp)
-- [`summableExpressionAnalysis.hpp`](../../include/mid/analysis/summableExpressionAnalysis.hpp)
-- [`costModel.hpp`](../../include/mid/analysis/costModel.hpp)
-- [`loopInterchangeAnalysis.hpp`](../../include/mid/analysis/loopInterchangeAnalysis.hpp)
-- [`loopVectorizationAnalysis.hpp`](../../include/mid/analysis/loopVectorizationAnalysis.hpp)
-- [`vectorizationCostModel.hpp`](../../include/mid/analysis/vectorizationCostModel.hpp)
-- [`functionTerminationAnalysis.hpp`](../../include/mid/analysis/functionTerminationAnalysis.hpp)
+- [`analysisManager.hpp`](../src/include/mid/analysis/analysisManager.hpp)
+- [`preservedAnalyses.hpp`](../src/include/mid/analysis/preservedAnalyses.hpp)
+- [`basicAliasAnalysis.hpp`](../src/include/mid/analysis/basicAliasAnalysis.hpp)
+- [`argumentAliasAnalysis.hpp`](../src/include/mid/analysis/argumentAliasAnalysis.hpp)
+- [`lazyValueInfo.hpp`](../src/include/mid/analysis/lazyValueInfo.hpp)
+- [`constantEvaluator.hpp`](../src/include/mid/analysis/constantEvaluator.hpp)
+- [`valueFacts.hpp`](../src/include/mid/analysis/valueFacts.hpp)
+- [`loopInfo.hpp`](../src/include/mid/analysis/loopInfo.hpp)
+- [`loopUtils.hpp`](../src/include/mid/analysis/loopUtils.hpp)
+- [`loopVerify.hpp`](../src/include/mid/analysis/loopVerify.hpp)
+- [`scalarEvolution.hpp`](../src/include/mid/analysis/scalarEvolution.hpp)
+- [`rangeAnalysis.hpp`](../src/include/mid/analysis/rangeAnalysis.hpp)
+- [`affineAnalysis.hpp`](../src/include/mid/analysis/affineAnalysis.hpp)
+- [`dependenceAnalysis.hpp`](../src/include/mid/analysis/dependenceAnalysis.hpp)
+- [`loopAccessAnalysis.hpp`](../src/include/mid/analysis/loopAccessAnalysis.hpp)
+- [`reductionAnalysis.hpp`](../src/include/mid/analysis/reductionAnalysis.hpp)
+- [`recurrenceAnalysis.hpp`](../src/include/mid/analysis/recurrenceAnalysis.hpp)
+- [`moduloRecurrenceAnalysis.hpp`](../src/include/mid/analysis/moduloRecurrenceAnalysis.hpp)
+- [`summableExpressionAnalysis.hpp`](../src/include/mid/analysis/summableExpressionAnalysis.hpp)
+- [`costModel.hpp`](../src/include/mid/analysis/costModel.hpp)
+- [`loopInterchangeAnalysis.hpp`](../src/include/mid/analysis/loopInterchangeAnalysis.hpp)
+- [`loopVectorizationAnalysis.hpp`](../src/include/mid/analysis/loopVectorizationAnalysis.hpp)
+- [`vectorizationCostModel.hpp`](../src/include/mid/analysis/vectorizationCostModel.hpp)
+- [`functionTerminationAnalysis.hpp`](../src/include/mid/analysis/functionTerminationAnalysis.hpp)
 
 ### 实现文件
 
-- [`analysisManager.cpp`](analysisManager.cpp)
-- [`basicAliasAnalysis.cpp`](basicAliasAnalysis.cpp)
-- [`argumentAliasAnalysis.cpp`](argumentAliasAnalysis.cpp)
-- [`lazyValueInfo.cpp`](lazyValueInfo.cpp)
-- [`loopInfo.cpp`](loopInfo.cpp)
-- [`loopVerify.cpp`](loopVerify.cpp)
-- [`scalarEvolution.cpp`](scalarEvolution.cpp)
-- [`rangeAnalysis.cpp`](rangeAnalysis.cpp)
-- [`affineAnalysis.cpp`](affineAnalysis.cpp)
-- [`dependenceAnalysis.cpp`](dependenceAnalysis.cpp)
-- [`loopAccessAnalysis.cpp`](loopAccessAnalysis.cpp)
-- [`reductionAnalysis.cpp`](reductionAnalysis.cpp)
-- [`recurrenceAnalysis.cpp`](recurrenceAnalysis.cpp)
-- [`moduloRecurrenceAnalysis.cpp`](moduloRecurrenceAnalysis.cpp)
-- [`summableExpressionAnalysis.cpp`](summableExpressionAnalysis.cpp)
-- [`costModel.cpp`](costModel.cpp)
-- [`loopInterchangeAnalysis.cpp`](loopInterchangeAnalysis.cpp)
-- [`loopVectorizationAnalysis.cpp`](loopVectorizationAnalysis.cpp)
-- [`vectorizationCostModel.cpp`](vectorizationCostModel.cpp)
-- [`functionTerminationAnalysis.cpp`](functionTerminationAnalysis.cpp)
+- [`analysisManager.cpp`](../src/mid/analysis/analysisManager.cpp)
+- [`basicAliasAnalysis.cpp`](../src/mid/analysis/basicAliasAnalysis.cpp)
+- [`argumentAliasAnalysis.cpp`](../src/mid/analysis/argumentAliasAnalysis.cpp)
+- [`lazyValueInfo.cpp`](../src/mid/analysis/lazyValueInfo.cpp)
+- [`loopInfo.cpp`](../src/mid/analysis/loopInfo.cpp)
+- [`loopVerify.cpp`](../src/mid/analysis/loopVerify.cpp)
+- [`scalarEvolution.cpp`](../src/mid/analysis/scalarEvolution.cpp)
+- [`rangeAnalysis.cpp`](../src/mid/analysis/rangeAnalysis.cpp)
+- [`affineAnalysis.cpp`](../src/mid/analysis/affineAnalysis.cpp)
+- [`dependenceAnalysis.cpp`](../src/mid/analysis/dependenceAnalysis.cpp)
+- [`loopAccessAnalysis.cpp`](../src/mid/analysis/loopAccessAnalysis.cpp)
+- [`reductionAnalysis.cpp`](../src/mid/analysis/reductionAnalysis.cpp)
+- [`recurrenceAnalysis.cpp`](../src/mid/analysis/recurrenceAnalysis.cpp)
+- [`moduloRecurrenceAnalysis.cpp`](../src/mid/analysis/moduloRecurrenceAnalysis.cpp)
+- [`summableExpressionAnalysis.cpp`](../src/mid/analysis/summableExpressionAnalysis.cpp)
+- [`costModel.cpp`](../src/mid/analysis/costModel.cpp)
+- [`loopInterchangeAnalysis.cpp`](../src/mid/analysis/loopInterchangeAnalysis.cpp)
+- [`loopVectorizationAnalysis.cpp`](../src/mid/analysis/loopVectorizationAnalysis.cpp)
+- [`vectorizationCostModel.cpp`](../src/mid/analysis/vectorizationCostModel.cpp)
+- [`functionTerminationAnalysis.cpp`](../src/mid/analysis/functionTerminationAnalysis.cpp)
