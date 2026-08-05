@@ -29,6 +29,8 @@
 | `LoopAccessAnalysis` | 收集循环访存并分类 GEP |
 | `ReductionAnalysis` | 检测 scalar reduction 的可扩展内层循环 |
 | `RecurrenceAnalysis` | 分析累加递推并计算闭式结果 |
+| `ModuloRecurrenceAnalysis` | 识别可安全合并的正模数循环状态递推 |
+| `SummableExpressionAnalysis` | 将可求和的模表达式归纳为线性/整除摘要 |
 | `LoopInterchangeAnalysis` | 判断交换合法性和访存成本收益 |
 | `LoopVectorizationAnalysis` | 构造向量化 legality/profitability plan |
 | `CostModel` | 估算 GEP 的 cache stride |
@@ -422,6 +424,84 @@ value = coeff * iv + constant
 和 `fitsI32` 防止闭式计算在宿主机 `long long` 上得到一个无法表示的 i32 结果。
 `computeAffineSumClosedForm` 只有在初始化值、step 和迭代次数都能安全计算时才成功。
 
+### 5.5 ModuloRecurrenceAnalysis
+
+实现：[`moduloRecurrenceAnalysis.hpp`](../../include/mid/analysis/moduloRecurrenceAnalysis.hpp)、
+[`moduloRecurrenceAnalysis.cpp`](moduloRecurrenceAnalysis.cpp)。
+
+这是一组 namespace 级查询，不由 `AnalysisManager` 缓存。它处理的不是任意取模，
+而是循环携带状态的下列形式：
+
+```text
+next = (state + term0 - term1 + ...) srem positive_constant
+```
+
+`analyze` 从 `srem` 的 dividend 向上展开位于指定 update blocks 中的 add/sub 链。
+展开结束时，`state` 的总系数必须恰好为 `+1`；每个其余项都必须不依赖 state。这样
+得到的 `Recurrence` 保存 state、remainder、正 modulus、带符号的 contribution terms
+以及完整 update chain。比如 `state - x + y` 会保留为两个符号相反的 term，而不是先
+重排成可能改变 i32 行为的新表达式。
+
+后续变换还需要两层额外证明：
+
+- `hasPrivateUpdateChain` 要求 update chain 除了回写 state phi 以外没有额外循环内
+  use；处理 live-out 时调用方可以显式允许循环外 use。
+- `inferContributionBounds` 要求 contribution 不依赖其它 loop-carried PHI；指定的
+  induction state 可以出现。每个 term 必须能由 `inferBounds` 得到范围。
+
+`inferBounds` 只接受能保持 signed-i32 非溢出解释的子集：常量、PHI 合流、zext、
+正常量 `srem`、非负 mask、add/sub、常量乘、常量左移、正除数的 sdiv 和 select。
+递归深度、值环、32 位以上整数或中间界超出 i32 都会失败。失败的含义是“不能改变
+原标量操作顺序”，不是值域为空。
+
+获得 contribution range 后，`advanceBounds` 将范围推进若干次；
+`proveNoI32UpdateWrap` 以初始 state 和 `[-modulus + 1, modulus - 1]` 的已归一化
+范围共同作为起点，证明一次更新的加减不会发生 i32 wrap。`needsAtMostOneCorrection`
+进一步检查更新前后的范围严格落在 `(-2M, 2M)` 内，使延迟取模或合并多步时只需要
+至多一次正/负修正。
+
+当前调用方有三类：
+
+- `instCombineMulDivRem` 在安全条件满足时保留 loop-carried remainder，等待后续
+  LoopUnroll 合并多步后再做 bounded correction；
+- `LoopModuloDelay` 用 `proveNoI32UpdateWrap` 作为将循环内 srem 延后的正确性门槛；
+- `LoopUnroll` 根据展开因子推进 prefix/final bounds，只有每段都至多需要一次修正时
+  才生成合并后的模递推。
+
+### 5.6 SummableExpressionAnalysis
+
+实现：[`summableExpressionAnalysis.hpp`](../../include/mid/analysis/summableExpressionAnalysis.hpp)、
+[`summableExpressionAnalysis.cpp`](summableExpressionAnalysis.cpp)。
+
+`SummableExpressionAnalysis` 也不是一个会遍历函数的 pass；它为 LoopRepFold 提供一个
+可组合的表达式摘要。成功时 `LinearFloorExpression` 表示：
+
+```text
+(linearMultiplier * u
+ + quotientMultiplier * ((divisionMultiplier * u) / divisor)
+ + constant) % modulus
+```
+
+其中 `u` 可以直接是 induction PHI，也可以是两个仿射式之间的单个 signed min/max
+选择。后一种情况下，摘要会记录左右斜率、常数项以及 true edge 选择哪一侧，供调用方
+在闭式展开时重建原选择关系。
+
+分析从带正整数 modulus 的 remainder 开始。它会扁平化 dividend 中的 add/sub，接受：
+
+- induction 或 selection basis 的线性项；
+- 常量乘、常量左移组成的线性项；
+- 至多一个正除数的常量倍数整除项，以及该商的常量倍数；
+- 常量偏移。
+
+仿射斜率、整除分子/商系数和除数都有明确上限，所有系数和常数累加都使用检查过的
+i32 范围。分析还会尝试识别 `select` 配合有序 signed compare 的 min/max 形态，以及
+一层或多层冗余的 `max(i, C - i)` 反射式。两个分支不是同一仿射变量、比较谓词不受
+支持、出现第二个 floor term、线性系数为负或中间系数越界时都会退出。
+
+`LoopRepFold::matchSummableContribution` 直接将这个摘要复制到它的
+`SummableModularRecurrenceMatch`。因此该分析只负责说明单次 contribution 的结构；
+循环控制、累积 state、范围检查和最终的闭式 IR 生成仍由 LoopRepFold 负责。
+
 ## 6. 循环交换、向量化与成本分析
 
 ### 6.1 CostModel
@@ -561,6 +641,8 @@ SCEV 或 range result。尤其是以下修改通常至少会使 LoopInfo/SCEV �
 - [`loopAccessAnalysis.hpp`](../../include/mid/analysis/loopAccessAnalysis.hpp)
 - [`reductionAnalysis.hpp`](../../include/mid/analysis/reductionAnalysis.hpp)
 - [`recurrenceAnalysis.hpp`](../../include/mid/analysis/recurrenceAnalysis.hpp)
+- [`moduloRecurrenceAnalysis.hpp`](../../include/mid/analysis/moduloRecurrenceAnalysis.hpp)
+- [`summableExpressionAnalysis.hpp`](../../include/mid/analysis/summableExpressionAnalysis.hpp)
 - [`costModel.hpp`](../../include/mid/analysis/costModel.hpp)
 - [`loopInterchangeAnalysis.hpp`](../../include/mid/analysis/loopInterchangeAnalysis.hpp)
 - [`loopVectorizationAnalysis.hpp`](../../include/mid/analysis/loopVectorizationAnalysis.hpp)
@@ -582,6 +664,8 @@ SCEV 或 range result。尤其是以下修改通常至少会使 LoopInfo/SCEV �
 - [`loopAccessAnalysis.cpp`](loopAccessAnalysis.cpp)
 - [`reductionAnalysis.cpp`](reductionAnalysis.cpp)
 - [`recurrenceAnalysis.cpp`](recurrenceAnalysis.cpp)
+- [`moduloRecurrenceAnalysis.cpp`](moduloRecurrenceAnalysis.cpp)
+- [`summableExpressionAnalysis.cpp`](summableExpressionAnalysis.cpp)
 - [`costModel.cpp`](costModel.cpp)
 - [`loopInterchangeAnalysis.cpp`](loopInterchangeAnalysis.cpp)
 - [`loopVectorizationAnalysis.cpp`](loopVectorizationAnalysis.cpp)
