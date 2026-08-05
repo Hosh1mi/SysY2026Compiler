@@ -8,6 +8,9 @@
 !src/
 !lib/
 !.proto/
+!docs/
+docs/*
+!docs/backend.md
 .agents/
 test/*
 

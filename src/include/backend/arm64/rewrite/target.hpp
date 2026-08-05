@@ -7,27 +7,30 @@
 
 namespace backend::aarch64 {
 
+// 值类型：DAG 节点结果类型、VReg 类型；由 isel/RegisterInfo 映射到 RegClass
 enum class ValueType : std::uint8_t {
-    Invalid,
-    I1,
+    Invalid, // 占位（如 chain 结果）
+    I1,      // 比较/布尔
     I32,
     I64,
     F32,
-    Ptr,
-    V4I32,
-    V4F32,
-    Flags,
+    Ptr,   // 指针（按 64 位地址处理）
+    V4I32, // 4×i32 NEON
+    V4F32, // 4×f32 NEON
+    Flags, // NZCV 条件标志
 };
 
+// 寄存器类：VReg/物理操作数所属银行；RA 按类着色，打印按类选 w/x/s/v 视图
 enum class RegClass : std::uint8_t {
     Invalid,
-    GPR32,
-    GPR64,
-    FPR32,
-    NEON128,
-    CCR,
+    GPR32,   // W 寄存器
+    GPR64,   // X / SP
+    FPR32,   // S 标量浮点
+    NEON128, // V 128-bit 向量
+    CCR,     // NZCV
 };
 
+// 物理寄存器编号：RA 着色结果、ABI 传参/返回、帧保存；asm_printer 据此输出名字
 enum class PhysReg : std::uint16_t {
     NoReg,
     X0, X1, X2, X3, X4, X5, X6, X7,
@@ -43,8 +46,11 @@ enum class PhysReg : std::uint16_t {
     NZCV,
 };
 
+// 机器指令操作码：MachineInstr 的核心字段；isel 发射、各 Machine Pass 匹配、
+// InstrInfo/调度/打印/校验均查此枚举
 enum class Opcode : std::uint16_t {
     Invalid,
+    // --- 伪指令 / SSA / 调用帧（帧降低或 PostRA 前消除）---
     PHI,
     COPY,
     IMPLICIT_DEF,
@@ -63,10 +69,8 @@ enum class Opcode : std::uint16_t {
     CSELX,
     FCSELS,
     CSETW,
-    MOVi32,
+    MOVi32, // isel 常量；PostRA 再展开为 MOVZ/MOVK
     MOVi64,
-    // Real constant pieces produced by PostRA expansion of MOVi32/MOVi64.
-    // MOVZ: dst(def), imm16, shift.  MOVK: dst(def), dst(use), imm16, shift.
     MOVZ,
     MOVK,
     MOVIv4Zero,
@@ -77,7 +81,7 @@ enum class Opcode : std::uint16_t {
     FMOVv4s,
     ADRP,
     ADDlow,
-    LEA_FRAME,
+    LEA_FRAME, // 栈槽地址；frame_lowering 换成 ADD/MOV 相对 SP/FP
     ADDWrr,
     ADDWri,
     ADDWrs,
@@ -136,6 +140,7 @@ enum class Opcode : std::uint16_t {
     FCVTZSW,
     FMOVWS,
     FMOVSW,
+    // 访存后缀：ui=基址+立即数，lo=全局 lo12，ro=寄存器偏移，post=后变址
     LDRWui,
     LDRWlo,
     LDRWro,
@@ -178,8 +183,8 @@ enum class Opcode : std::uint16_t {
     STPXi,
     LDPDi,
     STPDi,
-    STPXpre,
-    LDPXpost,
+    STPXpre,  // 序言：STP 前变址压栈
+    LDPXpost, // 收尾：LDP 后变址出栈
     LDPQi,
     STPQi,
     ADDXrr,
@@ -235,17 +240,19 @@ enum class Opcode : std::uint16_t {
     EORv16i8,
     SHUFFLEv16i8,
     ADDVv4i32,
-    FRAME_SETUP,
+    FRAME_SETUP,   // 保留伪指令；当前帧降低直接插 STP/SUB
     FRAME_DESTROY,
-    SPILL_LOAD,
+    SPILL_LOAD,  // RA 溢出；frame_lowering 换成真 LDR
     SPILL_STORE,
 };
 
+// AArch64 条件码：Bcc/CSEL/CSET 等操作数；isel 与条件相关 Pass 使用。
 enum class CondCode : std::uint8_t {
     EQ, NE, HS, LO, MI, PL, VS, VC,
     HI, LS, GE, LT, GT, LE, AL,
 };
 
+// 调度资源类别：写入 InstrDesc，供 A53MachineScheduler 做软偏好。
 enum class SchedResource : std::uint8_t {
     None,
     ALU,
@@ -257,9 +264,10 @@ enum class SchedResource : std::uint8_t {
     FPMulDiv,
 };
 
+// 单条 Opcode 的静态属性表项；由 InstrInfo::get 返回，供 MIR 分类、调度、校验、打印。
 struct InstrDesc {
     Opcode opcode = Opcode::Invalid;
-    std::string_view mnemonic;
+    std::string_view mnemonic; // 汇编助记符或伪名
     unsigned explicitDefs = 0;
     unsigned explicitOperands = 0;
     bool terminator = false;
@@ -276,6 +284,7 @@ struct InstrDesc {
     SchedResource resource = SchedResource::ALU;
 };
 
+// 寄存器查询工具：类型/ABI/名字/分配序；isel、RA、帧降低、asm_printer 共用。
 class RegisterInfo {
 public:
     static RegClass classForType(ValueType type);
@@ -290,6 +299,7 @@ public:
     static const std::vector<PhysReg> &calleeSaved(RegClass regClass);
 };
 
+// 指令查询工具：描述表、立即数合法性、是否可交换；isel/peephole/调度等使用。
 class InstrInfo {
 public:
     static const InstrDesc &get(Opcode opcode);
