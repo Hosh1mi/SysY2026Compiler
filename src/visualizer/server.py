@@ -73,12 +73,7 @@ def _compiler_candidates() -> list[Path]:
     if configured:
         candidate = Path(configured)
         return [candidate if candidate.is_absolute() else ROOT / candidate]
-    candidates = [ROOT / "build" / "compiler"]
-    candidates.extend(
-        path for path in sorted(ROOT.glob("build*/compiler"))
-        if path not in candidates
-    )
-    return candidates
+    return [ROOT / "build" / "compiler"]
 
 
 def _compiler_command(env: dict[str, str], args: list[str]) -> list[str]:
