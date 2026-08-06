@@ -586,6 +586,30 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
 
+    // This fast path only supports:
+    //
+    //   header:
+    //     condbr latch, exit
+    //
+    //   latch:
+    //     ...
+    //     br header
+    //
+    // In particular, the latch must not contain a side exit.  Skipping the
+    // latch terminator and synthesizing an unconditional backedge is only
+    // valid under that CFG shape.
+    if (loop.exiting.size() != 1 || loop.exiting[0] != header)
+        return false;
+
+    auto *latchBr = latch->get_terminator();
+    if (!latchBr || !latchBr->is_br())
+        return false;
+    // Unconditional br has a single target operand.
+    if (latchBr->num_ops_ != 1 || latchBr->get_operand(0) != header)
+        return false;
+    if (latch->succ_bbs_.size() != 1 || latch->succ_bbs_[0] != header)
+        return false;
+
     // Need a single exit from the header
     BasicBlock *exitBB = nullptr;
     for (auto succ : header->succ_bbs_) {
@@ -684,8 +708,9 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // effectively unbounded one.
     if (headerBr->get_operand(0) != cmpInst) return false;
     auto *trueSucc = static_cast<BasicBlock *>(headerBr->get_operand(1));
-    // true → body means the condition is "continue loop" (forward loop)
-    if (!loop.blocks.count(trueSucc)) return false;
+    auto *falseSucc = static_cast<BasicBlock *>(headerBr->get_operand(2));
+    // Current implementation only supports true = continue into latch.
+    if (trueSucc != latch || falseSucc != exitBB) return false;
 
     // No calls/phis/allocas in latch; only handle instruction types we can clone;
     // also skip loops whose body is large enough to cause register pressure when
@@ -759,13 +784,23 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
         return nullptr;
     };
 
-    // Helper: get the latch-incoming value of a phi
+    // Helper: get the latch-incoming value of a phi.  Must match the latch
+    // block exactly — "any in-loop predecessor" is the wrong query once a
+    // header grows additional loop-internal edges.
     auto getLatchVal = [&](PhiInst *phi) -> Value * {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
-            if (loop.blocks.count(static_cast<BasicBlock *>(phi->get_operand(i + 1))))
+        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            auto *incomingBlock =
+                static_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (incomingBlock == latch)
                 return phi->get_operand(i);
+        }
         return nullptr;
     };
+
+    for (auto *phi : headerPhis) {
+        if (!getInitVal(phi) || !getLatchVal(phi))
+            return false;
+    }
 
     std::vector<UnrolledModuloRecurrence> modularRecurrences;
     std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
@@ -889,14 +924,38 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
         }
 
         // Update iterMap for next iteration: replace each phi's "current" value
-        // with what comes out of the latch update this iteration
+        // with what comes out of the latch update this iteration.
+        //
+        // localMap miss is ambiguous:
+        //   A. latch value is loop-invariant (defined outside) → reuse as-is
+        //   B. latch value is loop-local but clone failed to map it → bug
+        // Treating both as "keep curPhiVals" produces self-phi backedges.
+        bool remapFailure = false;
         for (auto phi : headerPhis) {
             if (iter < N - 1 && modularRecurrenceIndex.count(phi))
                 continue;
             Value *lv = getLatchVal(phi);
-            if (!lv || !localMap.count(lv))
-                continue;
-            Value *nextValue = localMap[lv];
+            if (!lv) {
+                remapFailure = true;
+                break;
+            }
+
+            Value *nextValue = nullptr;
+            auto mapped = localMap.find(lv);
+            if (mapped != localMap.end()) {
+                nextValue = mapped->second;
+            } else {
+                bool definedInsideLoop = false;
+                if (auto *inst = dynamic_cast<Instruction *>(lv))
+                    definedInsideLoop = loop.blocks.count(inst->parent_);
+                if (definedInsideLoop) {
+                    remapFailure = true;
+                    break;
+                }
+                // Constant / argument / global / outer-loop value: invariant.
+                nextValue = lv;
+            }
+
             auto recurrenceIt = modularRecurrenceIndex.find(phi);
             if (iter == N - 1 &&
                 recurrenceIt != modularRecurrenceIndex.end()) {
@@ -915,6 +974,8 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             }
             curPhiVals[phi] = nextValue;
         }
+        if (remapFailure)
+            return false;
         // Next iteration uses the outputs of this one
         for (auto phi : headerPhis)
             iterMap[phi] = curPhiVals[phi];

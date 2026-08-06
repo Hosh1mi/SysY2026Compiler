@@ -121,77 +121,7 @@ static bool openOutput(const DriverOptions &options,
 }
 
 static void addCanonicalCleanup(PassManager &pm) {
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
-    pm.addPass(std::make_unique<LinearBlockMerge>());
-    pm.addPass(std::make_unique<SCCP>());
-    pm.addPass(std::make_unique<InstCombine>());
-    pm.addPass(std::make_unique<DeadStoreEliminate>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
-    pm.addPass(std::make_unique<LinearBlockMerge>());
-}
-
-static void addCorrelatedCleanup(PassManager &pm) {
-    pm.addPass(std::make_unique<CorrelatedValuePropagation>());
-    pm.addPass(std::make_unique<JumpThreadingLite>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
-    pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
-}
-
-static void addDeepCleanup(PassManager &pm) {
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<CFGSimplify>());
-    addCanonicalCleanup(pm);
-}
-
-static void addScalarCleanup(PassManager &pm) {
-    pm.addPass(std::make_unique<Reassociate>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<LocalCopyPropagation>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<CodeSink>());
-}
-
-static void addInterproceduralAndGlobals(PassManager &pm) {
-    pm.addPass(std::make_unique<BitFuncRecognize>());
-    pm.addPass(std::make_unique<LastIterationElimination>());
-    pm.addPass(std::make_unique<InlineExpand>());
-    pm.addPass(std::make_unique<LocalCopyPropagation>());
-    pm.addPass(std::make_unique<SemanticMarkerStamp>());
-    pm.addPass(std::make_unique<EarlyCSE>());
-    pm.addPass(std::make_unique<GlobalScalarPromotion>());
-    pm.addPass(std::make_unique<Mem2Reg>());
-    pm.addPass(std::make_unique<Reassociate>());
-    addDeepCleanup(pm);
-    // Inlining initially leaves arithmetic in small cloned blocks.  Run the
-    // linear combiner again after block merging exposes the complete DAG.
-    pm.addPass(std::make_unique<Reassociate>());
-    addCanonicalCleanup(pm);
-}
-
-static void addAnalysisDumpIfRequested(PassManager &pm) {
-    if (std::getenv("DEBUG_DUMP_ANALYSIS"))
-        pm.addPass(std::make_unique<AnalysisDump>());
-}
-
-static void addLateTargetIndependentPasses(PassManager &pm, Module *m) {
-    pm.addPass(std::make_unique<GVN>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<CodeSink>());
-    addCanonicalCleanup(pm);
-    pm.addPass(std::make_unique<TailDuplication>());
-    pm.addPass(std::make_unique<UnifyExitNodes>());
-    addCorrelatedCleanup(pm);
-    pm.addPass(std::make_unique<LateValueCleanup>());
-    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
-    // 放在 TRE 之后：线性自递归已被消成循环的函数不再误加缓存；
-    // 指数型重叠子问题（仍保留自调用）继续受益。
-    if (AutoMemoization::moduleHasAnyCandidate(m)) {
-        pm.addPass(std::make_unique<AutoMemoization>());
-    }
-    // After memo (and UnifyExitNodes): mark remaining call+ret tails for
-    // backend sibling/general TCO (b instead of bl).
-    pm.addPass(std::make_unique<TailCallOpt>());
+    pm.addPass(std::make_unique<CanonicalCleanup>());
 }
 
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
@@ -206,16 +136,38 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<TailRecursionEliminate>());
     pm.addPass(std::make_unique<LoopDistribution>());
-    addScalarCleanup(pm);
-    addInterproceduralAndGlobals(pm);
-    addCorrelatedCleanup(pm);
+
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<LocalCopyPropagation>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CodeSink>());
+
+    pm.addPass(std::make_unique<BitFuncRecognize>());
+    pm.addPass(std::make_unique<LastIterationElimination>());
+    pm.addPass(std::make_unique<InlineExpand>());
+    pm.addPass(std::make_unique<LocalCopyPropagation>());
+    pm.addPass(std::make_unique<SemanticMarkerStamp>());
+    pm.addPass(std::make_unique<EarlyCSE>());
+    pm.addPass(std::make_unique<GlobalScalarPromotion>());
+    pm.addPass(std::make_unique<Mem2Reg>());
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CFGSimplify>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<Reassociate>());
+    addCanonicalCleanup(pm);
+
+    pm.addPass(std::make_unique<CorrelatedValuePropagation>());
+    pm.addPass(std::make_unique<JumpThreadingLite>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<SemanticMarkerStamp>());
 
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addRepeatGroup(/*maxRounds=*/8, [](PassManager &pm) {
         pm.addPass(std::make_unique<LoopSimplify>());
-        // pm.addPass(std::make_unique<LCSSA>());
-        // pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<LCSSA>());
         pm.addPass(std::make_unique<IndVarSimplify>());
         pm.addPass(std::make_unique<SimpleLoopUnswitch>());
@@ -229,7 +181,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     });
     pm.addPass(std::make_unique<LoopFixedPointEliminate>());
     addCanonicalCleanup(pm);
-    addAnalysisDumpIfRequested(pm);
+    if (std::getenv("DEBUG_DUMP_ANALYSIS"))
+        pm.addPass(std::make_unique<AnalysisDump>());
     pm.addPass(std::make_unique<TriangularRemapSourceCompose>());
     pm.addPass(std::make_unique<TriangularPanelize>());
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
@@ -249,14 +202,40 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopModuloDelay>());
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
+    pm.addPass(std::make_unique<LoopPeel>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopUnroll>());
+    addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SLPVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
-    addDeepCleanup(pm);
-    addLateTargetIndependentPasses(pm, m);
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CFGSimplify>());
+    addCanonicalCleanup(pm);
+
+    pm.addPass(std::make_unique<GVN>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<CodeSink>());
+    addCanonicalCleanup(pm);
+    pm.addPass(std::make_unique<TailDuplication>());
+    pm.addPass(std::make_unique<UnifyExitNodes>());
+    pm.addPass(std::make_unique<CorrelatedValuePropagation>());
+    pm.addPass(std::make_unique<JumpThreadingLite>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    pm.addPass(std::make_unique<LateValueCleanup>());
+    pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
+    if (AutoMemoization::moduleHasAnyCandidate(m))
+        pm.addPass(std::make_unique<AutoMemoization>());
+    pm.addPass(std::make_unique<TailCallOpt>());
 }
 
 static Function *calledFunction(Instruction *inst) {

@@ -78,9 +78,11 @@ PreservedAnalyses execute(Module *module, AnalysisManager &AM)
 | deep cleanup | canonical cleanup、CFGSimplify、canonical cleanup |
 | scalar cleanup | Reassociate、canonical cleanup、LocalCopyPropagation、canonical cleanup、CodeSink |
 
-这里的重复并非装饰。比如 SCCP 折叠分支以后，DCE 才能删掉死块；块合并后原本跨块的
-同一表达式才会落进 EarlyCSE/GVN 的可见范围。反过来，若先做 DSE 再改 CFG，也可能
-把本来不可达的 store 留到下一轮。
+`CanonicalCleanup` 将上述低成本 pass 作为一个有限不动点运行：每轮依次执行
+SCCP、InstCombine、EarlyCSE、DSE、DCE 和 LinearBlockMerge；只要其中
+任一 pass 改变 IR 就继续下一轮，最多执行 4 轮。这样 SCCP/CFG 化简暴露的死块、
+Phi 和算术机会能在同一个 cleanup 调度点内完成，而不会依赖后续某个偶然的 cleanup。
+其余结构变换不参与这个不动点循环。
 
 ### 2.3 O1 的几段工作
 

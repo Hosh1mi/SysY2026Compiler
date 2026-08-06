@@ -42,6 +42,8 @@
 #include "loopInvariantReduction.hpp"
 #include "loopFusion.hpp"
 #include "loopUnroll.hpp"
+#include "loopPeel.hpp"
+#include "canonicalCleanup.hpp"
 #include "reassociate.hpp"
 #include "loopVectorize.hpp"
 #include "slpVectorize.hpp"
