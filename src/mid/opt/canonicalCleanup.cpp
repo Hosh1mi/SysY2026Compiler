@@ -7,7 +7,38 @@
 #include "../../include/mid/opt/sccp.hpp"
 #include "../../include/mid/opt/instCombine.hpp"
 
+#include <cstdlib>
+#include <iostream>
 #include <memory>
+#include <sstream>
+#include <string>
+
+namespace {
+
+bool dumpNestedPass(const std::string &name) {
+    const char *filter = std::getenv("DUMP_IR_PASS");
+    if (!filter || !*filter)
+        return false;
+    if (std::string(filter) == "*")
+        return true;
+    std::stringstream ss(filter);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item == name)
+            return true;
+    }
+    return false;
+}
+
+void dumpNestedSnapshot(Module *module, const std::string &name,
+                        const char *when) {
+    if (!dumpNestedPass(name))
+        return;
+    std::cerr << "; === IR " << when << " " << name << " ===\n"
+              << module->print() << "\n";
+}
+
+} // namespace
 
 namespace {
 
@@ -26,7 +57,12 @@ bool runCleanupIteration(Module *module, AnalysisManager &AM) {
 
     bool changed = false;
     for (auto &pass : passes) {
+        const std::string passName = pass->name();
+        if (std::getenv("TRACE_PASS_PIPELINE"))
+            std::cerr << "[PipelinePass] " << passName << "\n";
+        dumpNestedSnapshot(module, passName, "Before");
         PreservedAnalyses preserved = pass->execute(module, AM);
+        dumpNestedSnapshot(module, passName, "After");
         changed |= !preserved.preservesAll();
         AM.invalidate(module, preserved);
     }

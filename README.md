@@ -43,3 +43,7 @@ gcc out.s ../lib/libsysy.a -o out
 ## 项目说明
 
 见`docs/`
+
+## Godbolt-like Visualizer
+
+使用`python3 src/visualizer/server.py`开启服务，网址为`http://127.0.0.1:8787/`

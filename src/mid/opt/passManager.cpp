@@ -198,6 +198,8 @@ static void dumpSCEVSnapshot(Module *module, const std::string &when,
 PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
     const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
     const std::string passName = pass.name();
+    if (std::getenv("TRACE_PASS_PIPELINE"))
+        std::cerr << "[PipelinePass] " << passName << "\n";
     const size_t beforeInsts = profilePasses ? countInstructions(module) : 0;
     auto start = std::chrono::steady_clock::now();
     const bool dumpThis = shouldDumpIRForPass(dump_ir_, passName);
