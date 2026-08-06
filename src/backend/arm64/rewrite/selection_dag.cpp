@@ -694,6 +694,16 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
                 node->resultTypes().front() != ValueType::V4F32 &&
                 node->opcode() != SDOpcode::ExtractElement)
                 throw std::logic_error("unsupported vector legalization");
+            if (node->opcode() == SDOpcode::ShuffleVector) {
+                if (node->shuffleMask.size() != 4 ||
+                    std::any_of(node->shuffleMask.begin(),
+                                node->shuffleMask.end(),
+                                [](int lane) {
+                                    return lane < 0 || lane >= 8;
+                                }))
+                    throw std::logic_error(
+                        "invalid four-lane shuffle mask");
+            }
             if ((node->opcode() == SDOpcode::SMin ||
                  node->opcode() == SDOpcode::SMax) &&
                 node->resultTypes().front() != ValueType::I32 &&

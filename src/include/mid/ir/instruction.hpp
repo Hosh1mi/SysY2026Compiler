@@ -453,6 +453,14 @@ public:
         set_operand(1, val);
         set_operand(2, idx);
     }
+    InsertElementInst(Value* vec, Value* val, Value* idx, BasicBlock* bb,
+                      bool)
+        : Instruction(vec->type_, Instruction::InsertElement, 3) {
+        set_operand(0, vec);
+        set_operand(1, val);
+        set_operand(2, idx);
+        parent_ = bb;
+    }
     virtual std::string print() override;
 };
 

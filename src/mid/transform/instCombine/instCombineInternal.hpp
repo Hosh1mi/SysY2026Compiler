@@ -327,3 +327,11 @@ Value* foldICmpAddSub(ICmpInst *inst);
 // visitPhi: collapse when all non-self incomings are the same value
 Value* visitCast(Instruction *inst);
 Value* visitPhi(PhiInst *inst);
+
+// First-class vector values.  These combines deliberately operate on the IR
+// shape rather than on any source spelling, so they remain useful when the
+// language grammar eventually chooses its VecType syntax.
+Value* visitVectorBinary(BinaryInst *inst);
+Value* visitInsertElement(InsertElementInst *inst);
+Value* visitExtractElement(ExtractElementInst *inst);
+Value* visitShuffleVector(ShuffleVectorInst *inst);

@@ -560,6 +560,11 @@ Value *Reassociate::optAddTree(BinaryInst *root, std::vector<ValueEntry> &ops) {
 // reassociate: main entry for a binary instruction
 // -----------------------------------------------------------------------
 void Reassociate::reassociate(BinaryInst *inst) {
+    // The scalar tree builder materializes coefficients as ConstantInt.  A
+    // vector coefficient must instead be a ConstantVector splat; until that
+    // variant is profitable, leave vector algebra to InstCombine/SLP.
+    if (inst->type_->tid_ == Type::VectorTyID)
+        return;
     if (tryReassociateLinear(inst)) {
         changed_ = true;
         return;

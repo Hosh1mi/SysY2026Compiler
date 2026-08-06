@@ -73,31 +73,37 @@ extern int yydebug;
     INTTYPE = 267,                 /* INTTYPE  */
     FLOATTYPE = 268,               /* FLOATTYPE  */
     VOID = 269,                    /* VOID  */
-    CONST = 270,                   /* CONST  */
-    RETURN = 271,                  /* RETURN  */
-    IF = 272,                      /* IF  */
-    ELSE = 273,                    /* ELSE  */
-    WHILE = 274,                   /* WHILE  */
-    BREAK = 275,                   /* BREAK  */
-    CONTINUE = 276,                /* CONTINUE  */
-    LP = 277,                      /* LP  */
-    RP = 278,                      /* RP  */
-    LB = 279,                      /* LB  */
-    RB = 280,                      /* RB  */
-    LC = 281,                      /* LC  */
-    RC = 282,                      /* RC  */
-    COMMA = 283,                   /* COMMA  */
-    SEMICOLON = 284,               /* SEMICOLON  */
-    NOT = 285,                     /* NOT  */
-    ASSIGN = 286,                  /* ASSIGN  */
-    MINUS = 287,                   /* MINUS  */
-    ADD = 288,                     /* ADD  */
-    MUL = 289,                     /* MUL  */
-    DIV = 290,                     /* DIV  */
-    MOD = 291,                     /* MOD  */
-    AND = 292,                     /* AND  */
-    OR = 293,                      /* OR  */
-    LOWER_THEN_ELSE = 294          /* LOWER_THEN_ELSE  */
+    INTVECTYPE = 270,              /* INTVECTYPE  */
+    FLOATVECTYPE = 271,            /* FLOATVECTYPE  */
+    VECWIDTH = 272,                /* VECWIDTH  */
+    VECTOR = 273,                  /* VECTOR  */
+    DYNINTVECTYPE = 274,           /* DYNINTVECTYPE  */
+    DYNFLOATVECTYPE = 275,         /* DYNFLOATVECTYPE  */
+    CONST = 276,                   /* CONST  */
+    RETURN = 277,                  /* RETURN  */
+    IF = 278,                      /* IF  */
+    ELSE = 279,                    /* ELSE  */
+    WHILE = 280,                   /* WHILE  */
+    BREAK = 281,                   /* BREAK  */
+    CONTINUE = 282,                /* CONTINUE  */
+    LP = 283,                      /* LP  */
+    RP = 284,                      /* RP  */
+    LB = 285,                      /* LB  */
+    RB = 286,                      /* RB  */
+    LC = 287,                      /* LC  */
+    RC = 288,                      /* RC  */
+    COMMA = 289,                   /* COMMA  */
+    SEMICOLON = 290,               /* SEMICOLON  */
+    NOT = 291,                     /* NOT  */
+    ASSIGN = 292,                  /* ASSIGN  */
+    MINUS = 293,                   /* MINUS  */
+    ADD = 294,                     /* ADD  */
+    MUL = 295,                     /* MUL  */
+    DIV = 296,                     /* DIV  */
+    MOD = 297,                     /* MOD  */
+    AND = 298,                     /* AND  */
+    OR = 299,                      /* OR  */
+    LOWER_THEN_ELSE = 300          /* LOWER_THEN_ELSE  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -138,13 +144,13 @@ union YYSTYPE
     EqExpAST* eqExp;
     LAndExpAST* lAndExp;
     LOrExpAST* lOrExp;
-    TYPE ty;
+    TypeSpec* type_spec;
     UOP op;
     string* token;
     int int_val;
     float float_val;
 
-#line 148 "/workspace/src/include/frontend/parser.hpp"
+#line 154 "/workspace/src/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;

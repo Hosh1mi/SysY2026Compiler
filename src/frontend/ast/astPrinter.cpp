@@ -44,7 +44,12 @@ std::string Printer::visit(DeclAST &ast) {
         ans+="const\n";
     }
     ans+=strfmt("%*s", depth, "");
-    if (ast.bType == TYPE_INT) ans+="BType:int\n";
+    if (ast.bType.isFixedVector())
+        ans += "BType:vector<" + std::string(ast.bType.element == TYPE_INT ? "int," : "float,") +
+               std::to_string(ast.bType.lanes) + ">\n";
+    else if (ast.bType.isDynamicVector())
+        ans += "BType:vector<" + std::string(ast.bType.element == TYPE_INT ? "int" : "float") + ">\n";
+    else if (ast.bType == TYPE_INT) ans+="BType:int\n";
     else ans+="BType:float\n";
     for (auto &def: ast.defList) {
         ans+=visit(*def);
@@ -101,7 +106,12 @@ std::string Printer::visit(FuncDefAST &ast) {
     ans+="FuncDef:\n";
     depth += 2;
     ans+=strfmt("%*s", depth, "");
-    if (ast.funcType == TYPE_VOID) ans+= "funcType:void\n" ;
+    if (ast.funcType.isFixedVector())
+        ans += "funcType:vector<" + std::string(ast.funcType.element == TYPE_INT ? "int," : "float,") +
+               std::to_string(ast.funcType.lanes) + ">\n";
+    else if (ast.funcType.isDynamicVector())
+        ans += "funcType:vector<" + std::string(ast.funcType.element == TYPE_INT ? "int" : "float") + ">\n";
+    else if (ast.funcType == TYPE_VOID) ans+= "funcType:void\n" ;
     else if (ast.funcType == TYPE_INT) ans+= "funcType:int\n" ;
     else ans+= "funcType:float\n";
     ans+=strfmt("%*s", depth, "");
@@ -125,7 +135,12 @@ std::string Printer::visit(FuncFParamAST &ast) {
     ans+= "FuncFParam:\n";
     depth += 2;
     ans+=strfmt("%*s", depth, "");
-    if (ast.bType == TYPE_INT) ans+="BType:int\n";
+    if (ast.bType.isFixedVector())
+        ans += "BType:vector<" + std::string(ast.bType.element == TYPE_INT ? "int," : "float,") +
+               std::to_string(ast.bType.lanes) + ">\n";
+    else if (ast.bType.isDynamicVector())
+        ans += "BType:vector<" + std::string(ast.bType.element == TYPE_INT ? "int" : "float") + ">\n";
+    else if (ast.bType == TYPE_INT) ans+="BType:int\n";
     else ans+="BType:float\n";
     ans+=strfmt("%*s", depth, "");
     ans+= "id:" + *ast.id +"\n";
@@ -435,4 +450,3 @@ std::string Printer::visit(LOrExpAST &ast) {
     depth -= 2;
     return ans;
 }
-

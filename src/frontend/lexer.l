@@ -32,6 +32,9 @@ HEX_FLOAT_LIT (0[xX]([a-fA-F0-9]*\.[a-fA-F0-9]+|[a-fA-F0-9]+\.?){HEX_EXP}){FLOAT
 FLOAT_LIT     {DEC_FLOAT_LIT}|{HEX_FLOAT_LIT}
 
 Identifier [A-Za-z_][A-Za-z0-9_]*
+FixedIntVector (int[0-9]+|vec[0-9]+i|ivec[0-9]+|vector[0-9]+i)
+FixedFloatVector (float[0-9]+|vec[0-9]+f|fvec[0-9]+|vector[0-9]+f)
+VectorWidth (vec|vector)[0-9]+
 
 MultilineComment "/*"([^*]|[*][^/])*"*/"
 SingleLineComment "//"[^\n]*
@@ -44,6 +47,29 @@ SingleLineComment "//"[^\n]*
 {INT_LIT}       { yylval.int_val = strtol(yytext, nullptr, 0); LEXER_DEBUG_TOKEN("INT"); return INT; }
 {FLOAT_LIT}     { yylval.float_val = strtof(yytext, nullptr); LEXER_DEBUG_TOKEN("FLOAT"); return FLOAT; }
 
+"i32x4"|"int32x4"|"v4i32" { yylval.int_val = 4; LEXER_DEBUG_TOKEN("INTVECTYPE"); return INTVECTYPE; }
+"f32x4"|"float32x4"|"v4f32" { yylval.int_val = 4; LEXER_DEBUG_TOKEN("FLOATVECTYPE"); return FLOATVECTYPE; }
+{FixedIntVector} {
+                    const char *p = yytext;
+                    while (*p && (*p < '0' || *p > '9')) ++p;
+                    yylval.int_val = strtol(p, nullptr, 10);
+                    LEXER_DEBUG_TOKEN("INTVECTYPE"); return INTVECTYPE;
+                  }
+{FixedFloatVector} {
+                    const char *p = yytext;
+                    while (*p && (*p < '0' || *p > '9')) ++p;
+                    yylval.int_val = strtol(p, nullptr, 10);
+                    LEXER_DEBUG_TOKEN("FLOATVECTYPE"); return FLOATVECTYPE;
+                  }
+{VectorWidth}   {
+                    const char *p = yytext;
+                    while (*p && (*p < '0' || *p > '9')) ++p;
+                    yylval.int_val = strtol(p, nullptr, 10);
+                    LEXER_DEBUG_TOKEN("VECWIDTH"); return VECWIDTH;
+                  }
+"intvec"|"ivec" { LEXER_DEBUG_TOKEN("DYNINTVECTYPE"); return DYNINTVECTYPE; }
+"floatvec"|"fvec" { LEXER_DEBUG_TOKEN("DYNFLOATVECTYPE"); return DYNFLOATVECTYPE; }
+"vector"|"vec" { LEXER_DEBUG_TOKEN("VECTOR"); return VECTOR; }
 "int"           { LEXER_DEBUG_TOKEN("INTTYPE"); return INTTYPE; }
 "float"         { LEXER_DEBUG_TOKEN("FLOATTYPE"); return FLOATTYPE; }
 "void"          { LEXER_DEBUG_TOKEN("VOID"); return VOID; }

@@ -150,55 +150,85 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
         switch (inst->op_id_) {
         // AddSub
         case Instruction::Add:
-            replacement = visitAdd(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitAdd(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::Sub:
-            replacement = visitSub(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitSub(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::FAdd:
-            replacement = visitFAdd(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitFAdd(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::FSub:
-            replacement = visitFSub(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitFSub(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::FNeg:
             replacement = visitFNeg(static_cast<UnaryInst*>(inst));
             break;
         // MulDivRem
         case Instruction::Mul:
-            replacement = visitMul(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitMul(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::SDiv:
-            replacement = visitSDiv(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitSDiv(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::SRem:
-            replacement = visitSRem(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitSRem(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::FMul:
-            replacement = visitFMul(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitFMul(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::FDiv:
-            replacement = visitFDiv(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitFDiv(static_cast<BinaryInst*>(inst));
             break;
         // Shifts
         case Instruction::Shl:
-            replacement = visitShl(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitShl(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::LShr:
-            replacement = visitLShr(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitLShr(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::AShr:
-            replacement = visitAShr(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitAShr(static_cast<BinaryInst*>(inst));
             break;
         // Bitwise
         case Instruction::And:
-            replacement = visitAnd(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitAnd(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::Or:
-            replacement = visitOr(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitOr(static_cast<BinaryInst*>(inst));
             break;
         case Instruction::Xor:
-            replacement = visitXor(static_cast<BinaryInst*>(inst));
+            replacement = inst->type_->tid_ == Type::VectorTyID
+                              ? visitVectorBinary(static_cast<BinaryInst*>(inst))
+                              : visitXor(static_cast<BinaryInst*>(inst));
             break;
         // CmpSelect
         case Instruction::ICmp:
@@ -220,6 +250,18 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
             break;
         case Instruction::PHI:
             replacement = visitPhi(static_cast<PhiInst*>(inst));
+            break;
+        case Instruction::InsertElement:
+            replacement = visitInsertElement(
+                static_cast<InsertElementInst *>(inst));
+            break;
+        case Instruction::ExtractElement:
+            replacement = visitExtractElement(
+                static_cast<ExtractElementInst *>(inst));
+            break;
+        case Instruction::ShuffleVector:
+            replacement = visitShuffleVector(
+                static_cast<ShuffleVectorInst *>(inst));
             break;
         default:
             break;

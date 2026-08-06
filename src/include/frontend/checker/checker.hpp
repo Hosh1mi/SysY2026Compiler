@@ -45,7 +45,7 @@ private:
   struct Entry {
     bool is_array{};                       //是否为数组
     bool is_func{};                        //是否为函数
-    TYPE type;                             //变量类型or返回值类型
+    TypeSpec type;                         //变量类型or返回值类型
     int array_length{};                    //如果是数组，则长度非0
     std::vector<int> arlen_value;          //数组的每一维长度
     std::vector<struct Entry> func_params; //函数参数列表

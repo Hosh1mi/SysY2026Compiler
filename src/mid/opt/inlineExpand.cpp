@@ -789,6 +789,29 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldSelect);
                 valMap[oldSelect] = newInst;
+            } else if (auto *oldInsert =
+                           dynamic_cast<InsertElementInst *>(oldInst)) {
+                auto *newInst = new InsertElementInst(
+                    mapValue(oldInsert->get_operand(0), valMap, bbMap),
+                    mapValue(oldInsert->get_operand(1), valMap, bbMap),
+                    mapValue(oldInsert->get_operand(2), valMap, bbMap), newBB);
+                newInst->copySemFlagsFrom(oldInsert);
+                valMap[oldInsert] = newInst;
+            } else if (auto *oldExtract =
+                           dynamic_cast<ExtractElementInst *>(oldInst)) {
+                auto *newInst = new ExtractElementInst(
+                    mapValue(oldExtract->get_operand(0), valMap, bbMap),
+                    mapValue(oldExtract->get_operand(1), valMap, bbMap), newBB);
+                newInst->copySemFlagsFrom(oldExtract);
+                valMap[oldExtract] = newInst;
+            } else if (auto *oldShuffle =
+                           dynamic_cast<ShuffleVectorInst *>(oldInst)) {
+                auto *newInst = new ShuffleVectorInst(
+                    mapValue(oldShuffle->get_operand(0), valMap, bbMap),
+                    mapValue(oldShuffle->get_operand(1), valMap, bbMap),
+                    oldShuffle->mask(), newBB);
+                newInst->copySemFlagsFrom(oldShuffle);
+                valMap[oldShuffle] = newInst;
             } else if (auto *oldUnary = dynamic_cast<UnaryInst*>(oldInst)) {
                 new UnaryInst(oldUnary->type_, oldUnary->op_id_,
                               mapValue(oldUnary->get_operand(0), valMap, bbMap), newBB);
