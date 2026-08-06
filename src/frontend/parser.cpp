@@ -178,32 +178,33 @@ enum yysymbol_kind_t
   YYSYMBOL_Def = 55,                       /* Def  */
   YYSYMBOL_Arrays = 56,                    /* Arrays  */
   YYSYMBOL_InitVal = 57,                   /* InitVal  */
-  YYSYMBOL_InitValList = 58,               /* InitValList  */
-  YYSYMBOL_FuncDef = 59,                   /* FuncDef  */
-  YYSYMBOL_FuncFParamList = 60,            /* FuncFParamList  */
-  YYSYMBOL_FuncFParam = 61,                /* FuncFParam  */
-  YYSYMBOL_Block = 62,                     /* Block  */
-  YYSYMBOL_BlockItemList = 63,             /* BlockItemList  */
-  YYSYMBOL_BlockItem = 64,                 /* BlockItem  */
-  YYSYMBOL_Stmt = 65,                      /* Stmt  */
-  YYSYMBOL_SelectStmt = 66,                /* SelectStmt  */
-  YYSYMBOL_IterationStmt = 67,             /* IterationStmt  */
-  YYSYMBOL_ReturnStmt = 68,                /* ReturnStmt  */
-  YYSYMBOL_Exp = 69,                       /* Exp  */
-  YYSYMBOL_Cond = 70,                      /* Cond  */
-  YYSYMBOL_LVal = 71,                      /* LVal  */
-  YYSYMBOL_PrimaryExp = 72,                /* PrimaryExp  */
-  YYSYMBOL_Number = 73,                    /* Number  */
-  YYSYMBOL_UnaryExp = 74,                  /* UnaryExp  */
-  YYSYMBOL_Call = 75,                      /* Call  */
-  YYSYMBOL_UnaryOp = 76,                   /* UnaryOp  */
-  YYSYMBOL_FuncCParamList = 77,            /* FuncCParamList  */
-  YYSYMBOL_MulExp = 78,                    /* MulExp  */
-  YYSYMBOL_AddExp = 79,                    /* AddExp  */
-  YYSYMBOL_RelExp = 80,                    /* RelExp  */
-  YYSYMBOL_EqExp = 81,                     /* EqExp  */
-  YYSYMBOL_LAndExp = 82,                   /* LAndExp  */
-  YYSYMBOL_LOrExp = 83                     /* LOrExp  */
+  YYSYMBOL_BraceInitVal = 58,              /* BraceInitVal  */
+  YYSYMBOL_InitValList = 59,               /* InitValList  */
+  YYSYMBOL_FuncDef = 60,                   /* FuncDef  */
+  YYSYMBOL_FuncFParamList = 61,            /* FuncFParamList  */
+  YYSYMBOL_FuncFParam = 62,                /* FuncFParam  */
+  YYSYMBOL_Block = 63,                     /* Block  */
+  YYSYMBOL_BlockItemList = 64,             /* BlockItemList  */
+  YYSYMBOL_BlockItem = 65,                 /* BlockItem  */
+  YYSYMBOL_Stmt = 66,                      /* Stmt  */
+  YYSYMBOL_SelectStmt = 67,                /* SelectStmt  */
+  YYSYMBOL_IterationStmt = 68,             /* IterationStmt  */
+  YYSYMBOL_ReturnStmt = 69,                /* ReturnStmt  */
+  YYSYMBOL_Exp = 70,                       /* Exp  */
+  YYSYMBOL_Cond = 71,                      /* Cond  */
+  YYSYMBOL_LVal = 72,                      /* LVal  */
+  YYSYMBOL_PrimaryExp = 73,                /* PrimaryExp  */
+  YYSYMBOL_Number = 74,                    /* Number  */
+  YYSYMBOL_UnaryExp = 75,                  /* UnaryExp  */
+  YYSYMBOL_Call = 76,                      /* Call  */
+  YYSYMBOL_UnaryOp = 77,                   /* UnaryOp  */
+  YYSYMBOL_FuncCParamList = 78,            /* FuncCParamList  */
+  YYSYMBOL_MulExp = 79,                    /* MulExp  */
+  YYSYMBOL_AddExp = 80,                    /* AddExp  */
+  YYSYMBOL_RelExp = 81,                    /* RelExp  */
+  YYSYMBOL_EqExp = 82,                     /* EqExp  */
+  YYSYMBOL_LAndExp = 83,                   /* LAndExp  */
+  YYSYMBOL_LOrExp = 84                     /* LOrExp  */
 };
 typedef enum yysymbol_kind_t yysymbol_kind_t;
 
@@ -534,16 +535,16 @@ union yyalloc
 /* YYFINAL -- State number of the termination state.  */
 #define YYFINAL  28
 /* YYLAST -- Last index in YYTABLE.  */
-#define YYLAST   316
+#define YYLAST   338
 
 /* YYNTOKENS -- Number of terminals.  */
 #define YYNTOKENS  46
 /* YYNNTS -- Number of nonterminals.  */
-#define YYNNTS  38
+#define YYNNTS  39
 /* YYNRULES -- Number of rules.  */
-#define YYNRULES  118
+#define YYNRULES  121
 /* YYNSTATES -- Number of states.  */
-#define YYNSTATES  226
+#define YYNSTATES  232
 
 /* YYMAXUTOK -- Last valid token kind.  */
 #define YYMAXUTOK   300
@@ -602,13 +603,14 @@ static const yytype_int16 yyrline[] =
      222,   225,   228,   231,   234,   237,   240,   243,   246,   249,
      252,   255,   258,   261,   264,   267,   270,   273,   279,   285,
      289,   296,   302,   307,   312,   319,   323,   331,   335,   338,
-     345,   349,   356,   364,   371,   379,   389,   393,   400,   407,
-     414,   425,   428,   435,   439,   446,   450,   457,   461,   467,
-     472,   476,   480,   485,   490,   495,   503,   508,   517,   525,
-     529,   535,   541,   547,   551,   559,   563,   567,   574,   579,
-     587,   591,   595,   603,   608,   617,   620,   623,   629,   633,
-     640,   644,   650,   656,   665,   669,   675,   684,   688,   694,
-     700,   706,   715,   719,   725,   734,   738,   746,   750
+     345,   348,   355,   359,   366,   374,   381,   389,   399,   403,
+     410,   417,   424,   435,   438,   445,   449,   456,   460,   467,
+     471,   477,   483,   488,   492,   496,   501,   506,   511,   519,
+     524,   533,   541,   545,   551,   557,   563,   567,   575,   579,
+     583,   590,   595,   603,   607,   611,   619,   624,   633,   636,
+     639,   645,   649,   656,   660,   666,   672,   681,   685,   691,
+     700,   704,   710,   716,   722,   731,   735,   741,   750,   754,
+     762,   766
 };
 #endif
 
@@ -632,11 +634,11 @@ static const char *const yytname[] =
   "NOT", "ASSIGN", "MINUS", "ADD", "MUL", "DIV", "MOD", "AND", "OR",
   "LOWER_THEN_ELSE", "$accept", "Program", "CompUnit", "DeclDef", "Decl",
   "BType", "VecType", "VoidType", "DefList", "Def", "Arrays", "InitVal",
-  "InitValList", "FuncDef", "FuncFParamList", "FuncFParam", "Block",
-  "BlockItemList", "BlockItem", "Stmt", "SelectStmt", "IterationStmt",
-  "ReturnStmt", "Exp", "Cond", "LVal", "PrimaryExp", "Number", "UnaryExp",
-  "Call", "UnaryOp", "FuncCParamList", "MulExp", "AddExp", "RelExp",
-  "EqExp", "LAndExp", "LOrExp", YY_NULLPTR
+  "BraceInitVal", "InitValList", "FuncDef", "FuncFParamList", "FuncFParam",
+  "Block", "BlockItemList", "BlockItem", "Stmt", "SelectStmt",
+  "IterationStmt", "ReturnStmt", "Exp", "Cond", "LVal", "PrimaryExp",
+  "Number", "UnaryExp", "Call", "UnaryOp", "FuncCParamList", "MulExp",
+  "AddExp", "RelExp", "EqExp", "LAndExp", "LOrExp", YY_NULLPTR
 };
 
 static const char *
@@ -646,7 +648,7 @@ yysymbol_name (yysymbol_kind_t yysymbol)
 }
 #endif
 
-#define YYPACT_NINF (-178)
+#define YYPACT_NINF (-172)
 
 #define yypact_value_is_default(Yyn) \
   ((Yyn) == YYPACT_NINF)
@@ -660,29 +662,30 @@ yysymbol_name (yysymbol_kind_t yysymbol)
    STATE-NUM.  */
 static const yytype_int16 yypact[] =
 {
-     259,     9,    14,  -178,  -178,  -178,    19,    -1,  -178,  -178,
-     269,    63,   259,  -178,  -178,    85,  -178,    95,  -178,    59,
-       3,    75,    10,    18,    12,   107,   112,   100,  -178,  -178,
-      65,   118,  -178,    42,   104,  -178,    99,  -178,   125,  -178,
-     116,  -178,   149,   152,   133,     6,     8,   -12,    50,   140,
-     150,    20,   178,   226,    93,    49,    43,   100,  -178,   241,
-    -178,  -178,  -178,  -178,  -178,  -178,   204,  -178,   194,  -178,
-     197,  -178,   200,  -178,   220,   237,   246,  -178,   218,   247,
-      60,  -178,  -178,  -178,   138,    93,  -178,  -178,  -178,   231,
-    -178,  -178,  -178,  -178,  -178,    93,   -21,   180,    71,  -178,
-    -178,    93,    49,  -178,   218,    77,   243,   255,   256,   257,
-     238,   239,   235,   252,   123,  -178,   260,   218,   269,   186,
-     261,   240,  -178,  -178,    93,    93,    93,    93,    93,  -178,
-    -178,   187,   262,  -178,  -178,   218,  -178,  -178,  -178,  -178,
-    -178,  -178,  -178,  -178,   166,   264,   266,   263,   265,  -178,
-    -178,  -178,   100,  -178,   160,  -178,  -178,  -178,  -178,  -178,
-     267,   258,   268,  -178,  -178,  -178,  -178,    89,  -178,  -178,
-    -178,  -178,   -21,   -21,  -178,    49,  -178,  -178,  -178,   270,
-      93,    93,  -178,  -178,  -178,  -178,  -178,    93,   271,  -178,
-      93,  -178,  -178,   274,   180,   202,   216,   253,   272,   275,
-     273,   261,  -178,    33,    93,    93,    93,    93,    93,    93,
-      93,    93,    33,  -178,   282,   180,   180,   180,   180,   202,
-     202,   216,   253,  -178,    33,  -178
+     303,    50,    62,  -172,  -172,  -172,     5,    -2,  -172,  -172,
+     313,    17,   303,  -172,  -172,    25,  -172,    29,  -172,    73,
+       2,   108,    13,    85,    12,   116,   133,    56,  -172,  -172,
+     -10,   115,  -172,    49,   104,  -172,    83,  -172,   112,  -172,
+     100,  -172,   129,   135,   123,    21,    70,    84,    92,   139,
+     152,   -18,   119,   270,   242,   120,    80,    56,  -172,   285,
+    -172,  -172,  -172,  -172,  -172,  -172,   159,  -172,   190,  -172,
+     193,  -172,   196,  -172,   210,   220,   230,  -172,   204,   234,
+      98,  -172,  -172,  -172,    34,   242,  -172,  -172,  -172,   219,
+    -172,  -172,  -172,  -172,  -172,   242,   128,   153,    63,  -172,
+    -172,   242,   120,  -172,   204,   110,   243,   244,   247,   248,
+     228,   229,   231,   235,   162,  -172,   238,   204,   313,   225,
+     241,   245,  -172,  -172,   242,   242,   242,   242,   242,  -172,
+    -172,   172,   236,  -172,  -172,   204,  -172,  -172,  -172,  -172,
+    -172,  -172,  -172,  -172,    18,   232,   249,   224,   256,  -172,
+    -172,  -172,    56,  -172,   199,  -172,  -172,  -172,  -172,  -172,
+     257,   258,   253,  -172,  -172,  -172,  -172,   113,  -172,  -172,
+    -172,  -172,   128,   128,  -172,   120,  -172,  -172,  -172,   259,
+     242,   242,  -172,  -172,  -172,  -172,  -172,   237,   263,  -172,
+     242,  -172,  -172,   250,   153,   155,   197,   264,   252,   277,
+     102,   273,   274,   241,  -172,    47,   242,   242,   242,   242,
+     242,   242,   242,   242,    47,  -172,   176,  -172,  -172,   286,
+     153,   153,   153,   153,   155,   155,   197,   264,  -172,  -172,
+      47,  -172
 };
 
 /* YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
@@ -698,39 +701,40 @@ static const yytype_int8 yydefact[] =
        0,    44,     0,     0,     0,     0,    43,     0,     8,     0,
       24,    26,    25,    27,    22,    23,     0,    28,     0,    29,
        0,    30,     0,    31,     0,     0,     0,     7,     0,     0,
-       0,    56,    88,    89,    83,     0,    97,    96,    95,     0,
-      86,    90,    87,   100,    91,     0,   104,    81,     0,    42,
+       0,    58,    91,    92,    86,     0,   100,    99,    98,     0,
+      89,    93,    90,   103,    94,     0,   107,    84,     0,    42,
       47,     0,     0,    40,     0,     0,     0,     0,     0,     0,
-       0,     0,     0,     0,     0,    53,    58,     0,     0,     0,
-      84,     0,    45,    92,     0,     0,     0,     0,     0,    48,
-      51,     0,     0,    41,    55,     0,    16,    17,    14,    15,
-      18,    19,    20,    21,     0,     0,     0,     0,     0,    61,
-      67,    65,     0,    72,     0,    63,    66,    74,    75,    73,
-       0,    86,     0,    52,    57,    93,    98,     0,    85,   101,
-     102,   103,   106,   105,    49,     0,    46,    54,    80,     0,
-       0,     0,    71,    70,    62,    64,    69,     0,    59,    94,
-       0,    50,    79,     0,   107,   112,   115,   117,    82,     0,
-       0,    60,    99,     0,     0,     0,     0,     0,     0,     0,
-       0,     0,     0,    68,    76,   108,   109,   110,   111,   113,
-     114,   116,   118,    78,     0,    77
+       0,     0,     0,     0,     0,    55,    60,     0,     0,     0,
+      87,     0,    45,    95,     0,     0,     0,     0,     0,    48,
+      53,     0,     0,    41,    57,     0,    16,    17,    14,    15,
+      18,    19,    20,    21,     0,     0,     0,     0,     0,    63,
+      69,    67,     0,    75,     0,    65,    68,    77,    78,    76,
+       0,    89,     0,    54,    59,    96,   101,     0,    88,   104,
+     105,   106,   109,   108,    49,     0,    46,    56,    83,     0,
+       0,     0,    74,    73,    64,    66,    72,     0,    61,    97,
+       0,    52,    82,     0,   110,   115,   118,   120,    85,     0,
+       0,     0,     0,    62,   102,     0,     0,     0,     0,     0,
+       0,     0,     0,     0,     0,    50,     0,    71,    70,    79,
+     111,   112,   113,   114,   116,   117,   119,   121,    81,    51,
+       0,    80
 };
 
 /* YYPGOTO[NTERM-NUM].  */
 static const yytype_int16 yypgoto[] =
 {
-    -178,  -178,  -178,   285,  -103,     0,  -178,  -178,   280,   254,
-     -80,   -93,  -178,  -178,   250,   192,   -71,  -178,   158,  -177,
-    -178,  -178,  -178,   -53,   132,  -111,  -178,  -178,    -9,  -178,
-    -178,  -178,   101,    26,    39,   105,   103,  -178
+    -172,  -172,  -172,   260,  -106,     1,  -172,  -172,   284,   255,
+     -80,   -53,  -172,   127,  -172,   254,   216,   -72,  -172,   181,
+    -121,  -172,  -172,  -172,   -54,   156,  -111,  -172,  -172,   -37,
+    -172,  -172,  -172,   121,  -171,    33,   124,   125,  -172
 };
 
 /* YYDEFGOTO[NTERM-NUM].  */
 static const yytype_uint8 yydefgoto[] =
 {
        0,    11,    12,    13,    14,    79,    16,    17,    31,    32,
-      56,    99,   131,    18,    80,    81,   153,   154,   155,   156,
-     157,   158,   159,   160,   193,    90,    91,    92,    93,    94,
-      95,   167,    96,    97,   195,   196,   197,   198
+      56,   130,   201,   131,    18,    80,    81,   153,   154,   155,
+     156,   157,   158,   159,   100,   193,    90,    91,    92,    93,
+      94,    95,   167,    96,    97,   195,   196,   197,   198
 };
 
 /* YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
@@ -738,74 +742,78 @@ static const yytype_uint8 yydefgoto[] =
    number is the opposite.  If YYTABLE_NINF, syntax error.  */
 static const yytype_uint8 yytable[] =
 {
-      15,    89,   100,   161,   120,   130,    36,   115,    24,   133,
-      27,   151,    15,    40,    67,    44,    69,    71,    19,   124,
-     125,   126,    72,    21,    45,    46,   214,    25,    23,    26,
-      42,    43,   121,   134,    37,   223,    82,    83,    84,    20,
-      68,    41,    70,   161,    22,   100,   163,   225,   132,   100,
-      54,   151,    82,    83,    84,   144,   145,    55,   146,   147,
-     148,    85,    34,    28,   177,   114,   166,    35,   150,    86,
-      59,    87,    88,   101,    82,    83,    84,    85,    38,    73,
-     102,    98,   191,    39,    74,    86,   123,    87,    88,   117,
-      30,   179,   161,    53,   118,    54,    82,    83,    84,    85,
-      33,   161,    55,    98,   129,    51,   135,    86,   201,    87,
-      88,   118,    60,   161,   152,   169,   170,   171,   189,    47,
-      48,    85,   100,   190,    49,    50,    82,    83,    84,    86,
-      61,    87,    88,    62,   200,     1,     2,   202,     4,     5,
-       6,     7,     8,     9,    10,   144,   145,    63,   146,   147,
-     148,    85,    57,    58,   152,   114,   149,    64,   150,    86,
-      65,    87,    88,    82,    83,    84,   119,    66,    54,    82,
-      83,    84,     1,     2,    75,     4,     5,     6,     7,     8,
-       9,    10,   144,   145,    76,   146,   147,   148,    85,    82,
-      83,    84,   114,   184,    85,   150,    86,   108,    87,    88,
-     109,   178,    86,   110,    87,    88,   194,   194,   204,   205,
-     206,   207,    57,    77,    85,   165,   106,   107,   127,   128,
-     174,   175,    86,   111,    87,    88,   208,   209,   172,   173,
-     215,   216,   217,   218,   194,   194,   194,   194,     1,     2,
-     112,     4,     5,     6,     7,     8,     9,   219,   220,   113,
-     114,   136,   116,     1,     2,    78,     4,     5,     6,     7,
-       8,     9,   122,   137,   138,   139,   142,   140,   141,   168,
-     104,     1,     2,     3,     4,     5,     6,     7,     8,     9,
-      10,     1,     2,   143,     4,     5,     6,     7,     8,     9,
-     162,   101,   180,   176,   181,   187,   210,    29,   182,   188,
-     183,    54,   186,   203,   212,   192,   224,    52,   213,   105,
-     164,   103,   185,   199,   222,   221,   211
+      89,    15,    99,   161,   120,    36,   115,    24,   151,   194,
+     194,    27,    54,    15,    23,    44,    40,    28,    53,    55,
+      54,    82,    83,    84,    45,    46,    25,    55,    26,    67,
+      30,   121,   134,    37,    33,   220,   221,   222,   223,   194,
+     194,   194,   194,   161,    41,   163,    85,   132,   151,   133,
+      82,    83,    84,   178,    86,    68,    87,    88,   123,    19,
+     160,    51,   119,   177,    54,   166,    82,    83,    84,   144,
+     145,    21,   146,   147,   148,    85,    34,    59,    69,   114,
+      20,    35,   150,    86,   219,    87,    88,   169,   170,   171,
+     179,    85,    22,   228,   161,    98,   129,    42,    43,    86,
+     160,    87,    88,   161,    70,    82,    83,    84,   203,   231,
+     101,    38,    60,    71,    61,   152,    39,   102,    72,   161,
+      62,    73,   191,    82,    83,    84,    74,   117,    47,    48,
+      85,    63,   118,   202,    98,   215,   204,    64,    86,   135,
+      87,    88,   189,    65,   118,    49,    50,   190,    85,    57,
+      58,   160,    98,    57,    77,   152,    86,    66,    87,    88,
+     160,   206,   207,   208,   209,    82,    83,    84,   124,   125,
+     126,   106,   107,    75,     1,     2,   160,     4,     5,     6,
+       7,     8,     9,    10,   144,   145,    76,   146,   147,   148,
+      85,   127,   128,   108,   114,   149,   109,   150,    86,   110,
+      87,    88,    82,    83,    84,   174,   175,   210,   211,   229,
+     175,     1,     2,   111,     4,     5,     6,     7,     8,     9,
+      10,   144,   145,   112,   146,   147,   148,    85,    82,    83,
+      84,   114,   184,   113,   150,    86,   114,    87,    88,   116,
+      82,    83,    84,   224,   225,    82,    83,    84,   172,   173,
+     122,   136,   137,    85,   165,   138,   139,   140,   141,   182,
+     180,    86,   142,    87,    88,    85,   143,   176,   162,   200,
+      85,   101,    29,    86,   168,    87,    88,   181,    86,   205,
+      87,    88,     1,     2,   188,     4,     5,     6,     7,     8,
+       9,   183,   186,    54,   192,   187,   213,     1,     2,    78,
+       4,     5,     6,     7,     8,     9,   214,   212,   217,   218,
+     230,    52,   103,   105,   104,     1,     2,     3,     4,     5,
+       6,     7,     8,     9,    10,     1,     2,   216,     4,     5,
+       6,     7,     8,     9,   164,   185,   226,   199,   227
 };
 
 static const yytype_uint8 yycheck[] =
 {
-       0,    54,    55,   114,    84,    98,     3,    78,     9,   102,
-      10,   114,    12,     3,     8,     3,     8,    29,     9,    40,
-      41,    42,    34,     9,    12,    13,   203,    28,     9,    30,
-      12,    13,    85,   104,    31,   212,     3,     4,     5,    30,
-      34,    31,    34,   154,    30,    98,   117,   224,   101,   102,
-      30,   154,     3,     4,     5,    22,    23,    37,    25,    26,
-      27,    28,     3,     0,   135,    32,   119,     8,    35,    36,
-      28,    38,    39,    30,     3,     4,     5,    28,     3,    29,
-      37,    32,   175,     8,    34,    36,    95,    38,    39,    29,
-       5,   144,   203,    28,    34,    30,     3,     4,     5,    28,
-       5,   212,    37,    32,    33,     5,    29,    36,   188,    38,
-      39,    34,     8,   224,   114,   124,   125,   126,    29,    12,
-      13,    28,   175,    34,    12,    13,     3,     4,     5,    36,
-      31,    38,    39,     8,   187,    12,    13,   190,    15,    16,
-      17,    18,    19,    20,    21,    22,    23,    31,    25,    26,
-      27,    28,    34,    35,   154,    32,    33,     8,    35,    36,
-       8,    38,    39,     3,     4,     5,    28,    34,    30,     3,
-       4,     5,    12,    13,    34,    15,    16,    17,    18,    19,
-      20,    21,    22,    23,    34,    25,    26,    27,    28,     3,
-       4,     5,    32,    33,    28,    35,    36,     3,    38,    39,
-       3,    35,    36,     3,    38,    39,   180,   181,     6,     7,
-       8,     9,    34,    35,    28,    29,    12,    13,    38,    39,
-      33,    34,    36,     3,    38,    39,    10,    11,   127,   128,
-     204,   205,   206,   207,   208,   209,   210,   211,    12,    13,
-       3,    15,    16,    17,    18,    19,    20,   208,   209,     3,
-      32,     8,     5,    12,    13,    29,    15,    16,    17,    18,
-      19,    20,    31,     8,     8,     8,    31,    29,    29,    29,
-      29,    12,    13,    14,    15,    16,    17,    18,    19,    20,
-      21,    12,    13,    31,    15,    16,    17,    18,    19,    20,
-      30,    30,    28,    31,    28,    37,    43,    12,    35,    31,
-      35,    30,    35,    29,    29,    35,    24,    27,    35,    59,
-     118,    57,   154,   181,   211,   210,    44
+      54,     0,    55,   114,    84,     3,    78,     9,   114,   180,
+     181,    10,    30,    12,     9,     3,     3,     0,    28,    37,
+      30,     3,     4,     5,    12,    13,    28,    37,    30,     8,
+       5,    85,   104,    31,     5,   206,   207,   208,   209,   210,
+     211,   212,   213,   154,    31,   117,    28,   101,   154,   102,
+       3,     4,     5,    35,    36,    34,    38,    39,    95,     9,
+     114,     5,    28,   135,    30,   119,     3,     4,     5,    22,
+      23,     9,    25,    26,    27,    28,     3,    28,     8,    32,
+      30,     8,    35,    36,   205,    38,    39,   124,   125,   126,
+     144,    28,    30,   214,   205,    32,    33,    12,    13,    36,
+     154,    38,    39,   214,    34,     3,     4,     5,   188,   230,
+      30,     3,     8,    29,    31,   114,     8,    37,    34,   230,
+       8,    29,   175,     3,     4,     5,    34,    29,    12,    13,
+      28,    31,    34,   187,    32,    33,   190,     8,    36,    29,
+      38,    39,    29,     8,    34,    12,    13,    34,    28,    34,
+      35,   205,    32,    34,    35,   154,    36,    34,    38,    39,
+     214,     6,     7,     8,     9,     3,     4,     5,    40,    41,
+      42,    12,    13,    34,    12,    13,   230,    15,    16,    17,
+      18,    19,    20,    21,    22,    23,    34,    25,    26,    27,
+      28,    38,    39,     3,    32,    33,     3,    35,    36,     3,
+      38,    39,     3,     4,     5,    33,    34,    10,    11,    33,
+      34,    12,    13,     3,    15,    16,    17,    18,    19,    20,
+      21,    22,    23,     3,    25,    26,    27,    28,     3,     4,
+       5,    32,    33,     3,    35,    36,    32,    38,    39,     5,
+       3,     4,     5,   210,   211,     3,     4,     5,   127,   128,
+      31,     8,     8,    28,    29,     8,     8,    29,    29,    35,
+      28,    36,    31,    38,    39,    28,    31,    31,    30,    32,
+      28,    30,    12,    36,    29,    38,    39,    28,    36,    29,
+      38,    39,    12,    13,    31,    15,    16,    17,    18,    19,
+      20,    35,    35,    30,    35,    37,    44,    12,    13,    29,
+      15,    16,    17,    18,    19,    20,    29,    43,    35,    35,
+      24,    27,    57,    59,    29,    12,    13,    14,    15,    16,
+      17,    18,    19,    20,    21,    12,    13,   200,    15,    16,
+      17,    18,    19,    20,   118,   154,   212,   181,   213
 };
 
 /* YYSTOS[STATE-NUM] -- The symbol kind of the accessing symbol of
@@ -813,28 +821,29 @@ static const yytype_uint8 yycheck[] =
 static const yytype_int8 yystos[] =
 {
        0,    12,    13,    14,    15,    16,    17,    18,    19,    20,
-      21,    47,    48,    49,    50,    51,    52,    53,    59,     9,
+      21,    47,    48,    49,    50,    51,    52,    53,    60,     9,
       30,     9,    30,     9,     9,    28,    30,    51,     0,    49,
        5,    54,    55,     5,     3,     8,     3,    31,     3,     8,
        3,    31,    12,    13,     3,    12,    13,    12,    13,    12,
       13,     5,    54,    28,    30,    37,    56,    34,    35,    28,
        8,    31,     8,    31,     8,     8,    34,     8,    34,     8,
       34,    29,    34,    29,    34,    34,    34,    35,    29,    51,
-      60,    61,     3,     4,     5,    28,    36,    38,    39,    69,
-      71,    72,    73,    74,    75,    76,    78,    79,    32,    57,
-      69,    30,    37,    55,    29,    60,    12,    13,     3,     3,
-       3,     3,     3,     3,    32,    62,     5,    29,    34,    28,
-      56,    69,    31,    74,    40,    41,    42,    38,    39,    33,
-      57,    58,    69,    57,    62,    29,     8,     8,     8,     8,
+      61,    62,     3,     4,     5,    28,    36,    38,    39,    70,
+      72,    73,    74,    75,    76,    77,    79,    80,    32,    57,
+      70,    30,    37,    55,    29,    61,    12,    13,     3,     3,
+       3,     3,     3,     3,    32,    63,     5,    29,    34,    28,
+      56,    70,    31,    75,    40,    41,    42,    38,    39,    33,
+      57,    59,    70,    57,    63,    29,     8,     8,     8,     8,
       29,    29,    31,    31,    22,    23,    25,    26,    27,    33,
-      35,    50,    51,    62,    63,    64,    65,    66,    67,    68,
-      69,    71,    30,    62,    61,    29,    69,    77,    29,    74,
-      74,    74,    78,    78,    33,    34,    31,    62,    35,    69,
-      28,    28,    35,    35,    33,    64,    35,    37,    31,    29,
-      34,    57,    35,    70,    79,    80,    81,    82,    83,    70,
-      69,    56,    69,    29,     6,     7,     8,     9,    10,    11,
-      43,    44,    29,    35,    65,    79,    79,    79,    79,    80,
-      80,    81,    82,    65,    24,    65
+      35,    50,    51,    63,    64,    65,    66,    67,    68,    69,
+      70,    72,    30,    63,    62,    29,    70,    78,    29,    75,
+      75,    75,    79,    79,    33,    34,    31,    63,    35,    70,
+      28,    28,    35,    35,    33,    65,    35,    37,    31,    29,
+      34,    57,    35,    71,    80,    81,    82,    83,    84,    71,
+      32,    58,    70,    56,    70,    29,     6,     7,     8,     9,
+      10,    11,    43,    44,    29,    33,    59,    35,    35,    66,
+      80,    80,    80,    80,    81,    81,    82,    83,    66,    33,
+      24,    66
 };
 
 /* YYR1[RULE-NUM] -- Symbol kind of the left-hand side of rule RULE-NUM.  */
@@ -845,13 +854,14 @@ static const yytype_int8 yyr1[] =
       52,    52,    52,    52,    52,    52,    52,    52,    52,    52,
       52,    52,    52,    52,    52,    52,    52,    52,    53,    54,
       54,    55,    55,    55,    55,    56,    56,    57,    57,    57,
-      58,    58,    59,    59,    59,    59,    60,    60,    61,    61,
-      61,    62,    62,    63,    63,    64,    64,    65,    65,    65,
-      65,    65,    65,    65,    65,    65,    66,    66,    67,    68,
-      68,    69,    70,    71,    71,    72,    72,    72,    73,    73,
-      74,    74,    74,    75,    75,    76,    76,    76,    77,    77,
-      78,    78,    78,    78,    79,    79,    79,    80,    80,    80,
-      80,    80,    81,    81,    81,    82,    82,    83,    83
+      58,    58,    59,    59,    60,    60,    60,    60,    61,    61,
+      62,    62,    62,    63,    63,    64,    64,    65,    65,    66,
+      66,    66,    66,    66,    66,    66,    66,    66,    66,    67,
+      67,    68,    69,    69,    70,    71,    72,    72,    73,    73,
+      73,    74,    74,    75,    75,    75,    76,    76,    77,    77,
+      77,    78,    78,    79,    79,    79,    79,    80,    80,    80,
+      81,    81,    81,    81,    81,    82,    82,    82,    83,    83,
+      84,    84
 };
 
 /* YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.  */
@@ -862,13 +872,14 @@ static const yytype_int8 yyr2[] =
        6,     6,     4,     4,     4,     4,     4,     4,     4,     4,
        4,     4,     1,     1,     3,     3,     3,     3,     1,     1,
        3,     4,     3,     2,     1,     3,     4,     1,     2,     3,
-       3,     1,     6,     5,     6,     5,     1,     3,     2,     4,
-       5,     2,     3,     1,     2,     1,     1,     1,     4,     2,
-       2,     2,     1,     1,     1,     1,     5,     7,     5,     3,
-       2,     1,     1,     1,     2,     3,     1,     1,     1,     1,
-       1,     1,     2,     3,     4,     1,     1,     1,     1,     3,
-       1,     3,     3,     3,     1,     3,     3,     1,     3,     3,
-       3,     3,     1,     3,     3,     1,     3,     1,     3
+       2,     3,     3,     1,     6,     5,     6,     5,     1,     3,
+       2,     4,     5,     2,     3,     1,     2,     1,     1,     1,
+       4,     4,     2,     2,     2,     1,     1,     1,     1,     5,
+       7,     5,     3,     2,     1,     1,     1,     2,     3,     1,
+       1,     1,     1,     1,     1,     2,     3,     4,     1,     1,
+       1,     1,     3,     1,     3,     3,     3,     1,     3,     3,
+       1,     3,     3,     3,     3,     1,     3,     3,     1,     3,
+       1,     3
 };
 
 
@@ -1720,7 +1731,7 @@ yyreduce:
              {
         root = unique_ptr<CompUnitAST>((yyvsp[0].compUnit));
     }
-#line 1724 "/workspace/src/frontend/parser.cpp"
+#line 1735 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 3: /* CompUnit: CompUnit DeclDef  */
@@ -1729,7 +1740,7 @@ yyreduce:
         (yyval.compUnit) = (yyvsp[-1].compUnit);
         (yyval.compUnit)->declDefList.push_back(unique_ptr<DeclDefAST>((yyvsp[0].declDef)));
     }
-#line 1733 "/workspace/src/frontend/parser.cpp"
+#line 1744 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 4: /* CompUnit: DeclDef  */
@@ -1738,7 +1749,7 @@ yyreduce:
         (yyval.compUnit) = make_node<CompUnitAST>();
         (yyval.compUnit)->declDefList.push_back(unique_ptr<DeclDefAST>((yyvsp[0].declDef)));
     }
-#line 1742 "/workspace/src/frontend/parser.cpp"
+#line 1753 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 5: /* DeclDef: Decl  */
@@ -1747,7 +1758,7 @@ yyreduce:
         (yyval.declDef) = make_node<DeclDefAST>();
         (yyval.declDef)->Decl = unique_ptr<DeclAST>((yyvsp[0].decl));
     }
-#line 1751 "/workspace/src/frontend/parser.cpp"
+#line 1762 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 6: /* DeclDef: FuncDef  */
@@ -1756,7 +1767,7 @@ yyreduce:
         (yyval.declDef) = make_node<DeclDefAST>();
         (yyval.declDef)->funcDef = unique_ptr<FuncDefAST>((yyvsp[0].funcDef));
     }
-#line 1760 "/workspace/src/frontend/parser.cpp"
+#line 1771 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 7: /* Decl: CONST BType DefList SEMICOLON  */
@@ -1768,7 +1779,7 @@ yyreduce:
         delete (yyvsp[-2].type_spec);
         (yyval.decl)->defList.swap((yyvsp[-1].defList)->list);
     }
-#line 1772 "/workspace/src/frontend/parser.cpp"
+#line 1783 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 8: /* Decl: BType DefList SEMICOLON  */
@@ -1780,7 +1791,7 @@ yyreduce:
         delete (yyvsp[-2].type_spec);
         (yyval.decl)->defList.swap((yyvsp[-1].defList)->list);
     }
-#line 1784 "/workspace/src/frontend/parser.cpp"
+#line 1795 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 9: /* BType: INTTYPE  */
@@ -1788,7 +1799,7 @@ yyreduce:
             {
         (yyval.type_spec) = new TypeSpec(TYPE_INT);
     }
-#line 1792 "/workspace/src/frontend/parser.cpp"
+#line 1803 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 10: /* BType: FLOATTYPE  */
@@ -1796,7 +1807,7 @@ yyreduce:
               {
         (yyval.type_spec) = new TypeSpec(TYPE_FLOAT);
     }
-#line 1800 "/workspace/src/frontend/parser.cpp"
+#line 1811 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 11: /* BType: VecType  */
@@ -1804,7 +1815,7 @@ yyreduce:
             {
         (yyval.type_spec) = (yyvsp[0].type_spec);
     }
-#line 1808 "/workspace/src/frontend/parser.cpp"
+#line 1819 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 12: /* VecType: INTVECTYPE  */
@@ -1812,7 +1823,7 @@ yyreduce:
                {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[0].int_val)));
     }
-#line 1816 "/workspace/src/frontend/parser.cpp"
+#line 1827 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 13: /* VecType: FLOATVECTYPE  */
@@ -1820,7 +1831,7 @@ yyreduce:
                  {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[0].int_val)));
     }
-#line 1824 "/workspace/src/frontend/parser.cpp"
+#line 1835 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 14: /* VecType: VECTOR LT INTTYPE COMMA INT GT  */
@@ -1828,7 +1839,7 @@ yyreduce:
                                    {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-1].int_val)));
     }
-#line 1832 "/workspace/src/frontend/parser.cpp"
+#line 1843 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 15: /* VecType: VECTOR LT FLOATTYPE COMMA INT GT  */
@@ -1836,7 +1847,7 @@ yyreduce:
                                      {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-1].int_val)));
     }
-#line 1840 "/workspace/src/frontend/parser.cpp"
+#line 1851 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 16: /* VecType: VECTOR LT INT COMMA INTTYPE GT  */
@@ -1844,7 +1855,7 @@ yyreduce:
                                    {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-3].int_val)));
     }
-#line 1848 "/workspace/src/frontend/parser.cpp"
+#line 1859 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 17: /* VecType: VECTOR LT INT COMMA FLOATTYPE GT  */
@@ -1852,7 +1863,7 @@ yyreduce:
                                      {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-3].int_val)));
     }
-#line 1856 "/workspace/src/frontend/parser.cpp"
+#line 1867 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 18: /* VecType: VECTOR LP INTTYPE COMMA INT RP  */
@@ -1860,7 +1871,7 @@ yyreduce:
                                    {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-1].int_val)));
     }
-#line 1864 "/workspace/src/frontend/parser.cpp"
+#line 1875 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 19: /* VecType: VECTOR LP FLOATTYPE COMMA INT RP  */
@@ -1868,7 +1879,7 @@ yyreduce:
                                      {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-1].int_val)));
     }
-#line 1872 "/workspace/src/frontend/parser.cpp"
+#line 1883 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 20: /* VecType: VECTOR LB INTTYPE COMMA INT RB  */
@@ -1876,7 +1887,7 @@ yyreduce:
                                    {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-1].int_val)));
     }
-#line 1880 "/workspace/src/frontend/parser.cpp"
+#line 1891 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 21: /* VecType: VECTOR LB FLOATTYPE COMMA INT RB  */
@@ -1884,7 +1895,7 @@ yyreduce:
                                      {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-1].int_val)));
     }
-#line 1888 "/workspace/src/frontend/parser.cpp"
+#line 1899 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 22: /* VecType: VECWIDTH LT INTTYPE GT  */
@@ -1892,7 +1903,7 @@ yyreduce:
                            {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-3].int_val)));
     }
-#line 1896 "/workspace/src/frontend/parser.cpp"
+#line 1907 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 23: /* VecType: VECWIDTH LT FLOATTYPE GT  */
@@ -1900,7 +1911,7 @@ yyreduce:
                              {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-3].int_val)));
     }
-#line 1904 "/workspace/src/frontend/parser.cpp"
+#line 1915 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 24: /* VecType: INTTYPE LT INT GT  */
@@ -1908,7 +1919,7 @@ yyreduce:
                       {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-1].int_val)));
     }
-#line 1912 "/workspace/src/frontend/parser.cpp"
+#line 1923 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 25: /* VecType: FLOATTYPE LT INT GT  */
@@ -1916,7 +1927,7 @@ yyreduce:
                         {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-1].int_val)));
     }
-#line 1920 "/workspace/src/frontend/parser.cpp"
+#line 1931 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 26: /* VecType: INTTYPE LB INT RB  */
@@ -1924,7 +1935,7 @@ yyreduce:
                       {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_INT, (yyvsp[-1].int_val)));
     }
-#line 1928 "/workspace/src/frontend/parser.cpp"
+#line 1939 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 27: /* VecType: FLOATTYPE LB INT RB  */
@@ -1932,7 +1943,7 @@ yyreduce:
                         {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, (yyvsp[-1].int_val)));
     }
-#line 1936 "/workspace/src/frontend/parser.cpp"
+#line 1947 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 28: /* VecType: VECTOR LT INTTYPE GT  */
@@ -1940,7 +1951,7 @@ yyreduce:
                          {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
     }
-#line 1944 "/workspace/src/frontend/parser.cpp"
+#line 1955 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 29: /* VecType: VECTOR LT FLOATTYPE GT  */
@@ -1948,7 +1959,7 @@ yyreduce:
                            {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     }
-#line 1952 "/workspace/src/frontend/parser.cpp"
+#line 1963 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 30: /* VecType: VECTOR LP INTTYPE RP  */
@@ -1956,7 +1967,7 @@ yyreduce:
                          {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
     }
-#line 1960 "/workspace/src/frontend/parser.cpp"
+#line 1971 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 31: /* VecType: VECTOR LP FLOATTYPE RP  */
@@ -1964,7 +1975,7 @@ yyreduce:
                            {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     }
-#line 1968 "/workspace/src/frontend/parser.cpp"
+#line 1979 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 32: /* VecType: DYNINTVECTYPE  */
@@ -1972,7 +1983,7 @@ yyreduce:
                   {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
     }
-#line 1976 "/workspace/src/frontend/parser.cpp"
+#line 1987 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 33: /* VecType: DYNFLOATVECTYPE  */
@@ -1980,7 +1991,7 @@ yyreduce:
                     {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     }
-#line 1984 "/workspace/src/frontend/parser.cpp"
+#line 1995 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 34: /* VecType: INTTYPE LT GT  */
@@ -1988,7 +1999,7 @@ yyreduce:
                   {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
     }
-#line 1992 "/workspace/src/frontend/parser.cpp"
+#line 2003 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 35: /* VecType: FLOATTYPE LT GT  */
@@ -1996,7 +2007,7 @@ yyreduce:
                     {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     }
-#line 2000 "/workspace/src/frontend/parser.cpp"
+#line 2011 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 36: /* VecType: INTTYPE LB RB  */
@@ -2004,7 +2015,7 @@ yyreduce:
                   {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
     }
-#line 2008 "/workspace/src/frontend/parser.cpp"
+#line 2019 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 37: /* VecType: FLOATTYPE LB RB  */
@@ -2012,7 +2023,7 @@ yyreduce:
                     {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
     }
-#line 2016 "/workspace/src/frontend/parser.cpp"
+#line 2027 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 38: /* VoidType: VOID  */
@@ -2020,7 +2031,7 @@ yyreduce:
          {
         (yyval.type_spec) = new TypeSpec(TYPE_VOID);
     }
-#line 2024 "/workspace/src/frontend/parser.cpp"
+#line 2035 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 39: /* DefList: Def  */
@@ -2029,7 +2040,7 @@ yyreduce:
         (yyval.defList) = make_node<DefListAST>();
         (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
     }
-#line 2033 "/workspace/src/frontend/parser.cpp"
+#line 2044 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 40: /* DefList: DefList COMMA Def  */
@@ -2038,7 +2049,7 @@ yyreduce:
         (yyval.defList) = (yyvsp[-2].defList);
         (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
     }
-#line 2042 "/workspace/src/frontend/parser.cpp"
+#line 2053 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 41: /* Def: ID Arrays ASSIGN InitVal  */
@@ -2049,7 +2060,7 @@ yyreduce:
         (yyval.def)->arrays.swap((yyvsp[-2].arrays)->list);
         (yyval.def)->initVal = unique_ptr<InitValAST>((yyvsp[0].initVal));
     }
-#line 2053 "/workspace/src/frontend/parser.cpp"
+#line 2064 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 42: /* Def: ID ASSIGN InitVal  */
@@ -2059,7 +2070,7 @@ yyreduce:
         (yyval.def)->id = unique_ptr<string>((yyvsp[-2].token));
         (yyval.def)->initVal = unique_ptr<InitValAST>((yyvsp[0].initVal));
     }
-#line 2063 "/workspace/src/frontend/parser.cpp"
+#line 2074 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 43: /* Def: ID Arrays  */
@@ -2069,7 +2080,7 @@ yyreduce:
         (yyval.def)->id = unique_ptr<string>((yyvsp[-1].token));
         (yyval.def)->arrays.swap((yyvsp[0].arrays)->list);
     }
-#line 2073 "/workspace/src/frontend/parser.cpp"
+#line 2084 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 44: /* Def: ID  */
@@ -2078,7 +2089,7 @@ yyreduce:
         (yyval.def) = make_node<DefAST>();
         (yyval.def)->id = unique_ptr<string>((yyvsp[0].token));
     }
-#line 2082 "/workspace/src/frontend/parser.cpp"
+#line 2093 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 45: /* Arrays: LB Exp RB  */
@@ -2087,7 +2098,7 @@ yyreduce:
         (yyval.arrays) = make_node<ArraysAST>();
         (yyval.arrays)->list.push_back(unique_ptr<AddExpAST>((yyvsp[-1].addExp)));
     }
-#line 2091 "/workspace/src/frontend/parser.cpp"
+#line 2102 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 46: /* Arrays: Arrays LB Exp RB  */
@@ -2096,7 +2107,7 @@ yyreduce:
         (yyval.arrays) = (yyvsp[-3].arrays);
         (yyval.arrays)->list.push_back(unique_ptr<AddExpAST>((yyvsp[-1].addExp)));
     }
-#line 2100 "/workspace/src/frontend/parser.cpp"
+#line 2111 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 47: /* InitVal: Exp  */
@@ -2105,7 +2116,7 @@ yyreduce:
         (yyval.initVal) = make_node<InitValAST>();
         (yyval.initVal)->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2109 "/workspace/src/frontend/parser.cpp"
+#line 2120 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 48: /* InitVal: LC RC  */
@@ -2113,7 +2124,7 @@ yyreduce:
           {
         (yyval.initVal) = make_node<InitValAST>();
     }
-#line 2117 "/workspace/src/frontend/parser.cpp"
+#line 2128 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 49: /* InitVal: LC InitValList RC  */
@@ -2122,29 +2133,46 @@ yyreduce:
         (yyval.initVal) = make_node<InitValAST>();
         (yyval.initVal)->initValList.swap((yyvsp[-1].initValList)->list);
     }
-#line 2126 "/workspace/src/frontend/parser.cpp"
+#line 2137 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 50: /* InitValList: InitValList COMMA InitVal  */
+  case 50: /* BraceInitVal: LC RC  */
 #line 345 "/workspace/src/frontend/parser.y"
+          {
+        (yyval.initVal) = make_node<InitValAST>();
+    }
+#line 2145 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 51: /* BraceInitVal: LC InitValList RC  */
+#line 348 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.initVal) = make_node<InitValAST>();
+        (yyval.initVal)->initValList.swap((yyvsp[-1].initValList)->list);
+    }
+#line 2154 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 52: /* InitValList: InitValList COMMA InitVal  */
+#line 355 "/workspace/src/frontend/parser.y"
                             {
     (yyval.initValList) = (yyvsp[-2].initValList);
     (yyval.initValList)->list.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
   }
-#line 2135 "/workspace/src/frontend/parser.cpp"
+#line 2163 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 51: /* InitValList: InitVal  */
-#line 349 "/workspace/src/frontend/parser.y"
+  case 53: /* InitValList: InitVal  */
+#line 359 "/workspace/src/frontend/parser.y"
           {
     (yyval.initValList) = make_node<InitValListAST>();
     (yyval.initValList)->list.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
   }
-#line 2144 "/workspace/src/frontend/parser.cpp"
+#line 2172 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 52: /* FuncDef: BType ID LP FuncFParamList RP Block  */
-#line 356 "/workspace/src/frontend/parser.y"
+  case 54: /* FuncDef: BType ID LP FuncFParamList RP Block  */
+#line 366 "/workspace/src/frontend/parser.y"
                                         {
         (yyval.funcDef) = make_node<FuncDefAST>();
         (yyval.funcDef)->funcType = *(yyvsp[-5].type_spec);
@@ -2153,11 +2181,11 @@ yyreduce:
         (yyval.funcDef)->funcFParamList.swap((yyvsp[-2].FuncFParamList)->list);
         (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
     }
-#line 2157 "/workspace/src/frontend/parser.cpp"
+#line 2185 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 53: /* FuncDef: BType ID LP RP Block  */
-#line 364 "/workspace/src/frontend/parser.y"
+  case 55: /* FuncDef: BType ID LP RP Block  */
+#line 374 "/workspace/src/frontend/parser.y"
                          {
         (yyval.funcDef) = make_node<FuncDefAST>();
         (yyval.funcDef)->funcType = *(yyvsp[-4].type_spec);
@@ -2165,11 +2193,11 @@ yyreduce:
         (yyval.funcDef)->id = unique_ptr<string>((yyvsp[-3].token));
         (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
     }
-#line 2169 "/workspace/src/frontend/parser.cpp"
+#line 2197 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 54: /* FuncDef: VoidType ID LP FuncFParamList RP Block  */
-#line 371 "/workspace/src/frontend/parser.y"
+  case 56: /* FuncDef: VoidType ID LP FuncFParamList RP Block  */
+#line 381 "/workspace/src/frontend/parser.y"
                                            {
         (yyval.funcDef) = make_node<FuncDefAST>();
         (yyval.funcDef)->funcType = *(yyvsp[-5].type_spec);
@@ -2178,11 +2206,11 @@ yyreduce:
         (yyval.funcDef)->funcFParamList.swap((yyvsp[-2].FuncFParamList)->list);
         (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
     }
-#line 2182 "/workspace/src/frontend/parser.cpp"
+#line 2210 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 55: /* FuncDef: VoidType ID LP RP Block  */
-#line 379 "/workspace/src/frontend/parser.y"
+  case 57: /* FuncDef: VoidType ID LP RP Block  */
+#line 389 "/workspace/src/frontend/parser.y"
                             {
         (yyval.funcDef) = make_node<FuncDefAST>();
         (yyval.funcDef)->funcType = *(yyvsp[-4].type_spec);
@@ -2190,29 +2218,29 @@ yyreduce:
         (yyval.funcDef)->id = unique_ptr<string>((yyvsp[-3].token));
         (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
     }
-#line 2194 "/workspace/src/frontend/parser.cpp"
+#line 2222 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 56: /* FuncFParamList: FuncFParam  */
-#line 389 "/workspace/src/frontend/parser.y"
+  case 58: /* FuncFParamList: FuncFParam  */
+#line 399 "/workspace/src/frontend/parser.y"
                {
         (yyval.FuncFParamList) = make_node<FuncFParamListAST>();
         (yyval.FuncFParamList)->list.push_back(unique_ptr<FuncFParamAST>((yyvsp[0].funcFParam)));
     }
-#line 2203 "/workspace/src/frontend/parser.cpp"
+#line 2231 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 57: /* FuncFParamList: FuncFParamList COMMA FuncFParam  */
-#line 393 "/workspace/src/frontend/parser.y"
+  case 59: /* FuncFParamList: FuncFParamList COMMA FuncFParam  */
+#line 403 "/workspace/src/frontend/parser.y"
                                     {
         (yyval.FuncFParamList) = (yyvsp[-2].FuncFParamList);
         (yyval.FuncFParamList)->list.push_back(unique_ptr<FuncFParamAST>((yyvsp[0].funcFParam)));
     }
-#line 2212 "/workspace/src/frontend/parser.cpp"
+#line 2240 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 58: /* FuncFParam: BType ID  */
-#line 400 "/workspace/src/frontend/parser.y"
+  case 60: /* FuncFParam: BType ID  */
+#line 410 "/workspace/src/frontend/parser.y"
              {
         (yyval.funcFParam) = make_node<FuncFParamAST>();
         (yyval.funcFParam)->bType = *(yyvsp[-1].type_spec);
@@ -2220,11 +2248,11 @@ yyreduce:
         (yyval.funcFParam)->id = unique_ptr<string>((yyvsp[0].token));
         (yyval.funcFParam)->isArray = false;
     }
-#line 2224 "/workspace/src/frontend/parser.cpp"
+#line 2252 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 59: /* FuncFParam: BType ID LB RB  */
-#line 407 "/workspace/src/frontend/parser.y"
+  case 61: /* FuncFParam: BType ID LB RB  */
+#line 417 "/workspace/src/frontend/parser.y"
                    {
         (yyval.funcFParam) = make_node<FuncFParamAST>();
         (yyval.funcFParam)->bType = *(yyvsp[-3].type_spec);
@@ -2232,11 +2260,11 @@ yyreduce:
         (yyval.funcFParam)->id = unique_ptr<string>((yyvsp[-2].token));
         (yyval.funcFParam)->isArray = true;
     }
-#line 2236 "/workspace/src/frontend/parser.cpp"
+#line 2264 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 60: /* FuncFParam: BType ID LB RB Arrays  */
-#line 414 "/workspace/src/frontend/parser.y"
+  case 62: /* FuncFParam: BType ID LB RB Arrays  */
+#line 424 "/workspace/src/frontend/parser.y"
                           {
         (yyval.funcFParam) = make_node<FuncFParamAST>();
         (yyval.funcFParam)->bType = *(yyvsp[-4].type_spec);
@@ -2245,568 +2273,579 @@ yyreduce:
         (yyval.funcFParam)->isArray = true;
         (yyval.funcFParam)->arrays.swap((yyvsp[0].arrays)->list);
     }
-#line 2249 "/workspace/src/frontend/parser.cpp"
+#line 2277 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 61: /* Block: LC RC  */
-#line 425 "/workspace/src/frontend/parser.y"
+  case 63: /* Block: LC RC  */
+#line 435 "/workspace/src/frontend/parser.y"
           {
         (yyval.block) = make_node<BlockAST>();
     }
-#line 2257 "/workspace/src/frontend/parser.cpp"
+#line 2285 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 62: /* Block: LC BlockItemList RC  */
-#line 428 "/workspace/src/frontend/parser.y"
+  case 64: /* Block: LC BlockItemList RC  */
+#line 438 "/workspace/src/frontend/parser.y"
                         {
         (yyval.block) = make_node<BlockAST>();
         (yyval.block)->blockItemList.swap((yyvsp[-1].blockItemList)->list);
     }
-#line 2266 "/workspace/src/frontend/parser.cpp"
+#line 2294 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 63: /* BlockItemList: BlockItem  */
-#line 435 "/workspace/src/frontend/parser.y"
+  case 65: /* BlockItemList: BlockItem  */
+#line 445 "/workspace/src/frontend/parser.y"
               {
         (yyval.blockItemList) = make_node<BlockItemListAST>();
         (yyval.blockItemList)->list.push_back(unique_ptr<BlockItemAST>((yyvsp[0].blockItem)));
     }
-#line 2275 "/workspace/src/frontend/parser.cpp"
+#line 2303 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 64: /* BlockItemList: BlockItemList BlockItem  */
-#line 439 "/workspace/src/frontend/parser.y"
+  case 66: /* BlockItemList: BlockItemList BlockItem  */
+#line 449 "/workspace/src/frontend/parser.y"
                             {
         (yyval.blockItemList) = (yyvsp[-1].blockItemList);
         (yyval.blockItemList)->list.push_back(unique_ptr<BlockItemAST>((yyvsp[0].blockItem)));
     }
-#line 2284 "/workspace/src/frontend/parser.cpp"
+#line 2312 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 65: /* BlockItem: Decl  */
-#line 446 "/workspace/src/frontend/parser.y"
+  case 67: /* BlockItem: Decl  */
+#line 456 "/workspace/src/frontend/parser.y"
          {
         (yyval.blockItem) = make_node<BlockItemAST>();
         (yyval.blockItem)->decl = unique_ptr<DeclAST>((yyvsp[0].decl));
     }
-#line 2293 "/workspace/src/frontend/parser.cpp"
+#line 2321 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 66: /* BlockItem: Stmt  */
-#line 450 "/workspace/src/frontend/parser.y"
+  case 68: /* BlockItem: Stmt  */
+#line 460 "/workspace/src/frontend/parser.y"
          {
         (yyval.blockItem) = make_node<BlockItemAST>();
         (yyval.blockItem)->stmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
     }
-#line 2302 "/workspace/src/frontend/parser.cpp"
+#line 2330 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 67: /* Stmt: SEMICOLON  */
-#line 457 "/workspace/src/frontend/parser.y"
+  case 69: /* Stmt: SEMICOLON  */
+#line 467 "/workspace/src/frontend/parser.y"
               {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = SEMI;
     }
-#line 2311 "/workspace/src/frontend/parser.cpp"
+#line 2339 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 68: /* Stmt: LVal ASSIGN Exp SEMICOLON  */
-#line 461 "/workspace/src/frontend/parser.y"
+  case 70: /* Stmt: LVal ASSIGN Exp SEMICOLON  */
+#line 471 "/workspace/src/frontend/parser.y"
                               {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = ASS;
         (yyval.stmt)->lVal = unique_ptr<LValAST>((yyvsp[-3].lVal));
         (yyval.stmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
     }
-#line 2322 "/workspace/src/frontend/parser.cpp"
+#line 2350 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 69: /* Stmt: Exp SEMICOLON  */
-#line 467 "/workspace/src/frontend/parser.y"
+  case 71: /* Stmt: LVal ASSIGN BraceInitVal SEMICOLON  */
+#line 477 "/workspace/src/frontend/parser.y"
+                                       {
+        (yyval.stmt) = make_node<StmtAST>();
+        (yyval.stmt)->sType = ASS;
+        (yyval.stmt)->lVal = unique_ptr<LValAST>((yyvsp[-3].lVal));
+        (yyval.stmt)->initVal = unique_ptr<InitValAST>((yyvsp[-1].initVal));
+    }
+#line 2361 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 72: /* Stmt: Exp SEMICOLON  */
+#line 483 "/workspace/src/frontend/parser.y"
                   {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = EXP;
         (yyval.stmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
     }
-#line 2332 "/workspace/src/frontend/parser.cpp"
+#line 2371 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 70: /* Stmt: CONTINUE SEMICOLON  */
-#line 472 "/workspace/src/frontend/parser.y"
+  case 73: /* Stmt: CONTINUE SEMICOLON  */
+#line 488 "/workspace/src/frontend/parser.y"
                        {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = CONT;
     }
-#line 2341 "/workspace/src/frontend/parser.cpp"
+#line 2380 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 71: /* Stmt: BREAK SEMICOLON  */
-#line 476 "/workspace/src/frontend/parser.y"
+  case 74: /* Stmt: BREAK SEMICOLON  */
+#line 492 "/workspace/src/frontend/parser.y"
                     {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = BRE;
     }
-#line 2350 "/workspace/src/frontend/parser.cpp"
+#line 2389 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 72: /* Stmt: Block  */
-#line 480 "/workspace/src/frontend/parser.y"
+  case 75: /* Stmt: Block  */
+#line 496 "/workspace/src/frontend/parser.y"
           {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = BLK;
         (yyval.stmt)->block = unique_ptr<BlockAST>((yyvsp[0].block));
     }
-#line 2360 "/workspace/src/frontend/parser.cpp"
+#line 2399 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 73: /* Stmt: ReturnStmt  */
-#line 485 "/workspace/src/frontend/parser.y"
+  case 76: /* Stmt: ReturnStmt  */
+#line 501 "/workspace/src/frontend/parser.y"
                {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = RET;
         (yyval.stmt)->returnStmt = unique_ptr<ReturnStmtAST>((yyvsp[0].returnStmt));
     }
-#line 2370 "/workspace/src/frontend/parser.cpp"
+#line 2409 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 74: /* Stmt: SelectStmt  */
-#line 490 "/workspace/src/frontend/parser.y"
+  case 77: /* Stmt: SelectStmt  */
+#line 506 "/workspace/src/frontend/parser.y"
                {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = SEL;
         (yyval.stmt)->selectStmt = unique_ptr<SelectStmtAST>((yyvsp[0].selectStmt));
     }
-#line 2380 "/workspace/src/frontend/parser.cpp"
+#line 2419 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 75: /* Stmt: IterationStmt  */
-#line 495 "/workspace/src/frontend/parser.y"
+  case 78: /* Stmt: IterationStmt  */
+#line 511 "/workspace/src/frontend/parser.y"
                   {
         (yyval.stmt) = make_node<StmtAST>();
         (yyval.stmt)->sType = ITER;
         (yyval.stmt)->iterationStmt = unique_ptr<IterationStmtAST>((yyvsp[0].iterationStmt));
     }
-#line 2390 "/workspace/src/frontend/parser.cpp"
+#line 2429 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 76: /* SelectStmt: IF LP Cond RP Stmt  */
-#line 503 "/workspace/src/frontend/parser.y"
+  case 79: /* SelectStmt: IF LP Cond RP Stmt  */
+#line 519 "/workspace/src/frontend/parser.y"
                                              {
         (yyval.selectStmt) = make_node<SelectStmtAST>();
         (yyval.selectStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
         (yyval.selectStmt)->ifStmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
     }
-#line 2400 "/workspace/src/frontend/parser.cpp"
+#line 2439 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 77: /* SelectStmt: IF LP Cond RP Stmt ELSE Stmt  */
-#line 508 "/workspace/src/frontend/parser.y"
+  case 80: /* SelectStmt: IF LP Cond RP Stmt ELSE Stmt  */
+#line 524 "/workspace/src/frontend/parser.y"
                                  {
         (yyval.selectStmt) = make_node<SelectStmtAST>();
         (yyval.selectStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-4].lOrExp));
         (yyval.selectStmt)->ifStmt = unique_ptr<StmtAST>((yyvsp[-2].stmt));
         (yyval.selectStmt)->elseStmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
     }
-#line 2411 "/workspace/src/frontend/parser.cpp"
+#line 2450 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 78: /* IterationStmt: WHILE LP Cond RP Stmt  */
-#line 517 "/workspace/src/frontend/parser.y"
+  case 81: /* IterationStmt: WHILE LP Cond RP Stmt  */
+#line 533 "/workspace/src/frontend/parser.y"
                           {
         (yyval.iterationStmt) = make_node<IterationStmtAST>();
         (yyval.iterationStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
         (yyval.iterationStmt)->stmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
     }
-#line 2421 "/workspace/src/frontend/parser.cpp"
+#line 2460 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 79: /* ReturnStmt: RETURN Exp SEMICOLON  */
-#line 525 "/workspace/src/frontend/parser.y"
+  case 82: /* ReturnStmt: RETURN Exp SEMICOLON  */
+#line 541 "/workspace/src/frontend/parser.y"
                          {
         (yyval.returnStmt) = make_node<ReturnStmtAST>();
         (yyval.returnStmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
     }
-#line 2430 "/workspace/src/frontend/parser.cpp"
+#line 2469 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 80: /* ReturnStmt: RETURN SEMICOLON  */
-#line 529 "/workspace/src/frontend/parser.y"
+  case 83: /* ReturnStmt: RETURN SEMICOLON  */
+#line 545 "/workspace/src/frontend/parser.y"
                      {
         (yyval.returnStmt) = make_node<ReturnStmtAST>();
     }
-#line 2438 "/workspace/src/frontend/parser.cpp"
+#line 2477 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 81: /* Exp: AddExp  */
-#line 535 "/workspace/src/frontend/parser.y"
+  case 84: /* Exp: AddExp  */
+#line 551 "/workspace/src/frontend/parser.y"
            {
         (yyval.addExp) = (yyvsp[0].addExp);
     }
-#line 2446 "/workspace/src/frontend/parser.cpp"
+#line 2485 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 82: /* Cond: LOrExp  */
-#line 541 "/workspace/src/frontend/parser.y"
+  case 85: /* Cond: LOrExp  */
+#line 557 "/workspace/src/frontend/parser.y"
            {
         (yyval.lOrExp) = (yyvsp[0].lOrExp);
     }
-#line 2454 "/workspace/src/frontend/parser.cpp"
+#line 2493 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 83: /* LVal: ID  */
-#line 547 "/workspace/src/frontend/parser.y"
+  case 86: /* LVal: ID  */
+#line 563 "/workspace/src/frontend/parser.y"
        {
         (yyval.lVal) = make_node<LValAST>();
         (yyval.lVal)->id = unique_ptr<string>((yyvsp[0].token));
     }
-#line 2463 "/workspace/src/frontend/parser.cpp"
+#line 2502 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 84: /* LVal: ID Arrays  */
-#line 551 "/workspace/src/frontend/parser.y"
+  case 87: /* LVal: ID Arrays  */
+#line 567 "/workspace/src/frontend/parser.y"
               {
         (yyval.lVal) = make_node<LValAST>();
         (yyval.lVal)->id = unique_ptr<string>((yyvsp[-1].token));
         (yyval.lVal)->arrays.swap((yyvsp[0].arrays)->list);
     }
-#line 2473 "/workspace/src/frontend/parser.cpp"
+#line 2512 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 85: /* PrimaryExp: LP Exp RP  */
-#line 559 "/workspace/src/frontend/parser.y"
+  case 88: /* PrimaryExp: LP Exp RP  */
+#line 575 "/workspace/src/frontend/parser.y"
               {
         (yyval.primaryExp) = make_node<PrimaryExpAST>();
         (yyval.primaryExp)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
     }
-#line 2482 "/workspace/src/frontend/parser.cpp"
+#line 2521 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 86: /* PrimaryExp: LVal  */
-#line 563 "/workspace/src/frontend/parser.y"
+  case 89: /* PrimaryExp: LVal  */
+#line 579 "/workspace/src/frontend/parser.y"
          {
         (yyval.primaryExp) = make_node<PrimaryExpAST>();
         (yyval.primaryExp)->lval = unique_ptr<LValAST>((yyvsp[0].lVal));
     }
-#line 2491 "/workspace/src/frontend/parser.cpp"
+#line 2530 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 87: /* PrimaryExp: Number  */
-#line 567 "/workspace/src/frontend/parser.y"
+  case 90: /* PrimaryExp: Number  */
+#line 583 "/workspace/src/frontend/parser.y"
            {
         (yyval.primaryExp) = make_node<PrimaryExpAST>();
         (yyval.primaryExp)->number = unique_ptr<NumberAST>((yyvsp[0].number));
     }
-#line 2500 "/workspace/src/frontend/parser.cpp"
+#line 2539 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 88: /* Number: INT  */
-#line 574 "/workspace/src/frontend/parser.y"
+  case 91: /* Number: INT  */
+#line 590 "/workspace/src/frontend/parser.y"
         {
         (yyval.number) = make_node<NumberAST>();
         (yyval.number)->isInt = true;
         (yyval.number)->intval = (yyvsp[0].int_val);
     }
-#line 2510 "/workspace/src/frontend/parser.cpp"
+#line 2549 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 89: /* Number: FLOAT  */
-#line 579 "/workspace/src/frontend/parser.y"
+  case 92: /* Number: FLOAT  */
+#line 595 "/workspace/src/frontend/parser.y"
           {
         (yyval.number) = make_node<NumberAST>();
         (yyval.number)->isInt = false;
         (yyval.number)->floatval = (yyvsp[0].float_val);
     }
-#line 2520 "/workspace/src/frontend/parser.cpp"
+#line 2559 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 90: /* UnaryExp: PrimaryExp  */
-#line 587 "/workspace/src/frontend/parser.y"
+  case 93: /* UnaryExp: PrimaryExp  */
+#line 603 "/workspace/src/frontend/parser.y"
                {
         (yyval.unaryExp) = make_node<UnaryExpAST>();
         (yyval.unaryExp)->primaryExp = unique_ptr<PrimaryExpAST>((yyvsp[0].primaryExp));
     }
-#line 2529 "/workspace/src/frontend/parser.cpp"
+#line 2568 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 91: /* UnaryExp: Call  */
-#line 591 "/workspace/src/frontend/parser.y"
+  case 94: /* UnaryExp: Call  */
+#line 607 "/workspace/src/frontend/parser.y"
          {
         (yyval.unaryExp) = make_node<UnaryExpAST>();
         (yyval.unaryExp)->call = unique_ptr<CallAST>((yyvsp[0].call));
     }
-#line 2538 "/workspace/src/frontend/parser.cpp"
+#line 2577 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 92: /* UnaryExp: UnaryOp UnaryExp  */
-#line 595 "/workspace/src/frontend/parser.y"
+  case 95: /* UnaryExp: UnaryOp UnaryExp  */
+#line 611 "/workspace/src/frontend/parser.y"
                      {
         (yyval.unaryExp) = make_node<UnaryExpAST>();
         (yyval.unaryExp)->op = (yyvsp[-1].op);
         (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
     }
-#line 2548 "/workspace/src/frontend/parser.cpp"
+#line 2587 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 93: /* Call: ID LP RP  */
-#line 603 "/workspace/src/frontend/parser.y"
+  case 96: /* Call: ID LP RP  */
+#line 619 "/workspace/src/frontend/parser.y"
              {
         (yyval.call) = make_node<CallAST>();
         (yyval.call)->id = unique_ptr<string>((yyvsp[-2].token));
         (yyval.call)->lineno = (yylsp[-2]).first_line;
     }
-#line 2558 "/workspace/src/frontend/parser.cpp"
+#line 2597 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 94: /* Call: ID LP FuncCParamList RP  */
-#line 608 "/workspace/src/frontend/parser.y"
+  case 97: /* Call: ID LP FuncCParamList RP  */
+#line 624 "/workspace/src/frontend/parser.y"
                             {
         (yyval.call) = make_node<CallAST>();
         (yyval.call)->id = unique_ptr<string>((yyvsp[-3].token));
         (yyval.call)->funcCParamList.swap((yyvsp[-1].funcCParamList)->list);
         (yyval.call)->lineno = (yylsp[-3]).first_line;
     }
-#line 2569 "/workspace/src/frontend/parser.cpp"
+#line 2608 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 95: /* UnaryOp: ADD  */
-#line 617 "/workspace/src/frontend/parser.y"
+  case 98: /* UnaryOp: ADD  */
+#line 633 "/workspace/src/frontend/parser.y"
         {
         (yyval.op) = UOP_ADD;
     }
-#line 2577 "/workspace/src/frontend/parser.cpp"
+#line 2616 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 96: /* UnaryOp: MINUS  */
-#line 620 "/workspace/src/frontend/parser.y"
+  case 99: /* UnaryOp: MINUS  */
+#line 636 "/workspace/src/frontend/parser.y"
           {
         (yyval.op) = UOP_MINUS;
     }
-#line 2585 "/workspace/src/frontend/parser.cpp"
+#line 2624 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 97: /* UnaryOp: NOT  */
-#line 623 "/workspace/src/frontend/parser.y"
+  case 100: /* UnaryOp: NOT  */
+#line 639 "/workspace/src/frontend/parser.y"
         {
         (yyval.op) = UOP_NOT;
     }
-#line 2593 "/workspace/src/frontend/parser.cpp"
+#line 2632 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 98: /* FuncCParamList: Exp  */
-#line 629 "/workspace/src/frontend/parser.y"
+  case 101: /* FuncCParamList: Exp  */
+#line 645 "/workspace/src/frontend/parser.y"
         {
         (yyval.funcCParamList) = make_node<FuncCParamListAST>();
         (yyval.funcCParamList)->list.push_back(unique_ptr<AddExpAST>((yyvsp[0].addExp)));
     }
-#line 2602 "/workspace/src/frontend/parser.cpp"
+#line 2641 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 99: /* FuncCParamList: FuncCParamList COMMA Exp  */
-#line 633 "/workspace/src/frontend/parser.y"
+  case 102: /* FuncCParamList: FuncCParamList COMMA Exp  */
+#line 649 "/workspace/src/frontend/parser.y"
                              {
         (yyval.funcCParamList) = (FuncCParamListAST*) (yyvsp[-2].funcCParamList);
         (yyval.funcCParamList)->list.push_back(unique_ptr<AddExpAST>((yyvsp[0].addExp)));
     }
-#line 2611 "/workspace/src/frontend/parser.cpp"
+#line 2650 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 100: /* MulExp: UnaryExp  */
-#line 640 "/workspace/src/frontend/parser.y"
+  case 103: /* MulExp: UnaryExp  */
+#line 656 "/workspace/src/frontend/parser.y"
              {
         (yyval.mulExp) = make_node<MulExpAST>();
         (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
     }
-#line 2620 "/workspace/src/frontend/parser.cpp"
+#line 2659 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 101: /* MulExp: MulExp MUL UnaryExp  */
-#line 644 "/workspace/src/frontend/parser.y"
+  case 104: /* MulExp: MulExp MUL UnaryExp  */
+#line 660 "/workspace/src/frontend/parser.y"
                         {
         (yyval.mulExp) = make_node<MulExpAST>();
         (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
         (yyval.mulExp)->op = MOP_MUL;
         (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
     }
-#line 2631 "/workspace/src/frontend/parser.cpp"
+#line 2670 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 102: /* MulExp: MulExp DIV UnaryExp  */
-#line 650 "/workspace/src/frontend/parser.y"
+  case 105: /* MulExp: MulExp DIV UnaryExp  */
+#line 666 "/workspace/src/frontend/parser.y"
                         {
         (yyval.mulExp) = make_node<MulExpAST>();
         (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
         (yyval.mulExp)->op = MOP_DIV;
         (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
     }
-#line 2642 "/workspace/src/frontend/parser.cpp"
+#line 2681 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 103: /* MulExp: MulExp MOD UnaryExp  */
-#line 656 "/workspace/src/frontend/parser.y"
+  case 106: /* MulExp: MulExp MOD UnaryExp  */
+#line 672 "/workspace/src/frontend/parser.y"
                         {
         (yyval.mulExp) = make_node<MulExpAST>();
         (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
         (yyval.mulExp)->op = MOP_MOD;
         (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
     }
-#line 2653 "/workspace/src/frontend/parser.cpp"
+#line 2692 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 104: /* AddExp: MulExp  */
-#line 665 "/workspace/src/frontend/parser.y"
+  case 107: /* AddExp: MulExp  */
+#line 681 "/workspace/src/frontend/parser.y"
            {
         (yyval.addExp) = make_node<AddExpAST>();
         (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
     }
-#line 2662 "/workspace/src/frontend/parser.cpp"
+#line 2701 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 105: /* AddExp: AddExp ADD MulExp  */
-#line 669 "/workspace/src/frontend/parser.y"
+  case 108: /* AddExp: AddExp ADD MulExp  */
+#line 685 "/workspace/src/frontend/parser.y"
                       {
         (yyval.addExp) = make_node<AddExpAST>();
         (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
         (yyval.addExp)->op = AOP_ADD;
         (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
     }
-#line 2673 "/workspace/src/frontend/parser.cpp"
+#line 2712 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 106: /* AddExp: AddExp MINUS MulExp  */
-#line 675 "/workspace/src/frontend/parser.y"
+  case 109: /* AddExp: AddExp MINUS MulExp  */
+#line 691 "/workspace/src/frontend/parser.y"
                         {
         (yyval.addExp) = make_node<AddExpAST>();
         (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
         (yyval.addExp)->op = AOP_MINUS;
         (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
     }
-#line 2684 "/workspace/src/frontend/parser.cpp"
+#line 2723 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 107: /* RelExp: AddExp  */
-#line 684 "/workspace/src/frontend/parser.y"
+  case 110: /* RelExp: AddExp  */
+#line 700 "/workspace/src/frontend/parser.y"
            {
         (yyval.relExp) = make_node<RelExpAST>();
         (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2693 "/workspace/src/frontend/parser.cpp"
+#line 2732 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 108: /* RelExp: RelExp GTE AddExp  */
-#line 688 "/workspace/src/frontend/parser.y"
+  case 111: /* RelExp: RelExp GTE AddExp  */
+#line 704 "/workspace/src/frontend/parser.y"
                       {
         (yyval.relExp) = make_node<RelExpAST>();
         (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
         (yyval.relExp)->op = ROP_GTE;
         (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2704 "/workspace/src/frontend/parser.cpp"
+#line 2743 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 109: /* RelExp: RelExp LTE AddExp  */
-#line 694 "/workspace/src/frontend/parser.y"
+  case 112: /* RelExp: RelExp LTE AddExp  */
+#line 710 "/workspace/src/frontend/parser.y"
                       {
         (yyval.relExp) = make_node<RelExpAST>();
         (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
         (yyval.relExp)->op = ROP_LTE;
         (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2715 "/workspace/src/frontend/parser.cpp"
+#line 2754 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 110: /* RelExp: RelExp GT AddExp  */
-#line 700 "/workspace/src/frontend/parser.y"
+  case 113: /* RelExp: RelExp GT AddExp  */
+#line 716 "/workspace/src/frontend/parser.y"
                      {
         (yyval.relExp) = make_node<RelExpAST>();
         (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
         (yyval.relExp)->op = ROP_GT;
         (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2726 "/workspace/src/frontend/parser.cpp"
+#line 2765 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 111: /* RelExp: RelExp LT AddExp  */
-#line 706 "/workspace/src/frontend/parser.y"
+  case 114: /* RelExp: RelExp LT AddExp  */
+#line 722 "/workspace/src/frontend/parser.y"
                      {
         (yyval.relExp) = make_node<RelExpAST>();
         (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
         (yyval.relExp)->op = ROP_LT;
         (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
     }
-#line 2737 "/workspace/src/frontend/parser.cpp"
+#line 2776 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 112: /* EqExp: RelExp  */
-#line 715 "/workspace/src/frontend/parser.y"
+  case 115: /* EqExp: RelExp  */
+#line 731 "/workspace/src/frontend/parser.y"
            {
         (yyval.eqExp) = make_node<EqExpAST>();
         (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
     }
-#line 2746 "/workspace/src/frontend/parser.cpp"
+#line 2785 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 113: /* EqExp: EqExp EQ RelExp  */
-#line 719 "/workspace/src/frontend/parser.y"
+  case 116: /* EqExp: EqExp EQ RelExp  */
+#line 735 "/workspace/src/frontend/parser.y"
                     {
         (yyval.eqExp) = make_node<EqExpAST>();
         (yyval.eqExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[-2].eqExp));
         (yyval.eqExp)->op = EOP_EQ;
         (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
     }
-#line 2757 "/workspace/src/frontend/parser.cpp"
+#line 2796 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 114: /* EqExp: EqExp NEQ RelExp  */
-#line 725 "/workspace/src/frontend/parser.y"
+  case 117: /* EqExp: EqExp NEQ RelExp  */
+#line 741 "/workspace/src/frontend/parser.y"
                      {
         (yyval.eqExp) = make_node<EqExpAST>();
         (yyval.eqExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[-2].eqExp));
         (yyval.eqExp)->op = EOP_NEQ;
         (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
     }
-#line 2768 "/workspace/src/frontend/parser.cpp"
+#line 2807 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 115: /* LAndExp: EqExp  */
-#line 734 "/workspace/src/frontend/parser.y"
+  case 118: /* LAndExp: EqExp  */
+#line 750 "/workspace/src/frontend/parser.y"
           {
         (yyval.lAndExp) = make_node<LAndExpAST>();
         (yyval.lAndExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[0].eqExp));
     }
-#line 2777 "/workspace/src/frontend/parser.cpp"
+#line 2816 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 116: /* LAndExp: LAndExp AND EqExp  */
-#line 738 "/workspace/src/frontend/parser.y"
+  case 119: /* LAndExp: LAndExp AND EqExp  */
+#line 754 "/workspace/src/frontend/parser.y"
                       {
         (yyval.lAndExp) = make_node<LAndExpAST>();
         (yyval.lAndExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[-2].lAndExp));
         (yyval.lAndExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[0].eqExp));
     }
-#line 2787 "/workspace/src/frontend/parser.cpp"
+#line 2826 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 117: /* LOrExp: LAndExp  */
-#line 746 "/workspace/src/frontend/parser.y"
+  case 120: /* LOrExp: LAndExp  */
+#line 762 "/workspace/src/frontend/parser.y"
             {
         (yyval.lOrExp) = make_node<LOrExpAST>();
         (yyval.lOrExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[0].lAndExp));
     }
-#line 2796 "/workspace/src/frontend/parser.cpp"
+#line 2835 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 118: /* LOrExp: LOrExp OR LAndExp  */
-#line 750 "/workspace/src/frontend/parser.y"
+  case 121: /* LOrExp: LOrExp OR LAndExp  */
+#line 766 "/workspace/src/frontend/parser.y"
                       {
         (yyval.lOrExp) = make_node<LOrExpAST>();
         (yyval.lOrExp)->lOrExp = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
         (yyval.lOrExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[0].lAndExp));
     }
-#line 2806 "/workspace/src/frontend/parser.cpp"
+#line 2845 "/workspace/src/frontend/parser.cpp"
     break;
 
 
-#line 2810 "/workspace/src/frontend/parser.cpp"
+#line 2849 "/workspace/src/frontend/parser.cpp"
 
       default: break;
     }
@@ -3035,7 +3074,7 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 755 "/workspace/src/frontend/parser.y"
+#line 771 "/workspace/src/frontend/parser.y"
 
 
 void initFileName(const char *name) {

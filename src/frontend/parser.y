@@ -77,7 +77,7 @@
 %type <def> Def
 %type <arrays> Arrays
 %type <initValList> InitValList
-%type <initVal> InitVal
+%type <initVal> InitVal BraceInitVal
 %type <funcDef> FuncDef
 %type <FuncFParamList> FuncFParamList
 %type <funcFParam> FuncFParam
@@ -340,6 +340,16 @@ InitVal:
         $$->initValList.swap($2->list);
     };
 
+// Braced initializer used on the right-hand side of a whole-vector assignment.
+BraceInitVal:
+    LC RC {
+        $$ = make_node<InitValAST>();
+    }|
+    LC InitValList RC {
+        $$ = make_node<InitValAST>();
+        $$->initValList.swap($2->list);
+    };
+
 // 变量列表
 InitValList:
   InitValList COMMA InitVal {
@@ -463,6 +473,12 @@ Stmt:
         $$->sType = ASS;
         $$->lVal = unique_ptr<LValAST>($1);
         $$->exp = unique_ptr<AddExpAST>($3);
+    }|
+    LVal ASSIGN BraceInitVal SEMICOLON {
+        $$ = make_node<StmtAST>();
+        $$->sType = ASS;
+        $$->lVal = unique_ptr<LValAST>($1);
+        $$->initVal = unique_ptr<InitValAST>($3);
     }|
     Exp SEMICOLON {
         $$ = make_node<StmtAST>();

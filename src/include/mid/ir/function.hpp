@@ -8,6 +8,8 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class BasicBlock;
@@ -55,7 +57,9 @@ public:
     virtual std::string print() override;
     IntrinsicID intrinsicID() const { return intrinsicID_; }
     void setIntrinsicID(IntrinsicID id) { intrinsicID_ = id; }
-    void add_basic_block(BasicBlock* bb) { basic_blocks_.push_back(bb); invalidateDominatorInfo(); }
+    void add_basic_block(BasicBlock* bb);
+    // Allocate source-level block names without rescanning the whole function.
+    std::string uniqueBasicBlockName(const std::string &base);
     Type* get_return_type() const { return static_cast<FunctionType*>(type_)->result_; }
     bool is_declaration() { return basic_blocks_.empty(); }  // 无基本块→仅为声明
     enum class HiraWorkerState {
@@ -93,6 +97,9 @@ public:
     class AllocaInst *lastEntryAlloca_ = nullptr;
 
 private:
+    std::unordered_set<std::string> basic_block_names_;
+    std::unordered_map<std::string, unsigned> basic_block_suffixes_;
+
     void computeDominatorInfo();
     std::unique_ptr<DominatorInfo> domInfo_;
     HiraWorkerState hiraWorkerState_ = HiraWorkerState::None;

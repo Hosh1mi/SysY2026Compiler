@@ -368,6 +368,8 @@ Value *Mem2Reg::zeroValueFor(Type *ty) const {
         return new ConstantInt(ty, 0);
     if (ty->tid_ == Type::FloatTyID)
         return new ConstantFloat(ty, 0.0f);
+    if (ty->tid_ == Type::VectorTyID)
+        return new ConstantZero(ty);
     return nullptr;
 }
 

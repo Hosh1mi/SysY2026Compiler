@@ -1093,8 +1093,11 @@ bool AArch64ConditionOptimizer::run(
                 continue;
             }
 
-            auto select = std::next(booleanCompare);
-            while (select != instructions.end()) {
+            CondCode originalCondition =
+                set->operands()[1].condition();
+            bool rewroteSelect = false;
+            for (auto select = std::next(booleanCompare);
+                 select != instructions.end();) {
                 bool candidate =
                     (select->opcode() == Opcode::CSELW ||
                      select->opcode() == Opcode::CSELX ||
@@ -1102,38 +1105,30 @@ bool AArch64ConditionOptimizer::run(
                     select->operands().size() >= 4 &&
                     select->operands()[3].kind() ==
                         MachineOperand::Kind::ConditionCode;
-                if (candidate)
-                    break;
-                const InstrDesc &descriptor =
-                    InstrInfo::get(select->opcode());
+                if (candidate) {
+                    CondCode booleanCondition =
+                        select->operands()[3].condition();
+                    if (booleanCondition != CondCode::NE &&
+                        booleanCondition != CondCode::EQ)
+                        break;
+                    select->operands()[3] = MachineOperand::condition(
+                        booleanCondition == CondCode::NE
+                            ? originalCondition
+                            : inverseCondition(originalCondition));
+                    rewroteSelect = true;
+                    ++select;
+                    continue;
+                }
+                const InstrDesc &descriptor = InstrInfo::get(select->opcode());
                 if (descriptor.setsFlags || descriptor.usesFlags ||
                     select->isCall() || select->isTerminator())
                     break;
                 ++select;
             }
-            if (select == instructions.end() ||
-                (select->opcode() != Opcode::CSELW &&
-                 select->opcode() != Opcode::CSELX &&
-                 select->opcode() != Opcode::FCSELS) ||
-                select->operands().size() < 4) {
+            if (!rewroteSelect) {
                 ++set;
                 continue;
             }
-
-            CondCode booleanCondition =
-                select->operands()[3].condition();
-            if (booleanCondition != CondCode::NE &&
-                booleanCondition != CondCode::EQ) {
-                ++set;
-                continue;
-            }
-            CondCode originalCondition =
-                set->operands()[1].condition();
-            select->operands()[3] =
-                MachineOperand::condition(
-                    booleanCondition == CondCode::NE
-                        ? originalCondition
-                        : inverseCondition(originalCondition));
             instructions.erase(booleanCompare);
             set = instructions.erase(set);
             function.registerInfo().eraseVirtualRegister(

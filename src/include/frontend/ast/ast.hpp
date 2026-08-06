@@ -202,6 +202,7 @@ public:
   bool is_inloop = false;
   unique_ptr<LValAST> lVal = nullptr;
   unique_ptr<AddExpAST> exp = nullptr;
+  unique_ptr<InitValAST> initVal = nullptr;
   unique_ptr<ReturnStmtAST> returnStmt = nullptr;
   unique_ptr<SelectStmtAST> selectStmt = nullptr;
   unique_ptr<IterationStmtAST> iterationStmt = nullptr;

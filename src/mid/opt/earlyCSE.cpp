@@ -193,10 +193,19 @@ static void early_cse_dfs(BasicBlock *bb,
             Value *ptr  = inst->get_operand(1);
             Value *base = getBase(ptr);
 
-            // Dead-store detection (same exact ptr, not read)
-            auto mem_it = local_mem.find(ptr);
-            if (mem_it != local_mem.end() && !mem_it->second.has_been_read)
-                to_delete.push_back(mem_it->second.store_inst);
+            // The new write invalidates every forwarded value whose location
+            // may overlap it.  Only an exact overwrite can make the previous
+            // store dead; a partial or uncertain overlap merely blocks
+            // forwarding from that store.
+            for (auto mi = local_mem.begin(); mi != local_mem.end();) {
+                if (BAA.alias(mi->first, ptr) == AliasResult::NoAlias) {
+                    ++mi;
+                    continue;
+                }
+                if (mi->first == ptr && !mi->second.has_been_read)
+                    to_delete.push_back(mi->second.store_inst);
+                mi = local_mem.erase(mi);
+            }
 
             if (isUnknownBase(base))
                 local_mem.clear();
@@ -243,6 +252,13 @@ static void early_cse_dfs(BasicBlock *bb,
                 inst->replace_all_use_with(mem_it->second.stored_val);
                 to_delete.push_back(inst);
                 continue;
+            }
+
+            // This load may observe any overlapping store, so a later exact
+            // overwrite cannot remove those stores as unread.
+            for (auto &[storedPtr, def] : local_mem) {
+                if (BAA.alias(storedPtr, ptr) != AliasResult::NoAlias)
+                    def.has_been_read = true;
             }
 
             // Forward across one CFG edge only.  Requiring the defining store

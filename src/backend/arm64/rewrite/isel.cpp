@@ -1419,6 +1419,79 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         PhysReg::NZCV, RegClass::CCR, true, true));
                 append(block, std::move(compare));
                 RegClass selectedClass = valueClass(node.operands()[1]);
+                if (selectedClass == RegClass::NEON128) {
+                    ValueType vectorType = node.resultTypes().front();
+                    ValueType laneType = vectorType == ValueType::V4F32
+                                             ? ValueType::F32
+                                             : ValueType::I32;
+                    RegClass laneClass = RegisterInfo::classForType(laneType);
+                    VReg current = resultReg(node.operands()[2]);
+                    for (unsigned lane = 0; lane < 4; ++lane) {
+                        auto extractLane = [&](unsigned operandIndex) {
+                            VReg scalar = createTemporary(laneType);
+                            MachineInstr extract(
+                                laneType == ValueType::F32
+                                    ? Opcode::EXTRACTv4f32
+                                    : Opcode::EXTRACTv4i32);
+                            extract
+                                .addOperand(MachineOperand::vreg(
+                                    scalar, laneClass, true))
+                                .addOperand(use(node.operands()[operandIndex]))
+                                .addOperand(MachineOperand::immediate(lane));
+                            MachineInstr &definition =
+                                append(block, std::move(extract));
+                            registerInfo.setDefinition(scalar, &definition);
+                            return scalar;
+                        };
+
+                        VReg trueLane = extractLane(1);
+                        VReg falseLane = extractLane(2);
+                        VReg selectedLane = createTemporary(laneType);
+                        MachineInstr selectLane(
+                            laneType == ValueType::F32 ? Opcode::FCSELS
+                                                      : Opcode::CSELW);
+                        selectLane
+                            .addOperand(MachineOperand::vreg(
+                                selectedLane, laneClass, true))
+                            .addOperand(MachineOperand::vreg(
+                                trueLane, laneClass))
+                            .addOperand(MachineOperand::vreg(
+                                falseLane, laneClass))
+                            .addOperand(MachineOperand::condition(CondCode::NE))
+                            .addOperand(MachineOperand::physReg(
+                                PhysReg::NZCV, RegClass::CCR, false, true));
+                        MachineInstr &selectDefinition =
+                            append(block, std::move(selectLane));
+                        registerInfo.setDefinition(selectedLane,
+                                                   &selectDefinition);
+
+                        bool finalLane = lane == 3;
+                        VReg next = finalLane ? 0 : createTemporary(vectorType);
+                        MachineInstr insert(
+                            laneType == ValueType::F32 ? Opcode::INSv4f32
+                                                      : Opcode::INSv4i32);
+                        insert
+                            .addOperand(finalLane
+                                ? define(node)
+                                : MachineOperand::vreg(
+                                      next, RegClass::NEON128, true))
+                            .addOperand(MachineOperand::vreg(
+                                current, RegClass::NEON128))
+                            .addOperand(MachineOperand::vreg(
+                                selectedLane, laneClass))
+                            .addOperand(MachineOperand::immediate(lane));
+                        insert.operands()[1].tiedTo = 0;
+                        MachineInstr &insertDefinition = append(
+                            block, std::move(insert),
+                            finalLane ? &node : nullptr);
+                        if (!finalLane) {
+                            registerInfo.setDefinition(next,
+                                                       &insertDefinition);
+                            current = next;
+                        }
+                    }
+                    break;
+                }
                 Opcode opcode =
                     selectedClass == RegClass::FPR32 ? Opcode::FCSELS
                     : selectedClass == RegClass::GPR64 ? Opcode::CSELX

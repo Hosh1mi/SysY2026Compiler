@@ -128,7 +128,7 @@ static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
 }
 
 static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
-                          VectorType *type) {
+                           VectorType *type) {
     value = coerceScalar(builder, module, value, type->contained_);
     if (auto *constant = dynamic_cast<Constant *>(value)) {
         std::vector<Constant *> lanes(type->num_elements_, constant);
@@ -139,6 +139,22 @@ static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
         result = new InsertElementInst(
             result, value, new ConstantInt(module->int32_ty_, lane),
             builder->BB_);
+    return result;
+}
+
+static Value *scalarizeIntegerVectorBinary(IRStmtBuilder *builder, Module *module,
+                                           Value *lhs, Value *rhs,
+                                           Instruction::OpID op,
+                                           VectorType *type) {
+    Value *result = new ConstantZero(type);
+    for (unsigned lane = 0; lane < type->num_elements_; ++lane) {
+        auto *index = new ConstantInt(module->int32_ty_, lane);
+        Value *left = new ExtractElementInst(lhs, index, builder->BB_);
+        Value *right = new ExtractElementInst(rhs, index, builder->BB_);
+        Value *value = new BinaryInst(type->contained_, op, left, right,
+                                      builder->BB_);
+        result = new InsertElementInst(result, value, index, builder->BB_);
+    }
     return result;
 }
 
@@ -203,17 +219,7 @@ static Value *vectorLanePointer(GenIR *gen, Value *vectorPointer,
 // 在函数内创建带语义名的基本块；同名冲突时加数字后缀（if.then → if.then1）。
 static BasicBlock *createNamedBB(Module *m, Function *func,
                                  const std::string &base) {
-    std::string name = base;
-    int suffix = 1;
-    auto taken = [&](const std::string &n) {
-        for (auto *bb : func->basic_blocks_)
-            if (bb->name_ == n)
-                return true;
-        return false;
-    };
-    while (taken(name))
-        name = base + std::to_string(suffix++);
-    return new BasicBlock(m, name, func);
+    return new BasicBlock(m, func->uniqueBasicBlockName(base), func);
 }
 
 // 将返回值写到 %retval 前做必要的 i32/float 转换。
@@ -867,6 +873,25 @@ void GenIR::visit(StmtAST &ast) {
             requireLVal = true;  
             ast.lVal->accept(*this);
             auto var = recentVal;
+            if (ast.initVal) {
+                if (vectorLaneBase || !var ||
+                    var->type_->tid_ != Type::PointerTyID) {
+                    std::cerr << "a braced initializer requires a whole fixed vector lvalue\n";
+                    std::exit(1);
+                }
+                auto *vectorType = dynamic_cast<VectorType *>(
+                    static_cast<PointerType *>(var->type_)->contained_);
+                if (!vectorType) {
+                    std::cerr << "a braced initializer requires a whole fixed vector lvalue\n";
+                    std::exit(1);
+                }
+                Value *initializer =
+                    buildVectorInitializer(this, ast.initVal.get(), vectorType);
+                builder->create_store(initializer, var);
+                vectorLaneBase = nullptr;
+                vectorLaneIndex = nullptr;
+                break;
+            }
             ast.exp->accept(*this);
             auto expval = recentVal;
             if (vectorLaneBase) {
@@ -1211,6 +1236,14 @@ void GenIR::visit(MulExpAST &ast) {
         }
     }
     if (isIntegerValueType(val[0]->type_)) {
+        auto *vectorType = dynamic_cast<VectorType *>(val[0]->type_);
+        if (vectorType && (ast.op == MOP_DIV || ast.op == MOP_MOD)) {
+            recentVal = scalarizeIntegerVectorBinary(
+                builder, module.get(), val[0], val[1],
+                ast.op == MOP_DIV ? Instruction::SDiv : Instruction::SRem,
+                vectorType);
+            return;
+        }
         switch (ast.op) {
             case MOP_MUL:
                 recentVal = builder->create_imul(val[0], val[1]);

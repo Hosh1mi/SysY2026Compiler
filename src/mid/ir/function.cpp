@@ -12,6 +12,24 @@
 
 Function::~Function() {}
 
+void Function::add_basic_block(BasicBlock *bb) {
+    basic_blocks_.push_back(bb);
+    basic_block_names_.insert(bb->name_);
+    invalidateDominatorInfo();
+}
+
+std::string Function::uniqueBasicBlockName(const std::string &base) {
+    unsigned &suffix = basic_block_suffixes_[base];
+    for (;;) {
+        std::string candidate = suffix == 0
+                                    ? base
+                                    : base + std::to_string(suffix);
+        ++suffix;
+        if (basic_block_names_.insert(candidate).second)
+            return candidate;
+    }
+}
+
 // define/declare <ret_ty> @<name>(<args>) { <body> }
 std::string Function::print() {
     set_instr_name();  // 先统一命名，保证输出一致
