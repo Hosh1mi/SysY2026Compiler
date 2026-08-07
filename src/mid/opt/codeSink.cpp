@@ -1,5 +1,6 @@
 #include "../../include/mid/opt/codeSink.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <set>
@@ -54,41 +55,20 @@ BasicBlock *useBlock(const Use &use) {
     return user->parent_;
 }
 
-BasicBlock *nearestCommonDominator(const DominatorInfo &domInfo,
-                                   BasicBlock *a,
-                                   BasicBlock *b) {
-    if (!a || !b)
-        return nullptr;
-
-    std::set<BasicBlock *> ancestors;
-    for (auto *cur = a; cur;) {
-        ancestors.insert(cur);
-        auto it = domInfo.idom.find(cur);
-        cur = (it == domInfo.idom.end()) ? nullptr : it->second;
-    }
-
-    for (auto *cur = b; cur;) {
-        if (ancestors.count(cur))
-            return cur;
-        auto it = domInfo.idom.find(cur);
-        cur = (it == domInfo.idom.end()) ? nullptr : it->second;
-    }
-    return nullptr;
-}
-
 int loopDepth(LoopInfo &LI, BasicBlock *bb) {
     Loop *loop = LI.getLoopFor(bb);
     return loop ? loop->depth + 1 : 0;
 }
 
-bool operandsDominateTarget(Instruction *inst, Function *func, BasicBlock *target) {
+bool operandsDominateTarget(Instruction *inst, const DominatorTreeAnalysis &DT,
+                            BasicBlock *target) {
     for (unsigned i = 0; i < inst->num_ops_; ++i) {
         auto *opInst = dynamic_cast<Instruction *>(inst->get_operand(i));
         if (!opInst)
             continue;
         if (!opInst->parent_)
             return false;
-        if (!func->dominates(opInst->parent_, target))
+        if (!DT.dominates(opInst->parent_, target))
             return false;
     }
     return true;
@@ -114,7 +94,8 @@ Instruction *findInsertionPoint(Instruction *inst, BasicBlock *target) {
     return target->get_terminator();
 }
 
-bool trySinkInstruction(Instruction *inst, Function *func, LoopInfo &LI) {
+bool trySinkInstruction(Instruction *inst, Function *func, LoopInfo &LI,
+                        const DominatorTreeAnalysis &DT) {
     if (!isSinkableInstruction(inst))
         return false;
 
@@ -122,24 +103,23 @@ bool trySinkInstruction(Instruction *inst, Function *func, LoopInfo &LI) {
     if (!source)
         return false;
 
-    DominatorInfo &domInfo = func->getDominatorInfo();
     BasicBlock *target = nullptr;
     for (const auto &use : inst->use_list_) {
         BasicBlock *block = useBlock(use);
         if (!block)
             return false;
-        target = target ? nearestCommonDominator(domInfo, target, block) : block;
+        target = target ? DT.findNearestCommonDominator(target, block) : block;
         if (!target)
             return false;
     }
 
     if (!target || target == source)
         return false;
-    if (!func->dominates(source, target))
+    if (!DT.dominates(source, target))
         return false;
     if (loopDepth(LI, target) > loopDepth(LI, source))
         return false;
-    if (!operandsDominateTarget(inst, func, target))
+    if (!operandsDominateTarget(inst, DT, target))
         return false;
 
     Instruction *insertBefore = findInsertionPoint(inst, target);
@@ -158,23 +138,21 @@ bool trySinkInstruction(Instruction *inst, Function *func, LoopInfo &LI) {
 } // namespace
 
 void CodeSink::execute(Module *module) {
-    for (auto *func : module->function_list_) {
-        if (!func->is_declaration())
-            runOnFunction(func);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
 PreservedAnalyses CodeSink::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func);
+            changed |= runOnFunction(func, AM);
     }
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
-bool CodeSink::runOnFunction(Function *func) {
+bool CodeSink::runOnFunction(Function *func, AnalysisManager &AM) {
     bool changed = false;
 
     // Sinking the accepted instructions changes neither CFG nor loop
@@ -183,8 +161,8 @@ bool CodeSink::runOnFunction(Function *func) {
     // is sunk, an operand considered later sees the user's final block and
     // can be placed directly at its own final destination.  Restarting from
     // scratch after every successful move only turns the pass quadratic.
-    LoopInfo LI;
-    LI.analyze(func);
+    LoopInfo &LI = AM.getLoopInfo(func);
+    DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
 
     std::vector<Instruction *> worklist;
     for (auto *bb : func->basic_blocks_) {
@@ -196,7 +174,7 @@ bool CodeSink::runOnFunction(Function *func) {
         auto *inst = *it;
         if (!inst->parent_)
             continue;
-        changed |= trySinkInstruction(inst, func, LI);
+        changed |= trySinkInstruction(inst, func, LI, DT);
     }
 
     if (changed)

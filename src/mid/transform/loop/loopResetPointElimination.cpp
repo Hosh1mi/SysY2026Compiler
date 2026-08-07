@@ -377,6 +377,7 @@ bool enclosingLoopProvesPositiveBound(const Loop &loop, Value *bound) {
 }
 
 bool analyzeCandidate(Loop &recurrenceLoop, LoopInfo &loopInfo,
+                      const DominatorTreeAnalysis &DT,
                       BasicAliasAnalysis &basicAA,
                       ArgumentAliasAnalysis &argumentAA,
                       ResetCandidate &result) {
@@ -422,7 +423,7 @@ bool analyzeCandidate(Loop &recurrenceLoop, LoopInfo &loopInfo,
                 valueDependsOn(store->get_operand(1), induction) ||
                 containsUnexpectedPhi(store->get_operand(1), recurrenceLoop,
                                       {stateIV}) ||
-                !loopInfo.dominates(store->parent_, stateLoop->singleLatch()))
+                !DT.dominates(store->parent_, stateLoop->singleLatch()))
                 return false;
             recurrences.push_back(recurrence);
         }
@@ -613,17 +614,18 @@ bool applyTighten(const ResetCandidate &candidate, Module *module,
 
 bool runOnFunctionImpl(Function *function, Module *module,
                        BasicAliasAnalysis &basicAA,
-                       ArgumentAliasAnalysis &argumentAA) {
+                       ArgumentAliasAnalysis &argumentAA,
+                       AnalysisManager &AM) {
     if (function->basic_blocks_.empty())
         return false;
 
-    LoopInfo loopInfo;
-    loopInfo.analyze(function);
+    LoopInfo &loopInfo = AM.getLoopInfo(function);
+    DominatorTreeAnalysis &DT = AM.getDominatorTree(function);
     std::vector<ResetCandidate> candidates;
     std::set<BasicBlock *> seenHeaders;
     for (const auto &loop : loopInfo.allLoops()) {
         ResetCandidate candidate;
-        if (analyzeCandidate(*loop, loopInfo, basicAA, argumentAA,
+        if (analyzeCandidate(*loop, loopInfo, DT, basicAA, argumentAA,
                              candidate) &&
             seenHeaders.insert(candidate.header).second)
             candidates.push_back(candidate);
@@ -640,13 +642,13 @@ bool runOnFunctionImpl(Function *function, Module *module,
 } // namespace
 
 void LoopResetPointElimination::execute(Module *module) {
-    BasicAliasAnalysis basicAA;
-    basicAA.analyze(module);
+    AnalysisManager AM;
+    BasicAliasAnalysis &basicAA = AM.getBasicAA(module);
     ArgumentAliasAnalysis argumentAA;
     argumentAA.analyze(module);
     for (Function *function : module->function_list_)
         if (!function->is_declaration())
-            runOnFunction(function, module, basicAA, argumentAA);
+            runOnFunction(function, module, basicAA, argumentAA, AM);
 }
 
 PreservedAnalyses LoopResetPointElimination::execute(
@@ -657,12 +659,13 @@ PreservedAnalyses LoopResetPointElimination::execute(
     bool changed = false;
     for (Function *function : module->function_list_)
         if (!function->is_declaration())
-            changed |= runOnFunction(function, module, basicAA, argumentAA);
+            changed |= runOnFunction(function, module, basicAA, argumentAA,
+                                     manager);
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 bool LoopResetPointElimination::runOnFunction(
     Function *function, Module *module, BasicAliasAnalysis &basicAA,
-    ArgumentAliasAnalysis &argumentAA) {
-    return runOnFunctionImpl(function, module, basicAA, argumentAA);
+    ArgumentAliasAnalysis &argumentAA, AnalysisManager &AM) {
+    return runOnFunctionImpl(function, module, basicAA, argumentAA, AM);
 }

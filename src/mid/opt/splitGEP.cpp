@@ -18,7 +18,8 @@ static bool isInvariantInLoop(Value *v, Loop *loop) {
     return loop->blocks.count(inst->parent_) == 0;
 }
 
-bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI) {
+bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI,
+                         const DominatorTreeAnalysis &DT) {
     BasicBlock *preheader = loop->preheader;
     if (!preheader) return false;
 
@@ -75,13 +76,13 @@ bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI) {
             bool dominatesPreheader = true;
             for (Value *op : prefixIdxs) {
                 auto *opInst = dynamic_cast<Instruction *>(op);
-                if (opInst && !LI.dominates(opInst->parent_, preheader)) {
+                if (opInst && !DT.dominates(opInst->parent_, preheader)) {
                     dominatesPreheader = false;
                     break;
                 }
             }
             if (auto *baseInst = dynamic_cast<Instruction *>(gep->get_operand(0)))
-                if (!LI.dominates(baseInst->parent_, preheader))
+                if (!DT.dominates(baseInst->parent_, preheader))
                     dominatesPreheader = false;
             if (!dominatesPreheader) {
                 prefixGEP->remove_use_of_ops();
@@ -135,14 +136,15 @@ PreservedAnalyses SplitGEP::execute(Module *module, AnalysisManager &AM) {
     for (auto *f : module->function_list_) {
         if (f->is_declaration()) continue;
         LoopInfo &LI = AM.getLoopInfo(f);
+        DominatorTreeAnalysis &DT = AM.getDominatorTree(f);
         for (const auto &loop : LI.allLoops())
-            changed |= runOnLoop(loop.get(), LI);
+            changed |= runOnLoop(loop.get(), LI, DT);
     }
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
 void SplitGEP::execute(Module *module) {
-    // SplitGEP requires LoopInfo and is only meaningful through the
-    // AnalysisManager-aware entry point.
-    (void)module;
+    AnalysisManager AM;
+    execute(module, AM);
 }

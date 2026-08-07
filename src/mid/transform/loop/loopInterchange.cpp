@@ -1,4 +1,5 @@
 #include "../../../include/mid/opt/loopInterchange.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
@@ -174,7 +175,8 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
     }
 }
 
-bool applyParallelSink(Function *func, Loop *K) {
+bool applyParallelSink(Function *func, Loop *K,
+                       const DominatorTreeAnalysis &DT) {
     auto reject = [&](const char *reason) {
         if (debugEnabled())
             std::cerr << "[LoopInterchange] parallel sink rejected: "
@@ -303,7 +305,7 @@ bool applyParallelSink(Function *func, Loop *K) {
         for (unsigned i = 0; i < w->num_ops_; i++) {
             auto *op = dynamic_cast<Instruction *>(w->get_operand(i));
             if (!op || op == kIV || unionW.count(op)) continue;
-            if (!func->dominates(op->parent_, w->parent_))
+            if (!DT.dominates(op->parent_, w->parent_))
                 return reject("store slice operand does not dominate its use");
         }
     }
@@ -582,35 +584,35 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
 } // namespace
 
 void LoopInterchange::execute(Module *module) {
+    AnalysisManager AM;
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
     argAA_ = &argAA;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func);
+            runOnFunction(func, AM);
     }
     argAA_ = nullptr;
 }
 
 PreservedAnalyses LoopInterchange::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
     argAA_ = &argAA;
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func);
+            changed |= runOnFunction(func, AM);
     }
     argAA_ = nullptr;
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-bool LoopInterchange::runOnFunction(Function *func) {
+bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
     bool everChanged = false;
     for (int iter = 0; iter < 16; iter++) {
-        LoopInfo LI;
-        LI.analyze(func);
+        LoopInfo &LI = AM.getLoopInfo(func);
+        DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         if (LI.allLoops().empty()) break;
 
         AffineAnalysis     AA(LI);
@@ -646,8 +648,9 @@ bool LoopInterchange::runOnFunction(Function *func) {
         }
 
         if (target) {
-            if (applyParallelSink(func, target)) {
+            if (applyParallelSink(func, target, DT)) {
                 everChanged = true;
+                AM.clear(func);
                 continue;
             }
             if (debugEnabled())
@@ -681,6 +684,7 @@ bool LoopInterchange::runOnFunction(Function *func) {
             if (floatK) {
                 if (applyInterchange(func, floatK, floatM)) {
                     everChanged = true;
+                    AM.clear(func);
                     continue;
                 }
                 if (debugEnabled())

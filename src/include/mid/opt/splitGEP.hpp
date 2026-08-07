@@ -23,5 +23,6 @@ public:
     std::string name() const override { return "SplitGEP"; }
 
 private:
-    bool runOnLoop(Loop *loop, LoopInfo &LI);
+    bool runOnLoop(Loop *loop, LoopInfo &LI,
+                   const DominatorTreeAnalysis &DT);
 };

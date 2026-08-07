@@ -33,7 +33,7 @@ pass 可以对不同种类的值使用相同的替换与查询接口。
 | `Value` / `Use` | 表示 SSA 值并维护反向 use-list |
 | `Instruction` | 保存 opcode、操作数、所属块和打印逻辑 |
 | `BasicBlock` | 保存线性指令链表、CFG 边和分析附加信息 |
-| `Function` | 保存参数和基本块，惰性缓存支配树 |
+| `Function` | 保存参数和基本块；分析缓存由 AnalysisManager 管理 |
 | `Module` | 保存全局量、函数和类型工厂 |
 | `IRStmtBuilder` | 在当前基本块构造并插入指令 |
 | `GenIR` | 以 Visitor 遍历 AST，生成未优化 IR |
@@ -44,7 +44,7 @@ pass 可以对不同种类的值使用相同的替换与查询接口。
 | --- | --- |
 | [`type.cpp`](../src/mid/ir/type.cpp)、[`constant.cpp`](../src/mid/ir/constant.cpp)、[`globalVariable.cpp`](../src/mid/ir/globalVariable.cpp) | 类型与常量、全局对象的文本表示 |
 | [`value.cpp`](../src/mid/ir/value.cpp)、[`instruction.cpp`](../src/mid/ir/instruction.cpp) | use-def 维护与指令实现 |
-| [`basicBlock.cpp`](../src/mid/ir/basicBlock.cpp)、[`function.cpp`](../src/mid/ir/function.cpp) | 指令链表、CFG、支配信息与命名 |
+| [`basicBlock.cpp`](../src/mid/ir/basicBlock.cpp)、[`function.cpp`](../src/mid/ir/function.cpp) | 指令链表、CFG 与命名 |
 | [`module.cpp`](../src/mid/ir/module.cpp) | 模块输出与入口函数查询 |
 | [`intrinsics.cpp`](../src/mid/ir/intrinsics.cpp) | signed min/max 与 `mulmod` 内建函数 |
 | [`irGen.cpp`](../src/mid/ir/irGen.cpp) | AST 到基础 IR 的降低 |
@@ -160,17 +160,15 @@ PHI 操作数始终交错保存为：
 `succ_bbs_` 是为分析和变换保留的反向/正向缓存。改分支时必须同时维护两者及目标块 PHI
 的 incoming edge。
 
-`Function::remove_bb` 会从函数列表和相邻块的 CFG 缓存中移除块，并使支配树失效。
+`Function::remove_bb` 会从函数列表和相邻块的 CFG 缓存中移除块。
 批量 CFG pass 通常会从 terminator 重算边，不应在缓存未修复时查询 LoopInfo。
 
 ### 5.2 支配信息
 
-`Function::getDominatorInfo` 惰性计算 immediate dominator、支配边界和支配树子节点。
-CFG 变更后必须调用 `invalidateDominatorInfo`；`add_basic_block` 和 `remove_bb` 已经自动执行这一步，
-但只改写分支边的 pass 需要自行处理。
-
-`BasicBlock` 中的 `idom_`、`dom_frontier_`、`live_in` 和 `live_out` 是其他分析的工作区，
-不与 `Function::DominatorInfo` 共享缓存生命周期。
+支配信息不存放在 `Function` 或 `BasicBlock` 中。中端 pass 通过 `AnalysisManager` 请求
+`DominatorTreeAnalysis`、`PostDominatorTreeAnalysis` 和 `DominanceFrontierAnalysis`，
+并在修改 CFG 后用 `PreservedAnalyses` 触发统一失效。`BasicBlock` 只保留 CFG 边和
+`live_in`/`live_out` 工作区。具体接口见 [`mid_analysis.md`](mid_analysis.md)。
 
 ### 5.3 可读 IR
 

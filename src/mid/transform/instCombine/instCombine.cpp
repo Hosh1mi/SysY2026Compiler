@@ -7,6 +7,7 @@
 #include <vector>
 
 thread_local RangeAnalysis *gInstCombineRangeAnalysis = nullptr;
+thread_local DominatorTreeAnalysis *gInstCombineDominatorTree = nullptr;
 
 // ── trySinkInstruction ──────────────────────────────────────────────
 // If inst has exactly one user and that user is in a different block,
@@ -66,11 +67,8 @@ static void trySinkInstruction(Instruction *inst) {
 }
 
 void InstCombine::execute(Module *module) {
-    auto functions = module->function_list_;
-    for (auto func : functions) {
-        if (func->is_declaration()) continue;
-        runOnFunction(func, nullptr);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
 PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
@@ -80,7 +78,8 @@ PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
         if (func->is_declaration()) continue;
         changed |= runOnFunction(func, &AM);
     }
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
 bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
@@ -100,11 +99,10 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     };
 
     const size_t initialInstrCount = countInstructions();
-    // RangeAnalysis construction computes whole-function post-dominance and
-    // control dependence.  InstCombine invalidates that analysis after every
-    // replacement because its predicate facts may reference the replaced
-    // instruction.  Rebuilding it for every local fold is prohibitively
-    // expensive on large generated functions.  Keep the range-assisted
+    // RangeAnalysis is invalidated after every replacement because its
+    // predicate facts may reference the replaced instruction. Rebuilding it
+    // for every local fold is prohibitively expensive on large generated
+    // functions. Keep the range-assisted
     // combines for normal functions, while large functions use the always-safe
     // local combines.
     constexpr size_t kRangeAnalysisInstructionLimit = 1024;
@@ -120,6 +118,8 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     bool changed = false;
 
     RangeAnalysis *savedRangeAnalysis = gInstCombineRangeAnalysis;
+    DominatorTreeAnalysis *savedDominatorTree = gInstCombineDominatorTree;
+    gInstCombineDominatorTree = AM ? &AM->getDominatorTree(func) : nullptr;
     gInstCombineRangeAnalysis =
         useRangeAnalysis ? &AM->getRangeAnalysis(func) : nullptr;
 
@@ -322,6 +322,7 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     }
 
     gInstCombineRangeAnalysis = savedRangeAnalysis;
+    gInstCombineDominatorTree = savedDominatorTree;
 
     if (budgetHit) {
         std::cerr << "[InstCombine] budget hit in @" << func->name_

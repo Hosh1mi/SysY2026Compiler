@@ -11,6 +11,7 @@
 //   §G  Module-level driver
 
 #include "../../include/mid/opt/bitFuncRecognize.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/analysis/constantEvaluator.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -435,57 +436,6 @@ static void bfsReachable(BasicBlock *start,
     }
 }
 
-// Iterative post-dominator dataflow.  For each BB, computes the set of blocks
-// that post-dominate it (including itself).  Standard formulation:
-//   PD[B] = {B} ∪ (∩ PD[S] for S ∈ succ(B)),  PD[exit] = {exit}.
-// Blocks with no successors (return blocks) are seeds.  Blocks that cannot
-// reach any return (infinite loops) get PD[B] = {B} as a convention so the
-// algorithm terminates; this never affects IPDOM queries on such blocks.
-static std::unordered_map<BasicBlock *, std::unordered_set<BasicBlock *>>
-computePostDom(Function *f) {
-    std::unordered_map<BasicBlock *, std::unordered_set<BasicBlock *>> pd;
-    std::unordered_set<BasicBlock *> all(f->basic_blocks_.begin(), f->basic_blocks_.end());
-    for (auto *b : f->basic_blocks_) {
-        if (b->succ_bbs_.empty()) pd[b] = {b};
-        else                      pd[b] = all;
-    }
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto *b : f->basic_blocks_) {
-            if (b->succ_bbs_.empty()) continue;
-            std::unordered_set<BasicBlock *> next;
-            bool first = true;
-            for (auto *s : b->succ_bbs_) {
-                if (first) { next = pd[s]; first = false; }
-                else {
-                    std::unordered_set<BasicBlock *> isect;
-                    for (auto *x : next) if (pd[s].count(x)) isect.insert(x);
-                    next = std::move(isect);
-                }
-            }
-            next.insert(b);
-            if (next != pd[b]) { pd[b] = std::move(next); changed = true; }
-        }
-    }
-    return pd;
-}
-
-// Pick the immediate post-dominator of `b` from its post-dom set:
-// the unique block whose own PD set is `pd[b] \ {b}`.
-static BasicBlock *immediatePostDom(BasicBlock *b,
-        const std::unordered_map<BasicBlock *, std::unordered_set<BasicBlock *>> &pd) {
-    auto it = pd.find(b);
-    if (it == pd.end()) return nullptr;
-    size_t target = it->second.size() - 1;
-    for (auto *cand : it->second) {
-        if (cand == b) continue;
-        auto cit = pd.find(cand);
-        if (cit != pd.end() && cit->second.size() == target) return cand;
-    }
-    return nullptr;
-}
-
 struct RegionResult {
     bool         returned = false;   // true → returnBv valid; false → exitBB/exitPrev valid
     BitVec       returnBv;
@@ -496,6 +446,7 @@ struct RegionResult {
 class FunctionAnalyzer {
 public:
     Function   *func;
+    const PostDominatorTreeAnalysis *postDomTree;
     int         budget      = 60000;
     int         blockVisits = 0;
     const int   MAX_VISITS  = 4000;
@@ -510,7 +461,8 @@ public:
     // symbolic loop bound to 32 so the standard implicit unrolling can run).
     std::unordered_map<Value *, int> pins;
 
-    explicit FunctionAnalyzer(Function *f) : func(f) {}
+    FunctionAnalyzer(Function *f, const PostDominatorTreeAnalysis &PDT)
+        : func(f), postDomTree(&PDT) {}
     bool run();
 
     BasicBlock *ipdomOf(BasicBlock *bb) {
@@ -925,9 +877,8 @@ bool FunctionAnalyzer::run() {
     // Pre-compute IPDOM for every block.  Cheap O(N^2) iterative dataflow is
     // fine here: candidate functions are small (<200 blocks each, and we
     // bail on the analysis otherwise via budget).
-    auto pd = computePostDom(func);
     for (auto *bb : func->basic_blocks_)
-        ipdomCache[bb] = immediatePostDom(bb, pd);
+        ipdomCache[bb] = postDomTree->getIPostDominator(bb);
 
     State state;
     for (auto *arg : func->arguments_) {
@@ -1316,8 +1267,9 @@ static Argument *findCountdownParam(Function *f) {
     return paramArg;
 }
 
-static FuncEquiv tryRecognize(Function *f) {
-    FunctionAnalyzer fa(f);
+static FuncEquiv tryRecognize(Function *f,
+                              const PostDominatorTreeAnalysis &PDT) {
+    FunctionAnalyzer fa(f, PDT);
     if (!fa.run()) {
         if (BITFUNC_DEBUG)
             fprintf(stderr, "[bitfunc] %s: analysis failed (%s)\n",
@@ -1374,13 +1326,14 @@ static FuncEquiv tryRecognize(Function *f) {
 // it 32 times processes all 32 bits, giving the same closed form as the
 // "full-width" version would, e.g. (A & B) for AND.  The actual semantics
 // for N < 32 are recovered by masking the result with `(1 << N) - 1`.
-static FuncEquiv tryRecognizeParametric(Function *f) {
+static FuncEquiv tryRecognizeParametric(
+    Function *f, const PostDominatorTreeAnalysis &PDT) {
     Argument *param = findCountdownParam(f);
     if (!param) {
         if (BITFUNC_DEBUG) fprintf(stderr, "[bitfunc] %s: no parametric IV\n", f->name_.c_str());
         return {};
     }
-    FunctionAnalyzer fa(f);
+    FunctionAnalyzer fa(f, PDT);
     fa.pins[param] = 32;
     if (!fa.run()) {
         if (BITFUNC_DEBUG)
@@ -1747,6 +1700,12 @@ static void rewriteCallSites(Module *module,
 } // namespace bitfunc
 
 void BitFuncRecognize::execute(Module *module) {
+    AnalysisManager AM;
+    execute(module, AM);
+}
+
+PreservedAnalyses BitFuncRecognize::execute(Module *module,
+                                             AnalysisManager &AM) {
     // Install a fresh BitExpr arena for this pass invocation.  All BE pointers
     // produced inside this scope are owned by the arena and die when it does;
     // nothing outside must hold one past the closing brace.
@@ -1759,10 +1718,10 @@ void BitFuncRecognize::execute(Module *module) {
         if (!ft || ft->result_->tid_ != Type::IntegerTyID) continue;
         if (f->arguments_.empty() || f->arguments_.size() > 3) continue;
         // The symbolic recognizer is intended for compact bit-operation
-        // helpers.  Its post-dominator construction is quadratic and its
-        // path-state exploration copies symbolic maps, so reject functions
-        // outside the documented structural scope before constructing the
-        // analyzer.  This is a general complexity bound, independent of
+        // helpers. Its path-state exploration copies symbolic maps, so reject
+        // functions outside the documented structural scope before
+        // constructing the analyzer. Post-dominance is supplied by the shared
+        // AnalysisManager cache. This is a general complexity bound, independent of
         // function identity or call-site values.
         constexpr size_t kMaxCandidateBlocks = 200;
         if (f->basic_blocks_.size() > kMaxCandidateBlocks) continue;
@@ -1772,15 +1731,19 @@ void BitFuncRecognize::execute(Module *module) {
         if (!allInt) continue;
 
         // Standard recognition (fully unrolled constant-trip loops).
-        auto eq = bitfunc::tryRecognize(f);
+        PostDominatorTreeAnalysis &PDT = AM.getPostDominatorTree(f);
+        auto eq = bitfunc::tryRecognize(f, PDT);
         if (eq.kind != bitfunc::ClosedForm::NONE) { equiv[f] = eq; continue; }
 
         // SCEV-lite fallback: parametric trip count.  Only meaningful when
         // the function has a parametric arg that serves as a countdown IV;
         // tryRecognizeParametric checks that internally.
-        auto eq2 = bitfunc::tryRecognizeParametric(f);
+        auto eq2 = bitfunc::tryRecognizeParametric(f, PDT);
         if (eq2.kind != bitfunc::ClosedForm::NONE) equiv[f] = eq2;
     }
-    if (!equiv.empty())
+    if (!equiv.empty()) {
         bitfunc::rewriteCallSites(module, equiv);
+        return PreservedAnalyses::none();
+    }
+    return PreservedAnalyses::all();
 }

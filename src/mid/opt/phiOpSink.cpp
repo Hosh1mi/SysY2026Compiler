@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/phiOpSink.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
@@ -7,20 +8,18 @@
 #include <vector>
 
 void PhiOpSink::execute(Module *module) {
-    for (auto *func : module->function_list_) {
-        if (!func->is_declaration())
-            runOnFunction(func);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
 PreservedAnalyses PhiOpSink::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func);
+            changed |= runOnFunction(func, AM);
     }
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
 static bool isCommutative(Instruction::OpID op) {
@@ -58,16 +57,19 @@ static bool sameOperands(BinaryInst *inst, Instruction::OpID op,
     return isCommutative(op) && sameValue(a, rhs) && sameValue(b, lhs);
 }
 
-static bool valueDominatesBlock(Value *value, Function *func, BasicBlock *bb) {
+static bool valueDominatesBlock(Value *value,
+                                const DominatorTreeAnalysis &DT,
+                                BasicBlock *bb) {
     auto *inst = dynamic_cast<Instruction *>(value);
     if (!inst)
         return true;
     if (!inst->parent_)
         return false;
-    return func->dominates(inst->parent_, bb);
+    return DT.dominates(inst->parent_, bb);
 }
 
-bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI) {
+bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
+                           const DominatorTreeAnalysis &DT) {
     if (!phi || phi->num_ops_ < 2)
         return false;
 
@@ -90,8 +92,8 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI) {
     Value *rhs = first->get_operand(1);
     if (lhs == phi || rhs == phi)
         return false;
-    if (!valueDominatesBlock(lhs, func, phi->parent_) ||
-        !valueDominatesBlock(rhs, func, phi->parent_))
+    if (!valueDominatesBlock(lhs, DT, phi->parent_) ||
+        !valueDominatesBlock(rhs, DT, phi->parent_))
         return false;
 
     for (unsigned i = 2; i < phi->num_ops_; i += 2) {
@@ -144,14 +146,14 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI) {
     return true;
 }
 
-bool PhiOpSink::runOnFunction(Function *func) {
+bool PhiOpSink::runOnFunction(Function *func, AnalysisManager &AM) {
     bool changed = false;
     bool localChanged = true;
     while (localChanged) {
         localChanged = false;
         // sink 不改 CFG,LoopInfo 在 while 轮间仍有效;每轮重建求稳
-        LoopInfo LI;
-        LI.analyze(func);
+        LoopInfo &LI = AM.getLoopInfo(func);
+        DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         for (auto *bb : func->basic_blocks_) {
             std::vector<PhiInst *> phis;
             for (auto *inst : bb->instr_list_) {
@@ -161,7 +163,7 @@ bool PhiOpSink::runOnFunction(Function *func) {
             }
 
             for (auto *phi : phis) {
-                if (trySinkPhi(phi, func, LI)) {
+                if (trySinkPhi(phi, func, LI, DT)) {
                     changed = true;
                     localChanged = true;
                     func->set_instr_name();

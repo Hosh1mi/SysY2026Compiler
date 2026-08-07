@@ -10,6 +10,7 @@ public:
     std::string name() const override { return "PhiOpSink"; }
 
 private:
-    bool runOnFunction(Function *func);
-    bool trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
+    bool trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
+                    const DominatorTreeAnalysis &DT);
 };

@@ -9,6 +9,7 @@
 
 #include "../../../include/mid/opt/lcssa.hpp"
 #include "../../../include/mid/analysis/loopUtils.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
@@ -16,18 +17,26 @@
 #include <vector>
 
 void LCSSA::execute(Module *module) {
-    for (auto *func : module->function_list_) {
-        if (!func->is_declaration())
-            runOnFunction(func);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
-bool LCSSA::runOnFunction(Function *func) {
+PreservedAnalyses LCSSA::execute(Module *module, AnalysisManager &AM) {
+    bool changed = false;
+    for (auto *func : module->function_list_) {
+        if (!func->is_declaration())
+            changed |= runOnFunction(func, AM);
+    }
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
+}
+
+bool LCSSA::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty())
         return false;
 
-    LoopInfo LI;
-    LI.analyze(func);
+    LoopInfo &LI = AM.getLoopInfo(func);
+    DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
     if (LI.allLoops().empty())
         return false;
 
@@ -39,14 +48,14 @@ bool LCSSA::runOnFunction(Function *func) {
 
     bool changed = false;
     for (auto *loop : loops)
-        changed |= runOnLoop(loop, LI);
+        changed |= runOnLoop(loop, DT);
 
     if (changed)
         func->set_instr_name();
     return changed;
 }
 
-bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
+bool LCSSA::runOnLoop(Loop *loop, const DominatorTreeAnalysis &DT) {
     bool changed = false;
 
     std::vector<Instruction *> insts;
@@ -70,7 +79,7 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
 
         std::vector<std::pair<BasicBlock *, PhiInst *>> exitPhi;
         for (auto *exit : loop->exits) {
-            if (!LI.dominates(inst->parent_, exit))
+            if (!DT.dominates(inst->parent_, exit))
                 continue;
 
             bool dedicated = true;
@@ -93,7 +102,7 @@ bool LCSSA::runOnLoop(Loop *loop, LoopInfo &LI) {
             for (auto &[exit, phi] : exitPhi) {
                 if (user == phi)
                     continue;           
-                if (LI.dominates(exit, useBlock)) {
+                if (DT.dominates(exit, useBlock)) {
                     user->set_operand(idx, phi);
                     changed = true;
                     break;

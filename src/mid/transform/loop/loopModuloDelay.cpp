@@ -33,7 +33,8 @@ Value *incomingFor(PhiInst *phi, BasicBlock *predecessor) {
     return nullptr;
 }
 
-bool rewriteLoop(Loop &loop, Module *module) {
+bool rewriteLoop(Loop &loop, Module *module,
+                 const DominatorTreeAnalysis &DT) {
     BasicBlock *header = loop.header;
     BasicBlock *preheader = loop.preheader;
     BasicBlock *latch = loop.singleLatch();
@@ -93,8 +94,7 @@ bool rewriteLoop(Loop &loop, Module *module) {
         for (Instruction *chain : analyzed.updateChain)
             if (chain->parent_ != remainder->parent_)
                 oneBlockChain = false;
-        if (!oneBlockChain || !header->parent_->dominates(
-                                  remainder->parent_, latch))
+        if (!oneBlockChain || !DT.dominates(remainder->parent_, latch))
             continue;
         if (!ModuloRecurrenceAnalysis::proveNoI32UpdateWrap(
                 analyzed, loopStates, control->phi, candidateInitial))
@@ -216,11 +216,12 @@ bool rewriteLoop(Loop &loop, Module *module) {
     return true;
 }
 
-bool runOnFunction(Function *function, Module *module) {
+bool runOnFunction(Function *function, Module *module,
+                   AnalysisManager &manager) {
     bool changed = false;
     for (;;) {
-        LoopInfo loops;
-        loops.analyze(function);
+        LoopInfo &loops = manager.getLoopInfo(function);
+        DominatorTreeAnalysis &DT = manager.getDominatorTree(function);
         std::vector<Loop *> ordered;
         for (const auto &loop : loops.allLoops())
             ordered.push_back(loop.get());
@@ -230,10 +231,11 @@ bool runOnFunction(Function *function, Module *module) {
                   });
         bool progress = false;
         for (Loop *loop : ordered)
-            if (rewriteLoop(*loop, module)) {
+            if (rewriteLoop(*loop, module, DT)) {
                 progress = true;
                 changed = true;
                 function->set_instr_name();
+                manager.clear(function);
                 break;
             }
         if (!progress) break;
@@ -254,7 +256,7 @@ PreservedAnalyses LoopModuloDelay::execute(Module *module,
     std::vector<Function *> functions = module->function_list_;
     for (Function *function : functions)
         if (!function->is_declaration())
-            changed |= runOnFunction(function, module);
+            changed |= runOnFunction(function, module, manager);
     if (changed)
         manager.clear();
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

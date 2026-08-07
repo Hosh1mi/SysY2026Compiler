@@ -52,7 +52,8 @@ PreservedAnalyses execute(Module *module, AnalysisManager &AM)
 ```
 
 约定是“没有改动 IR 就返回 `all()`”。默认实现不知道 pass 做了什么，按最保守方式
-返回 `none()`。返回值交给 `AnalysisManager` 清除 LoopInfo、SCEV、LVI 或 BasicAA
+返回 `none()`。只改指令、不改 CFG 的 pass 可返回 `cfgAnalyses()`，继续复用支配树、
+后支配树和支配边界。返回值交给 `AnalysisManager` 清除失效的 LoopInfo、SCEV、LVI 或 BasicAA
 缓存，详细规则见 [`docs/mid_analysis.md`](mid_analysis.md)。
 
 ### 2.1 重复组
@@ -112,7 +113,7 @@ Mem2Reg 的入口按函数工作。它先收集可提升的 `alloca`，然后按
 1. 删除没有使用的 alloca；
 2. 只有一个 store 的 alloca 直接以 stored value 替换 load；
 3. 单 basic block 内的 alloca 按指令顺序转成 SSA；
-4. 对跨块 alloca 放置 PHI，再沿支配树 rename load/store。
+4. 用独立的 DominanceFrontier 放置跨块 PHI，再沿 DominatorTree rename load/store。
 
 零初始化不是凭空假定的。需要进入尚未看到 store 的路径时，`zeroValueFor` 按类型构造
 初始值；`hasStoreBeforeFirstLoad` 用块内顺序避免把后写的值倒灌给前读。
@@ -151,7 +152,7 @@ memory modification；load 只有在中间没有可能修改同一位置的 stor
 循环体使用 sentinel 隔开，以免把一次迭代的可用 load 误带入下一迭代。`DEBUG_EARLY_CSE_AA`
 可看到这部分 alias 判断。
 
-GVN 在支配树上做更完整的全局编号。除普通纯表达式外，它还处理：
+GVN 通过 AnalysisManager 取得共享支配树，并在树上做更完整的全局编号。除普通纯表达式外，它还处理：
 
 - PHI 所有 incoming 已归到同一个值时的折叠；
 - BasicAA 证明 pure/read-only 的调用；
@@ -354,7 +355,7 @@ RadixRecurrenceEliminate 匹配纯 radix-2 自递归：`F(a,0)=0`，`F(a,1)=a sr
 
 BitFuncRecognize 更偏向布尔/位级等价。它将 32 位结果表示为 interned 的 bit expression
 arena，能构造常量、源 bit、and/or/xor/not、select、移位、常数乘、部分除法和取模。对
-函数 CFG 做可达性与后支配推理后，尝试恢复可用的 closed form，并重写所有对应 call
+函数 CFG 做可达性与共享 PostDominatorTree 推理后，尝试恢复可用的 closed form，并重写所有对应 call
 site。无法得到完整 bit-vector 或闭式不在支持集合时不改写。
 
 ## 6. 内存 idiom 与地址形状

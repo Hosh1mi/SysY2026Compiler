@@ -279,7 +279,6 @@ void discardBody(Function *function) {
         block->succ_bbs_.clear();
     }
     function->basic_blocks_.clear();
-    function->invalidateDominatorInfo();
 }
 
 BinaryInst *binary(Module *module, BasicBlock *block, Instruction::OpID op,

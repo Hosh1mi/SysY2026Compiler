@@ -8,6 +8,7 @@
 // 设计原则：纯查询结构，不修改 IR；passes 持有的 Loop* 在 analyze() 重新调用前稳定。
 
 #include "../ir/ir.hpp"
+#include "dominanceAnalysis.hpp"
 #include "../ir/instruction.hpp"
 
 #include <map>
@@ -111,8 +112,9 @@ bool describeEqualityControlInduction(const Loop &loop,
 
 class LoopInfo {
 public:
-    // 重新分析一个函数：清空旧状态后重新计算支配关系、循环、嵌套、IV
+    // 独立调用时临时构建支配树；AnalysisManager 路径复用缓存结果。
     void analyze(Function *func);
+    void analyze(Function *func, const DominatorTreeAnalysis &DT);
 
     // 清空所有状态
     void reset();
@@ -122,20 +124,15 @@ public:
     const std::vector<Loop *>      &topLevelLoops() const { return top_; }
     const std::vector<std::unique_ptr<Loop>> &allLoops() const { return loops_; }
 
-    // 支配关系（顺手暴露，避免各 pass 再算一遍）
-    bool dominates(BasicBlock *a, BasicBlock *b) const;
-    BasicBlock *getIDom(BasicBlock *bb) const;
-
     // 调试输出
     std::string print() const;
 
 private:
     // 流水线步骤
-    std::vector<BasicBlock *> computeRPO(Function *func);
-    void                      computeDominators(const std::vector<BasicBlock *> &rpo);
-    BasicBlock               *intersect(BasicBlock *a, BasicBlock *b);
-    void                      findLoops(Function *func);
-    void                      enrichLoop(Loop *loop);   // preheader/latches/exits 等
+    void                      findLoops(Function *func,
+                                        const DominatorTreeAnalysis &DT);
+    void                      enrichLoop(Loop *loop,
+                                         const DominatorTreeAnalysis &DT);
     void                      buildNestTree();
     void                      analyzeIV(Loop *loop);
 
@@ -144,7 +141,4 @@ private:
     std::vector<Loop *>                top_;               // 顶层循环
     std::map<BasicBlock *, Loop *>     bb2innermost_;      // 每个 BB 的最内层循环
 
-    // 支配信息（analyze 结束后保留）
-    std::map<BasicBlock *, BasicBlock *> idom_;
-    std::map<BasicBlock *, int>          rpoIdx_;
 };

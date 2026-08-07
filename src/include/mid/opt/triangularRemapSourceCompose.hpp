@@ -15,5 +15,5 @@ public:
     std::string name() const override { return "TriangularRemapSourceCompose"; }
 
 private:
-    bool runOnFunction(Function *function);
+    bool runOnFunction(Function *function, AnalysisManager &AM);
 };

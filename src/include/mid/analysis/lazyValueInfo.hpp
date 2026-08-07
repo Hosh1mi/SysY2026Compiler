@@ -7,7 +7,8 @@
 
 class LazyValueInfo {
 public:
-    void analyze(Function *func, const LoopInfo *loopInfo = nullptr);
+    void analyze(Function *func, const LoopInfo *loopInfo = nullptr,
+                 const DominatorTreeAnalysis *domTree = nullptr);
 
     Constant *getConstant(Value *value, Instruction *cxtI = nullptr);
     Constant *getConstantOnEdge(Value *value, BasicBlock *fromBB,
@@ -30,4 +31,5 @@ private:
     Function *function_ = nullptr;
     Module *module_ = nullptr;
     const LoopInfo *loopInfo_ = nullptr;
+    const DominatorTreeAnalysis *domTree_ = nullptr;
 };

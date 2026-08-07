@@ -738,7 +738,6 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function) {
     waveHeader->add_pre_basic_block(plan.outerPreheader);
 
     removeUnreachableBlocks(function);
-    function->invalidateDominatorInfo();
     function->set_instr_name();
     if (debugEnabled())
         std::cerr << "[TriangleInterchange] transformed func="

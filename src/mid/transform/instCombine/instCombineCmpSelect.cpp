@@ -81,7 +81,7 @@ bool isSourceNonNegative(Value *v, BasicBlock *ctx,
     if (std::find(assuming.begin(), assuming.end(), v) != assuming.end())
         return true;
 
-    if (ValueFacts::isKnownNonNegative(v, ctx))
+    if (ValueFacts::isKnownNonNegative(v, ctx, gInstCombineDominatorTree))
         return true;
     if (gInstCombineRangeAnalysis && gInstCombineRangeAnalysis->isKnownNonNegative(v, ctx))
         return true;
@@ -151,7 +151,8 @@ bool inferSignedLowerBound(Value *value, BasicBlock *ctx,
         lower = constant->value_;
         return true;
     }
-    if (ValueFacts::isKnownNonNegative(value, ctx)) {
+    if (ValueFacts::isKnownNonNegative(value, ctx,
+                                       gInstCombineDominatorTree)) {
         lower = 0;
         return true;
     }
@@ -306,7 +307,8 @@ Value* visitICmp(ICmpInst *inst) {
     }
 
     if (cy) {
-        if (ValueFacts::isKnownNonNegative(x, bb)) {
+        if (ValueFacts::isKnownNonNegative(x, bb,
+                                           gInstCombineDominatorTree)) {
             bool known = false;
             bool result = false;
             switch (pred) {

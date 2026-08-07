@@ -22,6 +22,7 @@ public:
     std::string name() const override { return "inductiveRangeCheckElimination"; }
 
 private:
-    bool runOnFunction(Function *func);
-    bool tryTightenLoop(Loop &loop, Module *module, const LoopInfo &LI);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
+    bool tryTightenLoop(Loop &loop, Module *module, const LoopInfo &LI,
+                        const DominatorTreeAnalysis &DT);
 };

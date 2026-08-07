@@ -213,9 +213,7 @@ private:
     const std::vector<PredicateFact> &factsForBlock(BasicBlock *bb);
     void collectFacts(BasicBlock *bb, std::vector<PredicateFact> &out,
                       std::set<BasicBlock *> &visiting);
-    void computePostDom(Function *func);
     void buildControlDependence(Function *func);
-    BasicBlock *immediatePostDom(BasicBlock *bb) const;
 
     static ICmpInst::ICmpOp negatePredicate(ICmpInst::ICmpOp pred);
     static ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp pred);
@@ -235,8 +233,6 @@ private:
     std::map<BasicBlock *, std::vector<PredicateFact>> blockFacts_;
     std::map<BasicBlock *, MemoryFactSet> memoryInFacts_;
     std::map<BasicBlock *, MemoryFactSet> memoryOutFacts_;
-    std::map<BasicBlock *, std::set<BasicBlock *>> postDomSets_;
-    std::map<BasicBlock *, BasicBlock *> ipdom_;
     std::set<std::pair<Value *, BasicBlock *>> visiting_;
     unsigned queryDepth_ = 0;
     bool memoryFactsComputed_ = false;

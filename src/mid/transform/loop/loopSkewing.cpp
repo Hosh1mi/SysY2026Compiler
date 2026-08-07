@@ -323,7 +323,6 @@ bool applyLoopSkew(const LoopSkewPlan &plan, Module *module) {
 
     plan.latch->delete_instr(plan.innerUpdate);
     plan.inner->header->delete_instr(plan.innerIV);
-    plan.inner->header->parent_->invalidateDominatorInfo();
     plan.inner->header->parent_->set_instr_name();
 
     if (debugEnabled())

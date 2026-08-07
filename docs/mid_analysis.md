@@ -7,7 +7,7 @@
 
 ### 1.1 目录结构
 
-- 实现位于 [`src/mid/analysis`](../src/lib/mid/analysis)。
+- 实现位于 [`src/mid/analysis`](../src/mid/analysis)。
 - 公共接口位于 [`src/include/mid/analysis`](../src/include/mid/analysis)。
 - `analysisManager.hpp`、`preservedAnalyses.hpp`、`constantEvaluator.hpp`、
   `loopUtils.hpp`、`valueFacts.hpp` 主要是接口或 header-only 工具，没有对应的
@@ -18,10 +18,13 @@
 | 组件 | 主要职责 |
 | --- | --- |
 | `AnalysisManager` | 创建、缓存和失效分析结果 |
+| `DominatorTreeAnalysis` | 入口可达 CFG 的立即支配树和 SSA 支配查询 |
+| `PostDominatorTreeAnalysis` | 多出口 CFG 的后支配关系和立即后支配点 |
+| `DominanceFrontierAnalysis` | 独立计算支配边界，供 PHI 放置等变换使用 |
 | `BasicAliasAnalysis` | 指针别名、Mod/Ref、副作用和捕获分析 |
 | `ArgumentAliasAnalysis` | 根据所有调用点证明参数根对象不别名 |
 | `LazyValueInfo` | 在 block 或 CFG edge 上求常量和谓词事实 |
-| `LoopInfo` | 循环、支配关系、嵌套和归纳变量 |
+| `LoopInfo` | 基于支配树识别循环、嵌套和归纳变量 |
 | `ScalarEvolution` | SCEV 表达式、AddRec、trip count 和 GEP 线性化 |
 | `RangeAnalysis` | 整数区间、分支事实、load 范围和归一化取模 |
 | `AffineAnalysis` | 将值表示成归纳变量上的仿射表达式 |
@@ -51,8 +54,11 @@ Module
   └── BasicAliasAnalysis
 
 Function
+  ├── DominatorTreeAnalysis
+  ├── PostDominatorTreeAnalysis
+  ├── DominanceFrontierAnalysis → DominatorTreeAnalysis
   ├── LazyValueInfo
-  ├── LoopInfo
+  ├── LoopInfo → DominatorTreeAnalysis
   ├── RangeAnalysis
   └── ScalarEvolution
 ```
@@ -61,7 +67,7 @@ Function
 - 其余分析按 `Function*` 缓存，首次查询时递归建立所需依赖。
 - `RangeAnalysis` 需要 `LoopInfo` 和 `ScalarEvolution`，并持有 `AnalysisManager`
   以便在函数调用范围分析时查询其它函数。
-- `LazyValueInfo` 建立时可接收当前函数的 `LoopInfo`。
+- `LazyValueInfo` 建立时接收当前函数的 `LoopInfo` 和支配树。
 - 分析对象中的 `Loop*`、`BasicBlock*` 和 `Value*` 都指向当前 IR；如果 transform
   改动了 CFG 或删除了指令，不能继续使用过期对象。
 
@@ -71,14 +77,20 @@ Function
 记录以下分析是否仍然有效：
 
 - `BasicAA`
+- `DominatorTree`
+- `PostDominatorTree`
+- `DominanceFrontier`
 - `LazyValueInfo`
 - `LoopInfo`
 - `SCEV`
 
-`all()` 表示全部保留，`none()` 表示全部失效。PassManager 在 pass 返回结果后调用
+`all()` 表示全部保留，`none()` 表示全部失效，`cfgAnalyses()` 表示 CFG 没有改变，
+因此支配树、后支配树和支配边界都可复用。当前 `LoopInfo` 还保存归纳变量描述，指令改写
+后不能只因 CFG 未变就保留。PassManager 在 pass 返回结果后调用
 `AnalysisManager::invalidate` 或 `invalidateFunction`：
 
-- 不保留 `LoopInfo` 时，同时清除依赖循环结构的 `LoopInfo` 和 `SCEV`。
+- 不保留 `DominatorTree` 时，同时清除支配边界、LoopInfo、LVI、SCEV 和 RangeAnalysis。
+- 不保留 `LoopInfo` 时，同时清除依赖循环结构的 `LoopInfo`、SCEV 和 RangeAnalysis。
 - 不保留 `SCEV` 时清除 `ScalarEvolution`。
 - 不保留 `LazyValueInfo` 时清除 LVI。
 - 不保留 `BasicAA` 时清除模块级 alias summary。
@@ -194,19 +206,45 @@ LVI 查询某个值在 block、block edge 或指定指令上下文中的事实�
 
 ## 3. 循环和控制流分析
 
-### 3.1 LoopInfo
+### 3.1 支配树、后支配树和支配边界
+
+实现：[`dominanceAnalysis.hpp`](../src/include/mid/analysis/dominanceAnalysis.hpp)、
+[`dominanceAnalysis.cpp`](../src/mid/analysis/dominanceAnalysis.cpp)。
+
+`DominatorTreeAnalysis` 从 entry 对可达块做 reverse postorder，再用迭代式 immediate
+dominator 算法建立树。节点保存父节点、children、深度、RPO 序号和 DFS 区间，因此块级
+`dominates` 是常数时间查询；不可达块没有树节点，也不会被误当作由 entry 支配。接口还
+提供最近公共支配点、子树遍历和指令级支配查询。
+
+SSA use 查询专门处理 PHI：普通 operand 在 user 指令处使用，PHI incoming value 则在
+对应前驱边末端使用。同一块中的普通定义按指令顺序判断。这与 LLVM `DominatorTree`
+把 PHI use 视作 incoming edge use 的做法一致，pass 不应再各自拼一套近似规则。
+
+`PostDominatorTreeAnalysis` 从实际 exit 反向标出能到达出口的区域。多个 return 通过隐式
+virtual root 建模，所以某块没有共同的实际立即后支配点时 `getIPostDominator` 返回空；
+完全不能到达出口的区域不进入当前后支配关系。`DominanceFrontierAnalysis` 与树分开缓存，
+只有 Mem2Reg 等需要 PHI 放置的 pass 才会请求它。
+
+实现思路参考 LLVM 的 `llvm/IR/Dominators.h`、`llvm/Analysis/PostDominators.h` 和
+`llvm/docs/NewPassManager.md`：正向树、反向树和 pass 失效分别建模，不把结果塞回 IR
+节点；但这里没有照搬 LLVM 的通用图模板。当前 CFG 规模下选择较简单的全量重算；LLVM
+风格的增量 `DomTreeUpdater` 留待 CFG 高频局部改写确实成为瓶颈后再引入。
+
+设置 `DEBUG_VERIFY_DOMINANCE=1` 时，分析完成后会用独立的集合不动点结果核对树关系，
+发现不一致立即终止。`print` 可输出每个块的 idom/ipdom、深度和支配边界。
+
+### 3.2 LoopInfo
 
 实现：[`loopInfo.hpp`](../src/include/mid/analysis/loopInfo.hpp)、
 [`loopInfo.cpp`](../src/mid/analysis/loopInfo.cpp)。
 
-`LoopInfo::analyze(Function*)` 依次执行：
+`LoopInfo::analyze(Function*, DominatorTreeAnalysis&)` 复用 AnalysisManager 中的支配树，
+然后依次执行：
 
-1. 从函数入口计算 reverse postorder；
-2. 基于支配关系计算 immediate dominator；
-3. 将“回到被支配 header 的边”识别为回边，收集自然循环块；
-4. 计算每个循环的 preheader、latch、exiting、exit 和 `blocksOrdered`；
-5. 建立 parent/children/depth 嵌套树；
-6. 分析 canonical IV、一般 `+1` induction IV 和控制归纳描述。
+1. 将“回到被支配 header 的边”识别为回边，收集自然循环块；
+2. 计算每个循环的 preheader、latch、exiting、exit 和 `blocksOrdered`；
+3. 建立 parent/children/depth 嵌套树；
+4. 分析 canonical IV、一般 `+1` induction IV 和控制归纳描述。
 
 `Loop` 保存两种不同用途的归纳变量信息：
 
@@ -222,7 +260,7 @@ header。`singleLatch()` 和 `singleExit()` 也只在数量恰好为一时成功
 `describeEqualityControlInduction` 用于描述 `eq/ne` 终止的控制递推，但不会覆盖
 旧的 ordered-predicate 字段，避免破坏只理解 `<` 的现有客户端。
 
-### 3.2 loopUtils
+### 3.3 loopUtils
 
 实现：[`loopUtils.hpp`](../src/include/mid/analysis/loopUtils.hpp)。
 
@@ -230,7 +268,7 @@ header。`singleLatch()` 和 `singleExit()` 也只在数量恰好为一时成功
 所在块，而 PHI incoming value 的语义使用块是对应 incoming predecessor。这一点在
 循环外提、LCSSA 检查和 live-out 分析中很重要。
 
-### 3.3 LoopVerify
+### 3.4 LoopVerify
 
 实现：[`loopVerify.hpp`](../src/include/mid/analysis/loopVerify.hpp)、
 [`loopVerify.cpp`](../src/mid/analysis/loopVerify.cpp)。
@@ -295,9 +333,9 @@ SCEV 是针对 SSA 值的结构化表达式，当前支持：
 
 ### 控制流事实
 
-RangeAnalysis 根据前驱分支收集 `PredicateFact`，预先计算 post-dominator 和控制
-依赖；`applyFacts` 将当前 block 已知的比较条件收窄到查询值上。因此同一个值在不同
-block 上可以有不同范围。`getPredicateResult` 只有在区间足以证明谓词时才返回
+RangeAnalysis 从条件分支的两个后继分别计算可达集合，只把某一侧独占区域对应的条件
+记录为 `PredicateFact`；`applyFacts` 将当前 block 已知的比较条件收窄到查询值上。
+因此同一个值在不同 block 上可以有不同范围。`getPredicateResult` 只有在区间足以证明谓词时才返回
 `AlwaysTrue` 或 `AlwaysFalse`，否则返回 `Unknown`。
 
 ### Memory facts

@@ -9,5 +9,5 @@ public:
     std::string name() const override { return "CodeSink"; }
 
 private:
-    bool runOnFunction(Function *func);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
 };

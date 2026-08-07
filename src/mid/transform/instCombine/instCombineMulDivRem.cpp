@@ -125,16 +125,17 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
         BasicBlock *header = phi->parent_;
         Function *function = header ? header->parent_ : nullptr;
         if (!function || !backedge || !remainder->parent_ ||
-            !function->dominates(header, remainder->parent_) ||
-            !function->dominates(remainder->parent_, backedge))
+            !gInstCombineDominatorTree ||
+            !gInstCombineDominatorTree->dominates(header, remainder->parent_) ||
+            !gInstCombineDominatorTree->dominates(remainder->parent_, backedge))
             continue;
         // The remainder need not be in the latch itself.  Preserve it when it
         // is on every path from the loop header to the PHI's backedge; this is
         // the cross-block form consumed by CFG-region loop unrolling.
         std::set<BasicBlock *> updateBlocks;
         for (BasicBlock *block : function->basic_blocks_) {
-            if (function->dominates(header, block) &&
-                function->dominates(block, backedge))
+            if (gInstCombineDominatorTree->dominates(header, block) &&
+                gInstCombineDominatorTree->dominates(block, backedge))
                 updateBlocks.insert(block);
         }
         if (!updateBlocks.count(remainder->parent_))
