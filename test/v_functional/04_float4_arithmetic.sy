@@ -1,0 +1,26 @@
+// Covers float4 arithmetic, division, and runtime scalar broadcasting.
+float lane_sum(float4 value) {
+    return value[0] + value[1] + value[2] + value[3];
+}
+
+int main() {
+    float scale = getfloat();
+    float4 a = {1.5, -2.0, 3.25, 8.0};
+    float4 b = {0.5, 4.0, -1.25, 2.0};
+    float4 sum = a + b;
+    float4 difference = a - b;
+    float4 product = a * b;
+    float4 quotient = a / b;
+    float4 scaled = a * scale + b;
+    putint(lane_sum(sum));
+    putch(10);
+    putint(lane_sum(difference));
+    putch(10);
+    putint(lane_sum(product));
+    putch(10);
+    putint(lane_sum(quotient));
+    putch(10);
+    putint(lane_sum(scaled));
+    putch(10);
+    return 0;
+}

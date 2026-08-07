@@ -1,0 +1,48 @@
+// Measures four-wide row combinations for a fixed 4x4 matrix product.
+const int REPEAT = 100000;
+float4 left[4] = {{1.0, 0.0, 0.0, 0.0},
+                  {0.0, 2.0, 0.0, 0.0},
+                  {0.0, 0.0, 3.0, 0.0},
+                  {0.0, 0.0, 0.0, 4.0}};
+float4 right[4] = {{1.0, 2.0, 3.0, 4.0},
+                   {5.0, 6.0, 7.0, 8.0},
+                   {9.0, 10.0, 11.0, 12.0},
+                   {13.0, 14.0, 15.0, 16.0}};
+float4 result[4];
+
+int main() {
+    left[0] = {1.0, 0.0, 0.0, 0.0};
+    left[1] = {0.0, 2.0, 0.0, 0.0};
+    left[2] = {0.0, 0.0, 3.0, 0.0};
+    left[3] = {0.0, 0.0, 0.0, 4.0};
+    right[0] = {1.0, 2.0, 3.0, 4.0};
+    right[1] = {5.0, 6.0, 7.0, 8.0};
+    right[2] = {9.0, 10.0, 11.0, 12.0};
+    right[3] = {13.0, 14.0, 15.0, 16.0};
+
+    starttime();
+    int repeat = 0;
+    while (repeat < REPEAT) {
+        int row = 0;
+        while (row < 4) {
+            result[row] = right[0] * left[row][0]
+                        + right[1] * left[row][1]
+                        + right[2] * left[row][2]
+                        + right[3] * left[row][3];
+            row = row + 1;
+        }
+        repeat = repeat + 1;
+    }
+    stoptime();
+
+    float checksum = 0.0;
+    int row = 0;
+    while (row < 4) {
+        checksum = checksum + result[row][0] + result[row][1]
+                            + result[row][2] + result[row][3];
+        row = row + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

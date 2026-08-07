@@ -1,0 +1,39 @@
+// Measures float4 arithmetic with a runtime scalar broadcast over vector arrays.
+const int N = 4096;
+const int REPEAT = 256;
+float4 source[N];
+float4 bias[N];
+float4 result[N];
+
+int main() {
+    float scale = getfloat();
+    int i = 0;
+    while (i < N) {
+        source[i] = {1.25, 2.5, 3.75, 5.0};
+        bias[i] = {0.5, 1.0, 1.5, 2.0};
+        i = i + 1;
+    }
+
+    starttime();
+    int repeat = 0;
+    while (repeat < REPEAT) {
+        i = 0;
+        while (i < N) {
+            result[i] = source[i] * scale + bias[i];
+            i = i + 1;
+        }
+        repeat = repeat + 1;
+    }
+    stoptime();
+
+    float checksum = 0.0;
+    i = 0;
+    while (i < N) {
+        checksum = checksum + result[i][0] + result[i][1]
+                            + result[i][2] + result[i][3];
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

@@ -12,7 +12,9 @@
 docs/*
 !docs/*.md
 .agents/
+!test
 test/*
+!test/v_*
 
 src/backend/riscv_deprecated/
 src/mid/hira*

@@ -1,0 +1,42 @@
+// Measures a compact int4 kernel using declaration initializers and vector stores.
+const int N = 4096;
+const int REPEAT = 256;
+int4 source[N];
+int4 bias[N];
+int4 result[N];
+
+int main() {
+    int i = 0;
+    while (i < N) {
+        source[i][0] = 1;
+        source[i][1] = 2;
+        source[i][2] = 3;
+        source[i][3] = 4;
+        bias[i][0] = 5;
+        bias[i][1] = 6;
+        bias[i][2] = 7;
+        bias[i][3] = 8;
+        i = i + 1;
+    }
+    starttime();
+    int repeat = 0;
+    while (repeat < REPEAT) {
+        i = 0;
+        while (i < N) {
+            result[i] = source[i] * 3 + bias[i];
+            i = i + 1;
+        }
+        repeat = repeat + 1;
+    }
+    stoptime();
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        checksum = checksum + result[i][0] + result[i][1]
+                            + result[i][2] + result[i][3];
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

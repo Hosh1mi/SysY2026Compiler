@@ -1,0 +1,27 @@
+// Covers float4 values updated through loop-carried conditional selection.
+int main() {
+    int count = getint();
+    float4 accumulator = {0.0, 0.0, 0.0, 0.0};
+    float4 step = {1.0, 2.0, 3.0, 4.0};
+    int i = 0;
+    while (i < count) {
+        if (i % 2 == 0) {
+            accumulator = accumulator + step;
+        } else {
+            accumulator = accumulator - step;
+        }
+        step = step + 1.0;
+        i = i + 1;
+    }
+    putint(accumulator[0]);
+    putch(10);
+    putint(accumulator[1]);
+    putch(10);
+    putint(accumulator[2]);
+    putch(10);
+    putint(accumulator[3]);
+    putch(10);
+    putint(accumulator[0] + accumulator[1] + accumulator[2] + accumulator[3]);
+    putch(10);
+    return 0;
+}

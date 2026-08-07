@@ -1,0 +1,42 @@
+// Measures a reusable int4 transform across a large vector working set.
+const int N = 2048;
+const int REPEAT = 256;
+int4 source[N];
+int4 result[N];
+
+int4 transform(int4 value, int4 multiplier, int4 addend) {
+    return value * multiplier + addend;
+}
+
+int main() {
+    int4 multiplier = {2, 3, 4, 5};
+    int4 addend = {5, 6, 7, 8};
+    int i = 0;
+    while (i < N) {
+        source[i] = {1, 2, 3, 4};
+        i = i + 1;
+    }
+
+    starttime();
+    int repeat = 0;
+    while (repeat < REPEAT) {
+        i = 0;
+        while (i < N) {
+            result[i] = transform(source[i], multiplier, addend);
+            i = i + 1;
+        }
+        repeat = repeat + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        checksum = checksum + result[i][0] + result[i][1]
+                            + result[i][2] + result[i][3];
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

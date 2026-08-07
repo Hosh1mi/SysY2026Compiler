@@ -1,0 +1,16 @@
+// Covers float4 initialization and scalar-to-lane conversions on assignment.
+float4 global_data = {1.5, -2.5, 3.25, -4.25};
+const float4 global_weights = {2.0, 4.0, 6.0, 8.0};
+
+int main() {
+    float4 local = {0.5, 1.5};
+    local[2] = 3;
+    local[3] = 4.5;
+    putint(global_data[0] + global_data[1] + global_data[2] + global_data[3]);
+    putch(10);
+    putint(global_weights[0] + global_weights[1] + global_weights[2] + global_weights[3]);
+    putch(10);
+    putint(local[0] + local[1] + local[2] + local[3]);
+    putch(10);
+    return 0;
+}

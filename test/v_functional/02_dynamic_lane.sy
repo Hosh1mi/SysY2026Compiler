@@ -1,0 +1,20 @@
+// Covers runtime lane extraction and insertion together with constant lanes.
+int main() {
+    int lane = getint();
+    int value = getint();
+    int4 data = {1, 2, 3, 4};
+    data[lane] = value;
+    data[0] = data[3] * 3;
+    data[1] = data[lane] - 5;
+    putint(data[0]);
+    putch(10);
+    putint(data[1]);
+    putch(10);
+    putint(data[2]);
+    putch(10);
+    putint(data[3]);
+    putch(10);
+    putint(data[0] + data[1] + data[2] + data[3]);
+    putch(10);
+    return 0;
+}
