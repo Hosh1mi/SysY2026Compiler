@@ -51,18 +51,18 @@ bool isLoopHeader(BasicBlock *bb, const std::set<BasicBlock *> &loopHeaders) {
 }
 
 bool isUnsafeLoopThread(BasicBlock *pred, BasicBlock *mid, BasicBlock *chosenSucc,
-                        const LoopInfo &LI,
+                        const DominatorTreeAnalysis &DT,
                         const std::set<BasicBlock *> &loopHeaders) {
     if (isLoopHeader(mid, loopHeaders) || isLoopHeader(chosenSucc, loopHeaders))
         return true;
 
     // Mirroring LLVM's conservative loop-header stance: do not create a new
     // edge to a dominating block, which would be a new backedge candidate.
-    if (LI.dominates(chosenSucc, pred))
+    if (DT.dominates(chosenSucc, pred))
         return true;
 
     // If the existing edge is already a backedge, keep loop structure intact.
-    if (LI.dominates(mid, pred))
+    if (DT.dominates(mid, pred))
         return true;
 
     return false;
@@ -90,14 +90,14 @@ void collectEdgeFacts(BasicBlock *pred, BasicBlock *succ, BoolFactMap &boolFacts
 }
 
 bool isAllowedPhiIncomingValue(Value *value, BasicBlock *pred,
-                               const LoopInfo &LI) {
+                               const DominatorTreeAnalysis &DT) {
     if (dynamic_cast<Constant *>(value)) return true;
     if (dynamic_cast<Argument *>(value)) return true;
     if (dynamic_cast<GlobalVariable *>(value)) return true;
     auto *inst = dynamic_cast<Instruction *>(value);
     if (!inst || !inst->parent_) return false;
     if (inst->parent_->parent_ != pred->parent_) return false;
-    return LI.dominates(inst->parent_, pred);
+    return DT.dominates(inst->parent_, pred);
 }
 
 Value *substitutePhiOnEdge(Value *value, BasicBlock *mid, BasicBlock *pred,
@@ -207,7 +207,7 @@ bool redirectPredEdge(BasicBlock *pred, BasicBlock *oldTarget,
 }
 
 bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
-                             BasicBlock *pred, const LoopInfo &LI,
+                             BasicBlock *pred, const DominatorTreeAnalysis &DT,
                              std::vector<PhiRepairEdit> &edits) {
     for (auto *inst : chosenSucc->instr_list_) {
         if (!inst->is_phi()) break;
@@ -232,7 +232,7 @@ bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
 
         Value *replacement = substitutePhiOnEdge(phi->get_operand(incomingIdx - 1),
                                                  mid, pred);
-        if (!replacement || !isAllowedPhiIncomingValue(replacement, pred, LI))
+        if (!replacement || !isAllowedPhiIncomingValue(replacement, pred, DT))
             return false;
 
         if (existingPredIdx >= 0) {
@@ -270,7 +270,8 @@ void applySuccessorPhiRepairs(const std::vector<PhiRepairEdit> &edits,
     }
 }
 
-bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid, const LoopInfo &LI,
+bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid,
+                   const DominatorTreeAnalysis &DT,
                    const std::set<BasicBlock *> &loopHeaders) {
     if (!pred || !mid || pred->parent_ != mid->parent_)
         return false;
@@ -295,7 +296,7 @@ bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid, const LoopInfo &LI,
     (void)otherSucc;
 
     if (chosenSucc == pred || chosenSucc == mid) return false;
-    if (isUnsafeLoopThread(pred, mid, chosenSucc, LI, loopHeaders))
+    if (isUnsafeLoopThread(pred, mid, chosenSucc, DT, loopHeaders))
         return false;
 
     // Bypassing mid substitutes its phis only in the selected successor's
@@ -315,7 +316,7 @@ bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid, const LoopInfo &LI,
     }
 
     std::vector<PhiRepairEdit> phiEdits;
-    if (!planSuccessorPhiRepairs(chosenSucc, mid, pred, LI, phiEdits))
+    if (!planSuccessorPhiRepairs(chosenSucc, mid, pred, DT, phiEdits))
         return false;
 
     const bool midStillPredecessor = mid->pre_bbs_.size() > 1;
@@ -379,11 +380,15 @@ bool JumpThreadingLite::runOnFunction(Function *func, AnalysisManager *AM) {
         changedThisRound = false;
 
         LoopInfo localLI;
+        DominatorTreeAnalysis localDT;
         LoopInfo *LI = &localLI;
+        DominatorTreeAnalysis *DT = &localDT;
         if (AM) {
             LI = &AM->getLoopInfo(func);
+            DT = &AM->getDominatorTree(func);
         } else {
-            localLI.analyze(func);
+            localDT.analyze(func);
+            localLI.analyze(func, localDT);
         }
 
         std::set<BasicBlock *> loopHeaders;
@@ -399,7 +404,7 @@ bool JumpThreadingLite::runOnFunction(Function *func, AnalysisManager *AM) {
             std::vector<BasicBlock *> preds(mid->pre_bbs_.begin(), mid->pre_bbs_.end());
             for (auto *pred : preds) {
                 if (pred->parent_ != func) continue;
-                if (!tryThreadEdge(pred, mid, *LI, loopHeaders))
+                if (!tryThreadEdge(pred, mid, *DT, loopHeaders))
                     continue;
 
                 changedAny = true;

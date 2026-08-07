@@ -49,13 +49,13 @@ private:
     static constexpr unsigned HASH_SLOTS = 1u << HASH_BITS;
     static constexpr unsigned HASH_MASK  = HASH_SLOTS - 1;
 
-    bool isCandidate(Function *f, BasicAliasAnalysis &baa,
+    bool isCandidate(Function *f, BasicAliasAnalysis &baa, AnalysisManager &AM,
                      unsigned &selfCallCount, unsigned &externalCallCount);
     bool functionReadsMemory(Function *f);
     // 读到的全局是否存在“调用点之间仍可能被改写”的 store。
     // 若每个相关 store 都支配全部外部调用点，则全局在首次调用前已冻结，
     // 跨调用点缓存安全。
-    bool readsUnfrozenGlobal(Function *f);
+    bool readsUnfrozenGlobal(Function *f, AnalysisManager &AM);
     unsigned deriveArgBound(Function *f, Argument *arg);
     // 把 f 的全部基本块迁到新函数，形参 use 改写到新函数；f 变空壳供建包装。
     Function *outlineBody(Function *f);

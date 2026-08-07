@@ -1,17 +1,25 @@
 #include "../../include/mid/opt/deadStoreEliminate.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <queue>
 #include <set>
 #include <vector>
 
 void DeadStoreEliminate::execute(Module *module) {
-    BasicAliasAnalysis AA;
-    AA.analyze(module);
+    AnalysisManager AM;
+    execute(module, AM);
+}
 
+PreservedAnalyses DeadStoreEliminate::execute(Module *module,
+                                               AnalysisManager &AM) {
+    BasicAliasAnalysis &AA = AM.getBasicAA(module);
+    bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func, AA);
+            changed |= runOnFunction(func, AA, AM.getDominatorTree(func));
     }
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
 static bool instBefore(Instruction *a, Instruction *b) {
@@ -61,7 +69,8 @@ static std::set<BasicBlock *> backwardReachableFrom(BasicBlock *start) {
 }
 
 bool DeadStoreEliminate::isRedundantStore(StoreInst *store,
-                                          const BasicAliasAnalysis &AA) {
+                                          const BasicAliasAnalysis &AA,
+                                          const DominatorTreeAnalysis &DT) {
     if (!store)
         return false;
 
@@ -77,7 +86,7 @@ bool DeadStoreEliminate::isRedundantStore(StoreInst *store,
     BasicBlock *loadBB = load->parent_;
     BasicBlock *storeBB = store->parent_;
     Function *func = storeBB->parent_;
-    if (!func->dominates(loadBB, storeBB))
+    if (!DT.dominates(loadBB, storeBB))
         return false;
     if (loadBB == storeBB && !instBefore(load, store))
         return false;
@@ -112,12 +121,13 @@ bool DeadStoreEliminate::isRedundantStore(StoreInst *store,
 }
 
 bool DeadStoreEliminate::runOnFunction(Function *func,
-                                       const BasicAliasAnalysis &AA) {
+                                       const BasicAliasAnalysis &AA,
+                                       const DominatorTreeAnalysis &DT) {
     std::vector<StoreInst *> toDelete;
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *store = dynamic_cast<StoreInst *>(inst);
-            if (store && isRedundantStore(store, AA))
+            if (store && isRedundantStore(store, AA, DT))
                 toDelete.push_back(store);
         }
     }
@@ -127,7 +137,5 @@ bool DeadStoreEliminate::runOnFunction(Function *func,
             store->parent_->delete_instr(store);
     }
 
-    if (!toDelete.empty())
-        func->invalidateDominatorInfo();
     return !toDelete.empty();
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include "dominanceAnalysis.hpp"
 
 #include "../ir/ir.hpp"
 
@@ -322,7 +323,8 @@ inline bool isNonNegativeRecurrenceImpl(
     return finish(false);
 }
 
-inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
+inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth,
+                                   const DominatorTreeAnalysis *DT = nullptr) {
     if (!v || depth > 8)
         return false;
 
@@ -351,7 +353,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
                 continue;
             foundCaller = true;
             if (!isKnownNonNegativeImpl(call->get_operand(arg->arg_no_),
-                                        call->parent_, depth + 1))
+                                        call->parent_, depth + 1, DT))
                 return false;
         }
         if (foundCaller)
@@ -376,7 +378,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
         return true;
 
     if (inst->op_id_ == Instruction::AShr)
-        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1);
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1, DT);
 
     if (inst->op_id_ == Instruction::And) {
         auto *mask = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -409,18 +411,18 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
             if (zero && zero->value_ == 0)
                 return true;
         }
-        return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1) &&
-               isKnownNonNegativeImpl(inst->get_operand(2), ctx, depth + 1);
+        return isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1, DT) &&
+               isKnownNonNegativeImpl(inst->get_operand(2), ctx, depth + 1, DT);
     }
 
     if (inst->op_id_ == Instruction::Or)
-        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
-               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1, DT) &&
+               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1, DT);
 
     if (inst->op_id_ == Instruction::Add &&
         inst->hasSemFlag(SemFlag::NoSignedWrap))
-        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1) &&
-               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1);
+        return isKnownNonNegativeImpl(inst->get_operand(0), ctx, depth + 1, DT) &&
+               isKnownNonNegativeImpl(inst->get_operand(1), ctx, depth + 1, DT);
 
     if (inst->is_phi()) {
         std::unordered_set<Value *> visiting;
@@ -464,7 +466,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
                         ? dynamic_cast<ICmpInst *>(term->get_operand(0))
                         : nullptr;
         if (init && update && cmp &&
-            isKnownNonNegativeImpl(init, ctx, depth + 1)) {
+            isKnownNonNegativeImpl(init, ctx, depth + 1, DT)) {
             ICmpInst::ICmpOp pred = cmp->icmp_op_;
             Value *boundValue = nullptr;
             if (cmp->get_operand(0) == phi) {
@@ -475,8 +477,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
             }
             auto *bound = dynamic_cast<ConstantInt *>(boundValue);
             auto *taken = dynamic_cast<BasicBlock *>(term->get_operand(1));
-            Function *func = inst->parent_->parent_;
-            if (taken && backedge && func->dominates(taken, backedge)) {
+            if (taken && backedge && DT && DT->dominates(taken, backedge)) {
                 bool noOverflow = false;
                 bool nonNegativeBound = false;
                 if (bound) {
@@ -490,7 +491,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
                     // For any signed i32 bound, phi < bound proves
                     // phi <= INT_MAX-1, so incrementing once cannot overflow.
                     nonNegativeBound =
-                        isKnownNonNegativeImpl(boundValue, inst->parent_, depth + 1);
+                        isKnownNonNegativeImpl(boundValue, inst->parent_, depth + 1, DT);
                     noOverflow = true;
                 }
                 bool upperBound = pred == ICmpInst::ICMP_SLT ||
@@ -504,8 +505,9 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth) {
     return nonNegativeBranchImpl(v, ctx);
 }
 
-inline bool isKnownNonNegative(Value *v, BasicBlock *ctx = nullptr) {
-    return isKnownNonNegativeImpl(v, ctx, 0);
+inline bool isKnownNonNegative(Value *v, BasicBlock *ctx = nullptr,
+                               const DominatorTreeAnalysis *DT = nullptr) {
+    return isKnownNonNegativeImpl(v, ctx, 0, DT);
 }
 
 inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {

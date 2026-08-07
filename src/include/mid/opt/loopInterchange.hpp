@@ -42,7 +42,7 @@ public:
     std::string name() const override { return "LoopInterchange"; }
 
 private:
-    bool runOnFunction(Function *func);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
 
     const ArgumentAliasAnalysis *argAA_ = nullptr;  // 过程间参数别名 oracle
 };

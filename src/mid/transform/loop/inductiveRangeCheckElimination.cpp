@@ -1,4 +1,5 @@
 #include "../../../include/mid/opt/inductiveRangeCheckElimination.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include <unordered_set>
 
@@ -468,7 +469,7 @@ bool matchBranchShape(BasicBlock *header, BasicBlock *latch, const Loop &loop,
 Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
                            bool workOnTrue, const Loop &loop, Module *module,
                            BasicBlock *insertionBlock, Instruction *insertBefore,
-                           const LoopInfo &LI) {
+                           const DominatorTreeAnalysis &DT) {
     ICmpInst::ICmpOp pred =
         workOnTrue ? guardCmp->icmp_op_ : negateCmp(guardCmp->icmp_op_);
 
@@ -487,7 +488,7 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
         if (!inst) return true;
         if (!inst->parent_) return false;
         return inst->parent_ == insertionBlock ||
-               LI.dominates(inst->parent_, insertionBlock);
+               DT.dominates(inst->parent_, insertionBlock);
     };
     // A dedicated loop preheader is after the zero-trip guard.  Loop-invariant
     // only means "defined outside the loop"; it does not imply that a value
@@ -945,28 +946,27 @@ bool tryTightenMonotoneGuardLoop(Loop &loop, Module *module) {
 } // namespace
 
 void inductiveRangeCheckElimination::execute(Module *module) {
-    for (auto *func : module->function_list_) {
-        if (!func->is_declaration())
-            runOnFunction(func);
-    }
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
 PreservedAnalyses inductiveRangeCheckElimination::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func);
+            changed |= runOnFunction(func, AM);
     }
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }
 
-bool inductiveRangeCheckElimination::runOnFunction(Function *func) {
+bool inductiveRangeCheckElimination::runOnFunction(Function *func,
+                                                    AnalysisManager &AM) {
     if (func->basic_blocks_.empty())
         return false;
 
-    LoopInfo LI;
-    LI.analyze(func);
+    LoopInfo &LI = AM.getLoopInfo(func);
+    DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
 
     std::vector<Loop *> loops;
     for (auto &loop : LI.allLoops())
@@ -976,7 +976,7 @@ bool inductiveRangeCheckElimination::runOnFunction(Function *func) {
 
     bool changed = false;
     for (auto *loop : loops)
-        changed |= tryTightenLoop(*loop, func->parent_, LI);
+        changed |= tryTightenLoop(*loop, func->parent_, LI, DT);
 
     if (changed)
         func->set_instr_name();
@@ -984,7 +984,8 @@ bool inductiveRangeCheckElimination::runOnFunction(Function *func) {
 }
 
 bool inductiveRangeCheckElimination::tryTightenLoop(
-    Loop &loop, Module *module, const LoopInfo &LI) {
+    Loop &loop, Module *module, const LoopInfo &LI,
+    const DominatorTreeAnalysis &DT) {
     const bool debug = std::getenv("DEBUG_INDUCTIVE_RANGE") != nullptr;
     auto reject = [&](const char *reason) {
         if (debug)
@@ -1054,7 +1055,7 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
 
     Instruction *insertBefore = guardBlock->get_terminator();
     Value *tightened = buildTightenedBound(iv, guardCmp, shape.workOnTrue, loop,
-                                           module, guardBlock, insertBefore, LI);
+                                           module, guardBlock, insertBefore, DT);
     if (!tightened)
         return reject("bound-construction");
 

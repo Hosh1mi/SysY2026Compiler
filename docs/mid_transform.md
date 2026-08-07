@@ -43,8 +43,9 @@ LoopDistribution
 `InstCombine` 是 canonical cleanup 的一部分，因此会在整条流水线中多次运行。
 `LoopMemoryScalarPromotion` 的实现虽在本目录，但调度在 late target-independent 阶段。
 
-Pass 修改 IR 后通常返回 `PreservedAnalyses::none()`，让 `AnalysisManager` 清除 LoopInfo、SCEV、
-LVI 和 alias 缓存。纯维持性 pass 可以不参与 repeat-group 的收敛判定，但这不改变
+Pass 修改 CFG 后通常返回 `PreservedAnalyses::none()`，让 `AnalysisManager` 清除支配树、
+LoopInfo、SCEV、LVI 和 alias 缓存。只改写指令的 pass 返回 `cfgAnalyses()`，可以保留
+支配树、后支配树和支配边界。纯维持性 pass 可以不参与 repeat-group 的收敛判定，但这不改变
 其分析失效语义。
 
 ## 3. InstCombine

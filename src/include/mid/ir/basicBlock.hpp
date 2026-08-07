@@ -1,5 +1,5 @@
 #pragma once
-// IR 基本块：线性指令序列，以终止指令（br/ret）结尾，维护 CFG 前驱/后继关系和支配树信息
+// IR 基本块：线性指令序列，以终止指令（br/ret）结尾，维护 CFG 前驱/后继关系
 
 #include "value.hpp"
 #include "module.hpp"
@@ -40,20 +40,6 @@ public:
         succ_bbs_.erase(std::remove(succ_bbs_.begin(), succ_bbs_.end(), bb), succ_bbs_.end());
     }
 
-    // 判断 this 是否支配 bb2（沿 idom 链向上查找，不依赖块名）
-    int isDominate(BasicBlock* bb2) {
-        if (!bb2 || this->parent_ != bb2->parent_)
-            return -1;
-        if (this == bb2)
-            return 1;
-        while (bb2->idom_) {
-            if (bb2->idom_ == this)
-                return 1;
-            bb2 = bb2->idom_;
-        }
-        return 0;
-    }
-
     Instruction* get_terminator();   // 获取终止指令（br 或 ret）
     bool delete_instr(Instruction* instr);  // 删除指令并清除 use 关系
     bool remove_instr(Instruction* instr);  // 移出指令但保留 use 关系（用于跨 BB 移动）
@@ -64,11 +50,6 @@ public:
     // CFG 信息
     std::vector<BasicBlock*> pre_bbs_;
     std::vector<BasicBlock*> succ_bbs_;
-    // 支配树信息
-    std::set<BasicBlock*> dom_frontier_;
-    std::set<BasicBlock*> rdom_frontier_;
-    std::set<BasicBlock*> rdoms_;
-    BasicBlock* idom_;
     // 活跃变量分析
     std::set<Value*> live_in;
     std::set<Value*> live_out;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "basicAliasAnalysis.hpp"
+#include "dominanceAnalysis.hpp"
 #include "lazyValueInfo.hpp"
 #include "loopInfo.hpp"
 #include "preservedAnalyses.hpp"
@@ -15,6 +16,9 @@
 class AnalysisManager {
 public:
     BasicAliasAnalysis &getBasicAA(Module *module);
+    DominatorTreeAnalysis &getDominatorTree(Function *func);
+    PostDominatorTreeAnalysis &getPostDominatorTree(Function *func);
+    DominanceFrontierAnalysis &getDominanceFrontier(Function *func);
     LazyValueInfo &getLazyValueInfo(Function *func);
     LoopInfo &getLoopInfo(Function *func);
     RangeAnalysis &getRangeAnalysis(Function *func);
@@ -31,6 +35,9 @@ public:
 
 private:
     struct FunctionCache {
+        std::unique_ptr<DominatorTreeAnalysis> dominatorTree;
+        std::unique_ptr<PostDominatorTreeAnalysis> postDominatorTree;
+        std::unique_ptr<DominanceFrontierAnalysis> dominanceFrontier;
         std::unique_ptr<LazyValueInfo> lazyValueInfo;
         std::unique_ptr<LoopInfo> loopInfo;
         std::unique_ptr<RangeAnalysis> rangeAnalysis;

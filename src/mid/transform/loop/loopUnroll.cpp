@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+static thread_local const DominatorTreeAnalysis *gLoopUnrollDomTree = nullptr;
+
 static const int DEFAULT_UNROLL_FACTOR = 4;
 static const int MAX_STRUCTURED_LOOP_INSTS = 24;
 
@@ -98,18 +100,18 @@ static bool prepareModuloRecurrence(
 static bool isMustExecuteModuloRecurrence(
     const UnrolledModuloRecurrence &recurrence, const Loop &loop,
     Function *func, BasicBlock *latch) {
-    if (!func || !latch)
+    if (!func || !latch || !gLoopUnrollDomTree)
         return false;
     for (Instruction *instruction : recurrence.updateChain) {
         if (!instruction->parent_ ||
             !loop.blocks.count(instruction->parent_) ||
-            !func->dominates(instruction->parent_, latch))
+            !gLoopUnrollDomTree->dominates(instruction->parent_, latch))
             return false;
     }
     for (const auto &term : recurrence.contributionTerms) {
         auto *instruction = dynamic_cast<Instruction *>(term.value);
         if (instruction && loop.blocks.count(instruction->parent_) &&
-            !func->dominates(instruction->parent_, latch))
+            !gLoopUnrollDomTree->dominates(instruction->parent_, latch))
             return false;
     }
     return true;
@@ -3044,9 +3046,15 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return false;
 
+    DominatorTreeAnalysis DT;
+    DT.analyze(func);
+    gLoopUnrollDomTree = &DT;
     LoopInfo LI;
-    LI.analyze(func);
-    if (LI.allLoops().empty()) return false;
+    LI.analyze(func, DT);
+    if (LI.allLoops().empty()) {
+        gLoopUnrollDomTree = nullptr;
+        return false;
+    }
 
     // Innermost first。unroll 成功会改 CFG（preheader 改指 headerMain），
     // 快照内其余 Loop 结构随之过期——与迁移前行为一致：外层循环因
@@ -3081,6 +3089,7 @@ bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
 
     if (changed)
         func->set_instr_name();
+    gLoopUnrollDomTree = nullptr;
     return changed;
 }
 

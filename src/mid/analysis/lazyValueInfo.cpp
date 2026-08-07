@@ -32,6 +32,7 @@ struct QueryState {
     BasicBlock *toEdge = nullptr;
     bool useBlockValue = true;
     const LoopInfo *loopInfo = nullptr;
+    const DominatorTreeAnalysis *domTree = nullptr;
     int depth = 0;
     std::unordered_set<Value *> activeValues;
     std::unordered_set<PredicateQueryKey, PredicateQueryKeyHash> activePredicates;
@@ -119,7 +120,7 @@ static bool isSameOrNestedLoop(const Loop *inner, const Loop *outer) {
 static void collectDominatingEdgeFacts(const QueryState &state,
                                        BoolFactMap &boolFacts,
                                        ICmpFactMap &cmpFacts) {
-    if (!state.func || !state.block || !state.loopInfo)
+    if (!state.func || !state.block || !state.loopInfo || !state.domTree)
         return;
 
     Loop *contextLoop = state.loopInfo->getLoopFor(state.block);
@@ -139,7 +140,7 @@ static void collectDominatingEdgeFacts(const QueryState &state,
             auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(successorIndex));
             if (!succ || succ->pre_bbs_.size() != 1 || succ->pre_bbs_.front() != bb)
                 return;
-            if (!state.loopInfo->dominates(succ, state.block))
+            if (!state.domTree->dominates(succ, state.block))
                 return;
             recordAssumedBool(br->get_operand(0), assumed, boolFacts, cmpFacts);
         };
@@ -364,10 +365,12 @@ static Constant *evaluateConstant(Value *value, QueryState &state) {
 
 } // namespace
 
-void LazyValueInfo::analyze(Function *func, const LoopInfo *loopInfo) {
+void LazyValueInfo::analyze(Function *func, const LoopInfo *loopInfo,
+                            const DominatorTreeAnalysis *domTree) {
     function_ = func;
     module_ = func ? func->parent_ : nullptr;
     loopInfo_ = loopInfo;
+    domTree_ = domTree;
 }
 
 Constant *LazyValueInfo::getConstant(Value *value, Instruction *cxtI) {
@@ -375,6 +378,7 @@ Constant *LazyValueInfo::getConstant(Value *value, Instruction *cxtI) {
     state.func = function_;
     state.module = module_;
     state.loopInfo = loopInfo_;
+    state.domTree = domTree_;
     state.block = cxtI ? cxtI->parent_ : nullptr;
     return evaluateConstant(value, state);
 }
@@ -385,6 +389,7 @@ Constant *LazyValueInfo::getConstantOnEdge(Value *value, BasicBlock *fromBB,
     state.func = function_;
     state.module = module_;
     state.loopInfo = loopInfo_;
+    state.domTree = domTree_;
     state.block = toBB;
     state.fromEdge = fromBB;
     state.toEdge = toBB;
@@ -399,6 +404,7 @@ std::optional<bool> LazyValueInfo::getPredicateAt(ICmpInst::ICmpOp pred,
     state.func = function_;
     state.module = module_;
     state.loopInfo = loopInfo_;
+    state.domTree = domTree_;
     state.block = cxtI ? cxtI->parent_ : nullptr;
     state.useBlockValue = useBlockValue;
     return evaluatePredicate(pred, lhs, rhs, state);
@@ -413,6 +419,7 @@ std::optional<bool> LazyValueInfo::getPredicateOnEdge(ICmpInst::ICmpOp pred,
     state.func = function_;
     state.module = module_;
     state.loopInfo = loopInfo_;
+    state.domTree = domTree_;
     state.block = toBB;
     state.fromEdge = fromBB;
     state.toEdge = toBB;
@@ -427,4 +434,5 @@ void LazyValueInfo::clear() {
     function_ = nullptr;
     module_ = nullptr;
     loopInfo_ = nullptr;
+    domTree_ = nullptr;
 }

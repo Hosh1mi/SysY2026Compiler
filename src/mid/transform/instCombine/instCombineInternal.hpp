@@ -112,7 +112,11 @@ inline bool isKnownPowerOfTwo(Value *v, int &k) {
 // transform safe.  As analysis improves (range analysis, loop induction
 // variables, etc.) these functions naturally cover more cases.
 
-using ValueFacts::isKnownNonNegative;
+extern thread_local DominatorTreeAnalysis *gInstCombineDominatorTree;
+inline bool isKnownNonNegative(Value *value, BasicBlock *context = nullptr) {
+    return ValueFacts::isKnownNonNegative(value, context,
+                                          gInstCombineDominatorTree);
+}
 using ValueFacts::isKnownMultipleOf;
 using ValueFacts::knownAbsBound;
 

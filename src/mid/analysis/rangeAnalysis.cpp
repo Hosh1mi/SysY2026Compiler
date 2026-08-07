@@ -36,7 +36,6 @@ void debugLog(const char *what, Value *v, BasicBlock *ctx, const RangeAnalysis::
 RangeAnalysis::RangeAnalysis(Function *func, AnalysisManager *AM, const LoopInfo &LI,
                              ScalarEvolution &SE)
     : func_(func), AM_(AM), LI_(&LI), SE_(&SE) {
-    computePostDom(func);
     buildControlDependence(func);
 }
 
@@ -45,8 +44,6 @@ void RangeAnalysis::clear() {
     memoryInFacts_.clear();
     memoryOutFacts_.clear();
     blockFacts_.clear();
-    postDomSets_.clear();
-    ipdom_.clear();
     visiting_.clear();
     memoryFactsComputed_ = false;
     memoryFactsComputing_ = false;
@@ -149,73 +146,6 @@ ICmpInst::ICmpOp RangeAnalysis::swapPredicate(ICmpInst::ICmpOp pred) {
 RangeAnalysis::IntRange RangeAnalysis::getConstantRange(ConstantInt *ci) const {
     if (!ci) return IntRange::top();
     return IntRange::constant(ci->value_);
-}
-
-void RangeAnalysis::computePostDom(Function *func) {
-    if (!func || func->basic_blocks_.empty()) return;
-
-    std::set<BasicBlock *> all(func->basic_blocks_.begin(), func->basic_blocks_.end());
-    for (auto *bb : func->basic_blocks_) {
-        if (bb->succ_bbs_.empty()) postDomSets_[bb] = {bb};
-        else postDomSets_[bb] = all;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto *bb : func->basic_blocks_) {
-            if (bb->succ_bbs_.empty()) continue;
-
-            std::set<BasicBlock *> next;
-            bool first = true;
-            for (auto *succ : bb->succ_bbs_) {
-                auto it = postDomSets_.find(succ);
-                if (it == postDomSets_.end()) continue;
-                if (first) {
-                    next = it->second;
-                    first = false;
-                } else {
-                    std::set<BasicBlock *> inter;
-                    for (auto *x : next) {
-                        if (it->second.count(x)) inter.insert(x);
-                    }
-                    next = std::move(inter);
-                }
-            }
-            next.insert(bb);
-            if (next != postDomSets_[bb]) {
-                postDomSets_[bb] = std::move(next);
-                changed = true;
-            }
-        }
-    }
-
-    for (auto *bb : func->basic_blocks_) {
-        if (bb->succ_bbs_.empty()) {
-            ipdom_[bb] = nullptr;
-            continue;
-        }
-
-        auto it = postDomSets_.find(bb);
-        if (it == postDomSets_.end()) continue;
-        const auto &set = it->second;
-        BasicBlock *cand = nullptr;
-        size_t targetSize = set.size() > 0 ? set.size() - 1 : 0;
-        for (auto *p : set) {
-            if (p == bb) continue;
-            auto pit = postDomSets_.find(p);
-            if (pit != postDomSets_.end() && pit->second.size() == targetSize) {
-                cand = p;
-                break;
-            }
-        }
-        ipdom_[bb] = cand;
-    }
-}
-
-BasicBlock *RangeAnalysis::immediatePostDom(BasicBlock *bb) const {
-    auto it = ipdom_.find(bb);
-    return it == ipdom_.end() ? nullptr : it->second;
 }
 
 void RangeAnalysis::buildControlDependence(Function *func) {

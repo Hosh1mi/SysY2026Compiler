@@ -1,6 +1,7 @@
 #pragma once
 #include "../ir/ir.hpp"
 #include "pass.hpp"
+#include "../analysis/dominanceAnalysis.hpp"
 #include <map>
 #include <set>
 #include <vector>
@@ -12,8 +13,8 @@ public:
     std::string name() const override { return "Mem2Reg"; }
 
 private:
-    bool run(Module *module);
-    bool runOnFunction(Function *func);
+    bool run(Module *module, AnalysisManager &AM);
+    bool runOnFunction(Function *func, AnalysisManager &AM);
 
     struct BlockInfo {
         std::vector<LoadInst *> loads;
@@ -52,7 +53,8 @@ private:
 
     Function *currentFunc_ = nullptr;
     BasicBlock *entryBlock_ = nullptr;
-    DominatorInfo *domInfo_ = nullptr;
+    DominatorTreeAnalysis *domTree_ = nullptr;
+    DominanceFrontierAnalysis *domFrontier_ = nullptr;
     std::vector<AllocaInfo> allocas_;
     std::map<PhiInst *, AllocaInst *> phiOwners_;
     std::set<Instruction *> toDelete_;

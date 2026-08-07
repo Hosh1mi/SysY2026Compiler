@@ -122,7 +122,7 @@ bool isReadOnlyCall(Function *callee, const BasicAliasAnalysis &BAA) {
 }
 
 void gvnDfs(BasicBlock *bb,
-            const std::map<BasicBlock*, std::vector<BasicBlock*>> &dom_children,
+            const DominatorTreeAnalysis &DT,
             GvnState &st) {
     // 汇合块：多条路径带着不同内存状态进入，旧版本 load 一律失效
     auto pc = st.pred_count.find(bb);
@@ -227,17 +227,17 @@ void gvnDfs(BasicBlock *bb,
     for (auto *inst : to_delete)
         bb->delete_instr(inst);
 
-    auto itc = dom_children.find(bb);
-    if (itc != dom_children.end()) {
+    {
         // 单前驱子块先访问：它们紧随本块执行，赶在汇合块子树把
         // mem_gen 推高之前完成匹配（顺序只影响命中率，不影响正确性）
-        std::vector<BasicBlock*> kids = itc->second;
+        std::vector<BasicBlock*> kids;
+        for (auto *child : DT.getChildren(bb)) kids.push_back(child->block());
         std::stable_partition(kids.begin(), kids.end(), [&](BasicBlock *k) {
             auto kc = st.pred_count.find(k);
             return kc == st.pred_count.end() || kc->second < 2;
         });
         for (auto *child : kids)
-            gvnDfs(child, dom_children, st);
+            gvnDfs(child, DT, st);
     }
 
     for (auto &sig : added_sigs)
@@ -249,7 +249,8 @@ void gvnDfs(BasicBlock *bb,
     }
 }
 
-void gvnOnFunction(Function *func, const BasicAliasAnalysis &BAA, bool &changed) {
+void gvnOnFunction(Function *func, const BasicAliasAnalysis &BAA,
+                   const DominatorTreeAnalysis &DT, bool &changed) {
     if (func->basic_blocks_.empty())
         return;
 
@@ -257,8 +258,7 @@ void gvnOnFunction(Function *func, const BasicAliasAnalysis &BAA, bool &changed)
     st.BAA = &BAA;
     st.pred_count = countPredsFromTerminators(func);
 
-    auto &dom_children = func->getDominatorInfo().domChildren;
-    gvnDfs(func->basic_blocks_.front(), dom_children, st);
+    gvnDfs(func->basic_blocks_.front(), DT, st);
     changed |= st.changed;
 }
 
@@ -276,10 +276,11 @@ PreservedAnalyses GVN::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            gvnOnFunction(func, BAA, changed);
+            gvnOnFunction(func, BAA, AM.getDominatorTree(func), changed);
     }
     for (auto &p : canonical_constants)
         delete p.second;
     canonical_constants.clear();
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }

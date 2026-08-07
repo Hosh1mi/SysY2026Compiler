@@ -58,7 +58,7 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
         unsigned selfCalls = 0, externalCalls = 0;
-        if (!isCandidate(func, baa, selfCalls, externalCalls)) continue;
+        if (!isCandidate(func, baa, AM, selfCalls, externalCalls)) continue;
         if (selfCalls < MIN_SELF_CALLS) continue;
 
         // 推导每个形参的 bound。
@@ -115,6 +115,7 @@ PreservedAnalyses AutoMemoization::execute(Module *module,
 //      缓存可能读到过期值。无 load（readnone）则允许多调用点。
 
 bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
+                                  AnalysisManager &AM,
                                    unsigned &selfCallCount,
                                    unsigned &externalCallCount) {
     auto retTy = f->get_return_type();
@@ -150,7 +151,7 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
 
     if (externalCallCount == 0) return false;
 
-    if (functionReadsMemory(f) && readsUnfrozenGlobal(f)) return false;
+    if (functionReadsMemory(f) && readsUnfrozenGlobal(f, AM)) return false;
 
     return true;
 }
@@ -182,7 +183,7 @@ static GlobalVariable *baseGlobal(Value *ptr) {
 // 与全部外部调用点位于同一函数，且 store 所在基本块支配每一个调用点
 // 基本块。这样所有写都发生在首次调用之前，调用之间不会再改 G。
 // 跨函数的 store / 调用关系无法用单函数支配树刻画 → 保守视为未冻结。
-bool AutoMemoization::readsUnfrozenGlobal(Function *f) {
+bool AutoMemoization::readsUnfrozenGlobal(Function *f, AnalysisManager &AM) {
     std::set<GlobalVariable *> readGlobals;
     for (auto bb : f->basic_blocks_)
         for (auto inst : bb->instr_list_)
@@ -211,7 +212,7 @@ bool AutoMemoization::readsUnfrozenGlobal(Function *f) {
                     Function *caller = cs->parent_->parent_;
                     if (caller != func)
                         return true;
-                    if (!func->dominates(bb, cs->parent_))
+                    if (!AM.getDominatorTree(func).dominates(bb, cs->parent_))
                         return true;
                 }
             }
@@ -298,8 +299,6 @@ Function *AutoMemoization::outlineBody(Function *f) {
     for (size_t i = 0; i < f->arguments_.size(); ++i)
         f->arguments_[i]->replace_all_use_with(body->arguments_[i]);
 
-    body->invalidateDominatorInfo();
-    f->invalidateDominatorInfo();
     return body;
 }
 
@@ -378,7 +377,6 @@ void AutoMemoization::transform(Function *f,
         fb->set_insert_point(fRet);
         fb->create_ret(result);
         fillFn->set_instr_name();
-        fillFn->invalidateDominatorInfo();
         delete fb;
     }
 
@@ -410,12 +408,10 @@ void AutoMemoization::transform(Function *f,
         builder->create_ret(result);
 
         f->set_instr_name();
-        f->invalidateDominatorInfo();
         delete builder;
     }
 
     bodyFn->set_instr_name();
-    bodyFn->invalidateDominatorInfo();
 }
 
 /* static */ void AutoMemoization::transformHash(Function *f) {
@@ -501,7 +497,5 @@ void AutoMemoization::transform(Function *f,
 
     f->set_instr_name();
     bodyFn->set_instr_name();
-    f->invalidateDominatorInfo();
-    bodyFn->invalidateDominatorInfo();
     delete builder;
 }

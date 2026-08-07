@@ -4,6 +4,7 @@
 #include "../../../include/mid/opt/triangularRemapSourceCompose.hpp"
 
 #include "../../../include/mid/analysis/basicAliasAnalysis.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/globalVariable.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -148,14 +149,15 @@ int globalArrayExtent(Value *root, Module *module) {
     return static_cast<int>(arrayType->num_elements_);
 }
 
-bool valueAvailableAt(Value *value, BasicBlock *block, const LoopInfo &LI) {
+bool valueAvailableAt(Value *value, BasicBlock *block,
+                      const DominatorTreeAnalysis &DT) {
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction)
         return true;
     if (!instruction->parent_)
         return false;
     return instruction->parent_ == block ||
-           LI.dominates(instruction->parent_, block);
+           DT.dominates(instruction->parent_, block);
 }
 
 void removeTerminatorAndEdges(BasicBlock *block) {
@@ -427,7 +429,7 @@ struct ConsumerPattern {
 };
 
 bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
-                   BasicBlock *fastOrigin, const LoopInfo &LI,
+                   BasicBlock *fastOrigin, const DominatorTreeAnalysis &DT,
                    const BasicAliasAnalysis &BAA,
                    ConsumerPattern &consumer) {
     if (!loop || !loop->children.empty() || !loop->canonicalIV ||
@@ -470,7 +472,7 @@ bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
         }
     }
     if (!matrixLoad || matrixLoad->parent_ == loop->header ||
-        !LI.dominates(bodyEntry, matrixLoad->parent_))
+        !DT.dominates(bodyEntry, matrixLoad->parent_))
         return false;
 
     for (auto *instruction : loop->header->instr_list_) {
@@ -484,7 +486,7 @@ bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
                 break;
             }
         }
-        if (!initial || !valueAvailableAt(initial, fastOrigin, LI))
+        if (!initial || !valueAvailableAt(initial, fastOrigin, DT))
             return false;
     }
 
@@ -509,6 +511,7 @@ struct Pattern {
 };
 
 bool matchPattern(Function *function, LoopInfo &LI,
+                  const DominatorTreeAnalysis &DT,
                   const BasicAliasAnalysis &BAA, Pattern &pattern) {
     Module *module = function->parent_;
     for (Loop *top : LI.topLevelLoops()) {
@@ -531,9 +534,9 @@ bool matchPattern(Function *function, LoopInfo &LI,
         Value *extent = nullptr;
         if (!matchExtentDivision(remap.colsize, remap.rowsize, &extent) ||
             !isI32(extent, module) || !isI32(top->tripCount, module) ||
-            !valueAvailableAt(extent, top->preheader, LI) ||
-            !valueAvailableAt(top->tripCount, top->preheader, LI) ||
-            !valueAvailableAt(remap.matrixBase, top->preheader, LI))
+            !valueAvailableAt(extent, top->preheader, DT) ||
+            !valueAvailableAt(top->tripCount, top->preheader, DT) ||
+            !valueAvailableAt(remap.matrixBase, top->preheader, DT))
             continue;
 
         auto *matrixGlobal = dynamic_cast<GlobalVariable *>(remap.matrixRoot);
@@ -552,7 +555,7 @@ bool matchPattern(Function *function, LoopInfo &LI,
             if (candidate == top || candidate->preheader != consumerPreheader)
                 continue;
             if (!matchConsumer(candidate, top->tripCount, remap.matrixRoot,
-                               top->preheader, LI, BAA, matchedConsumer))
+                               top->preheader, DT, BAA, matchedConsumer))
                 continue;
             consumerLoop = candidate;
             break;
@@ -863,33 +866,33 @@ bool applyTransform(Function *function, Pattern &pattern) {
 } // namespace
 
 void TriangularRemapSourceCompose::execute(Module *module) {
+    AnalysisManager AM;
     for (auto *function : module->function_list_) {
         if (!function->is_declaration())
-            runOnFunction(function);
+            runOnFunction(function, AM);
     }
 }
 
 PreservedAnalyses
 TriangularRemapSourceCompose::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     bool changed = false;
     for (auto *function : module->function_list_) {
         if (!function->is_declaration())
-            changed |= runOnFunction(function);
+            changed |= runOnFunction(function, AM);
     }
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-bool TriangularRemapSourceCompose::runOnFunction(Function *function) {
+bool TriangularRemapSourceCompose::runOnFunction(Function *function,
+                                                 AnalysisManager &AM) {
     if (!function || function->basic_blocks_.empty())
         return false;
 
-    LoopInfo loopInfo;
-    loopInfo.analyze(function);
-    BasicAliasAnalysis aliasAnalysis;
-    aliasAnalysis.analyze(function->parent_);
+    LoopInfo &loopInfo = AM.getLoopInfo(function);
+    DominatorTreeAnalysis &DT = AM.getDominatorTree(function);
+    BasicAliasAnalysis &aliasAnalysis = AM.getBasicAA(function->parent_);
     Pattern pattern;
-    if (!matchPattern(function, loopInfo, aliasAnalysis, pattern))
+    if (!matchPattern(function, loopInfo, DT, aliasAnalysis, pattern))
         return false;
     return applyTransform(function, pattern);
 }

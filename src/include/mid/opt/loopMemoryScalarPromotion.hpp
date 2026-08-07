@@ -15,6 +15,8 @@ public:
     std::string name() const override { return "LoopMemoryScalarPromotion"; }
 
 private:
-    bool runOnFunction(Function *func, const BasicAliasAnalysis &BAA);
-    bool tryPromote(Loop &loop, const BasicAliasAnalysis &BAA);
+    bool runOnFunction(Function *func, const BasicAliasAnalysis &BAA,
+                       AnalysisManager &AM);
+    bool tryPromote(Loop &loop, const BasicAliasAnalysis &BAA,
+                    const DominatorTreeAnalysis &DT);
 };

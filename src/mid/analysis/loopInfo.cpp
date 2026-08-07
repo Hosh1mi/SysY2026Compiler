@@ -383,103 +383,34 @@ void LoopInfo::reset() {
     loops_.clear();
     top_.clear();
     bb2innermost_.clear();
-    idom_.clear();
-    rpoIdx_.clear();
 }
 
 void LoopInfo::analyze(Function *func) {
+    DominatorTreeAnalysis DT;
+    DT.analyze(func);
+    analyze(func, DT);
+}
+
+void LoopInfo::analyze(Function *func, const DominatorTreeAnalysis &DT) {
     reset();
     if (!func || func->basic_blocks_.empty()) return;
 
-    auto rpo = computeRPO(func);
-    computeDominators(rpo);
-    findLoops(func);
-    for (auto &loop : loops_) enrichLoop(loop.get());
+    findLoops(func, DT);
+    for (auto &loop : loops_) enrichLoop(loop.get(), DT);
     buildNestTree();
     for (auto &loop : loops_) analyzeIV(loop.get());
-}
-
-// ── RPO ────────────────────────────────────────────────────────────────────
-
-std::vector<BasicBlock *> LoopInfo::computeRPO(Function *func) {
-    std::vector<BasicBlock *> post;
-    std::set<BasicBlock *>    visited;
-
-    std::function<void(BasicBlock *)> dfs = [&](BasicBlock *bb) {
-        visited.insert(bb);
-        for (auto succ : bb->succ_bbs_)
-            if (!visited.count(succ)) dfs(succ);
-        post.push_back(bb);
-    };
-    dfs(func->basic_blocks_[0]);
-    std::reverse(post.begin(), post.end());
-    return post;
-}
-
-// ── Dominators (iterative Cooper-Harvey-Kennedy) ───────────────────────────
-
-void LoopInfo::computeDominators(const std::vector<BasicBlock *> &rpo) {
-    idom_.clear();
-    rpoIdx_.clear();
-    if (rpo.empty()) return;
-
-    for (int i = 0; i < (int)rpo.size(); i++) rpoIdx_[rpo[i]] = i;
-    BasicBlock *entry = rpo[0];
-    idom_[entry]      = entry;
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto bb : rpo) {
-            if (bb == entry) continue;
-            BasicBlock *new_idom = nullptr;
-            for (auto pred : bb->pre_bbs_) {
-                if (!idom_.count(pred)) continue;
-                new_idom = new_idom ? intersect(pred, new_idom) : pred;
-            }
-            if (new_idom && idom_[bb] != new_idom) {
-                idom_[bb] = new_idom;
-                changed   = true;
-            }
-        }
-    }
-}
-
-BasicBlock *LoopInfo::intersect(BasicBlock *a, BasicBlock *b) {
-    while (a != b) {
-        while (rpoIdx_[a] > rpoIdx_[b]) a = idom_[a];
-        while (rpoIdx_[b] > rpoIdx_[a]) b = idom_[b];
-    }
-    return a;
-}
-
-bool LoopInfo::dominates(BasicBlock *a, BasicBlock *b) const {
-    auto it = idom_.find(b);
-    if (it == idom_.end()) return false;
-    while (b != it->second) {
-        if (b == a) return true;
-        b  = it->second;
-        it = idom_.find(b);
-        if (it == idom_.end()) return false;
-    }
-    return b == a;
-}
-
-BasicBlock *LoopInfo::getIDom(BasicBlock *bb) const {
-    auto it = idom_.find(bb);
-    return it == idom_.end() ? nullptr : it->second;
 }
 
 // ── Natural loop detection ─────────────────────────────────────────────────
 // 回边 bb→succ：succ 支配 bb。把同一 header 的多条回边合并成一个 Loop。
 
-void LoopInfo::findLoops(Function *func) {
+void LoopInfo::findLoops(Function *func, const DominatorTreeAnalysis &DT) {
     std::map<BasicBlock *, Loop *> headerToLoop;
 
     for (auto bb : func->basic_blocks_) {
         for (auto succ : bb->succ_bbs_) {
-            if (!idom_.count(succ)) continue;            // 不可达
-            if (!dominates(succ, bb)) continue;          // 不是回边
+            if (!DT.isReachableFromEntry(succ)) continue; // 不可达
+            if (!DT.dominates(succ, bb)) continue;        // 不是回边
 
             Loop *loop;
             auto  it = headerToLoop.find(succ);
@@ -510,7 +441,7 @@ void LoopInfo::findLoops(Function *func) {
 
 // ── 填充 preheader / exiting / exits ───────────────────────────────────────
 
-void LoopInfo::enrichLoop(Loop *loop) {
+void LoopInfo::enrichLoop(Loop *loop, const DominatorTreeAnalysis &DT) {
     // preheader: header 的唯一循环外前驱，且该前驱必须是 dedicated 的
     // 单后继无条件跳转块。只有这种块才适合作为 LICM/IVSR/vectorize 等
     // pass 的循环入口插入点或重定向点。
@@ -530,10 +461,9 @@ void LoopInfo::enrichLoop(Loop *loop) {
     // blocks 的 RPO 确定序视图（不可达块兜底排在最后，按指针仅作稳定性兜底）
     loop->blocksOrdered.assign(loop->blocks.begin(), loop->blocks.end());
     std::sort(loop->blocksOrdered.begin(), loop->blocksOrdered.end(),
-              [this](BasicBlock *a, BasicBlock *b) {
-                  auto ia = rpoIdx_.find(a), ib = rpoIdx_.find(b);
-                  int ra = ia == rpoIdx_.end() ? INT32_MAX : ia->second;
-                  int rb = ib == rpoIdx_.end() ? INT32_MAX : ib->second;
+              [&DT](BasicBlock *a, BasicBlock *b) {
+                  unsigned ra = DT.getRPOIndex(a);
+                  unsigned rb = DT.getRPOIndex(b);
                   if (ra != rb) return ra < rb;
                   return a < b;
               });
@@ -553,10 +483,9 @@ void LoopInfo::enrichLoop(Loop *loop) {
     }
     loop->exits.assign(exit_set.begin(), exit_set.end());
     std::sort(loop->exits.begin(), loop->exits.end(),
-              [this](BasicBlock *a, BasicBlock *b) {
-                  auto ia = rpoIdx_.find(a), ib = rpoIdx_.find(b);
-                  int ra = ia == rpoIdx_.end() ? INT32_MAX : ia->second;
-                  int rb = ib == rpoIdx_.end() ? INT32_MAX : ib->second;
+              [&DT](BasicBlock *a, BasicBlock *b) {
+                  unsigned ra = DT.getRPOIndex(a);
+                  unsigned rb = DT.getRPOIndex(b);
                   if (ra != rb) return ra < rb;
                   return a < b;
               });

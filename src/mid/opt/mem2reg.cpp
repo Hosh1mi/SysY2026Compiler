@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/mem2reg.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -8,31 +9,33 @@
 #include <unordered_set>
 
 void Mem2Reg::execute(Module *module) {
-    run(module);
+    AnalysisManager AM;
+    execute(module, AM);
 }
 
 PreservedAnalyses Mem2Reg::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
-    return run(module) ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return run(module, AM) ? PreservedAnalyses::cfgAnalyses()
+                           : PreservedAnalyses::all();
 }
 
-bool Mem2Reg::run(Module *module) {
+bool Mem2Reg::run(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;
-        changed |= runOnFunction(func);
+        changed |= runOnFunction(func, AM);
     }
     return changed;
 }
 
-bool Mem2Reg::runOnFunction(Function *func) {
+bool Mem2Reg::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return false;
     resetFunctionState(func);
     if (!entryBlock_->pre_bbs_.empty()) return false;
 
     bool changed = runScalarReplacement();
 
-    domInfo_ = &func->getDominatorInfo();
+    domTree_ = &AM.getDominatorTree(func);
+    domFrontier_ = &AM.getDominanceFrontier(func);
     collectPromotableAllocas();
 
     size_t kept = 0;
@@ -66,7 +69,8 @@ bool Mem2Reg::runOnFunction(Function *func) {
 void Mem2Reg::resetFunctionState(Function *func) {
     currentFunc_ = func;
     entryBlock_ = func->basic_blocks_.front();
-    domInfo_ = nullptr;
+    domTree_ = nullptr;
+    domFrontier_ = nullptr;
     allocas_.clear();
     phiOwners_.clear();
     toDelete_.clear();
@@ -227,10 +231,7 @@ void Mem2Reg::placePhiNodes(AllocaInfo &info) {
         BasicBlock *bb = defWorklist.front();
         defWorklist.pop();
 
-        auto frontierIt = domInfo_->domFront.find(bb);
-        if (frontierIt == domInfo_->domFront.end()) continue;
-
-        for (auto *frontier : frontierIt->second) {
+        for (auto *frontier : domFrontier_->getFrontier(bb)) {
             if (visitedFrontiers.count(frontier)) continue;
             visitedFrontiers.insert(frontier);
 
@@ -327,11 +328,8 @@ void Mem2Reg::renamePromotedAllocas() {
             }
         }
 
-        auto children = domInfo_->domChildren.find(bb);
-        if (children != domInfo_->domChildren.end()) {
-            for (auto *child : children->second)
-                renameBlock(child);
-        }
+        for (auto *child : domTree_->getChildren(bb))
+            renameBlock(child->block());
 
         for (auto &entry : savedDepths) {
             auto &stack = valueStacks[entry.first];
@@ -349,18 +347,7 @@ void Mem2Reg::renamePromotedAllocas() {
 }
 
 bool Mem2Reg::instructionDominates(Instruction *def, Instruction *use) const {
-    BasicBlock *defBB = def->parent_;
-    BasicBlock *useBB = use->parent_;
-
-    if (defBB != useBB)
-        return domInfo_->dominates(defBB, useBB);
-
-    bool sawDef = false;
-    for (auto *inst : defBB->instr_list_) {
-        if (inst == def) sawDef = true;
-        if (inst == use) return sawDef;
-    }
-    return false;
+    return domTree_ && domTree_->dominates(def, use);
 }
 
 Value *Mem2Reg::zeroValueFor(Type *ty) const {

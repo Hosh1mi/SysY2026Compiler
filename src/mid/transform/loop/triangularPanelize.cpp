@@ -372,7 +372,6 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
     pattern.j->set_operand(incomingIndex, panelJ);
     pattern.j->set_operand(incomingIndex + 1, scalarEntry);
     redirectEdge(preheader, originalHeader, panelHeader);
-    function->invalidateDominatorInfo();
     function->set_instr_name();
     return true;
 }

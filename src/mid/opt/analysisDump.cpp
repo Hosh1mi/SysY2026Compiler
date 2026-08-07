@@ -113,9 +113,9 @@ void dumpLiveOutRecurrences(Function *func, Loop *loop,
     }
 }
 
-void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
-    LoopInfo LI;
-    LI.analyze(func);
+void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA,
+                  AnalysisManager &AM) {
+    LoopInfo &LI = AM.getLoopInfo(func);
 
     AffineAnalysis AA(LI);
     DependenceAnalysis DA(LI, AA);
@@ -203,16 +203,16 @@ void dumpFunction(Function *func, const ArgumentAliasAnalysis *argAA) {
 } // namespace
 
 void AnalysisDump::execute(Module *module) {
+    AnalysisManager AM;
+    execute(module, AM);
+}
+
+PreservedAnalyses AnalysisDump::execute(Module *module, AnalysisManager &AM) {
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            dumpFunction(func, &argAA);
+            dumpFunction(func, &argAA, AM);
     }
-}
-
-PreservedAnalyses AnalysisDump::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
-    execute(module);
     return PreservedAnalyses::all();
 }

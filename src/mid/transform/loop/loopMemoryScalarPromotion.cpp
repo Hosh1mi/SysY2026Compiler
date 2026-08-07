@@ -68,12 +68,13 @@ bool isLoopInvariant(Value *value, const Loop &loop) {
     return !inst || !loop.blocks.count(inst->parent_);
 }
 
-bool exitsAreDominatedByPreheader(const Loop &loop) {
+bool exitsAreDominatedByPreheader(const Loop &loop,
+                                  const DominatorTreeAnalysis &DT) {
     Function *func = loop.header ? loop.header->parent_ : nullptr;
     if (!func || !loop.preheader)
         return false;
     for (auto *exit : loop.exits) {
-        if (!func->dominates(loop.preheader, exit))
+        if (!DT.dominates(loop.preheader, exit))
             return false;
     }
     return true;
@@ -121,14 +122,13 @@ void LoopMemoryScalarPromotion::execute(Module *module) {
 
 PreservedAnalyses LoopMemoryScalarPromotion::execute(Module *module,
                                                      AnalysisManager &AM) {
-    (void)AM;
     BasicAliasAnalysis BAA;
     BAA.analyze(module);
 
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func, BAA);
+            changed |= runOnFunction(func, BAA, AM);
     }
 
     if (changed) {
@@ -140,12 +140,13 @@ PreservedAnalyses LoopMemoryScalarPromotion::execute(Module *module,
 }
 
 bool LoopMemoryScalarPromotion::runOnFunction(Function *func,
-                                              const BasicAliasAnalysis &BAA) {
+                                              const BasicAliasAnalysis &BAA,
+                                              AnalysisManager &AM) {
     bool changed = false;
 
     for (int iter = 0; iter < 32; ++iter) {
-        LoopInfo LI;
-        LI.analyze(func);
+        LoopInfo &LI = AM.getLoopInfo(func);
+        DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         if (LI.allLoops().empty())
             break;
 
@@ -158,9 +159,10 @@ bool LoopMemoryScalarPromotion::runOnFunction(Function *func,
 
         bool iterChanged = false;
         for (auto *loop : loops) {
-            if (tryPromote(*loop, BAA)) {
+            if (tryPromote(*loop, BAA, DT)) {
                 iterChanged = true;
                 changed = true;
+                AM.clear(func);
                 break;
             }
         }
@@ -173,9 +175,10 @@ bool LoopMemoryScalarPromotion::runOnFunction(Function *func,
 }
 
 bool LoopMemoryScalarPromotion::tryPromote(Loop &loop,
-                                           const BasicAliasAnalysis &BAA) {
+                                           const BasicAliasAnalysis &BAA,
+                                           const DominatorTreeAnalysis &DT) {
     if (!loop.preheader || loop.exits.empty() ||
-        !exitsAreDominatedByPreheader(loop) || !hasDedicatedPhiFreeExits(loop))
+        !exitsAreDominatedByPreheader(loop, DT) || !hasDedicatedPhiFreeExits(loop))
         return false;
     Function *func = loop.header ? loop.header->parent_ : nullptr;
     if (!func || func->basic_blocks_.empty())
@@ -333,6 +336,5 @@ bool LoopMemoryScalarPromotion::tryPromote(Loop &loop,
         new BranchInst(exit, writeback);
     }
 
-    func->invalidateDominatorInfo();
     return true;
 }

@@ -1713,7 +1713,6 @@ bool LoopVectorize::emitVectorizedLoop(
     vecHeader->setSemFlag(SemFlag::TargetPointerRecurrenceLoop);
     origHeader->setSemFlag(SemFlag::VectorizedEpilogue);
 
-    func->invalidateDominatorInfo();
     func->set_instr_name();
     return true;
 }
@@ -1778,7 +1777,6 @@ void LoopVectorize::runOnFunction(Function *func, const BasicAliasAnalysis &BAA)
         for (auto *loop : loops) {
             if (tryVectorize(*loop, func, func->parent_, BAA)) {
                 changed = true;
-                func->invalidateDominatorInfo();
                 break; // restart with fresh LoopInfo
             }
         }

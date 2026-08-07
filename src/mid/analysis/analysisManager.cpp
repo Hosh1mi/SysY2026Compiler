@@ -29,6 +29,44 @@ BasicAliasAnalysis &AnalysisManager::getBasicAA(Module *module) {
     return *basicAA_;
 }
 
+DominatorTreeAnalysis &AnalysisManager::getDominatorTree(Function *func) {
+    auto &cache = functionCaches_[func];
+    if (!cache.dominatorTree) {
+        debug("miss", "DominatorTree", func ? func->name_ : "<null>");
+        cache.dominatorTree = std::make_unique<DominatorTreeAnalysis>();
+        cache.dominatorTree->analyze(func);
+    } else {
+        debug("hit", "DominatorTree", func ? func->name_ : "<null>");
+    }
+    return *cache.dominatorTree;
+}
+
+PostDominatorTreeAnalysis &
+AnalysisManager::getPostDominatorTree(Function *func) {
+    auto &cache = functionCaches_[func];
+    if (!cache.postDominatorTree) {
+        debug("miss", "PostDominatorTree", func ? func->name_ : "<null>");
+        cache.postDominatorTree = std::make_unique<PostDominatorTreeAnalysis>();
+        cache.postDominatorTree->analyze(func);
+    } else {
+        debug("hit", "PostDominatorTree", func ? func->name_ : "<null>");
+    }
+    return *cache.postDominatorTree;
+}
+
+DominanceFrontierAnalysis &
+AnalysisManager::getDominanceFrontier(Function *func) {
+    auto &cache = functionCaches_[func];
+    if (!cache.dominanceFrontier) {
+        debug("miss", "DominanceFrontier", func ? func->name_ : "<null>");
+        cache.dominanceFrontier = std::make_unique<DominanceFrontierAnalysis>();
+        cache.dominanceFrontier->analyze(func, getDominatorTree(func));
+    } else {
+        debug("hit", "DominanceFrontier", func ? func->name_ : "<null>");
+    }
+    return *cache.dominanceFrontier;
+}
+
 LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.lazyValueInfo) {
@@ -37,7 +75,8 @@ LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
     } else {
         debug("hit", "LazyValueInfo", func ? func->name_ : "<null>");
     }
-    cache.lazyValueInfo->analyze(func, &getLoopInfo(func));
+    cache.lazyValueInfo->analyze(func, &getLoopInfo(func),
+                                 &getDominatorTree(func));
     return *cache.lazyValueInfo;
 }
 
@@ -46,7 +85,7 @@ LoopInfo &AnalysisManager::getLoopInfo(Function *func) {
     if (!cache.loopInfo) {
         debug("miss", "LoopInfo", func ? func->name_ : "<null>");
         cache.loopInfo = std::make_unique<LoopInfo>();
-        cache.loopInfo->analyze(func);
+        cache.loopInfo->analyze(func, getDominatorTree(func));
     } else {
         debug("hit", "LoopInfo", func ? func->name_ : "<null>");
     }
@@ -94,11 +133,28 @@ void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
                                               const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
 
+    if (!pa.preservesPostDominatorTree())
+        cache.postDominatorTree.reset();
+
+    if (!pa.preservesDominatorTree()) {
+        cache.dominanceFrontier.reset();
+        cache.lazyValueInfo.reset();
+        cache.rangeAnalysis.reset();
+        cache.scalarEvolution.reset();
+        cache.loopInfo.reset();
+        cache.dominatorTree.reset();
+        return;
+    }
+
+    if (!pa.preservesDominanceFrontier())
+        cache.dominanceFrontier.reset();
+
     if (!pa.preservesLVI()) {
         cache.lazyValueInfo.reset();
     }
 
     if (!pa.preservesLoopInfo()) {
+        cache.lazyValueInfo.reset();
         cache.rangeAnalysis.reset();
         cache.scalarEvolution.reset();
         cache.loopInfo.reset();
@@ -135,7 +191,16 @@ void AnalysisManager::invalidateFunction(Function *func,
     auto it = functionCaches_.find(func);
     if (it == functionCaches_.end()) return;
 
-    if (!pa.preservesLoopInfo())
+    if (!pa.preservesDominatorTree())
+        debug("invalidate", "DominatorTree/dependents",
+              func ? func->name_ : "<null>");
+    else if (!pa.preservesPostDominatorTree())
+        debug("invalidate", "PostDominatorTree",
+              func ? func->name_ : "<null>");
+    else if (!pa.preservesDominanceFrontier())
+        debug("invalidate", "DominanceFrontier",
+              func ? func->name_ : "<null>");
+    else if (!pa.preservesLoopInfo())
         debug("invalidate", "LoopInfo/SCEV", func ? func->name_ : "<null>");
     else if (!pa.preservesSCEV())
         debug("invalidate", "ScalarEvolution", func ? func->name_ : "<null>");

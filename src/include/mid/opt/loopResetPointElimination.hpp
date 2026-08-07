@@ -20,5 +20,6 @@ public:
 private:
     bool runOnFunction(Function *func, Module *module,
                        BasicAliasAnalysis &basicAA,
-                       ArgumentAliasAnalysis &argumentAA);
+                       ArgumentAliasAnalysis &argumentAA,
+                       AnalysisManager &AM);
 };

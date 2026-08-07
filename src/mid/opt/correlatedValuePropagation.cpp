@@ -75,7 +75,8 @@ Value *getValueOnEdge(Value *value, BasicBlock *fromBB, BasicBlock *toBB,
     return LVI.getConstantOnEdge(value, fromBB, toBB, user);
 }
 
-bool isSafePhiReplacement(Value *value, PhiInst *phi) {
+bool isSafePhiReplacement(Value *value, PhiInst *phi,
+                          const DominatorTreeAnalysis &DT) {
     if (!value || !phi) return false;
     if (dynamic_cast<Constant *>(value) || dynamic_cast<Argument *>(value))
         return true;
@@ -84,7 +85,7 @@ bool isSafePhiReplacement(Value *value, PhiInst *phi) {
     auto *inst = dynamic_cast<Instruction *>(value);
     if (!inst || !inst->parent_ || inst->parent_ == phi->parent_)
         return false;
-    return phi->parent_->parent_->dominates(inst->parent_, phi->parent_);
+    return DT.dominates(inst->parent_, phi->parent_);
 }
 
 bool simplifyTrivialPhi(PhiInst *phi) {
@@ -105,7 +106,8 @@ bool simplifyTrivialPhi(PhiInst *phi) {
     return phi->parent_ && phi->parent_->delete_instr(phi);
 }
 
-bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI) {
+bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI,
+                         const DominatorTreeAnalysis &DT) {
     bool changed = false;
     std::vector<Instruction *> snapshot(bb->instr_list_.begin(), bb->instr_list_.end());
     for (auto *inst : snapshot) {
@@ -150,7 +152,7 @@ bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI) {
             }
         }
 
-        if (failed || !candidate || !isSafePhiReplacement(candidate, phi))
+        if (failed || !candidate || !isSafePhiReplacement(candidate, phi, DT))
             continue;
 
         bool canReplace = true;
@@ -307,11 +309,12 @@ bool CorrelatedValuePropagation::runOnFunction(Function *func,
     do {
         changed = false;
         LazyValueInfo &LVI = AM.getLazyValueInfo(func);
+        DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         std::vector<BasicBlock *> blocks(func->basic_blocks_.begin(),
                                          func->basic_blocks_.end());
         for (auto *bb : blocks) {
             if (bb->parent_ != func) continue;
-            bool blockChanged = simplifyPhisInBlock(bb, LVI);
+            bool blockChanged = simplifyPhisInBlock(bb, LVI, DT);
             if (!blockChanged)
                 blockChanged = foldInstructionsInBlock(bb, LVI);
             if (blockChanged) {

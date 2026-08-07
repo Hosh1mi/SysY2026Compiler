@@ -1,5 +1,6 @@
 #include "../../include/mid/opt/CFGSimplify.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
+#include "../../include/mid/analysis/dominanceAnalysis.hpp"
 #include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -222,63 +223,6 @@ static bool foldConstantBranches(Function *func) {
     return changed;
 }
 
-static std::unordered_map<BasicBlock *, std::set<BasicBlock *>>
-computeDominators(Function *func) {
-    std::unordered_map<BasicBlock *, std::set<BasicBlock *>> doms;
-    if (!func || func->basic_blocks_.empty()) return doms;
-
-    std::set<BasicBlock *> allBlocks(func->basic_blocks_.begin(),
-                                     func->basic_blocks_.end());
-    BasicBlock *entry = func->basic_blocks_.front();
-
-    for (auto *bb : func->basic_blocks_) {
-        if (bb == entry)
-            doms[bb] = {bb};
-        else
-            doms[bb] = allBlocks;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto *bb : func->basic_blocks_) {
-            if (bb == entry) continue;
-
-            std::set<BasicBlock *> next = allBlocks;
-            bool hasReachablePred = false;
-            for (auto *pred : bb->pre_bbs_) {
-                auto it = doms.find(pred);
-                if (it == doms.end()) continue;
-                if (!hasReachablePred) {
-                    next = it->second;
-                    hasReachablePred = true;
-                } else {
-                    std::set<BasicBlock *> intersection;
-                    std::set_intersection(next.begin(), next.end(),
-                                          it->second.begin(), it->second.end(),
-                                          std::inserter(intersection, intersection.begin()));
-                    next = std::move(intersection);
-                }
-            }
-            if (!hasReachablePred) next.clear();
-            next.insert(bb);
-
-            if (doms[bb] != next) {
-                doms[bb] = std::move(next);
-                changed = true;
-            }
-        }
-    }
-
-    return doms;
-}
-
-static bool dominates(const std::unordered_map<BasicBlock *, std::set<BasicBlock *>> &doms,
-                      BasicBlock *dom, BasicBlock *bb) {
-    auto it = doms.find(bb);
-    return it != doms.end() && it->second.count(dom);
-}
-
 static Value *getPhiIncomingValue(PhiInst *phi, BasicBlock *pred) {
     for (unsigned i = 0; i < phi->num_ops_; i += 2) {
         if (phi->get_operand(i + 1) == pred)
@@ -351,12 +295,12 @@ static void redirectBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
 }
 
 static bool valueDominatesBlock(Value *value, BasicBlock *bb,
-                                const std::unordered_map<BasicBlock *, std::set<BasicBlock *>> &doms) {
+                                const DominatorTreeAnalysis &DT) {
     if (dynamic_cast<Constant *>(value)) return true;
     if (dynamic_cast<GlobalVariable *>(value)) return true;
     if (dynamic_cast<Argument *>(value)) return true;
     auto *inst = dynamic_cast<Instruction *>(value);
-    return inst && inst->parent_ && dominates(doms, inst->parent_, bb);
+    return inst && inst->parent_ && DT.dominates(inst->parent_, bb);
 }
 
 // Hoist loop-invariant branch conditions out of loop bodies.
@@ -375,7 +319,8 @@ bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
     if (func->basic_blocks_.size() < 3) return false;
 
     bool changed = false;
-    auto doms = computeDominators(func);
+    DominatorTreeAnalysis DT;
+    DT.analyze(func);
 
     // Collect B blocks; we'll look at each once.
     auto bbs = func->basic_blocks_;
@@ -427,12 +372,12 @@ bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
 
         BasicBlock *defBlock = cmpInst->parent_;
         if (defBlock == P || defBlock == B) continue;
-        if (!dominates(doms, defBlock, P)) continue;
+        if (!DT.dominates(defBlock, P)) continue;
         if (!blockHasOnlyOptionalCmpAndTerminator(B, cmpInst, false)) continue;
 
         bool allInvariant = true;
         for (unsigned i = 0; i < cmpInst->num_ops_; i++) {
-            if (!valueDominatesBlock(cmpInst->get_operand(i), P, doms)) {
+            if (!valueDominatesBlock(cmpInst->get_operand(i), P, DT)) {
                 allInvariant = false;
                 break;
             }
@@ -442,7 +387,7 @@ bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
         BasicBlock *entryPred = nullptr;
         int externalPreds = 0;
         for (auto *pred : P->pre_bbs_) {
-            if (!dominates(doms, P, pred)) {
+            if (!DT.dominates(P, pred)) {
                 entryPred = pred;
                 externalPreds++;
             }
