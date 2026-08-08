@@ -456,12 +456,15 @@ bool analyzeInner(Candidate &c) {
             : c.oldOuterIVUpdate->get_operand(0));
     if (!outerOne || outerOne->value_ != 1) return false;
     Value *modInput = oldModulo->get_operand(0);
-    auto *exitPhi = dynamic_cast<PhiInst *>(modInput);
-    if (!exitPhi || exitPhi->parent_ != c.innerExit) return false;
-    Value *exitIncoming = nullptr;
-    if (!findIncoming(exitPhi, c.inner->header, exitIncoming) ||
-        exitIncoming != c.innerSum)
-        return false;
+    PhiInst *exitPhi = nullptr;
+    if (modInput != c.innerSum) {
+        exitPhi = dynamic_cast<PhiInst *>(modInput);
+        if (!exitPhi || exitPhi->parent_ != c.innerExit) return false;
+        Value *exitIncoming = nullptr;
+        if (!findIncoming(exitPhi, c.inner->header, exitIncoming) ||
+            exitIncoming != c.innerSum)
+            return false;
+    }
     c.oldModulo = oldModulo;
     c.modulus = oldModulo->get_operand(1);
 
@@ -498,7 +501,9 @@ bool analyzeInner(Candidate &c) {
         auto *user = dynamic_cast<Instruction *>(use.val_);
         if (!user) return false;
         if (c.inner->blocks.count(user->parent_)) continue;
-        if (user->parent_ == c.innerExit && user == exitPhi) continue;
+        if (user->parent_ == c.innerExit &&
+            (user == exitPhi || user == c.oldModulo))
+            continue;
         return false;
     }
     return true;
