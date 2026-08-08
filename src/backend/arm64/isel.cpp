@@ -1,6 +1,6 @@
-#include "../../../include/backend/arm64/rewrite/isel.hpp"
-#include "../../../include/backend/arm64/rewrite/constant_division.hpp"
-#include "../../../include/backend/arm64/rewrite/vector_immediate.hpp"
+#include "../../include/backend/arm64/isel.hpp"
+#include "../../include/backend/arm64/constant_division.hpp"
+#include "../../include/backend/arm64/vector_immediate.hpp"
 
 #include <algorithm>
 #include <array>

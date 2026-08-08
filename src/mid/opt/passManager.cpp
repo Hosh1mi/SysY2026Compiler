@@ -17,11 +17,14 @@ void PassManager::addPass(std::unique_ptr<Pass> pass) {
     passes.push_back(std::move(pass));
 }
 
-void PassManager::beginRepeatGroup(int maxRounds) {
+void PassManager::beginRepeatGroup(int maxRounds, bool trackAllChanges,
+                                   bool verifyLoopForm) {
     RepeatGroup g;
     g.begin = passes.size();
     g.end   = passes.size();
     g.maxRounds = maxRounds;
+    g.trackAllChanges = trackAllChanges;
+    g.verifyLoopForm = verifyLoopForm;
     groups_.push_back(g);
 }
 
@@ -290,7 +293,8 @@ void PassManager::run(Module *module) {
                 for (size_t j = g.begin; j < g.end; j++) {
                     PreservedAnalyses preserved =
                         runSinglePass(*passes[j], module);
-                    if (passes[j]->convergenceRelevant() &&
+                    if ((g.trackAllChanges ||
+                         passes[j]->convergenceRelevant()) &&
                         !preserved.preservesAll()) {
                         roundChanged = true;
                         if (tracePipeline) {
@@ -318,7 +322,8 @@ void PassManager::run(Module *module) {
                     break;
                 }
             }
-            verifyRepeatGroupExit(module, completedNormally);
+            if (g.verifyLoopForm)
+                verifyRepeatGroupExit(module, completedNormally);
             i = g.end;
             gi++;
             continue;

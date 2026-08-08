@@ -352,3 +352,12 @@ void SCCP::execute(Module *module) {
             runOnFunction(func);
     }
 }
+
+PreservedAnalyses SCCP::execute(Module *module, AnalysisManager &) {
+    bool changed = false;
+    for (auto *func : module->function_list_) {
+        if (!func->is_declaration())
+            changed |= runOnFunction(func);
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}

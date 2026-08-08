@@ -1,5 +1,5 @@
-#include "../../../include/backend/arm64/rewrite/machine_passes.hpp"
-#include "../../../include/backend/arm64/rewrite/vector_immediate.hpp"
+#include "../../include/backend/arm64/machine_passes.hpp"
+#include "../../include/backend/arm64/vector_immediate.hpp"
 
 #include <deque>
 #include <algorithm>

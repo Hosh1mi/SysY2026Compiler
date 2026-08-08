@@ -1,15 +1,14 @@
-#include "../../../include/backend/arm64/rewrite/codegen.hpp"
+#include "../../include/backend/arm64/codegen.hpp"
 
-#include "../../../include/backend/arm64/rewrite/asm_printer.hpp"
-#include "../../../include/backend/arm64/rewrite/frame_lowering.hpp"
-#include "../../../include/backend/arm64/rewrite/isel.hpp"
-#include "../../../include/backend/arm64/rewrite/machine_passes.hpp"
-#include "../../../include/backend/arm64/rewrite/regalloc.hpp"
-#include "../../../include/backend/arm64/rewrite/scheduler.hpp"
-#include "../../../include/backend/arm64/rewrite/verifier.hpp"
+#include "../../include/backend/arm64/asm_printer.hpp"
+#include "../../include/backend/arm64/frame_lowering.hpp"
+#include "../../include/backend/arm64/isel.hpp"
+#include "../../include/backend/arm64/machine_passes.hpp"
+#include "../../include/backend/arm64/regalloc.hpp"
+#include "../../include/backend/arm64/scheduler.hpp"
+#include "../../include/backend/arm64/verifier.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -68,90 +67,33 @@ void AArch64Backend::generate() {
     AArch64AssemblyPrinter printer;
 
     output_ << "\t.arch armv8-a\n\t.text\n";
-    const bool tracePhases =
-        std::getenv("DEBUG_AARCH64_REWRITE_PHASES") != nullptr;
-    const bool verifyEachMachinePass =
-        std::getenv("DEBUG_AARCH64_REWRITE_VERIFY_EACH_PASS") != nullptr;
-    const bool dumpPhases =
-        std::getenv("DEBUG_AARCH64_REWRITE_DUMP_PHASES") != nullptr;
-    auto dumpMachine = [&](const Function *function, const char *when,
-                           const char *phase,
-                           const MachineFunction *machineFunction) {
-        if (!dumpPhases || !machineFunction)
-            return;
-        std::cerr << "; === AARCH64 " << when << " " << phase << " "
-                  << function->name_ << " ===\n"
-                  << printMachineIR(*machineFunction) << "\n";
-    };
-    auto dumpDag = [&](const Function *function, const char *when,
-                       const char *phase, const FunctionDAG *dag) {
-        if (!dumpPhases || !dag)
-            return;
-        std::cerr << "; === AARCH64 " << when << " " << phase << " "
-                  << function->name_ << " ===\n"
-                  << printSelectionDAG(*dag) << "\n";
-    };
-    auto trace = [&](const Function *function, const char *phase) {
-        if (tracePhases)
-            std::cerr << "[aarch64-rewrite] " << function->name_
-                      << ": " << phase << '\n';
-    };
     for (Function *function : module_->function_list_) {
         if (function->is_declaration())
             continue;
         function->set_instr_name();
-        trace(function, "dag");
         auto dag = dagBuilder.build(function);
-        dumpDag(function, "Before", "dag-legalization", dag.get());
         legalizer.run(*dag);
-        dumpDag(function, "After", "dag-legalization", dag.get());
-        dumpDag(function, "Before", "dag-combine", dag.get());
         combiner.run(*dag, options_.optimizationLevel >= 1);
-        dumpDag(function, "After", "dag-combine", dag.get());
         if (options_.dumpSelectionDAG)
             std::cerr << printSelectionDAG(*dag);
 
-        trace(function, "isel");
-        dumpDag(function, "Before", "instruction-select", dag.get());
         auto machineFunction = selector.select(*dag);
-        dumpMachine(function, "After", "instruction-select",
-                    machineFunction.get());
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "instruction-select");
-        if (std::getenv("DEBUG_AARCH64_REWRITE_BEFORE_MACHINE_SSA"))
-            std::cerr << printMachineIR(*machineFunction);
         if (options_.optimizationLevel >= 1) {
-            dumpMachine(function, "Before", "machine-optimization",
-                        machineFunction.get());
             if (!options_.disablePeephole) {
                 preRAPeephole.run(*machineFunction);
                 addressingFolder.run(*machineFunction);
-                if (options_.verifyMachineIR && verifyEachMachinePass)
-                    verifier.verifyOrThrow(*machineFunction,
-                                           "pre-ra-peephole");
             }
             conditionOptimizer.run(*machineFunction);
-            if (std::getenv("DEBUG_AARCH64_REWRITE_AFTER_CONDITION"))
-                std::cerr << printMachineIR(*machineFunction);
-            if (options_.verifyMachineIR && verifyEachMachinePass)
-                verifier.verifyOrThrow(*machineFunction,
-                                       "condition-optimization");
             for (unsigned iteration = 0; iteration < 4; ++iteration) {
                 if (!machineDCE.run(*machineFunction))
                     break;
-                if (options_.verifyMachineIR && verifyEachMachinePass)
-                    verifier.verifyOrThrow(*machineFunction,
-                                           "machine-dce");
             }
             if (options_.verifyMachineIR)
                 verifier.verifyOrThrow(
                     *machineFunction, "machine-ssa-optimization");
-            dumpMachine(function, "After", "machine-optimization",
-                        machineFunction.get());
         }
-        trace(function, "phi-elimination");
-        dumpMachine(function, "Before", "phi-elimination",
-                    machineFunction.get());
         phiElimination.run(*machineFunction);
         if (options_.optimizationLevel >= 1 &&
             !options_.disablePeephole) {
@@ -164,22 +106,10 @@ void AArch64Backend::generate() {
         }
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "phi-elimination");
-        if (std::getenv("DEBUG_AARCH64_REWRITE_AFTER_PHI"))
-            std::cerr << printMachineIR(*machineFunction);
-        dumpMachine(function, "After", "phi-elimination",
-                    machineFunction.get());
-        dumpMachine(function, "Before", "pre-ra-schedule",
-                    machineFunction.get());
         if (options_.optimizationLevel >= 1 &&
             !options_.disablePreSchedule)
             scheduler.run(*machineFunction);
-        dumpMachine(function, "After", "pre-ra-schedule",
-                    machineFunction.get());
-        trace(function, "regalloc");
-        dumpMachine(function, "Before", "register-allocation",
-                    machineFunction.get());
         registerAllocator.run(*machineFunction);
-        trace(function, "parallel-copies");
         parallelCopyResolver.run(*machineFunction);
         instructionExpansion.run(*machineFunction);
         if (options_.optimizationLevel >= 1 &&
@@ -187,11 +117,6 @@ void AArch64Backend::generate() {
             copyPropagation.run(*machineFunction);
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "register-allocation");
-        dumpMachine(function, "After", "register-allocation",
-                    machineFunction.get());
-        trace(function, "frame-lowering");
-        dumpMachine(function, "Before", "frame-lowering",
-                    machineFunction.get());
         frameLowering.run(*machineFunction);
         if (options_.optimizationLevel >= 1) {
             if (!options_.disablePeephole)
@@ -209,17 +134,9 @@ void AArch64Backend::generate() {
             scheduler.run(*machineFunction);
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "frame-lowering");
-        dumpMachine(function, "After", "frame-lowering",
-                    machineFunction.get());
-        dumpMachine(function, "Before", "post-ra-optimization",
-                    machineFunction.get());
         if (options_.dumpMachineIR)
             std::cerr << printMachineIR(*machineFunction);
-        dumpMachine(function, "After", "post-ra-optimization",
-                    machineFunction.get());
-        trace(function, "assembly");
         printer.printFunction(*machineFunction, output_);
-        trace(function, "done");
     }
 
     std::vector<GlobalVariable *> data;

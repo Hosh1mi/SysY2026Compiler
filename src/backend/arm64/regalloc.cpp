@@ -1,4 +1,4 @@
-#include "../../../include/backend/arm64/rewrite/regalloc.hpp"
+#include "../../include/backend/arm64/regalloc.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1182,20 +1182,12 @@ void GraphColoringRegisterAllocator::run(MachineFunction &function) const {
     constexpr unsigned kMaximumSpillRounds = 32;
     for (unsigned round = 0; round < kMaximumSpillRounds; ++round) {
         LivenessResult liveness = analysis.run(function);
-        if (std::getenv("DEBUG_AARCH64_REWRITE_PHASES"))
-            std::cerr << "[aarch64-rewrite] " << function.name()
-                      << ": regalloc round " << round
-                      << ", vregs=" << liveness.intervals.size()
-                      << '\n';
         std::unordered_map<VReg, PhysReg> assignments;
         std::vector<VReg> spills;
         if (colorOnce(function, liveness, assignments, spills)) {
             rewriteVirtualRegisters(function, assignments);
             return;
         }
-        if (std::getenv("DEBUG_AARCH64_REWRITE_PHASES"))
-            std::cerr << "[aarch64-rewrite] " << function.name()
-                      << ": spill " << spills.size() << " vregs\n";
         insertSpills(function, spills, spillSlots);
     }
     throw std::logic_error(

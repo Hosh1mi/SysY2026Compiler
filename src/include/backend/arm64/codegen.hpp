@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../../mid/ir/ir.hpp"
+#include "../../mid/ir/ir.hpp"
 
 #include <ostream>
 
