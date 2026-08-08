@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -17,19 +18,22 @@ void PassManager::addPass(std::unique_ptr<Pass> pass) {
     passes.push_back(std::move(pass));
 }
 
-void PassManager::beginRepeatGroup(int maxRounds, bool trackAllChanges,
-                                   bool verifyLoopForm) {
-    RepeatGroup g;
+void PassManager::beginFixedPointGroup(bool runOnClean) {
+    if (building_group_)
+        throw std::logic_error("nested pass groups are not supported");
+    building_group_ = true;
+    FixedPointGroup g;
     g.begin = passes.size();
     g.end   = passes.size();
-    g.maxRounds = maxRounds;
-    g.trackAllChanges = trackAllChanges;
-    g.verifyLoopForm = verifyLoopForm;
-    groups_.push_back(g);
+    g.runOnClean = runOnClean;
+    fixed_point_groups_.push_back(g);
 }
 
-void PassManager::endRepeatGroup() {
-    groups_.back().end = passes.size();
+void PassManager::endFixedPointGroup() {
+    if (!building_group_)
+        throw std::logic_error("pass group end without matching begin");
+    fixed_point_groups_.back().end = passes.size();
+    building_group_ = false;
 }
 
 static size_t countInstructions(Module *module) {
@@ -255,47 +259,34 @@ PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
     return preserved;
 }
 
-void PassManager::verifyRepeatGroupExit(Module *module, bool completedNormally) {
-    if (!verify_ir_)
-        return;
-
-    const std::string context = "after loop repeat group";
-    module->verify(context);
-    std::cerr << "[VERIFY] " << context << ": ok\n";
-
-    const bool strictLoopVerify =
-        isLoopVerifyStrictEnabled() && completedNormally;
-    verifyLoopForms(module, completedNormally ? 3 : 1, context,
-                    /*warnOnly=*/!strictLoopVerify,
-                    /*reportClean=*/true);
-}
-
 void PassManager::run(Module *module) {
     const bool tracePipeline =
-        dump_ir_ || std::getenv("DEBUG_LOOP_PIPELINE") != nullptr;
+        dump_ir_ || std::getenv("DEBUG_LOOP_PIPELINE") != nullptr ||
+        std::getenv("TRACE_PASS_PIPELINE") != nullptr;
 
+    bool irChangedSinceFixedPoint = false;
     size_t gi = 0; 
     for (size_t i = 0; i < passes.size();) {
-        if (gi < groups_.size() && groups_[gi].begin == i &&
-            groups_[gi].end > groups_[gi].begin) {
-            const RepeatGroup &g = groups_[gi];
-            const size_t entryInsts = countInstructions(module);
-            const size_t instBudget = entryInsts * 2 + 1024;
+        if (gi < fixed_point_groups_.size() &&
+            fixed_point_groups_[gi].begin == i &&
+            fixed_point_groups_[gi].end > fixed_point_groups_[gi].begin) {
+            const FixedPointGroup &g = fixed_point_groups_[gi];
+            if (!irChangedSinceFixedPoint && !g.runOnClean) {
+                if (tracePipeline)
+                    std::cerr << "[FixedPointPipeline] skipped: no pending IR "
+                                 "changes\n";
+                i = g.end;
+                gi++;
+                continue;
+            }
 
-            int maxRounds = g.maxRounds;
-            if (const char *ov = std::getenv("LOOP_PIPELINE_MAX_ROUNDS"))
-                maxRounds = std::atoi(ov);
-
-            bool completedNormally = false;
-            for (int round = 1; round <= maxRounds; round++) {
+            for (int round = 1;; round++) {
                 bool roundChanged = false;
                 std::string changedList;
                 for (size_t j = g.begin; j < g.end; j++) {
                     PreservedAnalyses preserved =
                         runSinglePass(*passes[j], module);
-                    if ((g.trackAllChanges ||
-                         passes[j]->convergenceRelevant()) &&
-                        !preserved.preservesAll()) {
+                    if (!preserved.preservesAll()) {
                         roundChanged = true;
                         if (tracePipeline) {
                             if (!changedList.empty()) changedList += ", ";
@@ -304,31 +295,20 @@ void PassManager::run(Module *module) {
                     }
                 }
                 if (tracePipeline)
-                    std::cerr << "[LoopPipeline] round " << round
+                    std::cerr << "[FixedPointPipeline] round " << round
                               << (roundChanged ? " changed: {" + changedList + "}"
                                                : " converged")
                               << "\n";
                 if (!roundChanged)
-                {
-                    completedNormally = true;
                     break;
-                }
-                size_t now = countInstructions(module);
-                if (now > instBudget) {
-                    std::cerr << "[LoopPipeline] WARNING: instruction count "
-                              << now << " exceeds budget " << instBudget
-                              << " (entry " << entryInsts
-                              << "), stopping repeat group\n";
-                    break;
-                }
             }
-            if (g.verifyLoopForm)
-                verifyRepeatGroupExit(module, completedNormally);
+            irChangedSinceFixedPoint = false;
             i = g.end;
             gi++;
             continue;
         }
-        runSinglePass(*passes[i], module);
+        PreservedAnalyses preserved = runSinglePass(*passes[i], module);
+        irChangedSinceFixedPoint |= !preserved.preservesAll();
         i++;
     }
 }

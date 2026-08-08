@@ -277,7 +277,8 @@ Type *scratchAllocaType(Value *root) {
 bool isAllowedReductionTerm(Value *value, const Loop &loop,
                             PhiInst *accumulator, PhiInst *ivPhi,
                             Instruction *ivNext,
-                            std::set<Value *> &visiting) {
+                            std::set<Value *> &visiting,
+                            const BasicAliasAnalysis &BAA) {
     if (!value || value == accumulator)
         return false;
     if (value == ivPhi || value == ivNext)
@@ -303,7 +304,7 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
             if (dynamic_cast<BasicBlock *>(op) || dynamic_cast<Function *>(op))
                 continue;
             if (!isAllowedReductionTerm(op, loop, accumulator, ivPhi, ivNext,
-                                        visiting))
+                                        visiting, BAA))
                 return false;
         }
         return true;
@@ -331,7 +332,7 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
             for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
                 ok = isAllowedReductionTerm(gep->get_operand(i), loop,
                                             accumulator, ivPhi, ivNext,
-                                            visiting);
+                                            visiting, BAA);
         } else {
             ok = dynamic_cast<GlobalVariable *>(ptr) != nullptr;
         }
@@ -339,19 +340,22 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
         ok = isAcceptedMemoryRoot(gepRootBase(gep));
         for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
             ok = isAllowedReductionTerm(gep->get_operand(i), loop,
-                                        accumulator, ivPhi, ivNext, visiting);
+                                        accumulator, ivPhi, ivNext, visiting,
+                                        BAA);
     } else if (auto *call = dynamic_cast<CallInst *>(inst)) {
         auto *callee = dynamic_cast<Function *>(
             call->get_operand(call->num_ops_ - 1));
-        ok = callee && callee->hasSemFlag(SemFlag::FnPure);
+        ok = callee && BAA.isPure(callee);
         for (unsigned i = 0; ok && i + 1 < call->num_ops_; ++i)
             ok = isAllowedReductionTerm(call->get_operand(i), loop,
-                                        accumulator, ivPhi, ivNext, visiting);
+                                        accumulator, ivPhi, ivNext, visiting,
+                                        BAA);
     } else if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
         ok = true;
         for (unsigned i = 0; ok && i < phi->num_ops_; i += 2)
             ok = isAllowedReductionTerm(phi->get_operand(i), loop,
-                                        accumulator, ivPhi, ivNext, visiting);
+                                        accumulator, ivPhi, ivNext, visiting,
+                                        BAA);
     } else if (inst->op_id_ == Instruction::Select ||
                inst->op_id_ == Instruction::ZExt) {
         ok = allOperandsAllowed();
@@ -478,13 +482,14 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         return false;
     };
 
+    BasicAliasAnalysis &BAA = AM->getBasicAA(func->parent_);
     std::vector<Instruction *> stores, accesses;
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
             if (auto *call = dynamic_cast<CallInst *>(inst)) {
                 auto *callee = dynamic_cast<Function *>(
                     call->get_operand(call->num_ops_ - 1));
-                if (!callee || !callee->hasSemFlag(SemFlag::FnPure))
+                if (!callee || !BAA.isPure(callee))
                     return fail("call in loop");
             }
             if (dynamic_cast<AllocaInst *>(inst)) return fail("alloca in loop");
@@ -573,7 +578,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
 
         std::set<Value *> visitingTerm;
         if (!isAllowedReductionTerm(term, loop, phi, shape.ivPhi,
-                                    shape.ivNext, visitingTerm))
+                                    shape.ivNext, visitingTerm, BAA))
             return fail("unsupported scalar reduction term");
 
         localScalarReductions.push_back(
@@ -934,10 +939,18 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         }
     }
 
-    // 编译期可知的小 trip count 不值得
+    // A constant-size loop must amortize worker dispatch, range splitting and
+    // the final join.  Tiny DOALL loops are often just boundary copies or
+    // initialization and lose substantially even though dependence analysis
+    // proves them parallel-safe.
     auto *ci = dynamic_cast<ConstantInt *>(shape.init);
     auto *cb = dynamic_cast<ConstantInt *>(shape.bound);
-    if (ci && cb && cb->value_ - ci->value_ < 64)
+    constexpr long long kMinLeafParallelTripCount = 2048;
+    constexpr long long kMinNestedParallelTripCount = 64;
+    const long long minimumTripCount = loop.children.empty()
+        ? kMinLeafParallelTripCount
+        : kMinNestedParallelTripCount;
+    if (ci && cb && cb->value_ - ci->value_ < minimumTripCount)
         return fail("constant trip count below parallel threshold");
 
     if (reductions)

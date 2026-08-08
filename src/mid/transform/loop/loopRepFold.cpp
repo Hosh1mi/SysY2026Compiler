@@ -796,6 +796,15 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
             auto *user = dynamic_cast<Instruction *>(use.val_);
             if (user && user->parent_ &&
                 !loop.blocks.count(user->parent_)) {
+                auto *exitPhi = dynamic_cast<PhiInst *>(user);
+                bool exportedFinalState =
+                    instruction == match.stateRemainder &&
+                    user->parent_ == exit && exitPhi &&
+                    exitPhi->num_ops_ == 2 &&
+                    exitPhi->get_operand(0) == match.stateRemainder &&
+                    exitPhi->get_operand(1) == loop.header;
+                if (exportedFinalState)
+                    continue;
                 bool exportedRemainderBase =
                     instruction == match.remainderBase &&
                     user->parent_ == exit && remainderExitChain.count(user);
@@ -810,7 +819,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
         }
     }
 
-    enum class ExitValueKind { RemainderBase, Invariant };
+    enum class ExitValueKind { StateResult, RemainderBase, Invariant };
     struct ExitPhiPlan {
         PhiInst *phi;
         Value *incoming;
@@ -824,7 +833,10 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
         if (phi->num_ops_ != 2 || phi->get_operand(1) != loop.header)
             return reject("unsupported-exit-phi");
         Value *incoming = phi->get_operand(0);
-        if (incoming == match.remainderBase) {
+        if (incoming == match.stateRemainder) {
+            exitPlans.push_back(
+                {phi, incoming, ExitValueKind::StateResult});
+        } else if (incoming == match.remainderBase) {
             remainderBaseExitPhi = phi;
             exitPlans.push_back(
                 {phi, incoming, ExitValueKind::RemainderBase});
@@ -999,7 +1011,9 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
 
     for (const auto &plan : exitPlans) {
         Value *fastIncoming = plan.incoming;
-        if (plan.kind == ExitValueKind::RemainderBase)
+        if (plan.kind == ExitValueKind::StateResult)
+            fastIncoming = result;
+        else if (plan.kind == ExitValueKind::RemainderBase)
             fastIncoming = fastRemainderBase;
         plan.phi->add_phi_pair_operand(fastIncoming, fast);
     }
@@ -1056,7 +1070,8 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
                       << " reason=no-dedicated-preheader\n";
         return false;
     }
-    if (tryFoldSummableModularRecurrence(loop, module))
+    if (mode_ == LoopRepFoldMode::Aggressive &&
+        tryFoldSummableModularRecurrence(loop, module))
         return true;
     // Every supported closed form summarizes the number of iterations implied
     // by the header condition.  An additional exiting edge (for example a
@@ -1130,7 +1145,8 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (!total_init || !total_latch) return debugReject("cannot find total init/latch incoming");
     if (!isLoopInvariant(total_init, loop.blocks)) return debugReject("total init is not invariant");
 
-    if (tryFoldModularRecurrence(loop, module, latch, r_phi, total_phi,
+    if (mode_ == LoopRepFoldMode::Aggressive &&
+        tryFoldModularRecurrence(loop, module, latch, r_phi, total_phi,
                                  loop_exit, N, total_init, total_latch,
                                  ivInit, ivStride))
         return true;
@@ -1144,16 +1160,17 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (ivInit != 0 || ivStride != 1)
         return false;
 
-    // 6. total_phi 在 loop body 内只作为 phi incoming（纯加法传递）
-    int body_phi_uses = 0;
+    // 6. The accumulator must participate in the in-loop update.  Its exact
+    // use chain is validated below; requiring every immediate user to be a
+    // phi rejects the canonical `next = total + invariant` form.
+    int bodyUses = 0;
     for (auto &use : total_phi->use_list_) {
         auto *user = dynamic_cast<Instruction *>(use.val_);
         if (!user) continue;
         if (!loop.blocks.count(user->parent_)) continue;
-        if (!user->is_phi()) return false;
-        body_phi_uses++;
+        ++bodyUses;
     }
-    if (body_phi_uses == 0) return false;
+    if (bodyUses == 0) return false;
 
     // 6b. 折叠公式 init + (total_latch_1 - init) * N 成立的充分条件：
     //     total_latch 作为 total_phi 的函数必须恰为 total_phi + C，且 C 每圈
@@ -1203,6 +1220,16 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
             return false;
         };
         if (!isAcc(total_latch)) return false;
+
+        // The recursive proof above identifies the one update chain reaching
+        // the latch.  A second in-loop use of the accumulator could affect
+        // control or another live value and must not be summarized away.
+        for (const Use &use : total_phi->use_list_) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && loop.blocks.count(user->parent_) &&
+                !accVisited.count(user))
+                return false;
+        }
 
         for (auto *bb : loop.blocks) {
             if (bb == loop.header) continue;

@@ -561,12 +561,11 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
     Value *vecVal = pack.vecValue;
     if (!vecVal) {
         Type *vecTy = module->get_vector_type(scalarTy, VF);
+        vecVal = new UndefValue(vecTy);
         for (int lane = 0; lane < VF; ++lane) {
             auto *laneIdx = new ConstantInt(module->int32_ty_, lane);
-            Value *base = vecVal ? vecVal : pack.instrs[lane]->get_operand(0);
-            auto *ins = new InsertElementInst(base,
+            auto *ins = new InsertElementInst(vecVal,
                 pack.instrs[lane]->get_operand(0), laneIdx, bb);
-            if (lane == 0) ins->type_ = vecTy;
             vecVal = ins;
             bb->remove_instr(ins);
             bb->add_instruction_before_inst(ins, pack.instrs[0]);
@@ -666,12 +665,10 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
 
         if (allSame) {
             // Splat the invariant value
-            Value *splat = nullptr;
+            Value *splat = new UndefValue(vecTy);
             for (int lane = 0; lane < VF; ++lane) {
                 auto *idx = new ConstantInt(module->int32_ty_, lane);
-                Value *base = splat ? splat : op0;
-                auto *ins = new InsertElementInst(base, op0, idx, bb);
-                if (lane == 0) ins->type_ = vecTy;
+                auto *ins = new InsertElementInst(splat, op0, idx, bb);
                 splat = ins;
                 bb->remove_instr(ins);
                 bb->add_instruction_before_inst(ins, pack.instrs[0]);
@@ -703,12 +700,12 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
 
             if (!vecOperands[opIdx]) {
                 // Fallback: pack scalar operands lane by lane
+                vecOperands[opIdx] = new UndefValue(vecTy);
                 for (int lane = 0; lane < VF; ++lane) {
                     Value *laneVal = pack.instrs[lane]->get_operand(opIdx);
                     auto *idx = new ConstantInt(module->int32_ty_, lane);
-                    Value *base = vecOperands[opIdx] ? vecOperands[opIdx] : laneVal;
-                    auto *ins = new InsertElementInst(base, laneVal, idx, bb);
-                    if (lane == 0) ins->type_ = vecTy;
+                    auto *ins = new InsertElementInst(
+                        vecOperands[opIdx], laneVal, idx, bb);
                     vecOperands[opIdx] = ins;
                     bb->remove_instr(ins);
                     bb->add_instruction_before_inst(ins, pack.instrs[0]);

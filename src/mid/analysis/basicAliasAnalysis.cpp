@@ -1,4 +1,5 @@
 #include "../../include/mid/analysis/basicAliasAnalysis.hpp"
+#include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
 
@@ -443,6 +444,23 @@ bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
     return alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID;
 }
 
+bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
+                                         const LoopInfo &LI) const {
+    if (!load || !load->is_load()) return false;
+    Value *object = getUnderlyingObject(load->get_operand(0));
+    if (auto *global = dynamic_cast<GlobalVariable *>(object))
+        return global->is_const_ ||
+               global->hasSemFlag(SemFlag::ImmutableObject);
+
+    auto *alloca = dynamic_cast<AllocaInst *>(object);
+    if (!alloca || !alloca->hasSemFlag(SemFlag::ImmutableObject) ||
+        LI.getLoopFor(alloca->parent_))
+        return false;
+
+    std::unordered_set<Value *> visited;
+    return immutableObjectHasSafeUses(alloca, visited);
+}
+
 namespace {
 
 bool isPointerDerivedFrom(Value *value, Value *target,
@@ -550,5 +568,41 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
         return false;
     }
 
+    return true;
+}
+
+bool BasicAliasAnalysis::immutableObjectHasSafeUses(
+    Value *value, std::unordered_set<Value *> &visited) const {
+    if (!value || !visited.insert(value).second)
+        return value != nullptr;
+
+    for (const Use &use : value->use_list_) {
+        auto *user = dynamic_cast<Instruction *>(use.val_);
+        if (!user) return false;
+        if (user->is_load()) continue;
+        if (user->is_store()) {
+            if (use.arg_no_ == 0) return false;
+            continue;
+        }
+        if (user->is_call()) {
+            auto *call = static_cast<CallInst *>(user);
+            if (use.arg_no_ >= call->num_ops_ - 1) return false;
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || callee->is_declaration() ||
+                use.arg_no_ >= callee->arguments_.size())
+                return false;
+            Argument *formal = callee->arguments_[use.arg_no_];
+            if (!isNoCapture(callee, formal) ||
+                isModSet(getFunctionModRef(callee, formal)))
+                return false;
+            continue;
+        }
+        if (user->is_gep() || dynamic_cast<Bitcast *>(user)) {
+            if (!immutableObjectHasSafeUses(user, visited)) return false;
+            continue;
+        }
+        return false;
+    }
     return true;
 }

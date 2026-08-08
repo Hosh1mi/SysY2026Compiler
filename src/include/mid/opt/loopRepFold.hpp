@@ -12,11 +12,21 @@
 // 仿射路径：total += a*i+b（i 为常量初值/正步长 IV，界为常量）经 SCEV
 // 识别后直接闭式求和为常量并整体删除循环。
 // 循环结构统一来自 LoopInfo（plan 阶段 3.1）。
+enum class LoopRepFoldMode {
+    Lite,
+    Aggressive,
+};
+
 class LoopRepFold : public Pass {
 public:
+    explicit LoopRepFold(LoopRepFoldMode mode = LoopRepFoldMode::Aggressive)
+        : mode_(mode) {}
     void execute(Module *module) override;
     PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
-    std::string name() const override { return "LoopRepFold"; }
+    std::string name() const override {
+        return mode_ == LoopRepFoldMode::Lite ? "LoopRepFoldLite"
+                                             : "LoopRepFold";
+    }
 
 private:
     void runOnFunction(Function *func, AnalysisManager *AM);
@@ -40,4 +50,5 @@ private:
     Function *getSummableModSumDeclaration(Module *module);
     std::set<BasicBlock *> modFolded_; // 已折叠的 header，防止重扫无限折叠
     Function *summableModSumDecl_ = nullptr;
+    LoopRepFoldMode mode_;
 };

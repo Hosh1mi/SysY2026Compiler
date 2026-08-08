@@ -167,8 +167,7 @@ bool SCCP::runOnFunction(Function *func) {
         reachable.insert(func->basic_blocks_[0]);
 
     bool changed = true;
-    int maxIterations = 10;
-    while (changed && maxIterations-- > 0) {
+    while (changed) {
         changed = false;
 
         // BFS reachable blocks (respects constant branches)

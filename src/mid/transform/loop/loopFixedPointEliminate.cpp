@@ -48,6 +48,26 @@ bool isSupportedStateType(Value *value) {
     return bits == 1 || bits == 32;
 }
 
+bool isTranslationState(const HeaderPhi &info, const Loop &loop) {
+    auto *update = dynamic_cast<BinaryInst *>(info.backedge);
+    if (!update)
+        return false;
+
+    auto isInvariant = [&](Value *value) {
+        auto *inst = dynamic_cast<Instruction *>(value);
+        return !inst || !loop.isInLoop(inst);
+    };
+
+    if (update->is_add()) {
+        if (update->get_operand(0) == info.phi)
+            return isInvariant(update->get_operand(1));
+        if (update->get_operand(1) == info.phi)
+            return isInvariant(update->get_operand(0));
+    }
+    return update->is_sub() && update->get_operand(0) == info.phi &&
+           isInvariant(update->get_operand(1));
+}
+
 bool normalizeGuard(ICmpInst *compare, Value *candidate,
                     ICmpInst::ICmpOp &predicate, ConstantInt *&bound) {
     if (!compare || !candidate)
@@ -420,6 +440,15 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
             return false;
         state.push_back(phis[i]);
     }
+
+    // A translation x' = x +/- c does not approach a fixed point.  It is
+    // unchanged only when c is already zero, and adding a per-iteration
+    // equality guard obscures the affine recurrence from reduction passes.
+    // Keep fixed-point elimination focused on state maps that can actually
+    // converge under repeated application.
+    for (const HeaderPhi &info : state)
+        if (isTranslationState(info, loop))
+            return false;
 
     if (!memoryIsIterationIndependent(loop, AA))
         return false;

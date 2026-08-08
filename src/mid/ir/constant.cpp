@@ -94,3 +94,7 @@ std::string ConstantVector::print() {
 std::string ConstantZero::print() {
     return "zeroinitializer";
 }
+
+std::string UndefValue::print() {
+    return "undef";
+}

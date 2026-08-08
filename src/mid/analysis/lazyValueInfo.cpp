@@ -138,8 +138,26 @@ static void collectDominatingEdgeFacts(const QueryState &state,
 
         auto recordIfDominating = [&](unsigned successorIndex, bool assumed) {
             auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(successorIndex));
-            if (!succ || succ->pre_bbs_.size() != 1 || succ->pre_bbs_.front() != bb)
+            if (!succ)
                 return;
+            bool hasDedicatedEdge =
+                succ->pre_bbs_.size() == 1 && succ->pre_bbs_.front() == bb;
+            if (!hasDedicatedEdge) {
+                Loop *successorLoop = state.loopInfo->getLoopFor(succ);
+                bool isUniqueLoopEntry =
+                    successorLoop && successorLoop->header == succ &&
+                    !successorLoop->isInLoop(bb);
+                if (isUniqueLoopEntry) {
+                    for (auto *pred : succ->pre_bbs_) {
+                        if (!successorLoop->isInLoop(pred) && pred != bb) {
+                            isUniqueLoopEntry = false;
+                            break;
+                        }
+                    }
+                }
+                if (!isUniqueLoopEntry)
+                    return;
+            }
             if (!state.domTree->dominates(succ, state.block))
                 return;
             recordAssumedBool(br->get_operand(0), assumed, boolFacts, cmpFacts);

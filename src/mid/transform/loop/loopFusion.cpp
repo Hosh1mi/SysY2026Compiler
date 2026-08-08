@@ -1,4 +1,5 @@
 #include "../../../include/mid/opt/loopFusion.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/globalVariable.hpp"
@@ -87,25 +88,30 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
 void LoopFusion::execute(Module *module) {
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
+    BasicAliasAnalysis basicAA;
+    basicAA.analyze(module);
     argAA_ = &argAA;
+    basicAA_ = &basicAA;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
             runOnFunction(func);
     }
     argAA_ = nullptr;
+    basicAA_ = nullptr;
 }
 
 PreservedAnalyses LoopFusion::execute(Module *module, AnalysisManager &AM) {
-    (void)AM;
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
     argAA_ = &argAA;
+    basicAA_ = &AM.getBasicAA(module);
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
             changed |= runOnFunction(func);
     }
     argAA_ = nullptr;
+    basicAA_ = nullptr;
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
@@ -388,7 +394,7 @@ bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
                 if (!call) continue;
                 auto *callee = dynamic_cast<Function *>(
                     call->get_operand(call->num_ops_ - 1));
-                if (!callee || !callee->hasSemFlag(SemFlag::FnPure))
+                if (!callee || !basicAA_ || !basicAA_->isPure(callee))
                     return false;
             }
     return true;

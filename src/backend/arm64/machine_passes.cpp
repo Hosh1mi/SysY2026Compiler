@@ -175,7 +175,7 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                 ++it;
                 continue;
             }
-            bool constant =
+            bool cseCandidate =
                 it->opcode() == Opcode::MOVi32 ||
                 it->opcode() == Opcode::MOVi64 ||
                 it->opcode() == Opcode::MOVIv4Zero ||
@@ -183,8 +183,10 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                 it->opcode() == Opcode::MOVIv4sMsl ||
                 it->opcode() == Opcode::MVNIv4s ||
                 it->opcode() == Opcode::MOVIv16b ||
-                it->opcode() == Opcode::FMOVv4s;
-            if (!constant || it->operands().empty() ||
+                it->opcode() == Opcode::FMOVv4s ||
+                it->opcode() == Opcode::DUPv4i32 ||
+                it->opcode() == Opcode::DUPv4f32;
+            if (!cseCandidate || it->operands().empty() ||
                 !it->operands()[0].isVirtualRegister() ||
                 !it->operands()[0].isDef) {
                 ++it;
@@ -195,6 +197,15 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
                 std::to_string(static_cast<unsigned>(it->opcode()));
             if (it->opcode() == Opcode::MOVIv4Zero) {
                 // zero vector has no immediate payload
+            } else if (it->opcode() == Opcode::DUPv4i32 ||
+                       it->opcode() == Opcode::DUPv4f32) {
+                if (it->operands().size() != 2 ||
+                    !it->operands()[1].isVirtualRegister()) {
+                    ++it;
+                    continue;
+                }
+                key += ":v" + std::to_string(
+                    it->operands()[1].virtualRegister());
             } else if (it->opcode() == Opcode::FMOVv4s) {
                 if (it->operands().size() != 2 ||
                     it->operands()[1].kind() !=
@@ -1518,10 +1529,19 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
             MachineOperand state = bitBranch->operands()[0];
             MachineBasicBlock *even =
                 bitBranch->operands()[2].basicBlock();
-            if (!even || even->instructions().size() != 3)
+            if (!even || (even->instructions().size() != 3 &&
+                          even->instructions().size() != 5))
                 continue;
+            bool incrementOnEdges = even->instructions().size() == 5;
             auto shift = even->instructions().begin();
+            auto increment = shift;
+            auto countCopy = shift;
             auto stateCopy = std::next(shift);
+            if (incrementOnEdges) {
+                increment = std::next(shift);
+                countCopy = std::next(increment);
+                stateCopy = std::next(countCopy);
+            }
             auto toLatch = std::next(stateCopy);
             if (shift->opcode() != Opcode::ASRWri ||
                 shift->operands().size() != 3 ||
@@ -1541,12 +1561,31 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                     MachineOperand::Kind::BasicBlock)
                 continue;
 
+            if (incrementOnEdges &&
+                (increment->opcode() != Opcode::ADDWri ||
+                 increment->operands().size() != 3 ||
+                 !increment->operands()[0].isVirtualRegister() ||
+                 !increment->operands()[1].isVirtualRegister() ||
+                 increment->operands()[2].kind() !=
+                     MachineOperand::Kind::Immediate ||
+                 increment->operands()[2].immediate() != 1 ||
+                 countCopy->opcode() != Opcode::COPY ||
+                 countCopy->operands().size() != 2 ||
+                 !sameVReg(countCopy->operands()[1],
+                           increment->operands()[0])))
+                continue;
+
             MachineBasicBlock *latch =
                 toLatch->operands()[0].basicBlock();
-            if (!latch || latch->instructions().size() != 4)
+            const std::size_t expectedLatchSize =
+                incrementOnEdges ? 3 : 4;
+            if (!latch || latch->instructions().size() != expectedLatchSize)
                 continue;
-            auto increment = latch->instructions().begin();
-            auto compare = std::next(increment);
+            auto compare = latch->instructions().begin();
+            if (!incrementOnEdges) {
+                increment = compare;
+                compare = std::next(increment);
+            }
             auto exitBranch = std::next(compare);
             auto continueBranch = std::next(exitBranch);
             if (increment->opcode() != Opcode::ADDWri ||
@@ -1586,6 +1625,10 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                 continue;
             bool copiesCount = false;
             bool copiesState = false;
+            MachineInstr *continuationCountCopy = nullptr;
+            const MachineOperand &edgeCount =
+                incrementOnEdges ? countCopy->operands()[0]
+                                 : increment->operands()[0];
             auto continuationIt =
                 continuation->instructions().begin();
             for (unsigned i = 0; i < 2;
@@ -1593,11 +1636,14 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                 if (continuationIt->opcode() != Opcode::COPY ||
                     continuationIt->operands().size() != 2)
                     break;
-                copiesCount |=
+                bool isCountCopy =
                     sameVReg(continuationIt->operands()[0],
                              increment->operands()[1]) &&
                     sameVReg(continuationIt->operands()[1],
-                             increment->operands()[0]);
+                             edgeCount);
+                copiesCount |= isCountCopy;
+                if (isCountCopy)
+                    continuationCountCopy = &*continuationIt;
                 copiesState |=
                     sameVReg(continuationIt->operands()[0],
                              state) &&
@@ -1615,6 +1661,30 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                     parity)
                 continue;
 
+            MachineInstr *exitCountCopy = nullptr;
+            unsigned edgeCountUses = 0;
+            for (auto &candidateBlock : function.blocks()) {
+                for (MachineInstr &candidate :
+                     candidateBlock->instructions()) {
+                    for (unsigned operandIndex = 0;
+                         operandIndex < candidate.operands().size();
+                         ++operandIndex) {
+                        MachineOperand &operand =
+                            candidate.operands()[operandIndex];
+                        if (operand.isDef || !sameVReg(operand, edgeCount))
+                            continue;
+                        ++edgeCountUses;
+                        if (candidateBlock.get() == exit &&
+                            candidate.opcode() == Opcode::COPY &&
+                            operandIndex == 1)
+                            exitCountCopy = &candidate;
+                    }
+                }
+            }
+            bool canReuseLoopCount =
+                incrementOnEdges && continuationCountCopy &&
+                exitCountCopy && edgeCountUses == 2;
+
             MachineBasicBlock *oddContinuation = nullptr;
             if (parityFallthrough->operands().size() == 1 &&
                 parityFallthrough->operands()[0].kind() ==
@@ -1624,12 +1694,38 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                 for (MachineBasicBlock *predecessor :
                      latch->predecessors()) {
                     if (predecessor == even ||
-                        predecessor->instructions().size() != 3)
+                        (predecessor->instructions().size() != 3 &&
+                         predecessor->instructions().size() != 5))
                         continue;
-                    auto update =
+                    bool oddIncrementOnEdge =
+                        predecessor->instructions().size() == 5;
+                    if (oddIncrementOnEdge != incrementOnEdges)
+                        continue;
+                    auto oddIncrement =
                         predecessor->instructions().begin();
-                    auto copy = std::next(update);
+                    auto update = oddIncrementOnEdge
+                                      ? std::next(oddIncrement)
+                                      : oddIncrement;
+                    auto oddCountCopy = std::next(update);
+                    auto copy = oddIncrementOnEdge
+                                    ? std::next(oddCountCopy)
+                                    : std::next(update);
                     auto branch = std::next(copy);
+                    if (oddIncrementOnEdge &&
+                        (oddIncrement->opcode() != Opcode::ADDWri ||
+                         oddIncrement->operands().size() != 3 ||
+                         !sameVReg(oddIncrement->operands()[1],
+                                   increment->operands()[1]) ||
+                         oddIncrement->operands()[2].kind() !=
+                             MachineOperand::Kind::Immediate ||
+                         oddIncrement->operands()[2].immediate() != 1 ||
+                         oddCountCopy->opcode() != Opcode::COPY ||
+                         oddCountCopy->operands().size() != 2 ||
+                         !sameVReg(oddCountCopy->operands()[0],
+                                   countCopy->operands()[0]) ||
+                         !sameVReg(oddCountCopy->operands()[1],
+                                   oddIncrement->operands()[0])))
+                        continue;
                     if (update->opcode() != Opcode::ADDWri ||
                         update->operands().size() != 3 ||
                         update->operands()[2].kind() !=
@@ -1715,11 +1811,21 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
 
             MachineInstr batchedIncrement(Opcode::ADDWrr);
             batchedIncrement
-                .addOperand(increment->operands()[0])
+                .addOperand(canReuseLoopCount
+                                ? MachineOperand::vreg(
+                                      increment->operands()[1]
+                                          .virtualRegister(),
+                                      increment->operands()[1]
+                                          .regClass(),
+                                      true)
+                                : increment->operands()[0])
                 .addOperand(increment->operands()[1])
                 .addOperand(MachineOperand::vreg(
                     shiftAmount, RegClass::GPR32));
-            even->append(std::move(batchedIncrement));
+            if (incrementOnEdges)
+                *increment = std::move(batchedIncrement);
+            else
+                even->append(std::move(batchedIncrement));
             even->append(*compare);
             even->append(*exitBranch);
             even->append(*continueBranch);
@@ -1734,10 +1840,21 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
             // sequence directly.  Clone with fresh virtual temporaries;
             // no physical scratch or input-dependent speculation is used.
             if (oddContinuation) {
-                auto update =
+                bool oddIncrementOnEdge =
+                    oddContinuation->instructions().size() == 5;
+                auto oddIncrement =
                     oddContinuation->instructions().begin();
-                auto copy = std::next(update);
+                auto update = oddIncrementOnEdge
+                                  ? std::next(oddIncrement)
+                                  : oddIncrement;
+                auto oddCountCopy = std::next(update);
+                auto copy = oddIncrementOnEdge
+                                ? std::next(oddCountCopy)
+                                : std::next(update);
                 auto oldBranch = std::next(copy);
+                auto oddBatchInsert = oddIncrementOnEdge
+                                          ? oddCountCopy
+                                          : copy;
                 MachineOperand updatedState =
                     MachineOperand::vreg(
                         update->operands()[0]
@@ -1754,7 +1871,7 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                     .addOperand(updatedState);
                 auto reverseOddDefinition =
                     oddContinuation->instructions().insert(
-                        copy, std::move(reverseOdd));
+                        oddBatchInsert, std::move(reverseOdd));
                 function.registerInfo().setDefinition(
                     oddReversed, &*reverseOddDefinition);
 
@@ -1769,7 +1886,7 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                         oddReversed, RegClass::GPR32));
                 auto oddCountDefinition =
                     oddContinuation->instructions().insert(
-                        copy, std::move(countOddZeros));
+                        oddBatchInsert, std::move(countOddZeros));
                 function.registerInfo().setDefinition(
                     oddShiftAmount, &*oddCountDefinition);
 
@@ -1783,36 +1900,67 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
                         oddShiftAmount, RegClass::GPR32));
                 oddContinuation->instructions().erase(oldBranch);
 
-                VReg batchedCount = function.registerInfo()
-                    .createVirtualRegister(RegClass::GPR32,
-                                           ValueType::I32);
-                MachineInstr addShifts(Opcode::ADDWrr);
-                addShifts
-                    .addOperand(MachineOperand::vreg(
-                        batchedCount, RegClass::GPR32, true))
-                    .addOperand(increment->operands()[1])
-                    .addOperand(MachineOperand::vreg(
-                        oddShiftAmount, RegClass::GPR32));
-                MachineInstr &addShiftsDefinition =
-                    oddContinuation->append(
-                        std::move(addShifts));
-                function.registerInfo().setDefinition(
-                    batchedCount, &addShiftsDefinition);
+                if (oddIncrementOnEdge) {
+                    MachineOperand countDestination = canReuseLoopCount
+                        ? MachineOperand::vreg(
+                              increment->operands()[1]
+                                  .virtualRegister(),
+                              increment->operands()[1].regClass(),
+                              true)
+                        : oddCountCopy->operands()[0];
+                    oddCountCopy->setOpcode(Opcode::ADDWrr);
+                    oddCountCopy->operands().clear();
+                    oddCountCopy
+                        ->addOperand(countDestination)
+                        .addOperand(oddIncrement->operands()[0])
+                        .addOperand(MachineOperand::vreg(
+                            oddShiftAmount, RegClass::GPR32));
+                } else {
+                    VReg batchedCount = function.registerInfo()
+                        .createVirtualRegister(RegClass::GPR32,
+                                               ValueType::I32);
+                    MachineInstr addShifts(Opcode::ADDWrr);
+                    addShifts
+                        .addOperand(MachineOperand::vreg(
+                            batchedCount, RegClass::GPR32, true))
+                        .addOperand(increment->operands()[1])
+                        .addOperand(MachineOperand::vreg(
+                            oddShiftAmount, RegClass::GPR32));
+                    MachineInstr &addShiftsDefinition =
+                        oddContinuation->append(
+                            std::move(addShifts));
+                    function.registerInfo().setDefinition(
+                        batchedCount, &addShiftsDefinition);
 
-                MachineInstr addOddIteration(Opcode::ADDWri);
-                addOddIteration
-                    .addOperand(increment->operands()[0])
-                    .addOperand(MachineOperand::vreg(
-                        batchedCount, RegClass::GPR32))
-                    .addOperand(MachineOperand::immediate(1));
-                oddContinuation->append(
-                    std::move(addOddIteration));
+                    MachineInstr addOddIteration(Opcode::ADDWri);
+                    addOddIteration
+                        .addOperand(increment->operands()[0])
+                        .addOperand(MachineOperand::vreg(
+                            batchedCount, RegClass::GPR32))
+                        .addOperand(MachineOperand::immediate(1));
+                    oddContinuation->append(
+                        std::move(addOddIteration));
+                }
                 oddContinuation->append(*compare);
                 oddContinuation->append(*exitBranch);
                 oddContinuation->append(*continueBranch);
                 oddContinuation->removeSuccessor(latch);
                 oddContinuation->addSuccessor(exit);
                 oddContinuation->addSuccessor(continuation);
+            }
+            if (canReuseLoopCount) {
+                exitCountCopy->operands()[1] = MachineOperand::vreg(
+                    increment->operands()[1].virtualRegister(),
+                    increment->operands()[1].regClass());
+                even->instructions().erase(countCopy);
+                for (auto copyIt = continuation->instructions().begin();
+                     copyIt != continuation->instructions().end();
+                     ++copyIt) {
+                    if (&*copyIt != continuationCountCopy)
+                        continue;
+                    continuation->instructions().erase(copyIt);
+                    break;
+                }
             }
             function.clearProperty(
                 MachineProperty::TracksLiveness);

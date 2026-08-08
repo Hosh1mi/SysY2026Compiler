@@ -146,13 +146,14 @@ analyze_loops(Function *func, const DominatorTreeAnalysis &DT) {
 // ---------- Core DFS ----------
 static const std::unordered_map<Value*, Value*> empty_vn_map;
 
-static void early_cse_dfs(BasicBlock *bb,
+static bool early_cse_dfs(BasicBlock *bb,
                           std::unordered_map<ExprSignature, Value*> &expr_map,
                           const DominatorTreeAnalysis &DT,
                           const std::map<BasicBlock*, std::vector<LoopMemoryMod>> &loop_mods,
                           std::vector<ActiveMemoryMod> &activeMods,
                           const BasicAliasAnalysis &BAA)
 {
+    bool changed = false;
     // ── Join point: clear cached loads to prevent sibling→sibling CSE ──
     // A load defined in one sibling does not dominate another sibling.
     // Without this, a load in sibling B could incorrectly replace a load in
@@ -364,12 +365,12 @@ static void early_cse_dfs(BasicBlock *bb,
     }
 
     for (auto *inst : to_delete)
-        bb->delete_instr(inst);
+        changed |= bb->delete_instr(inst);
 
     // ── Recurse into dominator children ──
     for (auto *child : DT.getChildren(bb))
-        early_cse_dfs(child->block(), expr_map, DT, loop_mods,
-                      activeMods, BAA);
+        changed |= early_cse_dfs(child->block(), expr_map, DT, loop_mods,
+                                 activeMods, BAA);
 
     // ── Restore scope ──
     for (auto &sig : added_sigs)
@@ -380,12 +381,14 @@ static void early_cse_dfs(BasicBlock *bb,
             expr_map[sig] = val;
     }
     activeMods.resize(savedModSize);
+    return changed;
 }
 
 // ---------- Entry point ----------
-static void early_cse_on_function(Function *func, const BasicAliasAnalysis &BAA,
+static bool early_cse_on_function(Function *func,
+                                  const BasicAliasAnalysis &BAA,
                                   const DominatorTreeAnalysis &DT) {
-    if (func->basic_blocks_.empty()) return;
+    if (func->basic_blocks_.empty()) return false;
 
     BasicBlock *entry = func->basic_blocks_.front();
     auto loop_mods = analyze_loops(func, DT);
@@ -393,7 +396,7 @@ static void early_cse_on_function(Function *func, const BasicAliasAnalysis &BAA,
     std::unordered_map<ExprSignature, Value*> expr_map;
     std::vector<ActiveMemoryMod> activeMods;
 
-    early_cse_dfs(entry, expr_map, DT, loop_mods, activeMods, BAA);
+    return early_cse_dfs(entry, expr_map, DT, loop_mods, activeMods, BAA);
 }
 
 void EarlyCSE::execute(Module *module) {
@@ -403,11 +406,14 @@ void EarlyCSE::execute(Module *module) {
 
 PreservedAnalyses EarlyCSE::execute(Module *module, AnalysisManager &AM) {
     BasicAliasAnalysis &BAA = AM.getBasicAA(module);
+    bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            early_cse_on_function(func, BAA, AM.getDominatorTree(func));
+            changed |= early_cse_on_function(
+                func, BAA, AM.getDominatorTree(func));
     }
     for (auto &p : canonical_constants) delete p.second;
     canonical_constants.clear();
-    return PreservedAnalyses::cfgAnalyses();
+    return changed ? PreservedAnalyses::cfgAnalyses()
+                   : PreservedAnalyses::all();
 }

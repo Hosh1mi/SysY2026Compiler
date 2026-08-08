@@ -53,3 +53,10 @@ public:
     ConstantZero(Type* ty) : Constant(ty, "") {}
     virtual std::string print() override;
 };
+
+// A typed undefined value used while constructing aggregate SSA values.
+class UndefValue : public Constant {
+public:
+    explicit UndefValue(Type* ty) : Constant(ty, "") {}
+    virtual std::string print() override;
+};

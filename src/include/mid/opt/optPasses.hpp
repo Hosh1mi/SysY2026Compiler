@@ -4,7 +4,6 @@
 // pipeline. Prefer this over listing individual pass headers in main.cpp.
 
 #include "deadCodeEliminate.hpp"
-#include "linearBlockMerge.hpp"
 #include "deadStoreEliminate.hpp"
 #include "correlatedValuePropagation.hpp"
 #include "jumpThreadingLite.hpp"
@@ -16,7 +15,6 @@
 #include "earlyCSE.hpp"
 #include "instCombine.hpp"
 #include "sccp.hpp"
-#include "localCopyPropagation.hpp"
 #include "inlineExpand.hpp"
 #include "bitFuncRecognize.hpp"
 #include "lastIterationElimination.hpp"
@@ -56,7 +54,6 @@
 #include "globalScalarPromotion.hpp"
 #include "gvn.hpp"
 #include "lateValueCleanup.hpp"
-#include "semanticMarkerStamp.hpp"
 #include "codeSink.hpp"
 #include "tailDuplication.hpp"
 #include "parallelizeLoops.hpp"

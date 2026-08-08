@@ -43,6 +43,8 @@
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
 
+class BasicAliasAnalysis;
+
 class LoopFusion : public Pass {
 public:
     void execute(Module *module) override;
@@ -100,4 +102,5 @@ private:
                      const std::vector<Instruction *> &sink);
 
     const ArgumentAliasAnalysis *argAA_ = nullptr;
+    const BasicAliasAnalysis *basicAA_ = nullptr;
 };

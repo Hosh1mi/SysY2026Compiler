@@ -120,75 +120,74 @@ static bool openOutput(const DriverOptions &options,
     return true;
 }
 
-static void addCleanupPasses(PassManager &pm) {
-    pm.addFixedPointGroup(/*maxRounds=*/4, [](PassManager &pm) {
-        pm.addPass(std::make_unique<DeadCodeEliminate>());
-        pm.addPass(std::make_unique<LinearBlockMerge>());
-        pm.addPass(std::make_unique<SCCP>());
+static void addScalarSimplifyClosure(PassManager &pm,
+                                     bool runOnClean = false) {
+    pm.addFixedPointGroup([](PassManager &pm) {
         pm.addPass(std::make_unique<InstCombine>());
-        pm.addPass(std::make_unique<DeadStoreEliminate>());
+        pm.addPass(std::make_unique<SCCP>());
+        pm.addPass(std::make_unique<CFGSimplify>(CFGSimplifyMode::Lite));
         pm.addPass(std::make_unique<DeadCodeEliminate>());
-        pm.addPass(std::make_unique<LinearBlockMerge>());
-    });
+    }, runOnClean);
+}
+
+static void addMemoryCleanup(PassManager &pm, bool runOnClean = false) {
+    pm.addPass(std::make_unique<DeadStoreEliminate>());
+    addScalarSimplifyClosure(pm, runOnClean);
 }
 
 static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     if (optLevel < 1)
         return;
 
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<RadixRecurrenceEliminate>());
     pm.addPass(std::make_unique<EarlyCSE>());
-    addCleanupPasses(pm);
+    addMemoryCleanup(pm, /*runOnClean=*/true);
     pm.addPass(std::make_unique<TailRecursionEliminate>());
     pm.addPass(std::make_unique<ScalarExpansion>());
 
     pm.addPass(std::make_unique<Reassociate>());
-    addCleanupPasses(pm);
-    pm.addPass(std::make_unique<LocalCopyPropagation>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CodeSink>());
 
     pm.addPass(std::make_unique<BitFuncRecognize>());
     pm.addPass(std::make_unique<LastIterationElimination>());
     pm.addPass(std::make_unique<InlineExpand>());
-    pm.addPass(std::make_unique<LocalCopyPropagation>());
-    pm.addPass(std::make_unique<SemanticMarkerStamp>());
     pm.addPass(std::make_unique<EarlyCSE>());
     pm.addPass(std::make_unique<GlobalScalarPromotion>());
     pm.addPass(std::make_unique<Mem2Reg>());
     pm.addPass(std::make_unique<Reassociate>());
-    addCleanupPasses(pm);
+    addMemoryCleanup(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<Reassociate>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
 
     pm.addPass(std::make_unique<CorrelatedValuePropagation>());
     pm.addPass(std::make_unique<JumpThreadingLite>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
-    pm.addPass(std::make_unique<SemanticMarkerStamp>());
+    addScalarSimplifyClosure(pm);
 
-    pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addRepeatGroup(/*maxRounds=*/8, [](PassManager &pm) {
-        pm.addPass(std::make_unique<LoopSimplify>());
-        pm.addPass(std::make_unique<LCSSA>());
-        pm.addPass(std::make_unique<IndVarSimplify>());
-        pm.addPass(std::make_unique<SimpleLoopUnswitch>());
-        pm.addPass(std::make_unique<LoopRotate>());
-        pm.addPass(std::make_unique<PhiOpSink>());
-        pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
-        pm.addPass(std::make_unique<LICM>());
-    addCleanupPasses(pm);
-        pm.addPass(std::make_unique<LCSSA>());
-        pm.addPass(std::make_unique<LoopDeletion>());
-    });
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<LCSSA>());
+    pm.addPass(std::make_unique<IndVarSimplify>());
+    pm.addPass(std::make_unique<SimpleLoopUnswitch>());
+    pm.addPass(std::make_unique<LoopRotate>());
+    pm.addPass(std::make_unique<PhiOpSink>());
+    pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
+    pm.addPass(std::make_unique<LICM>());
+    addScalarSimplifyClosure(pm);
+    pm.addPass(std::make_unique<LCSSA>());
+    pm.addPass(std::make_unique<LoopDeletion>());
+    // Collapse affine and invariant scalar recurrences before a generic
+    // fixed-point guard can add an early-exit edge and before parallelization
+    // considers the remaining loop.  Pattern-specific modular folds stay in
+    // the later aggressive phase.
+    pm.addPass(std::make_unique<LoopRepFold>(LoopRepFoldMode::Lite));
     pm.addPass(std::make_unique<LoopFixedPointEliminate>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
+    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<TriangularRemapSourceCompose>());
     pm.addPass(std::make_unique<TriangularPanelize>());
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
@@ -211,32 +210,31 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopPeel>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopUnroll>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SLPVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
-    addCleanupPasses(pm);
+    addMemoryCleanup(pm);
 
     pm.addPass(std::make_unique<GVN>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CodeSink>());
-    addCleanupPasses(pm);
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<TailDuplication>());
     pm.addPass(std::make_unique<UnifyExitNodes>());
     pm.addPass(std::make_unique<CorrelatedValuePropagation>());
     pm.addPass(std::make_unique<JumpThreadingLite>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
     pm.addPass(std::make_unique<CFGSimplify>());
-    pm.addPass(std::make_unique<DeadCodeEliminate>());
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LateValueCleanup>());
     pm.addPass(std::make_unique<LoopMemoryScalarPromotion>());
     if (AutoMemoization::moduleHasAnyCandidate(m))

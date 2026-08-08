@@ -122,6 +122,58 @@ static BasicBlock *getEntryBlock(Function *func) {
     return func->basic_blocks_.empty() ? nullptr : func->basic_blocks_.front();
 }
 
+// Merge a block with its sole successor when the successor has no other
+// predecessor. This is the non-speculative linear-block fold that belongs to
+// basic CFG canonicalization.
+static bool mergeLinearSuccessor(BasicBlock *bb) {
+    auto *func = bb ? bb->parent_ : nullptr;
+    if (!func)
+        return false;
+
+    auto *term = bb->get_terminator();
+    if (!term || !term->is_br() || term->num_ops_ != 1)
+        return false;
+
+    auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(0));
+    if (!succ || succ == bb || succ->parent_ != func ||
+        succ == getEntryBlock(func))
+        return false;
+    if (succ->pre_bbs_.size() != 1 || succ->pre_bbs_.front() != bb)
+        return false;
+    if (!succ->instr_list_.empty() && succ->instr_list_.front()->is_phi())
+        return false;
+
+    for (auto *next : succ->succ_bbs_) {
+        for (auto *inst : next->instr_list_) {
+            if (!inst->is_phi())
+                break;
+            auto *phi = static_cast<PhiInst *>(inst);
+            for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+                if (phi->get_operand(i) == succ)
+                    phi->set_operand(i, bb);
+            }
+        }
+    }
+
+    std::vector<BasicBlock *> newSuccs = succ->succ_bbs_;
+    bb->delete_instr(term);
+
+    std::vector<Instruction *> toMove(succ->instr_list_.begin(),
+                                      succ->instr_list_.end());
+    for (auto *inst : toMove) {
+        succ->remove_instr(inst);
+        bb->add_instruction(inst);
+    }
+
+    for (auto *next : newSuccs) {
+        next->remove_pre_basic_block(succ);
+        bb->add_succ_basic_block(next);
+        next->add_pre_basic_block(bb);
+    }
+    func->remove_bb(succ);
+    return true;
+}
+
 static bool mergeEmptyBlock(BasicBlock *bb) {
     // 入口块不合并
     if (bb == getEntryBlock(bb->parent_)) return false;
@@ -508,6 +560,12 @@ static int speculationCost(Instruction *inst) {
     case Instruction::SRem:
     case Instruction::FDiv:
         return 8;
+    case Instruction::Select:
+        // A select is not a free move: it consumes flags and extends a
+        // dependent select chain.  Counting it like ordinary integer ALU
+        // work makes an already if-converted inner diamond encourage
+        // conversion of its enclosing guard as well.
+        return 3;
     default:
         return 1;
     }
@@ -832,24 +890,37 @@ bool CFGSimplify::runOnModule(Module *module) {
         while (changed) {
             changed = false;
             bool iterChanged = false;
-            iterChanged |= convertDiamondsToSelect(func);
-            // 2. 折叠常量分支
-            iterChanged |= foldConstantBranches(func);
+            if (mode_ == CFGSimplifyMode::Full) {
+                iterChanged |= convertDiamondsToSelect(func);
+                // 2. 折叠常量分支
+                iterChanged |= foldConstantBranches(func);
 
-            // 3. 合并空基本块
-            // 需要遍历副本，因为集合在遍历中可能被修改
-            std::vector<BasicBlock *> bbs(func->basic_blocks_.begin(), func->basic_blocks_.end());
+                // 3. 合并空基本块
+                // 需要遍历副本，因为集合在遍历中可能被修改
+                std::vector<BasicBlock *> bbs(
+                    func->basic_blocks_.begin(), func->basic_blocks_.end());
+                for (auto *bb : bbs) {
+                    // 如果该块还存在且不是死块
+                    if (bb->parent_ == func) {
+                        iterChanged |= mergeEmptyBlock(bb);
+                    }
+                }
+
+                // 4. 删除不可达块
+                const size_t before = func->basic_blocks_.size();
+                removeUnreachableBlocks(func);
+                iterChanged |= before != func->basic_blocks_.size();
+            }
+
+            std::vector<BasicBlock *> bbs(func->basic_blocks_.begin(),
+                                          func->basic_blocks_.end());
             for (auto *bb : bbs) {
-                // 如果该块还存在且不是死块
-                if (bb->parent_ == func) {
-                    iterChanged |= mergeEmptyBlock(bb);
+                if (bb->parent_ == func && mergeLinearSuccessor(bb)) {
+                    iterChanged = true;
+                    break;
                 }
             }
 
-            // 4. 删除不可达块
-            const size_t before = func->basic_blocks_.size();
-            removeUnreachableBlocks(func);
-            iterChanged |= before != func->basic_blocks_.size();
             changed = iterChanged;
             funcChanged |= iterChanged;
         }

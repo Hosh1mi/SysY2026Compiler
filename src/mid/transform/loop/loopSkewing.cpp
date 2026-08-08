@@ -414,7 +414,7 @@ bool deriveScheduleWeights(const std::vector<std::vector<long long>> &deps,
 
 std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
     Loop &outer, LoopInfo &LI, const ArgumentAliasAnalysis &argAlias,
-    std::string &reason) {
+    const BasicAliasAnalysis &basicAA, std::string &reason) {
     RectangularWavefrontPlan plan;
     Loop *cursor = &outer;
     while (cursor && plan.nest.size() < 3) {
@@ -480,7 +480,7 @@ std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
             auto *call = static_cast<CallInst *>(instruction);
             auto *callee = dynamic_cast<Function *>(
                 call->get_operand(call->num_ops_ - 1));
-            if (!callee || !callee->hasSemFlag(SemFlag::FnPure)) {
+            if (!callee || !basicAA.isPure(callee)) {
                 reason = "cell contains an impure call";
                 return std::nullopt;
             }
@@ -672,6 +672,10 @@ Value *materializeFinalValue(
             return cache[value] = control->bound;
         }
         if (value == control->phi) {
+            if (control->guardPosition == InductionGuardPosition::Header) {
+                visiting.erase(value);
+                return cache[value] = control->bound;
+            }
             auto *last = new BinaryInst(
                 control->phi->type_, Instruction::Sub, control->bound,
                 new ConstantInt(control->phi->type_, 1), block);
@@ -680,6 +684,39 @@ Value *materializeFinalValue(
         }
     }
     if (auto *phi = dynamic_cast<PhiInst *>(value)) {
+        auto dependsOnCompletedIteration = [&](auto &&self, Value *candidate,
+                                               std::set<Value *> &seen)
+            -> bool {
+            for (const InductionDescriptor *control : plan.controls)
+                if (candidate == control->update)
+                    return true;
+            auto *instruction = dynamic_cast<Instruction *>(candidate);
+            if (!instruction || !seen.insert(candidate).second)
+                return false;
+            for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+                if (dynamic_cast<BasicBlock *>(instruction->get_operand(i)))
+                    continue;
+                if (self(self, instruction->get_operand(i), seen))
+                    return true;
+            }
+            return false;
+        };
+
+        // The fast path is entered only for a non-empty common domain. For
+        // an LCSSA merge between an empty-loop value and a completed-loop
+        // value, select the latter before recursively materializing it.
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            std::set<Value *> seen;
+            if (!dependsOnCompletedIteration(
+                    dependsOnCompletedIteration, phi->get_operand(i), seen))
+                continue;
+            Value *mapped = materializeFinalValue(
+                phi->get_operand(i), plan, block, cache, visiting);
+            if (mapped) {
+                visiting.erase(value);
+                return cache[value] = mapped;
+            }
+        }
         for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
             for (const InductionDescriptor *control : plan.controls) {
                 if (phi->get_operand(i) != control->update) continue;
@@ -1023,6 +1060,21 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
     }
     std::vector<std::pair<Instruction *, Value *>> liveOutMappings;
     for (Instruction *liveOut : liveOuts) {
+        bool exportedByLCSSA = false;
+        for (const Use &use : liveOut->use_list_) {
+            auto *phi = dynamic_cast<PhiInst *>(use.val_);
+            if (!phi || phi->parent_ != plan.exit || use.arg_no_ + 1 >=
+                                                       phi->num_ops_)
+                continue;
+            auto *pred = dynamic_cast<BasicBlock *>(
+                phi->get_operand(use.arg_no_ + 1));
+            if (pred && outer->blocks.count(pred)) {
+                exportedByLCSSA = true;
+                break;
+            }
+        }
+        if (exportedByLCSSA)
+            continue;
         Value *mapped = materializeFinalValue(liveOut, plan, done,
                                               finalCache, visiting);
         if (!mapped)
@@ -1079,6 +1131,14 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
 
 bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
     if (std::getenv("DISABLE_LOOP_SKEWING")) return false;
+    BasicAliasAnalysis localBasicAA;
+    BasicAliasAnalysis *basicAA = nullptr;
+    if (AM) {
+        basicAA = &AM->getBasicAA(function->parent_);
+    } else {
+        localBasicAA.analyze(function->parent_);
+        basicAA = &localBasicAA;
+    }
     bool changed = false;
     bool rectangularApplied = false;
     for (int iteration = 0; iteration < 16; ++iteration) {
@@ -1100,7 +1160,7 @@ bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
             if (loop->parent) continue;
             std::string reason;
             auto rectangular = analyzeRectangularWavefront(
-                *loop, *loopInfo, argumentAlias, reason);
+                *loop, *loopInfo, argumentAlias, *basicAA, reason);
             if (debugEnabled()) {
                 if (rectangular) {
                     std::cerr << "[LoopSkewing] rectangular candidate func="

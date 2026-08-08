@@ -34,7 +34,7 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
 }
 
 bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
-                         const BasicAliasAnalysis &BAA) {
+                         const BasicAliasAnalysis &BAA, const LoopInfo &LI) {
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
         inst->is_store() || inst->is_alloca())
         return false;
@@ -64,7 +64,7 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
     if (inst->is_load()) {
         // 不变内存（const 全局/不逃逸局部 const 数组）的读：内容永不改写，
         // 可越过循环内别名歧义直接外提，无需逐指令扫描 clobber。
-        if (inst->hasSemFlag(SemFlag::ImmutableLoad))
+        if (BAA.isImmutableLoad(inst, LI))
             return true;
         Value *ptr = inst->get_operand(0);
         for (auto *bb : loop.blocks) {
@@ -81,7 +81,8 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
-bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA) {
+bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA,
+                     const LoopInfo &LI) {
     BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
     if (!BAA) return false;
@@ -97,7 +98,7 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA) {
         std::set<Instruction*> toHoist;
         for (auto bb : loop.blocksOrdered) {
             for (auto inst : bb->instr_list_) {
-                if (!isSafeToHoist(inst, loop, *BAA)) continue;
+                if (!isSafeToHoist(inst, loop, *BAA, LI)) continue;
 
                 bool allInvariant = true;
                 unsigned operandLimit = inst->is_call() ? inst->num_ops_ - 1
@@ -217,7 +218,7 @@ bool LICM::runOnFunction(Function *func, AnalysisManager &AM) {
 
         BasicAliasAnalysis &BAA = AM.getBasicAA(func->parent_);
 
-        bool changed = runOnLoop(*loop, &BAA);
+        bool changed = runOnLoop(*loop, &BAA, LI);
         bool phiChanged = eliminateTrivialHeaderPhis(*loop);
         if (changed || phiChanged) {
             anyChanged = true;

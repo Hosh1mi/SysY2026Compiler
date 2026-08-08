@@ -34,6 +34,7 @@ struct GvnState {
     std::unordered_map<ExprSignature, Value*> expr_map;
     std::unordered_map<BasicBlock*, unsigned> pred_count;
     const BasicAliasAnalysis *BAA = nullptr;
+    const LoopInfo *LI = nullptr;
     uint64_t mem_gen = 0;
     bool changed = false;
 };
@@ -55,14 +56,19 @@ std::unordered_map<BasicBlock*, unsigned> countPredsFromTerminators(Function *fu
     return cnt;
 }
 
-ExprSignature makeLoadSig(Instruction *load, uint64_t gen) {
+bool isImmutableLoad(Instruction *load, const GvnState &st) {
+    return st.BAA && st.LI && st.BAA->isImmutableLoad(load, *st.LI);
+}
+
+ExprSignature makeLoadSig(Instruction *load, uint64_t gen,
+                          const GvnState &st) {
     ExprSignature sig;
     sig.op_id = Instruction::Load;
     sig.ty = load->type_;
     sig.extra_op = 0;
     // 不变内存（ImmutableLoad）的读与内存状态无关，固定 gen=0，
     // 使同一地址的读跨汇合/回边也能 CSE。
-    uint64_t g = load->hasSemFlag(SemFlag::ImmutableLoad) ? 0 : gen;
+    uint64_t g = isImmutableLoad(load, st) ? 0 : gen;
     sig.ops = {get_canonical_constant(load->get_operand(0)),
                reinterpret_cast<Value*>(static_cast<uintptr_t>(g))};
     return sig;
@@ -95,7 +101,7 @@ void invalidateLoads(Instruction *modInst, GvnState &st,
                      std::vector<std::pair<ExprSignature, Value*>> &removed_sigs) {
     for (auto si = st.expr_map.begin(); si != st.expr_map.end();) {
         if (si->first.op_id == Instruction::Load &&
-            !static_cast<Instruction*>(si->second)->hasSemFlag(SemFlag::ImmutableLoad) &&
+            !isImmutableLoad(static_cast<Instruction *>(si->second), st) &&
             isModSet(st.BAA->getModRefInfo(modInst, si->first.ops[0]))) {
             removed_sigs.push_back({si->first, si->second});
             si = st.expr_map.erase(si);
@@ -199,7 +205,7 @@ void gvnDfs(BasicBlock *bb,
         }
 
         if (inst->is_load()) {
-            tryCSE(inst, makeLoadSig(inst, st.mem_gen));
+            tryCSE(inst, makeLoadSig(inst, st.mem_gen, st));
             continue;
         }
 
@@ -250,12 +256,14 @@ void gvnDfs(BasicBlock *bb,
 }
 
 void gvnOnFunction(Function *func, const BasicAliasAnalysis &BAA,
-                   const DominatorTreeAnalysis &DT, bool &changed) {
+                   const DominatorTreeAnalysis &DT, const LoopInfo &LI,
+                   bool &changed) {
     if (func->basic_blocks_.empty())
         return;
 
     GvnState st;
     st.BAA = &BAA;
+    st.LI = &LI;
     st.pred_count = countPredsFromTerminators(func);
 
     gvnDfs(func->basic_blocks_.front(), DT, st);
@@ -276,7 +284,8 @@ PreservedAnalyses GVN::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            gvnOnFunction(func, BAA, AM.getDominatorTree(func), changed);
+            gvnOnFunction(func, BAA, AM.getDominatorTree(func),
+                          AM.getLoopInfo(func), changed);
     }
     for (auto &p : canonical_constants)
         delete p.second;

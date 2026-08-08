@@ -3,6 +3,7 @@
 #include "../../include/mid/analysis/lazyValueInfo.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/opt/branchFactUtils.hpp"
+#include "../../include/mid/opt/cfgUtils.hpp"
 
 #include <optional>
 #include <vector>
@@ -323,8 +324,13 @@ bool CorrelatedValuePropagation::runOnFunction(Function *func,
             }
         }
         changedAny |= changed;
-        if (changed)
+        if (changed) {
+            // A proven branch condition can disconnect an entire CFG region.
+            // Keep each CVP iteration's result structurally complete before
+            // rebuilding the CFG analyses used by the next iteration.
+            removeUnreachableBlocks(func);
             AM.invalidateFunction(func, PreservedAnalyses::none());
+        }
     } while (changed);
     return changedAny;
 }

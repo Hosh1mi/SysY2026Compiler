@@ -704,24 +704,22 @@ void LoopVectorize::emitReductionVectorizedLoop(
         bb->add_instruction_before_terminator(inst);
     };
     auto emitSplat = [&](Value *scalar, BasicBlock *bb) -> Value * {
-        Value *result = nullptr;
+        Value *result = new UndefValue(
+            module->get_vector_type(scalar->type_, vecWidth));
         for (int j = 0; j < vecWidth; ++j) {
             auto *idxConst = new ConstantInt(module->int32_ty_, j);
-            Value *base = result ? result : scalar;
-            auto *ins = new InsertElementInst(base, scalar, idxConst, bb);
-            if (j == 0) ins->type_ = module->get_vector_type(scalar->type_, vecWidth);
+            auto *ins = new InsertElementInst(result, scalar, idxConst, bb);
             if (bb == preheader) insertBeforeTerm(ins, bb);
             result = ins;
         }
         return result;
     };
     auto emitPack4 = [&](Value *vals[4], BasicBlock *bb) -> Value * {
-        Value *result = nullptr;
+        Value *result = new UndefValue(
+            module->get_vector_type(vals[0]->type_, vecWidth));
         for (int j = 0; j < vecWidth; ++j) {
             auto *idxConst = new ConstantInt(module->int32_ty_, j);
-            Value *base = result ? result : vals[j];
-            auto *ins = new InsertElementInst(base, vals[j], idxConst, bb);
-            if (j == 0) ins->type_ = module->get_vector_type(vals[j]->type_, vecWidth);
+            auto *ins = new InsertElementInst(result, vals[j], idxConst, bb);
             result = ins;
         }
         return result;
@@ -966,13 +964,11 @@ void LoopVectorize::emitReductionVectorizedLoop(
                 if (!entry) entry = emitSplat(value, preheader);
                 result = entry;
             } else if (value == iv.phi) {
-                Value *base = nullptr;
+                Value *base = new UndefValue(vecTy);
                 for (int lane = 0; lane < vecWidth; ++lane) {
                     auto *index = new ConstantInt(module->int32_ty_, lane);
-                    Value *insertBase = base ? base : vecIVPhi;
                     auto *insert = new InsertElementInst(
-                        insertBase, vecIVPhi, index, vecBody);
-                    if (lane == 0) insert->type_ = vecTy;
+                        base, vecIVPhi, index, vecBody);
                     base = insert;
                 }
                 std::vector<Constant *> offsets;
@@ -1447,12 +1443,11 @@ bool LoopVectorize::emitVectorizedLoop(
     auto emitSplat = [&](Value *scalar) -> Value * {
         auto found = splats.find(scalar);
         if (found != splats.end()) return found->second;
-        Value *result = nullptr;
+        Value *result = new UndefValue(vectorType(scalar->type_));
         for (int lane = 0; lane < VF; ++lane) {
             auto *index = new ConstantInt(module->int32_ty_, lane);
-            Value *base = result ? result : scalar;
-            auto *insert = new InsertElementInst(base, scalar, index, preheader);
-            if (lane == 0) insert->type_ = vectorType(scalar->type_);
+            auto *insert = new InsertElementInst(result, scalar, index,
+                                                  preheader);
             insertBeforePreheaderTerminator(insert);
             result = insert;
         }
@@ -1566,14 +1561,12 @@ bool LoopVectorize::emitVectorizedLoop(
         auto &vectorAddresses = partVectorAddresses[part];
         auto getVectorIV = [&]() -> Value * {
             if (vectorIVs[part]) return vectorIVs[part];
-            Value *base = nullptr;
+            Value *base = new UndefValue(
+                vectorType(module->int32_ty_));
             for (int lane = 0; lane < VF; ++lane) {
                 auto *index = new ConstantInt(module->int32_ty_, lane);
-                Value *insertBase = base ? base : partIV;
-                auto *insert = new InsertElementInst(insertBase, partIV, index,
+                auto *insert = new InsertElementInst(base, partIV, index,
                                                       vecBody);
-                if (lane == 0)
-                    insert->type_ = vectorType(module->int32_ty_);
                 base = insert;
             }
             std::vector<Constant *> offsets;

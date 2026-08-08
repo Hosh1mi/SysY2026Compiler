@@ -280,6 +280,12 @@ SDValue SelectionDAGBuilder::getValue(FunctionDAG &functionDAG,
             {type});
         return SDValue{&node, 0};
     }
+    if (dynamic_cast<UndefValue *>(value)) {
+        SDNode &node = dag.createNode(SDOpcode::Constant, {type});
+        if (type == ValueType::V4I32 || type == ValueType::V4F32)
+            node.shuffleMask.assign(4, 0);
+        return SDValue{&node, 0};
+    }
     if (auto *vector = dynamic_cast<ConstantVector *>(value)) {
         SDNode &node = dag.createNode(SDOpcode::Constant, {type});
         node.shuffleMask.reserve(vector->elements_.size());

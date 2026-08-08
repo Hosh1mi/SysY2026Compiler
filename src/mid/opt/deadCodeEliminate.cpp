@@ -63,12 +63,12 @@ void DeadCodeEliminate::execute(Module *module) {
 
 PreservedAnalyses DeadCodeEliminate::execute(Module *module,
                                              AnalysisManager &AM) {
-    (void)AM;
+    BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (func->is_declaration())
             continue;
-        changed |= runOnFunction(func);
+        changed |= runOnFunction(func, BAA);
     }
     changed |= eliminateUnreachableFunctions(module);
     changed |= eliminateUnusedGlobals(module);
@@ -140,19 +140,21 @@ bool DeadCodeEliminate::eliminateUnusedGlobals(Module *module) {
     return globals.size() != oldSize;
 }
 
-bool DeadCodeEliminate::runOnFunction(Function *func) {
+bool DeadCodeEliminate::runOnFunction(Function *func,
+                                      const BasicAliasAnalysis &BAA) {
     bool changed = false;
     bool localChanged = false;
     do {
         localChanged = false;
         localChanged |= eliminateTrivialPhis(func);
-        localChanged |= eliminateDeadInstructions(func);
+        localChanged |= eliminateDeadInstructions(func, BAA);
         changed |= localChanged;
     } while (localChanged);
     return changed;
 }
 
-bool DeadCodeEliminate::hasRequiredEffect(Instruction *inst) const {
+bool DeadCodeEliminate::hasRequiredEffect(
+    Instruction *inst, const BasicAliasAnalysis &BAA) const {
     switch (inst->op_id_) {
         case Instruction::Ret:
         case Instruction::Br:
@@ -162,21 +164,22 @@ bool DeadCodeEliminate::hasRequiredEffect(Instruction *inst) const {
             Function *callee = calledFunction(inst);
             if (!callee)
                 return true;
-            return !callee->hasSemFlag(SemFlag::FnPure);
+            return !BAA.isPure(callee);
         }
         default:
             return false;
     }
 }
 
-bool DeadCodeEliminate::eliminateDeadInstructions(Function *func) {
+bool DeadCodeEliminate::eliminateDeadInstructions(
+    Function *func, const BasicAliasAnalysis &BAA) {
     // Mark from observable roots so mutually-referential dead SSA cycles do
     // not keep themselves alive through non-empty use lists.
     std::set<Instruction *> live;
     std::vector<Instruction *> worklist;
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
-            if (hasRequiredEffect(inst) && live.insert(inst).second)
+            if (hasRequiredEffect(inst, BAA) && live.insert(inst).second)
                 worklist.push_back(inst);
         }
     }
