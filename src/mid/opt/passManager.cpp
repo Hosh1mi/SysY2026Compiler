@@ -41,7 +41,6 @@ static size_t countInstructions(Module *module) {
 static bool isLoopTransformPass(const std::string &name) {
     static const std::unordered_set<std::string> loopPasses = {
         "ScalarExpansion",
-        "LoopDistribution",
         "LoopInvariantReduction",
         "LastIterationElimination",
         "LoopSimplify",
@@ -65,7 +64,6 @@ static bool isLoopTransformPass(const std::string &name) {
         "LoopRepFold",
         "LoopUnroll",
         "LoopPeel",
-        "Hira",
     };
     return loopPasses.count(name) != 0;
 }

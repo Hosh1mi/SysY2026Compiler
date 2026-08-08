@@ -38,7 +38,7 @@
 #include "triangularPanelize.hpp"
 #include "triangularRemapSourceCompose.hpp"
 #include "loopResetPointElimination.hpp"
-#include "loopDistribution.hpp"
+#include "scalarExpansion.hpp"
 #include "loopInvariantReduction.hpp"
 #include "loopFusion.hpp"
 #include "loopUnroll.hpp"

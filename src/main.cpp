@@ -135,7 +135,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<EarlyCSE>());
     addCanonicalCleanup(pm);
     pm.addPass(std::make_unique<TailRecursionEliminate>());
-    pm.addPass(std::make_unique<LoopDistribution>());
+    pm.addPass(std::make_unique<ScalarExpansion>());
 
     pm.addPass(std::make_unique<Reassociate>());
     addCanonicalCleanup(pm);

@@ -2,7 +2,7 @@
 // LoopInterchange:
 //   通用的"循环交换"。本质是把一个【完全并行】的循环 K 下沉到最内层，
 //   遇到不完美嵌套时顺带做循环分配(distribution)——这正好等价于
-//   LoopDistribution + LoopInterchange 的组合，但用单一依赖驱动的变换表达。
+//   ScalarExpansion + LoopInterchange 的组合，但用单一依赖驱动的变换表达。
 //
 // 与 ScalarExpansion 的分工：
 //   - ScalarExpansion 处理"内层 reduction + 标量展开"的交换；
