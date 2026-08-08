@@ -169,48 +169,43 @@ bool DeadCodeEliminate::hasRequiredEffect(Instruction *inst) const {
     }
 }
 
-bool DeadCodeEliminate::isInstructionDead(Instruction *inst) const {
-    return inst && inst->use_list_.empty() && !hasRequiredEffect(inst);
-}
-
 bool DeadCodeEliminate::eliminateDeadInstructions(Function *func) {
+    // Mark from observable roots so mutually-referential dead SSA cycles do
+    // not keep themselves alive through non-empty use lists.
+    std::set<Instruction *> live;
     std::vector<Instruction *> worklist;
-    std::set<Instruction *> queued;
-
-    auto enqueueIfDead = [&](Instruction *inst) {
-        if (isInstructionDead(inst) && queued.insert(inst).second)
-            worklist.push_back(inst);
-    };
-
     for (auto *bb : func->basic_blocks_) {
-        for (auto *inst : bb->instr_list_)
-            enqueueIfDead(inst);
+        for (auto *inst : bb->instr_list_) {
+            if (hasRequiredEffect(inst) && live.insert(inst).second)
+                worklist.push_back(inst);
+        }
     }
 
-    bool changed = false;
     while (!worklist.empty()) {
         Instruction *inst = worklist.back();
         worklist.pop_back();
-        queued.erase(inst);
-
-        BasicBlock *parent = inst->parent_;
-        if (!parent || !isInstructionDead(inst))
-            continue;
-
-        std::vector<Instruction *> operands;
         for (unsigned i = 0; i < inst->num_ops_; ++i) {
-            if (auto *opInst = dynamic_cast<Instruction *>(inst->get_operand(i)))
-                operands.push_back(opInst);
+            auto *operand =
+                dynamic_cast<Instruction *>(inst->get_operand(i));
+            if (operand && operand->parent_ && live.insert(operand).second)
+                worklist.push_back(operand);
         }
-
-        if (!parent->delete_instr(inst))
-            continue;
-        changed = true;
-
-        for (auto *opInst : operands)
-            enqueueIfDead(opInst);
     }
 
+    std::vector<Instruction *> dead;
+    for (auto *bb : func->basic_blocks_) {
+        for (auto *inst : bb->instr_list_) {
+            if (!live.count(inst))
+                dead.push_back(inst);
+        }
+    }
+
+    bool changed = false;
+    for (auto *inst : dead) {
+        BasicBlock *parent = inst->parent_;
+        if (parent && parent->delete_instr(inst))
+            changed = true;
+    }
     return changed;
 }
 

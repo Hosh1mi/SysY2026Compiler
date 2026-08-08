@@ -18,6 +18,5 @@ private:
     bool eliminateDeadInstructions(Function *func);
     bool eliminateTrivialPhis(Function *func);
 
-    bool isInstructionDead(Instruction *inst) const;
     bool hasRequiredEffect(Instruction *inst) const;
 };
