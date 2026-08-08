@@ -25,6 +25,12 @@ public:
     void execute(Module *module) override;
     PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "LCSSA"; }
+    LoopForm requiredLoopForm() const override {
+        return LoopForm::Simplified;
+    }
+    LoopForm establishedLoopForm() const override {
+        return LoopForm::LCSSA;
+    }
 
 private:
     bool runOnFunction(Function *func, AnalysisManager &AM);

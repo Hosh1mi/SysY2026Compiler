@@ -16,6 +16,7 @@ class LoopUnroll : public Pass {
 public:
     void execute(Module *module) override;
     std::string name() const override { return "LoopUnroll"; }
+    LoopForm requiredLoopForm() const override { return LoopForm::LCSSA; }
 
 private:
     bool runOnFunction(Function *func, BasicAliasAnalysis &BAA);

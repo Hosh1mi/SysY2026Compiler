@@ -58,11 +58,16 @@ void markParallelBodiesForCall(Module *module, CallInst *call,
 
 void DeadCodeEliminate::execute(Module *module) {
     AnalysisManager AM;
-    execute(module, AM);
+    runPass(module, AM);
 }
 
 PreservedAnalyses DeadCodeEliminate::execute(Module *module,
                                              AnalysisManager &AM) {
+    return runPass(module, AM).preserved;
+}
+
+PassRunResult DeadCodeEliminate::runPass(Module *module,
+                                         AnalysisManager &AM) {
     BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -72,7 +77,8 @@ PreservedAnalyses DeadCodeEliminate::execute(Module *module,
     }
     changed |= eliminateUnreachableFunctions(module);
     changed |= eliminateUnusedGlobals(module);
-    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+    return {changed, changed ? PreservedAnalyses::none()
+                             : PreservedAnalyses::all()};
 }
 
 bool DeadCodeEliminate::eliminateUnreachableFunctions(Module *module) {

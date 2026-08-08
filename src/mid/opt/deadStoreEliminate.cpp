@@ -7,19 +7,24 @@
 
 void DeadStoreEliminate::execute(Module *module) {
     AnalysisManager AM;
-    execute(module, AM);
+    runPass(module, AM);
 }
 
 PreservedAnalyses DeadStoreEliminate::execute(Module *module,
                                                AnalysisManager &AM) {
+    return runPass(module, AM).preserved;
+}
+
+PassRunResult DeadStoreEliminate::runPass(Module *module,
+                                          AnalysisManager &AM) {
     BasicAliasAnalysis &AA = AM.getBasicAA(module);
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
             changed |= runOnFunction(func, AA, AM.getDominatorTree(func));
     }
-    return changed ? PreservedAnalyses::cfgAnalyses()
-                   : PreservedAnalyses::all();
+    return {changed, changed ? PreservedAnalyses::cfgAnalyses()
+                             : PreservedAnalyses::all()};
 }
 
 static bool instBefore(Instruction *a, Instruction *b) {

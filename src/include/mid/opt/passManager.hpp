@@ -18,10 +18,11 @@ class PassManager {
     AnalysisManager analyses_;
     bool dump_ir_    = false;
     bool verify_ir_  = false;
-    bool loop_form_ready_ = false;
+    LoopForm loop_form_ = LoopForm::None;
     bool building_group_ = false;
 
-    PreservedAnalyses runSinglePass(Pass &pass, Module *module);
+    PassRunResult runSinglePass(Pass &pass, Module *module);
+    void ensureLoopForm(LoopForm required, Module *module);
 
     void beginFixedPointGroup(bool runOnClean);
     void endFixedPointGroup();

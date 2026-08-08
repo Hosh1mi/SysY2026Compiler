@@ -4,6 +4,17 @@
 
 class AnalysisManager;
 
+enum class LoopForm {
+    None,
+    Simplified,
+    LCSSA,
+};
+
+struct PassRunResult {
+    bool changed = false;
+    PreservedAnalyses preserved = PreservedAnalyses::all();
+};
+
 class Pass {
 public:
     virtual void execute(Module *module) = 0;
@@ -14,6 +25,12 @@ public:
         execute(module);
         return PreservedAnalyses::none();
     }
+    virtual PassRunResult runPass(Module *module, AnalysisManager &AM) {
+        PreservedAnalyses preserved = execute(module, AM);
+        return {!preserved.preservesAll(), preserved};
+    }
+    virtual LoopForm requiredLoopForm() const { return LoopForm::None; }
+    virtual LoopForm establishedLoopForm() const { return LoopForm::None; }
     virtual std::string name() const = 0;
     virtual ~Pass() = default;
 };

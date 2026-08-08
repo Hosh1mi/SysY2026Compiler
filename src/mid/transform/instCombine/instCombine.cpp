@@ -68,18 +68,22 @@ static void trySinkInstruction(Instruction *inst) {
 
 void InstCombine::execute(Module *module) {
     AnalysisManager AM;
-    execute(module, AM);
+    runPass(module, AM);
 }
 
 PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
+    return runPass(module, AM).preserved;
+}
+
+PassRunResult InstCombine::runPass(Module *module, AnalysisManager &AM) {
     bool changed = false;
     auto functions = module->function_list_;
     for (auto func : functions) {
         if (func->is_declaration()) continue;
         changed |= runOnFunction(func, &AM);
     }
-    return changed ? PreservedAnalyses::cfgAnalyses()
-                   : PreservedAnalyses::all();
+    return {changed, changed ? PreservedAnalyses::cfgAnalyses()
+                             : PreservedAnalyses::all()};
 }
 
 bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {

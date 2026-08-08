@@ -3,6 +3,8 @@
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/analysis/scalarEvolution.hpp"
 #include "../../include/mid/ir/instruction.hpp"
+#include "../../include/mid/opt/lcssa.hpp"
+#include "../../include/mid/opt/loopSimplify.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -79,27 +81,20 @@ static bool isLoopVerifyStrictEnabled() {
     return std::getenv("LOOP_VERIFY_STRICT") != nullptr;
 }
 
-static bool establishesLoopStructure(const std::string &name) {
-    return name == "LoopSimplify";
-}
-
-static bool establishesLCSSA(const std::string &name) {
-    return name == "LCSSA";
-}
-
-static int loopVerifyLevelAfterPass(const std::string &name,
-                                    bool loopFormReady) {
-    if (establishesLCSSA(name) && loopFormReady)
+static int loopVerifyLevelAfterPass(const Pass &pass,
+                                    bool simplifiedBefore) {
+    if (pass.establishedLoopForm() == LoopForm::LCSSA && simplifiedBefore)
         return 3;
-    if (establishesLoopStructure(name))
+    if (pass.establishedLoopForm() == LoopForm::Simplified)
         return 2;
     return 1;
 }
 
-static bool canStrictlyVerifyLoopFormAfterPass(const std::string &name,
-                                               bool loopFormReady) {
-    return establishesLoopStructure(name) ||
-           (establishesLCSSA(name) && loopFormReady);
+static bool canStrictlyVerifyLoopFormAfterPass(const Pass &pass,
+                                               bool simplifiedBefore) {
+    return pass.establishedLoopForm() == LoopForm::Simplified ||
+           (pass.establishedLoopForm() == LoopForm::LCSSA &&
+            simplifiedBefore);
 }
 
 // DUMP_IR_PASS=PassA,PassB restricts --dump-ir to the listed pass names.
@@ -200,7 +195,7 @@ static void dumpSCEVSnapshot(Module *module, const std::string &when,
     }
 }
 
-PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
+PassRunResult PassManager::runSinglePass(Pass &pass, Module *module) {
     const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
     const std::string passName = pass.name();
     if (std::getenv("TRACE_PASS_PIPELINE"))
@@ -214,7 +209,11 @@ PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
     }
     dumpSCEVSnapshot(module, "Before", passName);
 
-    PreservedAnalyses preserved = pass.execute(module, analyses_);
+    PassRunResult result = pass.runPass(module, analyses_);
+    const PreservedAnalyses &preserved = result.preserved;
+    const bool simplifiedBefore =
+        static_cast<int>(loop_form_) >=
+        static_cast<int>(LoopForm::Simplified);
 
     if (verify_ir_) {
         const std::string context = "after " + passName;
@@ -222,21 +221,20 @@ PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
         if (isLoopTransformPass(passName)) {
             const bool strictLoopVerify = isLoopVerifyStrictEnabled();
             const int loopVerifyLevel =
-                loopVerifyLevelAfterPass(passName, loop_form_ready_);
+                loopVerifyLevelAfterPass(pass, simplifiedBefore);
             std::cerr << "[VERIFY] " << context << ": ok\n";
             verifyLoopForms(module, loopVerifyLevel, context,
                             /*warnOnly=*/!strictLoopVerify ||
                                 !canStrictlyVerifyLoopFormAfterPass(
-                                    passName, loop_form_ready_),
+                                    pass, simplifiedBefore),
                             /*reportClean=*/true);
         }
     }
 
-    if (establishesLoopStructure(passName)) {
-        loop_form_ready_ = true;
-    } else if (!establishesLCSSA(passName) && !preserved.preservesAll()) {
-        loop_form_ready_ = false;
-    }
+    if (pass.establishedLoopForm() != LoopForm::None)
+        loop_form_ = pass.establishedLoopForm();
+    else if (result.changed)
+        loop_form_ = LoopForm::None;
 
     analyses_.invalidate(module, preserved);
 
@@ -256,7 +254,21 @@ PreservedAnalyses PassManager::runSinglePass(Pass &pass, Module *module) {
                                     static_cast<long long>(beforeInsts)
                   << "\n";
     }
-    return preserved;
+    return result;
+}
+
+void PassManager::ensureLoopForm(LoopForm required, Module *module) {
+    if (static_cast<int>(loop_form_) >= static_cast<int>(required))
+        return;
+    if (static_cast<int>(loop_form_) <
+        static_cast<int>(LoopForm::Simplified)) {
+        LoopSimplify simplify;
+        runSinglePass(simplify, module);
+    }
+    if (required == LoopForm::LCSSA && loop_form_ != LoopForm::LCSSA) {
+        LCSSA lcssa;
+        runSinglePass(lcssa, module);
+    }
 }
 
 void PassManager::run(Module *module) {
@@ -284,9 +296,10 @@ void PassManager::run(Module *module) {
                 bool roundChanged = false;
                 std::string changedList;
                 for (size_t j = g.begin; j < g.end; j++) {
-                    PreservedAnalyses preserved =
+                    ensureLoopForm(passes[j]->requiredLoopForm(), module);
+                    PassRunResult result =
                         runSinglePass(*passes[j], module);
-                    if (!preserved.preservesAll()) {
+                    if (result.changed) {
                         roundChanged = true;
                         if (tracePipeline) {
                             if (!changedList.empty()) changedList += ", ";
@@ -307,8 +320,9 @@ void PassManager::run(Module *module) {
             gi++;
             continue;
         }
-        PreservedAnalyses preserved = runSinglePass(*passes[i], module);
-        irChangedSinceFixedPoint |= !preserved.preservesAll();
+        ensureLoopForm(passes[i]->requiredLoopForm(), module);
+        PassRunResult result = runSinglePass(*passes[i], module);
+        irChangedSinceFixedPoint |= result.changed;
         i++;
     }
 }

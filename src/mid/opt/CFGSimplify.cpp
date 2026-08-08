@@ -934,7 +934,12 @@ void CFGSimplify::execute(Module *module) {
 }
 
 PreservedAnalyses CFGSimplify::execute(Module *module, AnalysisManager &AM) {
+    return runPass(module, AM).preserved;
+}
+
+PassRunResult CFGSimplify::runPass(Module *module, AnalysisManager &AM) {
     (void)AM;
-    return runOnModule(module) ? PreservedAnalyses::none()
-                               : PreservedAnalyses::all();
+    bool changed = runOnModule(module);
+    return {changed, changed ? PreservedAnalyses::none()
+                             : PreservedAnalyses::all()};
 }

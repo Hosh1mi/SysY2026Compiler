@@ -182,7 +182,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     addScalarSimplifyClosure(pm);
 
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<IndVarSimplify>());
     pm.addPass(std::make_unique<SimpleLoopUnswitch>());
     pm.addPass(std::make_unique<LoopRotate>());
@@ -190,7 +189,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<inductiveRangeCheckElimination>());
     pm.addPass(std::make_unique<LICM>());
     addScalarSimplifyClosure(pm);
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopDeletion>());
     // Collapse affine and invariant scalar recurrences before a generic
     // fixed-point guard can add an early-exit edge and before parallelization
@@ -199,7 +197,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopRepFold>(LoopRepFoldMode::Lite));
     pm.addPass(std::make_unique<LoopFixedPointEliminate>());
     addScalarSimplifyClosure(pm);
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<TriangularRemapSourceCompose>());
     pm.addPass(std::make_unique<TriangularPanelize>());
     pm.addPass(std::make_unique<LinearRecurrenceFold>());
@@ -220,16 +217,13 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopRepFold>());
     pm.addPass(std::make_unique<LoopModuloDelay>());
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopPeel>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopUnroll>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LCSSA>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SLPVectorize>());
     pm.addPass(std::make_unique<SplitGEP>());
