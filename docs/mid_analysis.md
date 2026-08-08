@@ -374,9 +374,10 @@ BasicAA 清除受影响的 pointer/element facts。多前驱合流使用 meet，
 constant + Σ(coeff[iv] * iv)
 ```
 
-当前可识别的值形态是常量、LoopInfo 识别的 canonical IV、add、sub 和一侧为常量
-的 mul。分析首先尝试递归构造表达式，必要时通过内部 ScalarEvolution 转换
-AddRec/其它 SCEV；遇到 load、未知 call、非线性乘法或不能证明的值返回 invalid。
+当前可识别的值形态是常量、LoopInfo 识别的 canonical IV、add、sub、一侧为常量
+的 mul，以及常量位数的左移。分析先通过内部 ScalarEvolution 转换表达式；当
+SCEV 对移位或包含移位的复合算术返回 unknown 时，再按同一套仿射规则递归展开
+IR 算术。遇到 load、未知 call、非线性乘法或不能证明的值返回 invalid。
 
 `provablyIndependentOfIV` 沿 use-def 反向检查值是否到达目标 IV。常量、参数和 global
 可判定独立，load/间接下标默认判定相关；循环环路用 visited 集合截断。该结果被
@@ -426,6 +427,12 @@ DIR_ANY = 无法证明方向
 
 `loopCarriesDependence` 将非 `DIR_EQ` 的相依对视为该层携带依赖；无法求方向也
 保守视为携带。因此 `isLoopParallel` 只在没有循环携带依赖时返回 true。
+
+`getConstantDistance(source, sink, nest)` 是 wavefront 变换使用的更严格接口。它只在
+各维仿射系数一致、且每个循环距离都能由独立的单位系数方程精确解出时返回
+`Exact`；不同底层对象返回 `NoDependence`，其余情况均为 `Unknown`。返回向量采用
+`sink iteration - source iteration`，循环层次按从外到内排列。这个接口不会用
+方向区间冒充精确距离，因此不能求解的耦合方程仍会保守拒绝。
 
 `setArgAlias` 是可选的过程间 alias oracle；`setInductionOverride` 允许已经由其它
 变换验证过、但没有写入 LoopInfo legacy 字段的控制 IV 参与方向分析。

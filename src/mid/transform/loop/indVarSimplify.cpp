@@ -413,6 +413,20 @@ bool equivalentRecurrence(const Recurrence &lhs, const Recurrence &rhs,
            equivalentStep(lhs, rhs, scalarEvolution);
 }
 
+bool constantStartDelta(const Recurrence &leader,
+                        const Recurrence &derived,
+                        ScalarEvolution &scalarEvolution,
+                        long long &delta) {
+    if (!equivalentStep(leader, derived, scalarEvolution)) return false;
+    auto *leaderStart = dynamic_cast<ConstantInt *>(leader.start);
+    auto *derivedStart = dynamic_cast<ConstantInt *>(derived.start);
+    if (!leaderStart || !derivedStart) return false;
+    delta = static_cast<long long>(derivedStart->value_) -
+            static_cast<long long>(leaderStart->value_);
+    return delta >= std::numeric_limits<int>::min() &&
+           delta <= std::numeric_limits<int>::max();
+}
+
 bool replacementDoesNotStrengthenSemantics(const Recurrence &leader,
                                            const Recurrence &redundant,
                                            const Loop &loop) {
@@ -711,9 +725,15 @@ bool eliminateCongruentIVs(Loop &loop,
     std::vector<Recurrence *> leaders;
     for (Recurrence &recurrence : recurrences) {
         Recurrence *leader = nullptr;
+        long long affineDelta = 0;
         for (Recurrence *candidate : leaders) {
             if (equivalentRecurrence(*candidate, recurrence,
                                      scalarEvolution)) {
+                leader = candidate;
+                break;
+            }
+            if (constantStartDelta(*candidate, recurrence, scalarEvolution,
+                                   affineDelta)) {
                 leader = candidate;
                 break;
             }
@@ -724,9 +744,64 @@ bool eliminateCongruentIVs(Loop &loop,
         }
 
         if (recurrence.phi == loop.controlInduction.phi ||
-            !onlyUsedBy(recurrence.update, recurrence.phi) ||
             !replacementDoesNotStrengthenSemantics(*leader, recurrence,
                                                    loop))
+            continue;
+
+        if (affineDelta != 0) {
+            auto *delta = new ConstantInt(recurrence.phi->type_, affineDelta);
+            auto *current = new BinaryInst(
+                recurrence.phi->type_, Instruction::Add, leader->phi, delta,
+                loop.header, true);
+            Instruction *firstNonPhi = nullptr;
+            for (auto *instruction : loop.header->instr_list_)
+                if (!instruction->is_phi()) {
+                    firstNonPhi = instruction;
+                    break;
+                }
+            if (!firstNonPhi || !loop.header->add_instruction_before_inst(
+                                     current, firstNonPhi)) {
+                delete current;
+                continue;
+            }
+
+            auto *next = new BinaryInst(
+                recurrence.phi->type_,
+                recurrence.subtractStep ? Instruction::Sub
+                                        : Instruction::Add,
+                current, recurrence.step, recurrence.update->parent_, true);
+            if (!recurrence.update->parent_->add_instruction_before_inst(
+                    next, recurrence.update)) {
+                loop.header->delete_instr(current);
+                delete next;
+                continue;
+            }
+
+            std::vector<Use> phiUses(recurrence.phi->use_list_.begin(),
+                                     recurrence.phi->use_list_.end());
+            for (const Use &use : phiUses) {
+                auto *user = dynamic_cast<Instruction *>(use.val_);
+                if (user && user != recurrence.update)
+                    user->set_operand(use.arg_no_, current);
+            }
+            std::vector<Use> updateUses(recurrence.update->use_list_.begin(),
+                                        recurrence.update->use_list_.end());
+            for (const Use &use : updateUses) {
+                auto *user = dynamic_cast<Instruction *>(use.val_);
+                if (user && user != recurrence.phi)
+                    user->set_operand(use.arg_no_, next);
+            }
+            recurrence.phi->parent_->delete_instr(recurrence.phi);
+            recurrence.update->parent_->delete_instr(recurrence.update);
+            changed = true;
+            if (debugEnabled())
+                std::cerr << "[IndVarSimplify] eliminated affine IV header="
+                          << loop.header->name_ << " delta=" << affineDelta
+                          << "\n";
+            continue;
+        }
+
+        if (!onlyUsedBy(recurrence.update, recurrence.phi))
             continue;
 
         std::vector<Use> uses(recurrence.phi->use_list_.begin(),

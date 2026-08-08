@@ -178,7 +178,13 @@ DependenceAnalysis 证明交换不反转依赖，并要求 CostModel 计算的�
 
 ### 7.3 Skewing 与三角调度
 
-- [`LoopSkewing`](../src/mid/transform/loop/loopSkewing.cpp) 从仿射边界推导 skew 系数与 offset，改写内层起止值以消除斜向依赖。
+- [`LoopSkewing`](../src/mid/transform/loop/loopSkewing.cpp) 保留原有的三角域坐标改写；
+  对二层或三层矩形仿射循环，它还会从精确常量依赖距离推导 wave schedule，
+  将迭代重排为 `wave -> lane -> cell`。三层循环只调度外两维，最内维保持串行和
+  原有单位步长；同 wave 依赖必须局限在同一 lane 的最内层次序内。变换只接受共同的 i32 单位步长区间、可重建
+  的单块单 store cell 和可证明的出口值，并用运行时范围检查保护 wave 算术；检查失败时走
+  原循环。`DISABLE_LOOP_SKEWING=1` 可关闭该 pass，`DEBUG_LOOP_SKEWING=1` 输出候选、
+  拒绝原因和最终 schedule 权重。
 - [`TriangleInterchange`](../src/mid/transform/loop/triangleInterchange.cpp) 对 `0 <= distance < row <= extent` 一类已证明三角域，把 distance
   调度为外层 wave，把同一 wave 上的独立 cell 改为内层 lane。
 - 两者都要求完整的 IV、仿射访存、alias 和出口形状证明。成功后的 wavefront 并行维会通过
@@ -197,6 +203,10 @@ __sysy_par_body_<id>(lo, hi)
 原调用点替换为 `__sysy_parallel_for(id, lo, hi)`，live-in 经 `__sysy_par_ctx_*` 全局槽传递。
 它支持可合并的内存 reduction、标量加减/模 reduction 和可私有化 scratch；存在不可证明的
 循环携带依赖、alias、call 副作用或 live-out 时拒绝外提。
+同一 store 的地址若是有界仿射混合基数表达式，pass 会先证明该表达式在当前循环及
+子循环域上单射，再排除伪 store-store 依赖。这个证明同时检查 i32 地址下标不溢出。
+由 wavefront pass 标记的 coincident lane 可作为嵌套叶循环外提，普通嵌套叶循环仍受
+dispatch 开销规则限制。
 
 本 pass 只生成 worker IR 和 dispatch call。最终的 `__sysy_par_dispatch` 跳转表与双核 clone/spin
 汇编 runtime 在后端输出阶段追加，不属于 `src/mid/runtime`。

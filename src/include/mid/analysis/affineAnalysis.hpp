@@ -8,6 +8,7 @@
 //   add(a,b)                  → analyze(a) + analyze(b)
 //   sub(a,b)                  → analyze(a) - analyze(b)
 //   mul(c, x) / mul(x, c)    → c · analyze(x)
+//   shl(x, constant)          → 2^constant · analyze(x)
 //   其它                       → invalid
 //
 // 主要服务对象是 DependenceAnalysis 和 CostModel：能告诉它们

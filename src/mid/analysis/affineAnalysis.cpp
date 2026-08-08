@@ -89,6 +89,32 @@ AffineExpr AffineAnalysis::analyze(Value *v) {
     if (it != cache_.end()) return it->second;
 
     AffineExpr result = fromSCEV(SE_.getSCEV(v));
+    if (!result.valid) {
+        if (auto *binary = dynamic_cast<BinaryInst *>(v)) {
+            if (binary->is_add() || binary->is_sub()) {
+                AffineExpr lhs = analyze(binary->get_operand(0));
+                AffineExpr rhs = analyze(binary->get_operand(1));
+                result = binary->is_add() ? lhs + rhs : lhs - rhs;
+            } else if (binary->is_mul()) {
+                auto *lhsConstant =
+                    dynamic_cast<ConstantInt *>(binary->get_operand(0));
+                auto *rhsConstant =
+                    dynamic_cast<ConstantInt *>(binary->get_operand(1));
+                if (lhsConstant)
+                    result = analyze(binary->get_operand(1)) *
+                             static_cast<int>(lhsConstant->value_);
+                else if (rhsConstant)
+                    result = analyze(binary->get_operand(0)) *
+                             static_cast<int>(rhsConstant->value_);
+            } else if (binary->op_id_ == Instruction::Shl) {
+                auto *shift =
+                    dynamic_cast<ConstantInt *>(binary->get_operand(1));
+                if (shift && shift->value_ >= 0 && shift->value_ < 31)
+                    result = analyze(binary->get_operand(0)) *
+                             (1 << shift->value_);
+            }
+        }
+    }
     cache_[v] = result;
     return result;
 }

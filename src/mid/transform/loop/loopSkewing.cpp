@@ -1,6 +1,10 @@
 #include "../../../include/mid/opt/loopSkewing.hpp"
 
 #include "../../../include/mid/analysis/analysisManager.hpp"
+#include "../../../include/mid/analysis/affineAnalysis.hpp"
+#include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
+#include "../../../include/mid/analysis/dependenceAnalysis.hpp"
+#include "../../../include/mid/transform/loopCloneUtils.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
@@ -8,6 +12,8 @@
 #include <iostream>
 #include <limits>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -334,8 +340,747 @@ bool applyLoopSkew(const LoopSkewPlan &plan, Module *module) {
     return true;
 }
 
+namespace {
+
+struct RectangularWavefrontPlan {
+    std::vector<Loop *> nest;
+    std::vector<const InductionDescriptor *> controls;
+    std::vector<long long> weights;
+    std::vector<Instruction *> accesses;
+    BasicBlock *cell = nullptr;
+    BasicBlock *preheader = nullptr;
+    BasicBlock *exit = nullptr;
+    Value *start = nullptr;
+    Value *bound = nullptr;
+};
+
+bool lexPositive(const std::vector<long long> &distance) {
+    for (long long component : distance) {
+        if (component != 0) return component > 0;
+    }
+    return false;
+}
+
+bool allZero(const std::vector<long long> &distance) {
+    for (long long component : distance)
+        if (component != 0) return false;
+    return true;
+}
+
+bool sameValue(Value *lhs, Value *rhs) {
+    if (lhs == rhs) return true;
+    auto *lc = dynamic_cast<ConstantInt *>(lhs);
+    auto *rc = dynamic_cast<ConstantInt *>(rhs);
+    return lc && rc && lc->value_ == rc->value_;
+}
+
+bool deriveScheduleWeights(const std::vector<std::vector<long long>> &deps,
+                           size_t dimensions,
+                           std::vector<long long> &weights) {
+    weights.assign(dimensions, 1);
+    if (dimensions == 0) return false;
+    for (int level = static_cast<int>(dimensions) - 2; level >= 0; --level) {
+        long long required = 1;
+        for (const auto &distance : deps) {
+            int first = -1;
+            for (size_t i = 0; i < distance.size(); ++i)
+                if (distance[i] != 0) {
+                    first = static_cast<int>(i);
+                    break;
+                }
+            if (first != level || distance[level] <= 0) continue;
+            __int128 tail = 0;
+            for (size_t i = level + 1; i < dimensions; ++i)
+                tail += static_cast<__int128>(weights[i]) * distance[i];
+            if (tail < 1) {
+                __int128 numerator = 1 - tail;
+                __int128 candidate =
+                    (numerator + distance[level] - 1) / distance[level];
+                if (candidate > std::numeric_limits<int>::max()) return false;
+                required = std::max(required,
+                                    static_cast<long long>(candidate));
+            }
+        }
+        weights[level] = required;
+    }
+    for (const auto &distance : deps) {
+        __int128 dot = 0;
+        for (size_t i = 0; i < dimensions; ++i)
+            dot += static_cast<__int128>(weights[i]) * distance[i];
+        if (dot <= 0) return false;
+    }
+    return weights.back() == 1;
+}
+
+std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
+    Loop &outer, LoopInfo &LI, const ArgumentAliasAnalysis &argAlias,
+    std::string &reason) {
+    RectangularWavefrontPlan plan;
+    Loop *cursor = &outer;
+    while (cursor && plan.nest.size() < 3) {
+        plan.nest.push_back(cursor);
+        if (cursor->children.size() > 1) {
+            reason = "rectangular nest has multiple children";
+            return std::nullopt;
+        }
+        cursor = cursor->children.empty() ? nullptr : cursor->children.front();
+    }
+    if (cursor || plan.nest.size() < 2) {
+        reason = "requires a perfect two- or three-level nest";
+        return std::nullopt;
+    }
+    plan.preheader = outer.preheader;
+    plan.exit = outer.singleExit();
+    if (!plan.preheader || !plan.exit) {
+        reason = "outer loop lacks dedicated preheader or exit";
+        return std::nullopt;
+    }
+
+    for (Loop *loop : plan.nest) {
+        const InductionDescriptor *control = loop->getInductionDescriptor();
+        if (!control || !control->constantStep ||
+            *control->constantStep != 1 ||
+            control->predicate != ICmpInst::ICMP_SLT ||
+            !isI32(control->phi) || !loop->singleLatch()) {
+            reason = "requires signed i32 unit-stride controls";
+            return std::nullopt;
+        }
+        if (!sameValue(control->start,
+                       plan.controls.empty() ? control->start : plan.start) ||
+            !sameValue(control->bound,
+                       plan.controls.empty() ? control->bound : plan.bound)) {
+            reason = "requires a common rectangular iteration domain";
+            return std::nullopt;
+        }
+        if (plan.controls.empty()) {
+            plan.start = control->start;
+            plan.bound = control->bound;
+        }
+        plan.controls.push_back(control);
+    }
+    auto *startConstant = dynamic_cast<ConstantInt *>(plan.start);
+    if (!startConstant || startConstant->value_ < 0) {
+        reason = "requires a non-negative constant lower bound";
+        return std::nullopt;
+    }
+
+    Loop *inner = plan.nest.back();
+    if (inner->blocks.size() != 1 || inner->header != inner->singleLatch()) {
+        reason = "requires a single-block cell loop";
+        return std::nullopt;
+    }
+    plan.cell = inner->header;
+    unsigned storeCount = 0;
+    for (auto *instruction : plan.cell->instr_list_) {
+        if (instruction->is_load() || instruction->is_store()) {
+            plan.accesses.push_back(instruction);
+            storeCount += instruction->is_store();
+        }
+        if (instruction->is_call()) {
+            auto *call = static_cast<CallInst *>(instruction);
+            auto *callee = dynamic_cast<Function *>(
+                call->get_operand(call->num_ops_ - 1));
+            if (!callee || !callee->hasSemFlag(SemFlag::FnPure)) {
+                reason = "cell contains an impure call";
+                return std::nullopt;
+            }
+        }
+    }
+    if (storeCount != 1) {
+        reason = "requires exactly one cell store";
+        return std::nullopt;
+    }
+
+    AffineAnalysis affine(LI);
+    DependenceAnalysis dependence(LI, affine);
+    dependence.setArgAlias(&argAlias);
+    std::vector<std::vector<long long>> distances;
+    for (Instruction *store : plan.accesses) {
+        if (!store->is_store()) continue;
+        for (Instruction *access : plan.accesses) {
+            if (access != store && !access->is_load() && !access->is_store())
+                continue;
+            std::vector<std::pair<Instruction *, Instruction *>> orientations;
+            if (access->is_load()) {
+                orientations.push_back({store, access});
+                orientations.push_back({access, store});
+            } else {
+                orientations.push_back({store, access});
+            }
+            for (auto [source, sink] : orientations) {
+                auto result = dependence.getConstantDistance(
+                    source, sink, plan.nest);
+                if (result.status ==
+                    DependenceAnalysis::DistanceStatus::Unknown) {
+                    reason = "memory dependence has no exact distance";
+                    return std::nullopt;
+                }
+                if (result.status ==
+                        DependenceAnalysis::DistanceStatus::Exact &&
+                    !allZero(result.distance) && lexPositive(result.distance))
+                    distances.push_back(std::move(result.distance));
+            }
+        }
+    }
+    if (distances.empty()) {
+        reason = "rectangular nest is DOALL";
+        return std::nullopt;
+    }
+    if (plan.nest.size() == 3) {
+        std::vector<std::vector<long long>> projected;
+        for (const auto &distance : distances) {
+            if (distance[0] != 0 || distance[1] != 0)
+                projected.push_back({distance[0], distance[1]});
+        }
+        std::vector<long long> outerWeights;
+        if (projected.empty() ||
+            !deriveScheduleWeights(projected, 2, outerWeights)) {
+            reason = "no bounded locality-preserving outer wave schedule";
+            return std::nullopt;
+        }
+        plan.weights = {outerWeights[0], outerWeights[1], 0};
+        for (const auto &distance : distances) {
+            __int128 waveDistance =
+                static_cast<__int128>(plan.weights[0]) * distance[0] +
+                static_cast<__int128>(plan.weights[1]) * distance[1];
+            // Equal-wave dependences are legal only within one (i,j) lane;
+            // that lane executes the original innermost loop serially.
+            if (waveDistance < 0 ||
+                (waveDistance == 0 &&
+                 (distance[0] != 0 || distance[1] != 0 ||
+                  distance[2] <= 0))) {
+                reason = "outer wave leaves a cross-lane dependence";
+                return std::nullopt;
+            }
+        }
+    } else if (!deriveScheduleWeights(distances, plan.nest.size(),
+                                      plan.weights)) {
+        reason = "no bounded positive affine wave schedule";
+        return std::nullopt;
+    }
+    reason.clear();
+    return plan;
+}
+
+Value *emitSelectMin(Value *lhs, Value *rhs, BasicBlock *block) {
+    auto *cmp = new ICmpInst(ICmpInst::ICMP_SLT, lhs, rhs, block);
+    return new SelectInst(cmp, lhs, rhs, block);
+}
+
+Value *emitSelectMax(Value *lhs, Value *rhs, BasicBlock *block) {
+    auto *cmp = new ICmpInst(ICmpInst::ICMP_SGT, lhs, rhs, block);
+    return new SelectInst(cmp, lhs, rhs, block);
+}
+
+Value *emitFloorDiv(Value *value, long long divisor, Module *module,
+                    BasicBlock *block) {
+    if (divisor == 1) return value;
+    auto *d = new ConstantInt(module->int32_ty_, divisor);
+    auto *q = new BinaryInst(module->int32_ty_, Instruction::SDiv,
+                             value, d, block);
+    auto *r = new BinaryInst(module->int32_ty_, Instruction::SRem,
+                             value, new ConstantInt(module->int32_ty_, divisor),
+                             block);
+    auto *negative = new ICmpInst(ICmpInst::ICMP_SLT, value,
+                                  new ConstantInt(module->int32_ty_, 0), block);
+    auto *hasRemainder = new ICmpInst(
+        ICmpInst::ICMP_NE, r, new ConstantInt(module->int32_ty_, 0), block);
+    auto *adjust = new BinaryInst(module->int1_ty_, Instruction::And,
+                                  negative, hasRemainder, block);
+    auto *minusOne = new BinaryInst(module->int32_ty_, Instruction::Sub, q,
+                                    new ConstantInt(module->int32_ty_, 1), block);
+    return new SelectInst(adjust, minusOne, q, block);
+}
+
+Value *emitCeilDiv(Value *value, long long divisor, Module *module,
+                   BasicBlock *block) {
+    if (divisor == 1) return value;
+    auto *q = new BinaryInst(module->int32_ty_, Instruction::SDiv, value,
+                             new ConstantInt(module->int32_ty_, divisor), block);
+    auto *r = new BinaryInst(module->int32_ty_, Instruction::SRem, value,
+                             new ConstantInt(module->int32_ty_, divisor), block);
+    auto *positive = new ICmpInst(ICmpInst::ICMP_SGT, value,
+                                  new ConstantInt(module->int32_ty_, 0), block);
+    auto *hasRemainder = new ICmpInst(
+        ICmpInst::ICMP_NE, r, new ConstantInt(module->int32_ty_, 0), block);
+    auto *adjust = new BinaryInst(module->int1_ty_, Instruction::And,
+                                  positive, hasRemainder, block);
+    auto *plusOne = new BinaryInst(module->int32_ty_, Instruction::Add, q,
+                                   new ConstantInt(module->int32_ty_, 1), block);
+    return new SelectInst(adjust, plusOne, q, block);
+}
+
+Value *rematerialize(Value *value, BasicBlock *block,
+                     std::unordered_map<Value *, Value *> &map,
+                     const std::set<BasicBlock *> &nestBlocks) {
+    auto found = map.find(value);
+    if (found != map.end()) return found->second;
+    auto *instruction = dynamic_cast<Instruction *>(value);
+    if (!instruction || !instruction->parent_ ||
+        !nestBlocks.count(instruction->parent_))
+        return value;
+    if (instruction->is_phi() || instruction->isTerminator() ||
+        instruction->is_load() || instruction->is_store() ||
+        instruction->is_call())
+        return nullptr;
+    if (auto *binary = dynamic_cast<BinaryInst *>(instruction)) {
+        Value *lhs = rematerialize(binary->get_operand(0), block, map,
+                                   nestBlocks);
+        Value *rhs = rematerialize(binary->get_operand(1), block, map,
+                                   nestBlocks);
+        if (!lhs || !rhs) return nullptr;
+        auto *clone = new BinaryInst(binary->type_, binary->op_id_, lhs, rhs,
+                                     block);
+        clone->copySemFlagsFrom(binary);
+        map[value] = clone;
+        return clone;
+    }
+    if (auto *gep = dynamic_cast<GetElementPtrInst *>(instruction)) {
+        Value *base = rematerialize(gep->get_operand(0), block, map,
+                                    nestBlocks);
+        if (!base) return nullptr;
+        std::vector<Value *> indices;
+        for (unsigned i = 1; i < gep->num_ops_; ++i) {
+            Value *index = rematerialize(gep->get_operand(i), block, map,
+                                         nestBlocks);
+            if (!index) return nullptr;
+            indices.push_back(index);
+        }
+        auto *clone = new GetElementPtrInst(base, indices, block);
+        clone->copySemFlagsFrom(gep);
+        map[value] = clone;
+        return clone;
+    }
+    return nullptr;
+}
+
+Value *materializeFinalValue(
+    Value *value, const RectangularWavefrontPlan &plan, BasicBlock *block,
+    std::unordered_map<Value *, Value *> &cache,
+    std::set<Value *> &visiting) {
+    auto found = cache.find(value);
+    if (found != cache.end()) return found->second;
+    if (!value || dynamic_cast<Constant *>(value) ||
+        dynamic_cast<Argument *>(value) ||
+        dynamic_cast<GlobalVariable *>(value))
+        return value;
+    if (!visiting.insert(value).second) return nullptr;
+
+    for (const InductionDescriptor *control : plan.controls) {
+        if (value == control->update) {
+            visiting.erase(value);
+            return cache[value] = control->bound;
+        }
+        if (value == control->phi) {
+            auto *last = new BinaryInst(
+                control->phi->type_, Instruction::Sub, control->bound,
+                new ConstantInt(control->phi->type_, 1), block);
+            visiting.erase(value);
+            return cache[value] = last;
+        }
+    }
+    if (auto *phi = dynamic_cast<PhiInst *>(value)) {
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            for (const InductionDescriptor *control : plan.controls) {
+                if (phi->get_operand(i) != control->update) continue;
+                Value *mapped = materializeFinalValue(
+                    phi->get_operand(i), plan, block, cache, visiting);
+                if (mapped) {
+                    visiting.erase(value);
+                    return cache[value] = mapped;
+                }
+            }
+        }
+        for (auto loopIt = plan.nest.rbegin(); loopIt != plan.nest.rend();
+             ++loopIt) {
+            for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+                auto *pred =
+                    dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+                if (!pred || !(*loopIt)->blocks.count(pred)) continue;
+                Value *mapped = materializeFinalValue(
+                    phi->get_operand(i), plan, block, cache, visiting);
+                if (mapped) {
+                    visiting.erase(value);
+                    return cache[value] = mapped;
+                }
+            }
+        }
+    }
+    if (auto *binary = dynamic_cast<BinaryInst *>(value)) {
+        Value *lhs = materializeFinalValue(binary->get_operand(0), plan,
+                                           block, cache, visiting);
+        Value *rhs = materializeFinalValue(binary->get_operand(1), plan,
+                                           block, cache, visiting);
+        if (lhs && rhs) {
+            auto *mapped = new BinaryInst(binary->type_, binary->op_id_, lhs,
+                                          rhs, block);
+            mapped->copySemFlagsFrom(binary);
+            visiting.erase(value);
+            return cache[value] = mapped;
+        }
+    }
+    visiting.erase(value);
+    return nullptr;
+}
+
+Value *phiIncomingFrom(PhiInst *phi, BasicBlock *predecessor) {
+    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2)
+        if (phi->get_operand(i + 1) == predecessor)
+            return phi->get_operand(i);
+    return nullptr;
+}
+
+bool isUnitPointerRecurrence(PhiInst *phi, BasicBlock *preheader,
+                             Value *&initial) {
+    initial = phiIncomingFrom(phi, preheader);
+    Value *back = phiIncomingFrom(phi, phi->parent_);
+    auto *gep = dynamic_cast<GetElementPtrInst *>(back);
+    auto *one = gep && gep->num_ops_ == 2
+                    ? dynamic_cast<ConstantInt *>(gep->get_operand(1))
+                    : nullptr;
+    return initial && gep && gep->get_operand(0) == phi && one &&
+           one->value_ == 1;
+}
+
+bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
+                               Function *function, Module *module) {
+    std::vector<BasicBlock *> createdBlocks;
+    auto fail = [&](const std::string &reason) {
+        if (debugEnabled())
+            std::cerr << "[LoopSkewing] rectangular apply rejected: "
+                      << reason << "\n";
+        std::vector<Instruction *> garbage;
+        for (BasicBlock *block : createdBlocks)
+            garbage.insert(garbage.end(), block->instr_list_.begin(),
+                           block->instr_list_.end());
+        for (BasicBlock *block : createdBlocks) {
+            std::vector<Instruction *> instructions(block->instr_list_.begin(),
+                                                     block->instr_list_.end());
+            for (Instruction *instruction : instructions)
+                block->delete_instr(instruction);
+        }
+        for (Instruction *instruction : garbage) delete instruction;
+        for (BasicBlock *block : createdBlocks)
+            function->remove_bb(block);
+        for (BasicBlock *block : createdBlocks) delete block;
+        createdBlocks.clear();
+        return false;
+    };
+    if (!function || !module || plan.nest.size() < 2 ||
+        plan.nest.size() > 3 || plan.weights.size() != plan.nest.size())
+        return fail("invalid plan");
+
+    Loop *outer = plan.nest.front();
+    Loop *inner = plan.nest.back();
+    BasicBlock *oldPreheader = plan.preheader;
+    auto *oldPreTerm = oldPreheader->get_terminator();
+    if (!oldPreTerm) return fail("preheader has no terminator");
+    bool hasOuterEdge = false;
+    for (unsigned i = 0; i < oldPreTerm->num_ops_; ++i)
+        hasOuterEdge |= oldPreTerm->get_operand(i) == outer->header;
+    if (!hasOuterEdge) return fail("preheader has no edge to outer header");
+
+    std::vector<PhiInst *> pointerPhis;
+    std::unordered_map<PhiInst *, Value *> pointerStarts;
+    for (auto *instruction : plan.cell->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(instruction);
+        if (!phi || phi == plan.controls.back()->phi) continue;
+        Value *initial = nullptr;
+        if (!dynamic_cast<PointerType *>(phi->type_) ||
+            !isUnitPointerRecurrence(phi, inner->preheader, initial))
+            return fail("unsupported cell phi " + phi->name_);
+        pointerPhis.push_back(phi);
+        pointerStarts[phi] = initial;
+    }
+
+    std::vector<Instruction *> liveOuts;
+    for (BasicBlock *block : outer->blocks) {
+        for (Instruction *instruction : block->instr_list_) {
+            for (const Use &use : instruction->use_list_) {
+                auto *user = dynamic_cast<Instruction *>(use.val_);
+                if (!user || !user->parent_ ||
+                    outer->blocks.count(user->parent_))
+                    continue;
+                if (std::find(liveOuts.begin(), liveOuts.end(), instruction) ==
+                    liveOuts.end())
+                    liveOuts.push_back(instruction);
+            }
+        }
+    }
+    for (BasicBlock *pred : plan.exit->pre_bbs_)
+        if (!outer->blocks.count(pred))
+            return fail("outer exit has a non-loop predecessor");
+
+    long long weightSum = 0;
+    for (size_t dimension = 0; dimension < plan.weights.size(); ++dimension) {
+        long long weight = plan.weights[dimension];
+        const bool serialInnermost = plan.nest.size() == 3 &&
+                                     dimension == 2 && weight == 0;
+        if ((!serialInnermost && weight <= 0) ||
+            weightSum > std::numeric_limits<int>::max() - weight)
+            return fail("schedule weight overflow");
+        weightSum += weight;
+    }
+
+    int serial = static_cast<int>(function->basic_blocks_.size());
+    auto makeBlock = [&](const std::string &tag) {
+        auto *block = new BasicBlock(module,
+                                     "wavefront." + tag + "." +
+                                         std::to_string(serial++),
+                                     function);
+        createdBlocks.push_back(block);
+        return block;
+    };
+    auto *guard = makeBlock("guard");
+    auto *fastEntry = makeBlock("fast.entry");
+    auto *fallbackEntry = makeBlock("fallback.entry");
+    auto *waveHeader = makeBlock("wave.h");
+    auto *waveBody = makeBlock("wave.body");
+    auto *laneHeader = makeBlock("lane.h");
+    auto *laneBody = makeBlock("lane.body");
+    BasicBlock *innerHeader =
+        plan.nest.size() == 3 ? makeBlock("inner.h") : nullptr;
+    auto *cell = makeBlock("cell");
+    BasicBlock *innerLatch =
+        plan.nest.size() == 3 ? makeBlock("inner.latch") : nullptr;
+    auto *laneLatch = makeBlock("lane.latch");
+    auto *waveLatch = makeBlock("wave.latch");
+    auto *done = makeBlock("done");
+    laneHeader->setSemFlag(SemFlag::WavefrontCoincident);
+
+    auto *zero = new ConstantInt(module->int32_ty_, 0);
+    auto *one = new ConstantInt(module->int32_ty_, 1);
+    auto *sixteen = new ConstantInt(module->int32_ty_, 16);
+
+    auto *extent = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                  plan.bound, plan.start, guard);
+    auto *nonEmpty = new ICmpInst(ICmpInst::ICMP_SGT, plan.bound, plan.start,
+                                  guard);
+    auto *largeEnough = new ICmpInst(ICmpInst::ICMP_SGE, extent, sixteen,
+                                     guard);
+    long long startValue = static_cast<ConstantInt *>(plan.start)->value_;
+    long long maxExtent =
+        (static_cast<long long>(std::numeric_limits<int>::max()) - 1) /
+            weightSum +
+        1;
+    long long safeBound = std::min<long long>(
+        std::numeric_limits<int>::max(), startValue + maxExtent);
+    auto *boundSafe = new ICmpInst(
+        ICmpInst::ICMP_SLE, plan.bound,
+        new ConstantInt(module->int32_ty_, safeBound), guard);
+    auto *validSize = new BinaryInst(module->int1_ty_, Instruction::And,
+                                     nonEmpty, largeEnough, guard);
+    auto *fastPath = new BinaryInst(module->int1_ty_, Instruction::And,
+                                    validSize, boundSafe, guard);
+    new BranchInst(fastPath, fastEntry, fallbackEntry, guard);
+    new BranchInst(waveHeader, fastEntry);
+    new BranchInst(outer->header, fallbackEntry);
+
+    auto *extentMinusOne = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                          extent, one, waveHeader);
+    auto *scaledExtent = new BinaryInst(
+        module->int32_ty_, Instruction::Mul, extentMinusOne,
+        new ConstantInt(module->int32_ty_, weightSum), waveHeader);
+    auto *waveBound = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                     scaledExtent, one, waveHeader);
+    auto *wave = PhiInst::create_phi(module->int32_ty_, waveHeader);
+    wave->add_phi_pair_operand(zero, fastEntry);
+    waveHeader->add_instruction_front(wave);
+    auto *waveCmp = new ICmpInst(ICmpInst::ICMP_SLT, wave, waveBound,
+                                 waveHeader);
+    new BranchInst(waveCmp, waveBody, done, waveHeader);
+
+    long long tailWeight = weightSum - plan.weights[0];
+    auto *tailSpan = new BinaryInst(
+        module->int32_ty_, Instruction::Mul, extentMinusOne,
+        new ConstantInt(module->int32_ty_, tailWeight), waveBody);
+    auto *laneLowerNumerator = new BinaryInst(
+        module->int32_ty_, Instruction::Sub, wave, tailSpan, waveBody);
+    Value *laneLower = emitCeilDiv(laneLowerNumerator, plan.weights[0],
+                                   module, waveBody);
+    laneLower = emitSelectMax(laneLower, zero, waveBody);
+    Value *laneUpper = emitFloorDiv(wave, plan.weights[0], module, waveBody);
+    laneUpper = new BinaryInst(module->int32_ty_, Instruction::Add, laneUpper,
+                               one, waveBody);
+    laneUpper = emitSelectMin(laneUpper, extent, waveBody);
+    new BranchInst(laneHeader, waveBody);
+
+    auto *lane = PhiInst::create_phi(module->int32_ty_, laneHeader);
+    lane->add_phi_pair_operand(laneLower, waveBody);
+    laneHeader->add_instruction_front(lane);
+    auto *laneCmp = new ICmpInst(ICmpInst::ICMP_SLT, lane, laneUpper,
+                                 laneHeader);
+    new BranchInst(laneCmp, laneBody, waveLatch, laneHeader);
+    auto *weightedLane = new BinaryInst(
+        module->int32_ty_, Instruction::Mul, lane,
+        new ConstantInt(module->int32_ty_, plan.weights[0]), laneBody);
+    auto *remainder = new BinaryInst(module->int32_ty_, Instruction::Sub,
+                                     wave, weightedLane, laneBody);
+
+    std::vector<Value *> normalized(plan.nest.size());
+    normalized[0] = lane;
+    if (plan.nest.size() == 2) {
+        normalized[1] = remainder;
+        new BranchInst(cell, laneBody);
+    } else {
+        // Schedule only the outer two coordinates. Equal-wave dependences in
+        // the third coordinate remain ordered by this original serial loop,
+        // preserving the unit-stride memory traversal.
+        normalized[1] = remainder;
+        new BranchInst(innerHeader, laneBody);
+
+        auto *innerIV = PhiInst::create_phi(module->int32_ty_, innerHeader);
+        innerIV->add_phi_pair_operand(zero, laneBody);
+        innerHeader->add_instruction_front(innerIV);
+        auto *innerCmp = new ICmpInst(ICmpInst::ICMP_SLT, innerIV, extent,
+                                      innerHeader);
+        normalized[2] = innerIV;
+        new BranchInst(innerCmp, cell, laneLatch, innerHeader);
+
+        auto *innerNext = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                         innerIV, one, innerLatch);
+        innerIV->add_phi_pair_operand(innerNext, innerLatch);
+        new BranchInst(innerHeader, innerLatch);
+    }
+
+    std::set<BasicBlock *> nestBlocks(outer->blocks.begin(),
+                                      outer->blocks.end());
+    std::unordered_set<BasicBlock *> cloneBlocks(outer->blocks.begin(),
+                                                  outer->blocks.end());
+    std::unordered_map<Value *, Value *> valueMap;
+    for (size_t dimension = 0; dimension < plan.controls.size(); ++dimension) {
+        Value *coordinate = new BinaryInst(module->int32_ty_, Instruction::Add,
+                                            plan.start, normalized[dimension],
+                                            cell);
+        valueMap[plan.controls[dimension]->phi] = coordinate;
+        valueMap[plan.controls[dimension]->update] =
+            new BinaryInst(module->int32_ty_, Instruction::Add, coordinate,
+                           one, cell);
+    }
+    for (PhiInst *phi : pointerPhis) {
+        Value *startPointer = rematerialize(pointerStarts[phi], cell, valueMap,
+                                            nestBlocks);
+        if (!startPointer) return fail("cannot rematerialize pointer start");
+        valueMap[phi] = new GetElementPtrInst(
+            startPointer, {normalized.back()}, cell);
+    }
+
+    std::unordered_set<Instruction *> pointerUpdates;
+    for (PhiInst *phi : pointerPhis)
+        pointerUpdates.insert(static_cast<Instruction *>(
+            phiIncomingFrom(phi, plan.cell)));
+    for (Instruction *instruction : plan.cell->instr_list_) {
+        if (instruction->is_phi() || instruction->isTerminator() ||
+            instruction == plan.controls.back()->update ||
+            instruction == plan.controls.back()->compare ||
+            pointerUpdates.count(instruction))
+            continue;
+        for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+            Value *operand = instruction->get_operand(i);
+            if (dynamic_cast<BasicBlock *>(operand) || valueMap.count(operand))
+                continue;
+            Value *mapped = rematerialize(operand, cell, valueMap, nestBlocks);
+            if (!mapped)
+                return fail("cannot rematerialize operand of " +
+                            instruction->name_);
+            valueMap[operand] = mapped;
+        }
+        if (!loop_clone::cloneInstruction(instruction, cell, valueMap,
+                                          cloneBlocks))
+            return fail("cannot clone cell instruction " +
+                        instruction->name_);
+    }
+    new BranchInst(plan.nest.size() == 3 ? innerLatch : laneLatch, cell);
+
+    auto *laneNext = new BinaryInst(module->int32_ty_, Instruction::Add, lane,
+                                    one, laneLatch);
+    lane->add_phi_pair_operand(laneNext, laneLatch);
+    new BranchInst(laneHeader, laneLatch);
+    auto *waveNext = new BinaryInst(module->int32_ty_, Instruction::Add, wave,
+                                    one, waveLatch);
+    wave->add_phi_pair_operand(waveNext, waveLatch);
+    new BranchInst(waveHeader, waveLatch);
+
+    std::unordered_map<Value *, Value *> finalCache;
+    std::set<Value *> visiting;
+    std::vector<std::pair<PhiInst *, Value *>> exitIncoming;
+    for (Instruction *instruction : plan.exit->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(instruction);
+        if (!phi) break;
+        Value *incoming = nullptr;
+        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
+            if (!pred || !outer->blocks.count(pred)) continue;
+            if (incoming && incoming != phi->get_operand(i))
+                return fail("exit phi has differing loop incoming values");
+            incoming = phi->get_operand(i);
+        }
+        if (!incoming) continue;
+        Value *mapped = materializeFinalValue(incoming, plan, done,
+                                              finalCache, visiting);
+        if (!mapped) return fail("cannot materialize exit phi incoming");
+        exitIncoming.push_back({phi, mapped});
+    }
+    std::vector<std::pair<Instruction *, Value *>> liveOutMappings;
+    for (Instruction *liveOut : liveOuts) {
+        Value *mapped = materializeFinalValue(liveOut, plan, done,
+                                              finalCache, visiting);
+        if (!mapped)
+            return fail("cannot materialize live-out " + liveOut->name_);
+        liveOutMappings.push_back({liveOut, mapped});
+    }
+    for (auto [phi, mapped] : exitIncoming)
+        phi->add_phi_pair_operand(mapped, done);
+    for (auto [liveOut, mapped] : liveOutMappings) {
+        std::vector<Use> uses(liveOut->use_list_.begin(),
+                              liveOut->use_list_.end());
+        auto *exportPhi = PhiInst::create_phi(liveOut->type_, plan.exit);
+        for (BasicBlock *pred : plan.exit->pre_bbs_)
+            exportPhi->add_phi_pair_operand(liveOut, pred);
+        exportPhi->add_phi_pair_operand(mapped, done);
+        plan.exit->add_instruction_front(exportPhi);
+        for (const Use &use : uses) {
+            auto *user = dynamic_cast<Instruction *>(use.val_);
+            if (user && user->parent_ &&
+                !outer->blocks.count(user->parent_))
+                user->set_operand(use.arg_no_, exportPhi);
+        }
+    }
+    new BranchInst(plan.exit, done);
+
+    for (Instruction *instruction : outer->header->instr_list_) {
+        auto *phi = dynamic_cast<PhiInst *>(instruction);
+        if (!phi) break;
+        for (unsigned i = 1; i < phi->num_ops_; i += 2)
+            if (phi->get_operand(i) == oldPreheader)
+                phi->set_operand(i, fallbackEntry);
+    }
+    for (unsigned i = 0; i < oldPreTerm->num_ops_; ++i)
+        if (oldPreTerm->get_operand(i) == outer->header)
+            oldPreTerm->set_operand(i, guard);
+    oldPreheader->remove_succ_basic_block(outer->header);
+    outer->header->remove_pre_basic_block(oldPreheader);
+    oldPreheader->add_succ_basic_block(guard);
+    guard->add_pre_basic_block(oldPreheader);
+
+    function->set_instr_name();
+    if (debugEnabled()) {
+        std::cerr << "[LoopSkewing] rectangular wavefront func="
+                  << function->name_ << " depth=" << plan.nest.size()
+                  << " weights=";
+        for (size_t i = 0; i < plan.weights.size(); ++i)
+            std::cerr << (i ? "," : "") << plan.weights[i];
+        std::cerr << "\n";
+    }
+    return true;
+}
+
+} // namespace
+
 bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
+    if (std::getenv("DISABLE_LOOP_SKEWING")) return false;
     bool changed = false;
+    bool rectangularApplied = false;
     for (int iteration = 0; iteration < 16; ++iteration) {
         LoopInfo localLoopInfo;
         LoopInfo *loopInfo = nullptr;
@@ -347,6 +1092,38 @@ bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
         }
 
         bool applied = false;
+        ArgumentAliasAnalysis argumentAlias;
+        argumentAlias.analyze(function->parent_);
+        for (const auto &ownedLoop : loopInfo->allLoops()) {
+            if (rectangularApplied) break;
+            Loop *loop = ownedLoop.get();
+            if (loop->parent) continue;
+            std::string reason;
+            auto rectangular = analyzeRectangularWavefront(
+                *loop, *loopInfo, argumentAlias, reason);
+            if (debugEnabled()) {
+                if (rectangular) {
+                    std::cerr << "[LoopSkewing] rectangular candidate func="
+                              << function->name_ << " header="
+                              << loop->header->name_ << " weights=";
+                    for (size_t i = 0; i < rectangular->weights.size(); ++i)
+                        std::cerr << (i ? "," : "")
+                                  << rectangular->weights[i];
+                    std::cerr << "\n";
+                } else {
+                    reject(*loop, reason, nullptr);
+                }
+            }
+            if (rectangular && applyRectangularWavefront(
+                                   *rectangular, function,
+                                   function->parent_)) {
+                applied = true;
+                changed = true;
+                rectangularApplied = true;
+                break;
+            }
+        }
+        if (applied) continue;
         for (const auto &ownedLoop : loopInfo->allLoops()) {
             Loop *loop = ownedLoop.get();
             std::string reason;

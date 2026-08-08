@@ -48,6 +48,100 @@ std::string loopName(const Loop &loop) {
     return loop.header ? loop.header->name_ : "<no-header>";
 }
 
+bool valueDependsOn(Value *value, Value *target,
+                    std::set<Value *> &visited) {
+    if (value == target) return true;
+    auto *instruction = dynamic_cast<Instruction *>(value);
+    if (!instruction || !visited.insert(value).second) return false;
+    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+        if (dynamic_cast<BasicBlock *>(instruction->get_operand(i))) continue;
+        if (valueDependsOn(instruction->get_operand(i), target, visited))
+            return true;
+    }
+    return false;
+}
+
+bool isDescendantOrSelf(const Loop *candidate, const Loop *ancestor) {
+    for (const Loop *cursor = candidate; cursor; cursor = cursor->parent)
+        if (cursor == ancestor) return true;
+    return false;
+}
+
+bool sameAccessIsInjective(Instruction *access, Loop &loop,
+                           PhiInst *loopIV, Value *loopStart,
+                           Value *loopBound, LoopInfo &LI,
+                           AffineAnalysis &affine) {
+    Value *pointer = access->is_store() ? access->get_operand(1)
+                                        : access->get_operand(0);
+    auto *gep = dynamic_cast<GetElementPtrInst *>(pointer);
+    if (!gep) return false;
+
+    std::map<PhiInst *, Loop *> ivLoops;
+    for (const auto &owned : LI.allLoops()) {
+        const InductionDescriptor *control = owned->getInductionDescriptor();
+        if (control) ivLoops[control->phi] = owned.get();
+    }
+    ivLoops[loopIV] = &loop;
+
+    for (unsigned index = 1; index < gep->num_ops_; ++index) {
+        AffineExpr expression = affine.analyze(gep->get_operand(index));
+        if (!expression.valid || expression.coeffOf(loopIV) == 0) continue;
+
+        __int128 minimum = expression.constant;
+        __int128 maximum = expression.constant;
+        std::vector<std::pair<long long, long long>> digits;
+        bool valid = true;
+        for (const auto &[iv, coefficient] : expression.coeffs) {
+            auto found = ivLoops.find(iv);
+            if (found == ivLoops.end()) {
+                valid = false;
+                break;
+            }
+            const InductionDescriptor *control =
+                found->second->getInductionDescriptor();
+            auto *start = dynamic_cast<ConstantInt *>(
+                iv == loopIV ? loopStart : control ? control->start : nullptr);
+            auto *bound = dynamic_cast<ConstantInt *>(
+                iv == loopIV ? loopBound : control ? control->bound : nullptr);
+            bool unitControl = iv == loopIV ||
+                               (control && control->constantStep &&
+                                *control->constantStep == 1 &&
+                                control->predicate == ICmpInst::ICMP_SLT);
+            if (!unitControl || !start || !bound ||
+                bound->value_ <= start->value_) {
+                valid = false;
+                break;
+            }
+            long long first = start->value_;
+            long long last = bound->value_ - 1;
+            __int128 low = static_cast<__int128>(coefficient) * first;
+            __int128 high = static_cast<__int128>(coefficient) * last;
+            minimum += std::min(low, high);
+            maximum += std::max(low, high);
+            if (isDescendantOrSelf(found->second, &loop))
+                digits.push_back(
+                    {std::llabs(static_cast<long long>(coefficient)),
+                     bound->value_ - start->value_});
+        }
+        if (!valid || minimum < std::numeric_limits<int>::min() ||
+            maximum > std::numeric_limits<int>::max()) {
+            continue;
+        }
+        std::sort(digits.begin(), digits.end());
+        __int128 representedSpan = 0;
+        for (const auto &[coefficient, range] : digits) {
+            if (coefficient <= representedSpan) {
+                valid = false;
+                break;
+            }
+            representedSpan +=
+                static_cast<__int128>(coefficient) * (range - 1);
+        }
+        if (valid) return true;
+    }
+    return false;
+}
+
 template <typename T>
 bool containsPtr(const std::vector<T *> &values, T *value) {
     return std::find(values.begin(), values.end(), value) != values.end();
@@ -757,6 +851,11 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
                 SE.getSCEV(gep->get_operand(i)));
             if (rec && rec->loop() == &loop) { variesWithIV = true; break; }
+            std::set<Value *> visited;
+            if (valueDependsOn(gep->get_operand(i), shape.ivPhi, visited)) {
+                variesWithIV = true;
+                break;
+            }
         }
         if (!variesWithIV && isPrivatizableScratch(base, loop.blocks)) {
             // 私有 scratch 放 worker 栈（静态 1MB），总量限 64KB 防溢出。
@@ -795,6 +894,10 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         if (basePriv(s)) continue;
         for (auto *a : accesses) {
             if (basePriv(a)) continue;
+            if (s == a &&
+                sameAccessIsInjective(s, loop, shape.ivPhi, shape.init,
+                                      shape.bound, LI, AA))
+                continue;
             auto r = DA.test(s, a);
             if (r.provably_independent) continue;
             int idx = -1;
@@ -811,8 +914,22 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                         (red.load == s && red.store == a))
                         { isReduction = true; break; }
                 }
-                if (!isReduction)
+                if (!isReduction) {
+                    if (isParDebugEnabled()) {
+                        debugPar("carried pair store=" + valueName(s) +
+                                 " access=" + valueName(a) +
+                                 " store-root=" + valueName(gepRootBase(
+                                     s->get_operand(1))) +
+                                 " access-root=" + valueName(gepRootBase(
+                                     a->is_store() ? a->get_operand(1)
+                                                   : a->get_operand(0))) +
+                                 " access-op=" +
+                                 (a->is_store() ? "store" : "load") +
+                                 " direction=" +
+                                 std::to_string(r.direction[idx]));
+                    }
                     return fail("loop carries memory dependence");
+                }
             }
         }
     }
@@ -1151,7 +1268,9 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                 // and live-out checks as a top-level DOALL loop.
                 if (loop->depth != 0 && reductions.empty() &&
                     scalarReductions.empty() &&
-                    loop->children.empty()) {
+                    loop->children.empty() &&
+                    !loop->header->hasSemFlag(
+                        SemFlag::WavefrontCoincident)) {
                     debugPar("skip func=" + func->name_ + " loop=" +
                              loopName(*loop) +
                              ": nested leaf loop without reduction");

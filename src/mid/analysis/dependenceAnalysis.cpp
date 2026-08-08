@@ -356,6 +356,96 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
 
     return result;
 }
+
+DependenceAnalysis::DistanceResult
+DependenceAnalysis::getConstantDistance(
+    Instruction *source, Instruction *sink,
+    const std::vector<Loop *> &nest) {
+    DistanceResult result;
+    auto *sourceGEP = accessGEP(source);
+    auto *sinkGEP = accessGEP(sink);
+    if (!sourceGEP || !sinkGEP || nest.empty()) return result;
+
+    BaseRelation relation = baseRelation(gepBase(sourceGEP), gepBase(sinkGEP));
+    if (relation == BaseRelation::NoAlias) {
+        result.status = DistanceStatus::NoDependence;
+        return result;
+    }
+    if (relation != BaseRelation::MustAlias ||
+        sourceGEP->num_ops_ != sinkGEP->num_ops_)
+        return result;
+
+    struct Equation {
+        std::vector<long long> coeffs;
+        long long rhs = 0;
+    };
+    std::vector<Equation> equations;
+    for (unsigned index = 1; index < sourceGEP->num_ops_; ++index) {
+        AffineExpr sourceExpr = AA_->analyze(sourceGEP->get_operand(index));
+        AffineExpr sinkExpr = AA_->analyze(sinkGEP->get_operand(index));
+        if (!sourceExpr.valid || !sinkExpr.valid) return result;
+
+        Equation equation;
+        equation.rhs = static_cast<long long>(sourceExpr.constant) -
+                       static_cast<long long>(sinkExpr.constant);
+        for (Loop *loop : nest) {
+            PhiInst *iv = loop ? loop->getInductionIV() : nullptr;
+            if (!iv) return result;
+            long long sourceCoeff = sourceExpr.coeffOf(iv);
+            long long sinkCoeff = sinkExpr.coeffOf(iv);
+            if (sourceCoeff != sinkCoeff) return result;
+            equation.coeffs.push_back(sourceCoeff);
+        }
+        for (const auto &term : sourceExpr.coeffs) {
+            bool inNest = false;
+            for (Loop *loop : nest)
+                inNest |= loop && loop->getInductionIV() == term.first;
+            if (!inNest && term.second != sinkExpr.coeffOf(term.first))
+                return result;
+        }
+        for (const auto &term : sinkExpr.coeffs) {
+            bool inNest = false;
+            for (Loop *loop : nest)
+                inNest |= loop && loop->getInductionIV() == term.first;
+            if (!inNest && term.second != sourceExpr.coeffOf(term.first))
+                return result;
+        }
+        equations.push_back(std::move(equation));
+    }
+
+    std::vector<long long> distance(nest.size(), 0);
+    for (size_t column = 0; column < nest.size(); ++column) {
+        const Equation *selected = nullptr;
+        for (const Equation &equation : equations) {
+            if (equation.coeffs[column] != 1 &&
+                equation.coeffs[column] != -1)
+                continue;
+            bool separates = true;
+            for (size_t other = 0; other < nest.size(); ++other)
+                if (other != column && equation.coeffs[other] != 0)
+                    separates = false;
+            if (separates) {
+                selected = &equation;
+                break;
+            }
+        }
+        if (!selected) return result;
+        distance[column] = selected->rhs / selected->coeffs[column];
+    }
+
+    for (const Equation &equation : equations) {
+        __int128 lhs = 0;
+        for (size_t i = 0; i < distance.size(); ++i)
+            lhs += static_cast<__int128>(equation.coeffs[i]) * distance[i];
+        if (lhs != equation.rhs) {
+            result.status = DistanceStatus::NoDependence;
+            return result;
+        }
+    }
+    result.status = DistanceStatus::Exact;
+    result.distance = std::move(distance);
+    return result;
+}
 // ── 循环交换合法性 ─────────────────────────────────────────────────────────
 // 检查给定一组访问之间的依赖方向，看 outer/inner 互换后是否反转。
 // 简化规则：

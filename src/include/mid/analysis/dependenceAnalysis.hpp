@@ -53,8 +53,23 @@ public:
         std::vector<Loop *> commonLoops;    // 共同嵌套的循环（最外在前）
     };
 
+    enum class DistanceStatus {
+        NoDependence,
+        Exact,
+        Unknown,
+    };
+
+    struct DistanceResult {
+        DistanceStatus status = DistanceStatus::Unknown;
+        // sink iteration minus source iteration, outermost loop first.
+        std::vector<long long> distance;
+    };
+
     // 主入口
     Result test(Instruction *acc1, Instruction *acc2);
+    DistanceResult getConstantDistance(
+        Instruction *source, Instruction *sink,
+        const std::vector<Loop *> &nest);
 
     // 给一对访问 + 一对相邻 loop 判断 loop interchange 是否合法：
     // direction 向量在两个位置上不能形如 (>, <)，否则交换会反转依赖
