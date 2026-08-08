@@ -34,6 +34,63 @@ static bool instBefore(Instruction *a, Instruction *b) {
     return false;
 }
 
+bool DeadStoreEliminate::isLocallyOverwritten(
+    StoreInst *store, const BasicAliasAnalysis &AA) {
+    if (!store || !store->parent_)
+        return false;
+
+    Value *ptr = store->get_operand(1);
+    MemoryLocation location = AA.getMemoryLocation(ptr);
+    bool afterStore = false;
+    for (auto *inst : store->parent_->instr_list_) {
+        if (inst == store) {
+            afterStore = true;
+            continue;
+        }
+        if (!afterStore)
+            continue;
+
+        if (auto *laterStore = dynamic_cast<StoreInst *>(inst)) {
+            MemoryLocation laterLocation =
+                AA.getMemoryLocation(laterStore->get_operand(1));
+            if (location.sizeBytes > 0 &&
+                laterLocation.sizeBytes >= location.sizeBytes &&
+                AA.alias(location, laterLocation) == AliasResult::MustAlias)
+                return true;
+        }
+
+        if (isRefSet(AA.getModRefInfo(inst, ptr)))
+            return false;
+    }
+    return false;
+}
+
+bool DeadStoreEliminate::isLocallyRedundantWriteback(
+    StoreInst *store, const BasicAliasAnalysis &AA) {
+    if (!store || !store->parent_)
+        return false;
+    auto *load = dynamic_cast<LoadInst *>(store->get_operand(0));
+    if (!load || load->parent_ != store->parent_ ||
+        AA.alias(load->get_operand(0), store->get_operand(1)) !=
+            AliasResult::MustAlias)
+        return false;
+
+    bool afterLoad = false;
+    for (auto *inst : store->parent_->instr_list_) {
+        if (inst == load) {
+            afterLoad = true;
+            continue;
+        }
+        if (inst == store)
+            return afterLoad;
+        if (!afterLoad)
+            continue;
+        if (isModSet(AA.getModRefInfo(inst, store->get_operand(1))))
+            return false;
+    }
+    return false;
+}
+
 static std::set<BasicBlock *> forwardReachableFrom(BasicBlock *start) {
     std::set<BasicBlock *> visited;
     std::queue<BasicBlock *> worklist;
@@ -127,7 +184,13 @@ bool DeadStoreEliminate::runOnFunction(Function *func,
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *store = dynamic_cast<StoreInst *>(inst);
-            if (store && isRedundantStore(store, AA, DT))
+            if (!store)
+                continue;
+            bool dead = isLocallyOverwritten(store, AA) ||
+                        isLocallyRedundantWriteback(store, AA);
+            if (!dead && mode_ == DeadStoreEliminateMode::Full)
+                dead = isRedundantStore(store, AA, DT);
+            if (dead)
                 toDelete.push_back(store);
         }
     }

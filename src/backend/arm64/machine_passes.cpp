@@ -2799,6 +2799,42 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         return false;
 
     bool changed = false;
+    // Earlier CFG rewrites may bypass a latch or a split PHI edge after its
+    // instructions have already been formed.  Remove blocks that are no
+    // longer reachable before threading and layout so stale code does not
+    // consume instruction-cache space or distort fallthrough selection.
+    std::unordered_set<MachineBasicBlock *> reachable;
+    std::vector<MachineBasicBlock *> worklist;
+    if (MachineBasicBlock *entry = function.entryBlock()) {
+        reachable.insert(entry);
+        worklist.push_back(entry);
+    }
+    while (!worklist.empty()) {
+        MachineBasicBlock *block = worklist.back();
+        worklist.pop_back();
+        for (MachineBasicBlock *successor : block->successors()) {
+            if (successor && reachable.insert(successor).second)
+                worklist.push_back(successor);
+        }
+    }
+    for (auto blockIt = blocks.begin(); blockIt != blocks.end();) {
+        MachineBasicBlock *block = blockIt->get();
+        if (reachable.count(block)) {
+            ++blockIt;
+            continue;
+        }
+        std::vector<MachineBasicBlock *> predecessors =
+            block->predecessors();
+        std::vector<MachineBasicBlock *> successors =
+            block->successors();
+        for (MachineBasicBlock *predecessor : predecessors)
+            predecessor->removeSuccessor(block);
+        for (MachineBasicBlock *successor : successors)
+            block->removeSuccessor(successor);
+        blockIt = blocks.erase(blockIt);
+        changed = true;
+    }
+
     // Allocation and copy propagation often turn split PHI edges into a
     // single unconditional branch.  Thread all predecessors through such
     // forwarding blocks before choosing layout; otherwise hot paths pay for

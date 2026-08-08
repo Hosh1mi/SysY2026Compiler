@@ -120,14 +120,26 @@ static bool openOutput(const DriverOptions &options,
     return true;
 }
 
+static void addScalarSimplifyPasses(PassManager &pm) {
+    pm.addPass(std::make_unique<InstCombine>());
+    pm.addPass(std::make_unique<SCCP>());
+    pm.addPass(std::make_unique<CFGSimplify>(CFGSimplifyMode::Lite));
+    pm.addPass(std::make_unique<DeadCodeEliminate>());
+}
+
 static void addScalarSimplifyClosure(PassManager &pm,
                                      bool runOnClean = false) {
-    pm.addFixedPointGroup([](PassManager &pm) {
-        pm.addPass(std::make_unique<InstCombine>());
-        pm.addPass(std::make_unique<SCCP>());
-        pm.addPass(std::make_unique<CFGSimplify>(CFGSimplifyMode::Lite));
-        pm.addPass(std::make_unique<DeadCodeEliminate>());
-    }, runOnClean);
+    pm.addFixedPointGroup(
+        [](PassManager &group) { addScalarSimplifyPasses(group); },
+        runOnClean);
+}
+
+static void addLightweightMemoryClosure(PassManager &pm) {
+    pm.addFixedPointGroup([](PassManager &group) {
+        group.addPass(std::make_unique<DeadStoreEliminate>(
+            DeadStoreEliminateMode::Lite));
+        addScalarSimplifyPasses(group);
+    });
 }
 
 static void addMemoryCleanup(PassManager &pm, bool runOnClean = false) {
@@ -226,7 +238,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     addMemoryCleanup(pm);
 
     pm.addPass(std::make_unique<GVN>());
-    addScalarSimplifyClosure(pm);
+    addLightweightMemoryClosure(pm);
     pm.addPass(std::make_unique<CodeSink>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<TailDuplication>());
