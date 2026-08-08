@@ -69,9 +69,10 @@ enum class Opcode : std::uint16_t {
     CSELX,
     FCSELS,
     CSETW,
-    MOVi32, // isel 常量；PostRA 再展开为 MOVZ/MOVK
+    MOVi32, // isel 常量；PostRA 再选择 move-wide 或 logical-immediate
     MOVi64,
     MOVZ,
+    MOVN,
     MOVK,
     MOVIv4Zero,
     MOVIv4s,
@@ -109,9 +110,11 @@ enum class Opcode : std::uint16_t {
     ANDWrr,
     ANDWri,
     ORRWrr,
+    ORRWri,
     EORWrr,
     ANDXrr,
     ORRXrr,
+    ORRXri,
     EORXrr,
     LSLWrr,
     LSLWri,

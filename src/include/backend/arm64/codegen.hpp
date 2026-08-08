@@ -20,6 +20,8 @@ struct BackendOptions {
     bool disableAddressOptimization = false;
     bool disableCopyPropagation = false;
     bool disableBlockPlacement = false;
+    bool disableMovnMaterialization = false;
+    bool disableLogicalImmediateMaterialization = false;
     bool disableSchedule = false;
     bool disablePreSchedule = false;
 };

@@ -176,6 +176,7 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::MOVi32:
     case Opcode::MOVi64:
     case Opcode::MOVZ:
+    case Opcode::MOVN:
     case Opcode::MOVK:
     case Opcode::MOVIv4Zero:
     case Opcode::MOVIv4s:
@@ -188,6 +189,8 @@ const InstrDesc &descriptor(Opcode opcode) {
         static const InstrDesc x = DESC(MOVi64, "MOVi64", 1, 2, 1,
                                         SchedResource::ALU);
         static const InstrDesc movz = DESC(MOVZ, "movz", 1, 3, 1,
+                                           SchedResource::ALU);
+        static const InstrDesc movn = DESC(MOVN, "movn", 1, 3, 1,
                                            SchedResource::ALU);
         static const InstrDesc movk = DESC(MOVK, "movk", 1, 4, 1,
                                            SchedResource::ALU);
@@ -206,6 +209,7 @@ const InstrDesc &descriptor(Opcode opcode) {
         return opcode == Opcode::MOVi32 ? w
              : opcode == Opcode::MOVi64 ? x
              : opcode == Opcode::MOVZ ? movz
+             : opcode == Opcode::MOVN ? movn
              : opcode == Opcode::MOVK ? movk
              : opcode == Opcode::MOVIv4Zero ? v
              : opcode == Opcode::MOVIv4s ? movi4s
@@ -267,9 +271,11 @@ const InstrDesc &descriptor(Opcode opcode) {
     SIMPLE_CASE(ANDWrr, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDWri, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ORRWrr, "orr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(ORRWri, "orr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(EORWrr, "eor", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ANDXrr, "and", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(ORRXrr, "orr", 1, 3, 1, SchedResource::ALU)
+    SIMPLE_CASE(ORRXri, "orr", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(EORXrr, "eor", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSLWrr, "lsl", 1, 3, 1, SchedResource::ALU)
     SIMPLE_CASE(LSLWri, "lsl", 1, 3, 1, SchedResource::ALU)

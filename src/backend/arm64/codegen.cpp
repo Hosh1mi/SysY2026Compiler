@@ -64,6 +64,7 @@ void AArch64Backend::generate() {
     PostRAParallelCopyResolver parallelCopyResolver;
     PostRAInstructionExpansion instructionExpansion;
     PostRACopyPropagation copyPropagation;
+    PostRARedundantCopyElimination redundantCopyElimination;
     PreRAAddressingFolder addressingFolder;
     PostRAAddressingOptimizer addressingOptimizer;
     MachineBlockPlacement blockPlacement;
@@ -208,6 +209,12 @@ void AArch64Backend::generate() {
             [&](MachineFunction &function) {
                 return instructionExpansion.run(function);
             });
+    addPass("PostRARedundantCopyElimination",
+            MachinePassStage::PostRegAlloc, allocated,
+            MachineProperty::FrameFinalized,
+            [&](MachineFunction &function) {
+                return redundantCopyElimination.run(function);
+            });
     if (options_.optimizationLevel >= 1 &&
         !options_.disableCopyPropagation)
         addPass("PostRACopyPropagation", MachinePassStage::PostRegAlloc,
@@ -249,7 +256,8 @@ void AArch64Backend::generate() {
             MachinePassStage::PreEmit, finalized, MachineProperty::None,
             [&](MachineFunction &function) {
                 return instructionExpansion.expandConstantMaterializations(
-                    function);
+                    function, !options_.disableMovnMaterialization,
+                    !options_.disableLogicalImmediateMaterialization);
             });
     if (options_.optimizationLevel >= 1 && !options_.disableSchedule)
         addPass("A53PostRAScheduler", MachinePassStage::PreEmit,

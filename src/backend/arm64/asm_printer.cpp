@@ -183,13 +183,17 @@ void printInstruction(const MachineFunction &function,
             output << "\tmov " << destination << ", " << source << '\n';
         break;
     }
-    case Opcode::MOVZ: {
+    case Opcode::MOVZ:
+    case Opcode::MOVN: {
         if (operands.size() != 3 ||
             !operands[0].isPhysicalRegister() ||
             operands[1].kind() != MachineOperand::Kind::Immediate ||
             operands[2].kind() != MachineOperand::Kind::Immediate)
-            throw std::logic_error("malformed movz at assembly printing");
-        output << "\tmovz " << registerName(operands[0]) << ", #"
+            throw std::logic_error(
+                "malformed move-wide instruction at assembly printing");
+        output << (instruction.opcode() == Opcode::MOVZ ? "\tmovz "
+                                                        : "\tmovn ")
+               << registerName(operands[0]) << ", #"
                << operands[1].immediate();
         if (operands[2].immediate())
             output << ", lsl #" << operands[2].immediate();
@@ -350,6 +354,22 @@ void printInstruction(const MachineFunction &function,
         break;
     case Opcode::ANDWrr: emitThreeRegisters(output, "and", instruction); break;
     case Opcode::ORRWrr: emitThreeRegisters(output, "orr", instruction); break;
+    case Opcode::ORRWri:
+    case Opcode::ORRXri:
+        if (operands.size() != 3 ||
+            operands[2].kind() != MachineOperand::Kind::Immediate)
+            throw std::logic_error(
+                "malformed logical-immediate ORR at assembly printing");
+        output << "\torr " << registerName(operands[0]) << ", "
+               << registerName(operands[1]) << ", #0x" << std::hex
+               << (instruction.opcode() == Opcode::ORRWri
+                       ? static_cast<std::uint64_t>(
+                             static_cast<std::uint32_t>(
+                                 operands[2].immediate()))
+                       : static_cast<std::uint64_t>(
+                             operands[2].immediate()))
+               << std::dec << '\n';
+        break;
     case Opcode::EORWrr: emitThreeRegisters(output, "eor", instruction); break;
     case Opcode::ANDXrr: emitThreeRegisters(output, "and", instruction); break;
     case Opcode::ORRXrr: emitThreeRegisters(output, "orr", instruction); break;

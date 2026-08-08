@@ -2201,6 +2201,34 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
     return changed;
 }
 
+bool PostRARedundantCopyElimination::run(
+    MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+
+    bool changed = false;
+    for (auto &block : function.blocks()) {
+        auto &instructions = block->instructions();
+        for (auto instruction = instructions.begin();
+             instruction != instructions.end();) {
+            if (instruction->opcode() != Opcode::COPY ||
+                instruction->operands().size() != 2 ||
+                !instruction->operands()[0].isPhysicalRegister() ||
+                !instruction->operands()[1].isPhysicalRegister() ||
+                instruction->operands()[0].physicalRegister() !=
+                    instruction->operands()[1].physicalRegister() ||
+                instruction->operands()[0].regClass() !=
+                    instruction->operands()[1].regClass()) {
+                ++instruction;
+                continue;
+            }
+            instruction = instructions.erase(instruction);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 bool PostRAInstructionExpansion::run(
     MachineFunction &function) const {
     if (!function.hasProperty(MachineProperty::NoVRegs))
@@ -2250,11 +2278,54 @@ bool PostRAInstructionExpansion::run(
 
 namespace {
 
-// Expand one MOVi32/MOVi64 into MOVZ + MOVK pieces.  Matches the historical
-// asm-printer encoding: first non-zero 16-bit slice becomes MOVZ, remaining
-// non-zero slices become MOVK.  An all-zero immediate becomes `movz #0`.
+bool isAArch64LogicalImmediate(std::uint64_t value, unsigned width) {
+    const std::uint64_t widthMask =
+        width == 64 ? ~std::uint64_t{0}
+                    : (std::uint64_t{1} << width) - 1;
+    value &= widthMask;
+    if (value == 0 || value == widthMask)
+        return false;
+
+    for (unsigned elementWidth = 2; elementWidth <= width;
+         elementWidth *= 2) {
+        const std::uint64_t elementMask =
+            elementWidth == 64
+                ? ~std::uint64_t{0}
+                : (std::uint64_t{1} << elementWidth) - 1;
+        const std::uint64_t element = value & elementMask;
+        bool repeats = true;
+        for (unsigned offset = elementWidth; offset < width;
+             offset += elementWidth)
+            repeats &= ((value >> offset) & elementMask) == element;
+        if (!repeats || element == 0 || element == elementMask)
+            continue;
+
+        for (unsigned ones = 1; ones < elementWidth; ++ones) {
+            const std::uint64_t run =
+                (std::uint64_t{1} << ones) - 1;
+            for (unsigned rotation = 0; rotation < elementWidth;
+                 ++rotation) {
+                const std::uint64_t rotated =
+                    rotation == 0
+                        ? run
+                        : ((run >> rotation) |
+                           (run << (elementWidth - rotation))) &
+                              elementMask;
+                if (rotated == element)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Expand one MOVi32/MOVi64 into the shorter of the architectural MOVZ/MOVK
+// and MOVN/MOVK sequences.  A tie deliberately keeps MOVZ so constants that
+// gain nothing from inversion retain their established encoding.
 void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
-                            MachineBasicBlock::InstrList::iterator materialize) {
+                            MachineBasicBlock::InstrList::iterator materialize,
+                            bool enableMovn,
+                            bool enableLogicalImmediate) {
     if (materialize->operands().size() != 2 ||
         !materialize->operands()[0].isPhysicalRegister() ||
         !materialize->operands()[0].isDef ||
@@ -2277,12 +2348,43 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
         : static_cast<std::uint32_t>(materialize->operands()[1].immediate());
     const unsigned pieces = wide ? 4U : 2U;
 
-    unsigned first = pieces;
-    for (unsigned i = 0; i < pieces; ++i)
-        if (((value >> (i * 16)) & 0xffffU) != 0) {
-            first = i;
+    auto piece = [&](unsigned index) {
+        return (value >> (index * 16)) & 0xffffU;
+    };
+    unsigned nonzeroPieces = 0;
+    unsigned nonOnesPieces = 0;
+    for (unsigned index = 0; index < pieces; ++index) {
+        nonzeroPieces += piece(index) != 0;
+        nonOnesPieces += piece(index) != 0xffffU;
+    }
+    const unsigned movzCost = std::max(1U, nonzeroPieces);
+    const unsigned movnCost = std::max(1U, nonOnesPieces);
+    const bool useMovn = enableMovn && movnCost < movzCost;
+    const unsigned moveWideCost = useMovn ? movnCost : movzCost;
+
+    if (enableLogicalImmediate && moveWideCost > 1 &&
+        isAArch64LogicalImmediate(value, wide ? 64U : 32U)) {
+        MachineInstr logicalImmediate(wide ? Opcode::ORRXri
+                                           : Opcode::ORRWri);
+        logicalImmediate
+            .addOperand(MachineOperand::physReg(reg, regClass, true))
+            .addOperand(MachineOperand::physReg(PhysReg::XZR, regClass))
+            .addOperand(MachineOperand::immediate(
+                static_cast<std::int64_t>(value)));
+        instructions.insert(materialize, std::move(logicalImmediate));
+        instructions.erase(materialize);
+        return;
+    }
+
+    unsigned first = 0;
+    for (unsigned index = 0; index < pieces; ++index) {
+        const bool needsSeed = useMovn ? piece(index) != 0xffffU
+                                      : piece(index) != 0;
+        if (needsSeed) {
+            first = index;
             break;
         }
+    }
 
     auto emitMovz = [&](unsigned slice, std::uint64_t imm) {
         MachineInstr movz(Opcode::MOVZ);
@@ -2290,6 +2392,15 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
         movz.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(imm)));
         movz.addOperand(MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
         instructions.insert(materialize, std::move(movz));
+    };
+    auto emitMovn = [&](unsigned slice, std::uint64_t imm) {
+        MachineInstr movn(Opcode::MOVN);
+        movn.addOperand(MachineOperand::physReg(reg, regClass, true));
+        movn.addOperand(
+            MachineOperand::immediate(static_cast<std::int64_t>(imm)));
+        movn.addOperand(MachineOperand::immediate(
+            static_cast<std::int64_t>(slice * 16)));
+        instructions.insert(materialize, std::move(movn));
     };
     auto emitMovk = [&](unsigned slice, std::uint64_t imm) {
         MachineInstr movk(Opcode::MOVK);
@@ -2303,18 +2414,17 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
         instructions.insert(materialize, std::move(movk));
     };
 
-    if (first == pieces) {
-        emitMovz(0, 0);
-    } else {
-        emitMovz(first, (value >> (first * 16)) & 0xffffU);
-        for (unsigned i = 0; i < pieces; ++i) {
-            if (i == first)
-                continue;
-            const std::uint64_t piece = (value >> (i * 16)) & 0xffffU;
-            if (!piece)
-                continue;
-            emitMovk(i, piece);
-        }
+    if (useMovn)
+        emitMovn(first, (~piece(first)) & 0xffffU);
+    else
+        emitMovz(first, piece(first));
+    for (unsigned index = 0; index < pieces; ++index) {
+        if (index == first)
+            continue;
+        const std::uint64_t current = piece(index);
+        if ((useMovn && current == 0xffffU) || (!useMovn && current == 0))
+            continue;
+        emitMovk(index, current);
     }
     instructions.erase(materialize);
 }
@@ -2322,7 +2432,8 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 } // namespace
 
 bool PostRAInstructionExpansion::expandConstantMaterializations(
-    MachineFunction &function) const {
+    MachineFunction &function, bool enableMovn,
+    bool enableLogicalImmediate) const {
     if (!function.hasProperty(MachineProperty::NoVRegs))
         return false;
     bool changed = false;
@@ -2333,7 +2444,8 @@ bool PostRAInstructionExpansion::expandConstantMaterializations(
             if (current->opcode() != Opcode::MOVi32 &&
                 current->opcode() != Opcode::MOVi64)
                 continue;
-            expandIntegerImmediate(instructions, current);
+            expandIntegerImmediate(instructions, current, enableMovn,
+                                   enableLogicalImmediate);
             changed = true;
         }
     }

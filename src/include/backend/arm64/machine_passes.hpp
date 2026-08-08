@@ -48,13 +48,20 @@ public:
     bool run(MachineFunction &function) const;
 };
 
+class PostRARedundantCopyElimination {
+public:
+    bool run(MachineFunction &function) const;
+};
+
 class PostRAInstructionExpansion {
 public:
     // Lower vector insert/accumulate into tied post-RA form.
     bool run(MachineFunction &function) const;
-    // Expand MOVi32/MOVi64 into MOVZ/MOVK pieces so the post-RA scheduler
-    // can interleave independent constant materializations.
-    bool expandConstantMaterializations(MachineFunction &function) const;
+    // Select a shortest legal move-wide or logical-immediate sequence before
+    // the post-RA scheduler orders the resulting real instructions.
+    bool expandConstantMaterializations(MachineFunction &function,
+                                        bool enableMovn = true,
+                                        bool enableLogicalImmediate = true) const;
 };
 
 // Fold ADDXri / ADDXrs address arithmetic into LDR/STR scaled-immediate or

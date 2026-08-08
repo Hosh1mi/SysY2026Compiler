@@ -37,6 +37,8 @@ struct DriverOptions {
     bool disableAddressOptimization = false;
     bool disableCopyPropagation = false;
     bool disableBlockPlacement = false;
+    bool disableMovnMaterialization = false;
+    bool disableLogicalImmediateMaterialization = false;
     bool disableSchedule = false;
     bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
@@ -104,6 +106,10 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.disableCopyPropagation = true;
         } else if (arg == "--fno-block-placement") {
             options.disableBlockPlacement = true;
+        } else if (arg == "--fno-movn-materialization") {
+            options.disableMovnMaterialization = true;
+        } else if (arg == "--fno-logical-immediate-materialization") {
+            options.disableLogicalImmediateMaterialization = true;
         } else if (arg == "--fno-schedule") {
             options.disableSchedule = true;
         } else if (arg == "--fno-pre-schedule") {
@@ -339,6 +345,10 @@ int main(int argc, char **argv) {
             options.disableCopyPropagation;
         backendOptions.disableBlockPlacement =
             options.disableBlockPlacement;
+        backendOptions.disableMovnMaterialization =
+            options.disableMovnMaterialization;
+        backendOptions.disableLogicalImmediateMaterialization =
+            options.disableLogicalImmediateMaterialization;
         backendOptions.disableSchedule =
             options.disableSchedule;
         backendOptions.disablePreSchedule =
