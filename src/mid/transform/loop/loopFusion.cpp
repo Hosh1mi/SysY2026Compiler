@@ -1,6 +1,7 @@
 #include "../../../include/mid/opt/loopFusion.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/opt/loopWorklist.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/globalVariable.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -94,7 +95,7 @@ void LoopFusion::execute(Module *module) {
     basicAA_ = &basicAA;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            runOnFunction(func);
+            runOnFunction(func, nullptr);
     }
     argAA_ = nullptr;
     basicAA_ = nullptr;
@@ -108,37 +109,45 @@ PreservedAnalyses LoopFusion::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
-            changed |= runOnFunction(func);
+            changed |= runOnFunction(func, &AM);
     }
     argAA_ = nullptr;
     basicAA_ = nullptr;
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-bool LoopFusion::runOnFunction(Function *func) {
+bool LoopFusion::runOnFunction(Function *func, AnalysisManager *AM) {
     bool everChanged = false;
-    // 每融合一对就重扫：LoopInfo 过期，且融合会让下一对（链式同级、
-    // 外层融合后露出的内层对）变得相邻。每次迭代循环数减一，必然终止。
-    for (int iter = 0; iter < 64; iter++) {
-        LoopInfo LI;
-        LI.analyze(func);
-        if (LI.allLoops().empty()) break;
+    LoopInfo localLoopInfo;
+    LoopInfo *loopInfo = nullptr;
+    if (AM)
+        loopInfo = &AM->getLoopInfo(func);
+    else {
+        localLoopInfo.analyze(func);
+        loopInfo = &localLoopInfo;
+    }
 
-        AffineAnalysis AA(LI);
-        DependenceAnalysis DA(LI, AA);
+    AffectedLoopWorklist worklist;
+    worklist.seed(*loopInfo);
+
+    while (true) {
+        if (loopInfo->allLoops().empty()) break;
+
+        AffineAnalysis AA(*loopInfo);
+        DependenceAnalysis DA(*loopInfo, AA);
         DA.setArgAlias(argAA_);
         LoopAccessAnalysis LA(AA);
         CostModel CM(AA);
         LoopInterchangeAnalysis IA(DA, LA, CM);
 
         bool fused = false;
-        for (auto &Lp : LI.allLoops()) {
-            Loop *L1 = Lp.get();
+        BasicBlock *survivingHeader = nullptr;
+        while (Loop *L1 = worklist.take(*loopInfo)) {
             Shape s1 = analyzeShape(L1);
             if (!s1.ok) continue;
 
             std::vector<BasicBlock *> chain;
-            Loop *L2 = walkToSibling(s1, L1, LI, chain);
+            Loop *L2 = walkToSibling(s1, L1, *loopInfo, chain);
             if (!L2) continue;
             Shape s2 = analyzeShape(L2);
             if (!s2.ok) continue;
@@ -177,9 +186,19 @@ bool LoopFusion::runOnFunction(Function *func) {
             applyFusion(func, s1, s2, chain, bypassPhis, hoist, sink);
             fused = true;
             everChanged = true;
+            survivingHeader = s1.header;
             break;
         }
         if (!fused) break;
+
+        if (AM) {
+            AM->clear(func);
+            loopInfo = &AM->getLoopInfo(func);
+        } else {
+            localLoopInfo.analyze(func);
+            loopInfo = &localLoopInfo;
+        }
+        worklist.addNeighborhood(*loopInfo, survivingHeader);
     }
     return everChanged;
 }

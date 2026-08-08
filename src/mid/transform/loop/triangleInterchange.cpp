@@ -15,8 +15,10 @@
 #include "../../../include/mid/opt/triangleInterchange.hpp"
 
 #include "../../../include/mid/analysis/affineAnalysis.hpp"
+#include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/opt/loopWorklist.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/function.hpp"
@@ -560,7 +562,8 @@ Value *materializeExternal(Value *value, BasicBlock *destination,
     return clone;
 }
 
-bool applyTriangle(const TriangleSchedulePlan &plan, Function *function) {
+bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
+                   std::vector<BasicBlock *> &newLoopHeaders) {
     Module *module = function->parent_;
     std::set<BasicBlock *> cellBlocks;
     for (auto *block : plan.inner->blocksOrdered)
@@ -744,53 +747,83 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function) {
                   << function->name_ << " domain=0<=distance<row<=extent"
                   << " schedule=(distance,lane) offset=" << plan.offset
                   << "\n";
+    newLoopHeaders.push_back(waveHeader);
+    newLoopHeaders.push_back(laneHeader);
     return true;
 }
 
 } // namespace
 
-bool TriangleInterchange::runOnFunction(Function *function) {
+bool TriangleInterchange::runOnFunction(Function *function,
+                                        AnalysisManager *AM) {
     ArgumentAliasAnalysis argumentAlias;
     argumentAlias.analyze(function->parent_);
-    for (int iteration = 0; iteration < 8; ++iteration) {
-        LoopInfo loopInfo;
-        loopInfo.analyze(function);
+    LoopInfo localLoopInfo;
+    LoopInfo *loopInfo = nullptr;
+    if (AM)
+        loopInfo = &AM->getLoopInfo(function);
+    else {
+        localLoopInfo.analyze(function);
+        loopInfo = &localLoopInfo;
+    }
+
+    AffectedLoopWorklist worklist;
+    worklist.seed(*loopInfo);
+    bool everChanged = false;
+    while (true) {
         ScheduleAffineAnalyzer scheduleAffine;
-        bool changed = false;
-        for (const auto &owned : loopInfo.allLoops()) {
-            Loop *loop = owned.get();
+        bool transformed = false;
+        std::vector<BasicBlock *> affectedHeaders;
+        while (Loop *loop = worklist.take(*loopInfo)) {
             std::string reason;
             auto plan = matchTriangle(*loop, reason);
             if (!plan) {
                 if (loop->parent) debugReject(function, loop, reason);
                 continue;
             }
-            if (!proveWavefrontDependences(*plan, loopInfo, scheduleAffine,
+            if (!proveWavefrontDependences(*plan, *loopInfo, scheduleAffine,
                                            argumentAlias, reason)) {
                 debugReject(function, loop, reason);
                 continue;
             }
-            if (applyTriangle(*plan, function)) {
-                changed = true;
-                return true;
+            if (plan->outer->parent)
+                affectedHeaders.push_back(plan->outer->parent->header);
+            std::vector<BasicBlock *> newLoopHeaders;
+            if (applyTriangle(*plan, function, newLoopHeaders)) {
+                affectedHeaders.insert(affectedHeaders.end(),
+                                       newLoopHeaders.begin(),
+                                       newLoopHeaders.end());
+                transformed = true;
+                everChanged = true;
+                break;
             }
+            affectedHeaders.clear();
         }
-        if (!changed) break;
+        if (!transformed) break;
+
+        if (AM) {
+            AM->clear(function);
+            loopInfo = &AM->getLoopInfo(function);
+        } else {
+            localLoopInfo.analyze(function);
+            loopInfo = &localLoopInfo;
+        }
+        for (BasicBlock *header : affectedHeaders)
+            worklist.addNeighborhood(*loopInfo, header);
     }
-    return false;
+    return everChanged;
 }
 
 void TriangleInterchange::execute(Module *module) {
     for (auto *function : module->function_list_)
-        if (!function->is_declaration()) runOnFunction(function);
+        if (!function->is_declaration()) runOnFunction(function, nullptr);
 }
 
 PreservedAnalyses TriangleInterchange::execute(Module *module,
                                                AnalysisManager &AM) {
-    (void)AM;
     bool changed = false;
     for (auto *function : module->function_list_)
         if (!function->is_declaration())
-            changed |= runOnFunction(function);
+            changed |= runOnFunction(function, &AM);
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

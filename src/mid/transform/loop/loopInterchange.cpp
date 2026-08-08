@@ -2,6 +2,7 @@
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
+#include "../../../include/mid/opt/loopWorklist.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/function.hpp"
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -176,7 +178,8 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
 }
 
 bool applyParallelSink(Function *func, Loop *K,
-                       const DominatorTreeAnalysis &DT) {
+                       const DominatorTreeAnalysis &DT,
+                       std::vector<BasicBlock *> &newLoopHeaders) {
     auto reject = [&](const char *reason) {
         if (debugEnabled())
             std::cerr << "[LoopInterchange] parallel sink rejected: "
@@ -316,6 +319,7 @@ bool applyParallelSink(Function *func, Loop *K,
     };
     auto *c0 = new ConstantInt(i32, 0);
     auto *c1 = new ConstantInt(i32, 1);
+    std::vector<BasicBlock *> generatedLoopHeaders;
 
     for (auto *B : storeBlocks) {
         auto &W = slices[B];
@@ -350,6 +354,7 @@ bool applyParallelSink(Function *func, Loop *K,
         BasicBlock *skH = newBB("kH");
         BasicBlock *skB = newBB("kB");
         BasicBlock *skL = newBB("kL");
+        generatedLoopHeaders.push_back(skH);
 
         new BranchInst(skH, B);
         B->add_succ_basic_block(skH);
@@ -398,6 +403,7 @@ bool applyParallelSink(Function *func, Loop *K,
 
     removeUnreachableBlocks(func);
     deleteUnusedPureInstructions(kLatch);
+    newLoopHeaders = std::move(generatedLoopHeaders);
     return true;
 }
 
@@ -411,7 +417,8 @@ bool applyParallelSink(Function *func, Loop *K,
 // new outer header (mOuter), while the old header becomes the entry to the
 // interchanged body.  Guards that depend on K remain in their body blocks.
 
-bool applyInterchange(Function *func, Loop *K, Loop *M) {
+bool applyInterchange(Function *func, Loop *K, Loop *M,
+                      BasicBlock *&newOuterHeader) {
     Module *module = func->parent_;
     auto reject = [&](const char *reason) {
         if (debugEnabled())
@@ -579,6 +586,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M) {
         retargetPhiPred(mPre, mHeader, mOuter);
 
     removeUnreachableBlocks(func);
+    newOuterHeader = mOuter;
     return true;
 }
 } // namespace
@@ -610,7 +618,13 @@ PreservedAnalyses LoopInterchange::execute(Module *module, AnalysisManager &AM) 
 
 bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
     bool everChanged = false;
-    for (int iter = 0; iter < 16; iter++) {
+    LoopInfo &initialLoopInfo = AM.getLoopInfo(func);
+    AffectedLoopWorklist sinkWorklist;
+    AffectedLoopWorklist floatWorklist;
+    sinkWorklist.seed(initialLoopInfo);
+    floatWorklist.seed(initialLoopInfo);
+
+    while (true) {
         LoopInfo &LI = AM.getLoopInfo(func);
         DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         if (LI.allLoops().empty()) break;
@@ -629,9 +643,9 @@ bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
                           << " depth=" << K->depth << ": " << why << "\n";
         };
 
-        Loop *target = nullptr;
-        for (auto &Lp : LI.allLoops()) {
-            Loop *K = Lp.get();
+        bool transformed = false;
+        std::vector<BasicBlock *> affectedHeaders;
+        while (Loop *K = sinkWorklist.take(LI)) {
             ParallelSinkAnalysisResult analysis = IA.analyzeParallelSink(K);
             if (!analysis.accepted) {
                 if (!K->children.empty()) dbg(K, analysis.reason);
@@ -643,16 +657,19 @@ bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
                           << K->header->name_ << " stride "
                           << analysis.cost.before << "->"
                           << analysis.cost.after << "\n";
-            target = K;
-            break;
-        }
-
-        if (target) {
-            if (applyParallelSink(func, target, DT)) {
+            if (K->parent) affectedHeaders.push_back(K->parent->header);
+            for (Loop *child : K->children)
+                affectedHeaders.push_back(child->header);
+            std::vector<BasicBlock *> newLoopHeaders;
+            if (applyParallelSink(func, K, DT, newLoopHeaders)) {
+                affectedHeaders.insert(affectedHeaders.end(),
+                                       newLoopHeaders.begin(),
+                                       newLoopHeaders.end());
                 everChanged = true;
-                AM.clear(func);
-                continue;
+                transformed = true;
+                break;
             }
+            affectedHeaders.clear();
             if (debugEnabled())
                 std::cerr << "[LoopInterchange] applyParallelSink bailed\n";
         }
@@ -660,11 +677,8 @@ bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
         // Phase 2: parallel float — K carries dependence, M (child) is parallel.
         // Interchange K and M so the reduction loop moves closer to innermost,
         // reducing the reuse distance of the reduction variable.
-        {
-            Loop *floatK = nullptr;
-            Loop *floatM = nullptr;
-            for (auto &Lp : LI.allLoops()) {
-                Loop *K = Lp.get();
+        if (!transformed) {
+            while (Loop *K = floatWorklist.take(LI)) {
                 ParallelFloatAnalysisResult analysis =
                     IA.analyzeParallelFloat(K);
                 if (!analysis.accepted) {
@@ -676,23 +690,34 @@ bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
                     std::cerr << "[LoopInterchange] float candidate K=" << func->name_ << "/"
                               << K->header->name_ << " M="
                               << analysis.inner->header->name_ << "\n";
-                floatK = K;
-                floatM = analysis.inner;
-                break;
-            }
-
-            if (floatK) {
-                if (applyInterchange(func, floatK, floatM)) {
+                affectedHeaders.push_back(K->header);
+                affectedHeaders.push_back(analysis.inner->header);
+                if (K->parent)
+                    affectedHeaders.push_back(K->parent->header);
+                for (Loop *child : K->children)
+                    affectedHeaders.push_back(child->header);
+                BasicBlock *newOuterHeader = nullptr;
+                if (applyInterchange(func, K, analysis.inner,
+                                     newOuterHeader)) {
+                    affectedHeaders.push_back(newOuterHeader);
                     everChanged = true;
-                    AM.clear(func);
-                    continue;
+                    transformed = true;
+                    break;
                 }
+                affectedHeaders.clear();
                 if (debugEnabled())
                     std::cerr << "[LoopInterchange] applyInterchange bailed\n";
             }
         }
 
-        break;
+        if (!transformed) break;
+
+        AM.clear(func);
+        LoopInfo &updatedLoopInfo = AM.getLoopInfo(func);
+        for (BasicBlock *header : affectedHeaders) {
+            sinkWorklist.addNeighborhood(updatedLoopInfo, header);
+            floatWorklist.addNeighborhood(updatedLoopInfo, header);
+        }
     }
     return everChanged;
 }

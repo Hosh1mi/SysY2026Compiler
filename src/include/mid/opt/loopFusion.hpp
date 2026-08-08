@@ -34,8 +34,9 @@
 //   L1.header 的 exit 边改指 L2.exit；L2 的非 IV phi 迁入 L1.header
 //   （preheader 入边 P2→P1），iv2 全部 RAUW 为 iv1（两边迭代区间相同）。
 //   中间块与 L2.header 变不可达，由 removeUnreachableBlocks 回收。
-//   结果仍是 simplified + LCSSA 形态。嵌套融合靠不动点重扫自然完成：
-//   外层融合后两侧子循环在新父循环体内相邻，下一轮按同一规则融合。
+//   结果仍是 simplified + LCSSA 形态。外层融合后，受影响循环
+//   工作队列重新检查保留的循环、父子关系与相邻同级循环，因此能继续
+//   融合新相邻的子循环或后续循环，无需重扫无关循环。
 
 #include "../analysis/affineAnalysis.hpp"
 #include "../analysis/argumentAliasAnalysis.hpp"
@@ -66,7 +67,7 @@ private:
         bool ok = false;
     };
 
-    bool runOnFunction(Function *func);
+    bool runOnFunction(Function *func, AnalysisManager *AM);
 
     Shape analyzeShape(Loop *L) const;
     // 从 L1.exit 沿单后继链走到某个同级循环的 preheader；chain 收集途经块

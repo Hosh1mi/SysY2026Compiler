@@ -4,6 +4,7 @@
 #include "../../../include/mid/analysis/affineAnalysis.hpp"
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../../include/mid/analysis/dependenceAnalysis.hpp"
+#include "../../../include/mid/opt/loopWorklist.hpp"
 #include "../../../include/mid/transform/loopCloneUtils.hpp"
 #include "../../../include/mid/ir/constant.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -780,7 +781,8 @@ bool isUnitPointerRecurrence(PhiInst *phi, BasicBlock *preheader,
 }
 
 bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
-                               Function *function, Module *module) {
+                               Function *function, Module *module,
+                               std::vector<BasicBlock *> &newLoopHeaders) {
     std::vector<BasicBlock *> createdBlocks;
     auto fail = [&](const std::string &reason) {
         if (debugEnabled())
@@ -1124,6 +1126,9 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
             std::cerr << (i ? "," : "") << plan.weights[i];
         std::cerr << "\n";
     }
+    newLoopHeaders.push_back(waveHeader);
+    newLoopHeaders.push_back(laneHeader);
+    if (innerHeader) newLoopHeaders.push_back(innerHeader);
     return true;
 }
 
@@ -1139,24 +1144,29 @@ bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
         localBasicAA.analyze(function->parent_);
         basicAA = &localBasicAA;
     }
-    bool changed = false;
-    bool rectangularApplied = false;
-    for (int iteration = 0; iteration < 16; ++iteration) {
-        LoopInfo localLoopInfo;
-        LoopInfo *loopInfo = nullptr;
-        if (AM && !changed)
-            loopInfo = &AM->getLoopInfo(function);
-        else {
-            localLoopInfo.analyze(function);
-            loopInfo = &localLoopInfo;
-        }
 
+    LoopInfo localLoopInfo;
+    LoopInfo *loopInfo = nullptr;
+    if (AM)
+        loopInfo = &AM->getLoopInfo(function);
+    else {
+        localLoopInfo.analyze(function);
+        loopInfo = &localLoopInfo;
+    }
+
+    AffectedLoopWorklist rectangularWorklist;
+    AffectedLoopWorklist skewWorklist;
+    rectangularWorklist.seed(*loopInfo);
+    skewWorklist.seed(*loopInfo);
+
+    bool changed = false;
+    while (true) {
         bool applied = false;
+        std::vector<BasicBlock *> affectedHeaders;
         ArgumentAliasAnalysis argumentAlias;
         argumentAlias.analyze(function->parent_);
-        for (const auto &ownedLoop : loopInfo->allLoops()) {
-            if (rectangularApplied) break;
-            Loop *loop = ownedLoop.get();
+
+        while (Loop *loop = rectangularWorklist.take(*loopInfo)) {
             if (loop->parent) continue;
             std::string reason;
             auto rectangular = analyzeRectangularWavefront(
@@ -1174,28 +1184,45 @@ bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
                     reject(*loop, reason, nullptr);
                 }
             }
+            std::vector<BasicBlock *> newLoopHeaders;
             if (rectangular && applyRectangularWavefront(
                                    *rectangular, function,
-                                   function->parent_)) {
+                                   function->parent_, newLoopHeaders)) {
                 applied = true;
                 changed = true;
-                rectangularApplied = true;
+                affectedHeaders.push_back(loop->header);
+                affectedHeaders.insert(affectedHeaders.end(),
+                                       newLoopHeaders.begin(),
+                                       newLoopHeaders.end());
                 break;
             }
         }
-        if (applied) continue;
-        for (const auto &ownedLoop : loopInfo->allLoops()) {
-            Loop *loop = ownedLoop.get();
-            std::string reason;
-            auto plan = analyzeLoopSkew(*loop, &reason);
-            if (!plan) continue;
-            if (applyLoopSkew(*plan, function->parent_)) {
-                applied = true;
-                changed = true;
-                break;
+
+        if (!applied) {
+            while (Loop *loop = skewWorklist.take(*loopInfo)) {
+                std::string reason;
+                auto plan = analyzeLoopSkew(*loop, &reason);
+                if (!plan) continue;
+                BasicBlock *header = loop->header;
+                if (applyLoopSkew(*plan, function->parent_)) {
+                    applied = true;
+                    changed = true;
+                    affectedHeaders.push_back(header);
+                    break;
+                }
             }
         }
         if (!applied) break;
+
+        if (AM) {
+            AM->clear(function);
+            loopInfo = &AM->getLoopInfo(function);
+        } else {
+            localLoopInfo.analyze(function);
+            loopInfo = &localLoopInfo;
+        }
+        for (BasicBlock *header : affectedHeaders)
+            skewWorklist.addNeighborhood(*loopInfo, header);
     }
     return changed;
 }

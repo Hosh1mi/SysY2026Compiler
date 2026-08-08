@@ -29,5 +29,5 @@ public:
     std::string name() const override { return "TriangleInterchange"; }
 
 private:
-    bool runOnFunction(Function *function);
+    bool runOnFunction(Function *function, AnalysisManager *AM);
 };
