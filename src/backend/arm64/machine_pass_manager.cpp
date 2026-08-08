@@ -33,7 +33,7 @@ std::string_view stageName(MachinePassStage stage) {
   return "unknown";
 }
 
-bool enabled(const char *name) { return std::getenv(name) != nullptr; }
+bool envEnabled(const char *name) { return std::getenv(name) != nullptr; }
 
 } // namespace
 
@@ -56,9 +56,9 @@ void MachineFunctionPassManager::addPass(std::string name,
 }
 
 void MachineFunctionPassManager::run(MachineFunction &function) const {
-  const bool trace = enabled("TRACE_MACHINE_PIPELINE");
-  const bool dump = enabled("DUMP_MACHINE_PIPELINE");
-  const bool profile = enabled("PROFILE_MACHINE_PASSES");
+  const bool trace = trace_ || envEnabled("TRACE_MACHINE_PIPELINE");
+  const bool dump = dump_ || envEnabled("DUMP_MACHINE_PIPELINE");
+  const bool profile = envEnabled("PROFILE_MACHINE_PASSES");
 
   for (const PassEntry &pass : passes_) {
     if (!function.hasAllProperties(pass.contract.required))

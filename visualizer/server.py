@@ -58,7 +58,10 @@ def _compiler_candidates() -> list[Path]:
     if configured:
         candidate = Path(configured)
         return [candidate if candidate.is_absolute() else ROOT / candidate]
-    return [ROOT / "build" / "compiler"]
+    return [
+        ROOT / "build-agent" / "compiler",
+        ROOT / "build" / "compiler",
+    ]
 
 
 def _container_path(path: Path) -> str | None:
@@ -85,7 +88,7 @@ def _compiler_command(env: dict[str, str], args: list[str]) -> list[str]:
             return [str(possible), *args]
         except OSError:
             continue
-    for possible in reversed(candidates):
+    for possible in candidates:
         if possible.exists() and os.access(possible, os.X_OK):
             candidate = possible
             break
@@ -142,6 +145,25 @@ def run_compiler(source: str, opt: int, args: list[str], env_updates: dict[str, 
         path.unlink(missing_ok=True)
 
 
+def _is_block_boundary(line: str) -> bool:
+    """True when a dump block must end because a foreign marker begins."""
+    stripped = line.rstrip("\n")
+    return (
+        stripped.startswith("; === ")
+        or stripped.startswith("; *** ")
+        or stripped.startswith("[PipelinePass] ")
+        or stripped.startswith("[FixedPointPipeline]")
+        or stripped.startswith("[MachinePipeline]")
+        or stripped.startswith("[MachinePassProfile]")
+        or stripped.startswith("[PassProfile]")
+        or stripped.startswith("[LoopPipeline]")
+        or stripped.startswith("[VERIFY]")
+        or stripped.startswith("[aarch64-rewrite]")
+        or stripped.startswith("[InstCombine]")
+        or stripped.startswith("selection-dag ")
+    )
+
+
 def _blocks(stderr: str, marker: re.Pattern[str]) -> list[tuple[str, str, str]]:
     blocks: list[tuple[str, str, str]] = []
     current: tuple[str, str, list[str]] | None = None
@@ -151,13 +173,7 @@ def _blocks(stderr: str, marker: re.Pattern[str]) -> list[tuple[str, str, str]]:
             if current:
                 blocks.append((current[0], current[1], "".join(current[2]).strip()))
             current = (match.group(1), match.group(2), [])
-        elif current and (
-            line.startswith("; === ")
-            or line.startswith("; *** ")
-            or line.startswith("[PipelinePass] ")
-            or line.startswith("[LoopPipeline]")
-            or line.startswith("[aarch64-rewrite]")
-        ):
+        elif current and _is_block_boundary(line):
             blocks.append((current[0], current[1], "".join(current[2]).strip()))
             current = None
         elif current:
@@ -252,7 +268,7 @@ def compile_once(source: str, opt: int) -> dict[str, Any]:
         stdout, stderr = run_compiler(
             source,
             opt,
-            ["-S", "--dump-ir", "--dump-pre-machine-instr"],
+            ["-S", "--dump-ir", "--dump-pre-machine-instr", "--dump-machine-instr"],
             {
                 "DUMP_IR_PASS": "*",
                 "TRACE_PASS_PIPELINE": "1",
@@ -265,7 +281,7 @@ def compile_once(source: str, opt: int) -> dict[str, Any]:
         mid_snapshots: dict[tuple[str, int], dict[str, Any]] = {}
         for item in mid:
             name = item["name"]
-            if name == "CanonicalCleanup":
+            if name in {"CanonicalCleanup", "FixedPointPipeline"}:
                 continue
             occurrence = occurrences.get(name, 0)
             occurrences[name] = occurrence + 1
@@ -285,11 +301,13 @@ def compile_once(source: str, opt: int) -> dict[str, Any]:
         machine = parse_machine(stderr)
         backend: dict[str, dict[str, Any]] = {}
         selection_dags = parse_selection_dags(stderr)
+        # SelectionDAG lowers the final mid-end IR; use that dump as before.
+        entering_ir = mid[-1]["after"] if mid else ""
         if selection_dags:
             backend["SelectionDAG"] = {
-                "before": "",
+                "before": entering_ir,
                 "after": selection_dags,
-                "changed": True,
+                "changed": entering_ir != selection_dags,
             }
         if selection_dags and machine:
             first_machine = next(iter(machine.values()))["before"]
@@ -298,7 +316,9 @@ def compile_once(source: str, opt: int) -> dict[str, Any]:
                 "after": first_machine,
                 "changed": selection_dags != first_machine,
             }
-        backend.update(machine)
+        # Preserve machine-pass registration order for the sidebar.
+        for pass_name, backend_item in machine.items():
+            backend[pass_name] = backend_item
         for pass_name, backend_item in backend.items():
             stages.append({
                 "id": f"backend:{pass_name}",

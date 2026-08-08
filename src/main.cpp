@@ -28,19 +28,6 @@ struct DriverOptions {
     int optLevel = 0;
     bool dumpIR = false;
     bool verifyIR = false;
-    bool disablePeephole = false;
-    bool disableMachineCSE = false;
-    bool disableLoadStoreOptimization = false;
-    bool disableMachineSink = false;
-    bool disableMachineLICM = false;
-    bool disableMachineCFGOptimization = false;
-    bool disableAddressOptimization = false;
-    bool disableCopyPropagation = false;
-    bool disableBlockPlacement = false;
-    bool disableMovnMaterialization = false;
-    bool disableLogicalImmediateMaterialization = false;
-    bool disableSchedule = false;
-    bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
     bool dumpPreMachineInstr = false;
 };
@@ -88,32 +75,6 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.dumpIR = true;
         } else if (arg == "--verify-ir") {
             options.verifyIR = true;
-        } else if (arg == "--fno-peephole") {
-            options.disablePeephole = true;
-        } else if (arg == "--fno-machine-cse") {
-            options.disableMachineCSE = true;
-        } else if (arg == "--fno-load-store-opt") {
-            options.disableLoadStoreOptimization = true;
-        } else if (arg == "--fno-machine-sink") {
-            options.disableMachineSink = true;
-        } else if (arg == "--fno-machine-licm") {
-            options.disableMachineLICM = true;
-        } else if (arg == "--fno-machine-cfg-opt") {
-            options.disableMachineCFGOptimization = true;
-        } else if (arg == "--fno-address-opt") {
-            options.disableAddressOptimization = true;
-        } else if (arg == "--fno-copy-prop") {
-            options.disableCopyPropagation = true;
-        } else if (arg == "--fno-block-placement") {
-            options.disableBlockPlacement = true;
-        } else if (arg == "--fno-movn-materialization") {
-            options.disableMovnMaterialization = true;
-        } else if (arg == "--fno-logical-immediate-materialization") {
-            options.disableLogicalImmediateMaterialization = true;
-        } else if (arg == "--fno-schedule") {
-            options.disableSchedule = true;
-        } else if (arg == "--fno-pre-schedule") {
-            options.disablePreSchedule = true;
         } else if (arg == "--dump-machine-instr") {
             options.dumpMachineInstr = true;
         } else if (arg == "--dump-pre-machine-instr") {
@@ -327,32 +288,6 @@ int main(int argc, char **argv) {
         backendOptions.dumpSelectionDAG =
             options.dumpPreMachineInstr;
         backendOptions.dumpMachineIR = options.dumpMachineInstr;
-        backendOptions.disablePeephole =
-            options.disablePeephole;
-        backendOptions.disableMachineCSE =
-            options.disableMachineCSE;
-        backendOptions.disableLoadStoreOptimization =
-            options.disableLoadStoreOptimization;
-        backendOptions.disableMachineSink =
-            options.disableMachineSink;
-        backendOptions.disableMachineLICM =
-            options.disableMachineLICM;
-        backendOptions.disableMachineCFGOptimization =
-            options.disableMachineCFGOptimization;
-        backendOptions.disableAddressOptimization =
-            options.disableAddressOptimization;
-        backendOptions.disableCopyPropagation =
-            options.disableCopyPropagation;
-        backendOptions.disableBlockPlacement =
-            options.disableBlockPlacement;
-        backendOptions.disableMovnMaterialization =
-            options.disableMovnMaterialization;
-        backendOptions.disableLogicalImmediateMaterialization =
-            options.disableLogicalImmediateMaterialization;
-        backendOptions.disableSchedule =
-            options.disableSchedule;
-        backendOptions.disablePreSchedule =
-            options.disablePreSchedule;
         backend::aarch64::AArch64Backend codegen(
             m.get(), *out, backendOptions);
         codegen.generate();

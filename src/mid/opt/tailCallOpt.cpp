@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/tailCallOpt.hpp"
+#include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <vector>
 
@@ -101,14 +102,21 @@ static void canonicalizePattern2(CallInst *call, BasicBlock *bb,
 }
 
 void TailCallOpt::execute(Module *module) {
+    AnalysisManager unused;
+    execute(module, unused);
+}
+
+PreservedAnalyses TailCallOpt::execute(Module *module, AnalysisManager &) {
+    bool changed = false;
     for (auto *func : module->function_list_) {
         if (func->is_declaration())
             continue;
-        runOnFunction(func);
+        changed |= runOnFunction(func);
     }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-void TailCallOpt::runOnFunction(Function *func) {
+bool TailCallOpt::runOnFunction(Function *func) {
     // Collect sites first so Pattern-2 rewrites do not invalidate iteration.
     struct Site {
         CallInst *call;
@@ -148,9 +156,13 @@ void TailCallOpt::runOnFunction(Function *func) {
         }
     }
 
+    if (sites.empty())
+        return false;
+
     for (auto &site : sites) {
         if (site.retBB)
             canonicalizePattern2(site.call, site.bb, site.retBB);
         site.call->set_tail(true);
     }
+    return true;
 }

@@ -35,6 +35,9 @@ public:
   explicit MachineFunctionPassManager(const MachineVerifier *verifier,
                                       bool verifyEachPass);
 
+  void setDump(bool value) { dump_ = value; }
+  void setTrace(bool value) { trace_ = value; }
+
   void addPass(std::string name, MachinePassStage stage,
                MachinePassContract contract, PassRunner runner);
   void run(MachineFunction &function) const;
@@ -49,6 +52,8 @@ private:
 
   const MachineVerifier *verifier_;
   bool verifyEachPass_;
+  bool dump_ = false;
+  bool trace_ = false;
   std::vector<PassEntry> passes_;
 };
 

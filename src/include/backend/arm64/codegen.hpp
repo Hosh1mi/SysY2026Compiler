@@ -10,20 +10,8 @@ struct BackendOptions {
     int optimizationLevel = 0;
     bool verifyMachineIR = true;
     bool dumpSelectionDAG = false;
+    // When set, dump MIR before/after every machine pass (like --dump-ir).
     bool dumpMachineIR = false;
-    bool disablePeephole = false;
-    bool disableMachineCSE = false;
-    bool disableLoadStoreOptimization = false;
-    bool disableMachineSink = false;
-    bool disableMachineLICM = false;
-    bool disableMachineCFGOptimization = false;
-    bool disableAddressOptimization = false;
-    bool disableCopyPropagation = false;
-    bool disableBlockPlacement = false;
-    bool disableMovnMaterialization = false;
-    bool disableLogicalImmediateMaterialization = false;
-    bool disableSchedule = false;
-    bool disablePreSchedule = false;
 };
 
 class AArch64Backend {
