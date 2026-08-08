@@ -717,6 +717,7 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
                 throw std::logic_error("unsupported signed min/max type");
         }
     }
+    functionDAG.legalized = true;
 }
 
 // Fusing vmul into fmla/fmls collapses two roundings into one, which can

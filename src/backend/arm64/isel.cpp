@@ -112,12 +112,21 @@ PhysReg vectorArgumentRegister(unsigned index) {
 
 std::unique_ptr<MachineFunction>
 AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
+    if (!functionDAG.legalized)
+        throw std::logic_error(
+            "instruction selection requires a legalized SelectionDAG");
     auto machineFunction =
         std::make_unique<MachineFunction>(functionDAG.function->name_);
     machineFunction->setProperty(MachineProperty::IsSSA);
-    machineFunction->setProperty(MachineProperty::HasPHIs);
     machineFunction->setProperty(MachineProperty::Legalized);
     machineFunction->setProperty(MachineProperty::Selected);
+
+    bool hasPHIs = false;
+    for (BasicBlock *block : functionDAG.blockOrder)
+        for (const auto &node : functionDAG.blocks.at(block)->nodes())
+            hasPHIs |= node->opcode() == SDOpcode::Phi;
+    if (hasPHIs)
+        machineFunction->setProperty(MachineProperty::HasPHIs);
 
     std::unordered_map<BasicBlock *, MachineBasicBlock *> blocks;
     for (BasicBlock *block : functionDAG.blockOrder)

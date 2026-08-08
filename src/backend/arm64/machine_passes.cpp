@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/machine_passes.hpp"
+#include "../../include/backend/arm64/machine_analysis.hpp"
 #include "../../include/backend/arm64/vector_immediate.hpp"
 
 #include <deque>
@@ -158,258 +159,231 @@ bool flagsUsedAfter(
 
 } // namespace
 
-bool PreRAMachinePeephole::run(MachineFunction &function) const {
-    bool changed = false;
-    // Local Machine CSE for materialized constants.  Keeping this before RA
-    // lets graph coloring decide whether the shared value belongs in a
-    // caller-saved register, a callee-saved register, or a spill slot.  The
-    // table is cleared at calls so this transformation does not manufacture
-    // a new live-across-call range.
+bool AArch64PreRAOptimizer::run(MachineFunction &function,
+                                PreRAOptimizationKind kind) const {
+  bool changed = false;
+  // Local Machine CSE for materialized constants.  Keeping this before RA
+  // lets graph coloring decide whether the shared value belongs in a
+  // caller-saved register, a callee-saved register, or a spill slot.  The
+  // table is cleared at calls so this transformation does not manufacture
+  // a new live-across-call range.
+  if (kind == PreRAOptimizationKind::ConstantCSE) {
     for (auto &block : function.blocks()) {
-        std::unordered_map<std::string, VReg> available;
-        auto &instructions = block->instructions();
-        for (auto it = instructions.begin();
-             it != instructions.end();) {
-            if (it->isCall()) {
-                available.clear();
-                ++it;
-                continue;
-            }
-            bool cseCandidate =
-                it->opcode() == Opcode::MOVi32 ||
-                it->opcode() == Opcode::MOVi64 ||
-                it->opcode() == Opcode::MOVIv4Zero ||
-                it->opcode() == Opcode::MOVIv4s ||
-                it->opcode() == Opcode::MOVIv4sMsl ||
-                it->opcode() == Opcode::MVNIv4s ||
-                it->opcode() == Opcode::MOVIv16b ||
-                it->opcode() == Opcode::FMOVv4s ||
-                it->opcode() == Opcode::DUPv4i32 ||
-                it->opcode() == Opcode::DUPv4f32;
-            if (!cseCandidate || it->operands().empty() ||
-                !it->operands()[0].isVirtualRegister() ||
-                !it->operands()[0].isDef) {
-                ++it;
-                continue;
-            }
-
-            std::string key =
-                std::to_string(static_cast<unsigned>(it->opcode()));
-            if (it->opcode() == Opcode::MOVIv4Zero) {
-                // zero vector has no immediate payload
-            } else if (it->opcode() == Opcode::DUPv4i32 ||
-                       it->opcode() == Opcode::DUPv4f32) {
-                if (it->operands().size() != 2 ||
-                    !it->operands()[1].isVirtualRegister()) {
-                    ++it;
-                    continue;
-                }
-                key += ":v" + std::to_string(
-                    it->operands()[1].virtualRegister());
-            } else if (it->opcode() == Opcode::FMOVv4s) {
-                if (it->operands().size() != 2 ||
-                    it->operands()[1].kind() !=
-                        MachineOperand::Kind::FloatingBits) {
-                    ++it;
-                    continue;
-                }
-                key += ":" +
-                       std::to_string(it->operands()[1].floatingBits());
-            } else if (it->opcode() == Opcode::MOVIv4s ||
-                       it->opcode() == Opcode::MOVIv4sMsl ||
-                       it->opcode() == Opcode::MVNIv4s) {
-                if (it->operands().size() != 3 ||
-                    it->operands()[1].kind() !=
-                        MachineOperand::Kind::Immediate ||
-                    it->operands()[2].kind() !=
-                        MachineOperand::Kind::Immediate) {
-                    ++it;
-                    continue;
-                }
-                key += ":" +
-                       std::to_string(it->operands()[1].immediate()) +
-                       ":" +
-                       std::to_string(it->operands()[2].immediate());
-            } else {
-                if (it->operands().size() != 2 ||
-                    it->operands()[1].kind() !=
-                        MachineOperand::Kind::Immediate) {
-                    ++it;
-                    continue;
-                }
-                key += ":" +
-                       std::to_string(
-                           it->operands()[1].immediate());
-            }
-            VReg duplicate =
-                it->operands()[0].virtualRegister();
-            auto canonical = available.find(key);
-            if (canonical == available.end()) {
-                available.emplace(std::move(key), duplicate);
-                ++it;
-                continue;
-            }
-
-            VReg replacement = canonical->second;
-            for (auto &useBlock : function.blocks())
-                for (MachineInstr &instruction :
-                     useBlock->instructions())
-                    for (MachineOperand &operand :
-                         instruction.operands())
-                        if (operand.isVirtualRegister() &&
-                            !operand.isDef &&
-                            operand.virtualRegister() ==
-                                duplicate)
-                            operand = MachineOperand::vreg(
-                                replacement,
-                                operand.regClass());
-            it = instructions.erase(it);
-            function.registerInfo().eraseVirtualRegister(
-                duplicate);
-            changed = true;
+      std::unordered_map<std::string, VReg> available;
+      auto &instructions = block->instructions();
+      for (auto it = instructions.begin(); it != instructions.end();) {
+        if (it->isCall()) {
+          available.clear();
+          ++it;
+          continue;
         }
-    }
-
-    // GPR vs NEON bank choice for splat immediates.
-    //
-    // ISel keeps Splat as DUP from a scalar so integer users can share the
-    // same MOVi.  When that scalar immediate has no non-broadcast users,
-    // rewrite the DUP into a NEON immediate.  Dead scalar materializations
-    // are left for Machine DCE; Machine LICM then places the NEON form.
-    {
-        std::unordered_map<VReg, unsigned> useCount;
-        for (const auto &block : function.blocks())
-            for (const MachineInstr &instruction : block->instructions())
-                for (const MachineOperand &operand : instruction.operands())
-                    if (operand.isVirtualRegister() && !operand.isDef)
-                        ++useCount[operand.virtualRegister()];
-
-        auto definitionOf = [&](VReg reg) -> MachineInstr * {
-            if (!function.registerInfo().contains(reg))
-                return nullptr;
-            return function.registerInfo().get(reg).definition;
-        };
-
-        auto onlyUsedAs = [&](VReg reg, Opcode opcode) {
-            if (!useCount.count(reg) || useCount[reg] == 0)
-                return false;
-            unsigned seen = 0;
-            for (const auto &block : function.blocks())
-                for (const MachineInstr &instruction :
-                     block->instructions())
-                    for (const MachineOperand &operand :
-                         instruction.operands()) {
-                        if (!operand.isVirtualRegister() ||
-                            operand.isDef ||
-                            operand.virtualRegister() != reg)
-                            continue;
-                        if (instruction.opcode() != opcode)
-                            return false;
-                        ++seen;
-                    }
-            return seen == useCount[reg];
-        };
-
-        for (auto &block : function.blocks()) {
-            auto &instructions = block->instructions();
-            for (auto it = instructions.begin();
-                 it != instructions.end(); ++it) {
-                const bool integerDup = it->opcode() == Opcode::DUPv4i32;
-                const bool floatDup = it->opcode() == Opcode::DUPv4f32;
-                if ((!integerDup && !floatDup) ||
-                    it->operands().size() != 2 ||
-                    !it->operands()[0].isVirtualRegister() ||
-                    !it->operands()[0].isDef ||
-                    !it->operands()[1].isVirtualRegister())
-                    continue;
-
-                VReg scalar = it->operands()[1].virtualRegister();
-                MachineInstr *scalarDef = definitionOf(scalar);
-                std::uint32_t bits = 0;
-                if (integerDup) {
-                    if (!scalarDef ||
-                        scalarDef->opcode() != Opcode::MOVi32 ||
-                        scalarDef->operands().size() != 2 ||
-                        scalarDef->operands()[1].kind() !=
-                            MachineOperand::Kind::Immediate ||
-                        !onlyUsedAs(scalar, Opcode::DUPv4i32))
-                        continue;
-                    bits = static_cast<std::uint32_t>(
-                        scalarDef->operands()[1].immediate());
-                } else {
-                    // Prefer FMOVSW -> DUP when the FPR value is broadcast
-                    // only.  Walk through an optional MOVi32 of the bit
-                    // pattern so float splats share the same policy.
-                    if (!scalarDef ||
-                        scalarDef->opcode() != Opcode::FMOVSW ||
-                        scalarDef->operands().size() != 2 ||
-                        !scalarDef->operands()[1].isVirtualRegister() ||
-                        !onlyUsedAs(scalar, Opcode::DUPv4f32))
-                        continue;
-                    VReg bitsReg =
-                        scalarDef->operands()[1].virtualRegister();
-                    MachineInstr *bitsDef = definitionOf(bitsReg);
-                    if (!bitsDef || bitsDef->opcode() != Opcode::MOVi32 ||
-                        bitsDef->operands().size() != 2 ||
-                        bitsDef->operands()[1].kind() !=
-                            MachineOperand::Kind::Immediate ||
-                        !onlyUsedAs(bitsReg, Opcode::FMOVSW))
-                        continue;
-                    bits = static_cast<std::uint32_t>(
-                        bitsDef->operands()[1].immediate());
-                }
-
-                auto immediate = classifyNeonSplatImmediate(bits);
-                if (!immediate)
-                    continue;
-                MachineOperand destination = it->operands()[0];
-                *it = makeNeonSplatImmediate(*immediate, destination);
-                if (destination.isVirtualRegister())
-                    function.registerInfo().setDefinition(
-                        destination.virtualRegister(), &*it);
-                changed = true;
-            }
+        bool cseCandidate = it->opcode() == Opcode::MOVi32 ||
+                            it->opcode() == Opcode::MOVi64 ||
+                            it->opcode() == Opcode::MOVIv4Zero ||
+                            it->opcode() == Opcode::MOVIv4s ||
+                            it->opcode() == Opcode::MOVIv4sMsl ||
+                            it->opcode() == Opcode::MVNIv4s ||
+                            it->opcode() == Opcode::MOVIv16b ||
+                            it->opcode() == Opcode::FMOVv4s ||
+                            it->opcode() == Opcode::DUPv4i32 ||
+                            it->opcode() == Opcode::DUPv4f32;
+        if (!cseCandidate || it->operands().empty() ||
+            !it->operands()[0].isVirtualRegister() ||
+            !it->operands()[0].isDef) {
+          ++it;
+          continue;
         }
-    }
 
-    for (auto &block : function.blocks()) {
-        auto &instructions = block->instructions();
-        for (auto it = instructions.begin(); it != instructions.end();) {
-            if (isZeroIdentity(*it)) {
-                MachineOperand destination = it->operands()[0];
-                MachineOperand source = it->operands()[1];
-                it->setOpcode(Opcode::COPY);
-                it->operands().clear();
-                it->addOperand(std::move(destination))
-                    .addOperand(std::move(source));
-                changed = true;
-            }
-            if (it->opcode() == Opcode::COPY &&
-                it->operands().size() == 2 &&
-                sameRegister(it->operands()[0], it->operands()[1]) &&
-                it->operands()[0].isPhysicalRegister()) {
-                it = instructions.erase(it);
-                changed = true;
-                continue;
-            }
+        std::string key = std::to_string(static_cast<unsigned>(it->opcode()));
+        if (it->opcode() == Opcode::MOVIv4Zero) {
+          // zero vector has no immediate payload
+        } else if (it->opcode() == Opcode::DUPv4i32 ||
+                   it->opcode() == Opcode::DUPv4f32) {
+          if (it->operands().size() != 2 ||
+              !it->operands()[1].isVirtualRegister()) {
             ++it;
+            continue;
+          }
+          key += ":v" + std::to_string(it->operands()[1].virtualRegister());
+        } else if (it->opcode() == Opcode::FMOVv4s) {
+          if (it->operands().size() != 2 ||
+              it->operands()[1].kind() != MachineOperand::Kind::FloatingBits) {
+            ++it;
+            continue;
+          }
+          key += ":" + std::to_string(it->operands()[1].floatingBits());
+        } else if (it->opcode() == Opcode::MOVIv4s ||
+                   it->opcode() == Opcode::MOVIv4sMsl ||
+                   it->opcode() == Opcode::MVNIv4s) {
+          if (it->operands().size() != 3 ||
+              it->operands()[1].kind() != MachineOperand::Kind::Immediate ||
+              it->operands()[2].kind() != MachineOperand::Kind::Immediate) {
+            ++it;
+            continue;
+          }
+          key += ":" + std::to_string(it->operands()[1].immediate()) + ":" +
+                 std::to_string(it->operands()[2].immediate());
+        } else {
+          if (it->operands().size() != 2 ||
+              it->operands()[1].kind() != MachineOperand::Kind::Immediate) {
+            ++it;
+            continue;
+          }
+          key += ":" + std::to_string(it->operands()[1].immediate());
         }
-    }
+        VReg duplicate = it->operands()[0].virtualRegister();
+        auto canonical = available.find(key);
+        if (canonical == available.end()) {
+          available.emplace(std::move(key), duplicate);
+          ++it;
+          continue;
+        }
 
+        VReg replacement = canonical->second;
+        for (auto &useBlock : function.blocks())
+          for (MachineInstr &instruction : useBlock->instructions())
+            for (MachineOperand &operand : instruction.operands())
+              if (operand.isVirtualRegister() && !operand.isDef &&
+                  operand.virtualRegister() == duplicate)
+                operand = MachineOperand::vreg(replacement, operand.regClass());
+        it = instructions.erase(it);
+        function.registerInfo().eraseVirtualRegister(duplicate);
+        changed = true;
+      }
+    }
+  }
+
+  // GPR vs NEON bank choice for splat immediates.
+  //
+  // ISel keeps Splat as DUP from a scalar so integer users can share the
+  // same MOVi.  When that scalar immediate has no non-broadcast users,
+  // rewrite the DUP into a NEON immediate.  Dead scalar materializations
+  // are left for Machine DCE.
+  if (kind == PreRAOptimizationKind::VectorImmediateSelection) {
+    std::unordered_map<VReg, unsigned> useCount;
+    for (const auto &block : function.blocks())
+      for (const MachineInstr &instruction : block->instructions())
+        for (const MachineOperand &operand : instruction.operands())
+          if (operand.isVirtualRegister() && !operand.isDef)
+            ++useCount[operand.virtualRegister()];
+
+    auto definitionOf = [&](VReg reg) -> MachineInstr * {
+      if (!function.registerInfo().contains(reg))
+        return nullptr;
+      return function.registerInfo().get(reg).definition;
+    };
+
+    auto onlyUsedAs = [&](VReg reg, Opcode opcode) {
+      if (!useCount.count(reg) || useCount[reg] == 0)
+        return false;
+      unsigned seen = 0;
+      for (const auto &block : function.blocks())
+        for (const MachineInstr &instruction : block->instructions())
+          for (const MachineOperand &operand : instruction.operands()) {
+            if (!operand.isVirtualRegister() || operand.isDef ||
+                operand.virtualRegister() != reg)
+              continue;
+            if (instruction.opcode() != opcode)
+              return false;
+            ++seen;
+          }
+      return seen == useCount[reg];
+    };
+
+    for (auto &block : function.blocks()) {
+      auto &instructions = block->instructions();
+      for (auto it = instructions.begin(); it != instructions.end(); ++it) {
+        const bool integerDup = it->opcode() == Opcode::DUPv4i32;
+        const bool floatDup = it->opcode() == Opcode::DUPv4f32;
+        if ((!integerDup && !floatDup) || it->operands().size() != 2 ||
+            !it->operands()[0].isVirtualRegister() ||
+            !it->operands()[0].isDef || !it->operands()[1].isVirtualRegister())
+          continue;
+
+        VReg scalar = it->operands()[1].virtualRegister();
+        MachineInstr *scalarDef = definitionOf(scalar);
+        std::uint32_t bits = 0;
+        if (integerDup) {
+          if (!scalarDef || scalarDef->opcode() != Opcode::MOVi32 ||
+              scalarDef->operands().size() != 2 ||
+              scalarDef->operands()[1].kind() !=
+                  MachineOperand::Kind::Immediate ||
+              !onlyUsedAs(scalar, Opcode::DUPv4i32))
+            continue;
+          bits =
+              static_cast<std::uint32_t>(scalarDef->operands()[1].immediate());
+        } else {
+          // Prefer FMOVSW -> DUP when the FPR value is broadcast
+          // only.  Walk through an optional MOVi32 of the bit
+          // pattern so float splats share the same policy.
+          if (!scalarDef || scalarDef->opcode() != Opcode::FMOVSW ||
+              scalarDef->operands().size() != 2 ||
+              !scalarDef->operands()[1].isVirtualRegister() ||
+              !onlyUsedAs(scalar, Opcode::DUPv4f32))
+            continue;
+          VReg bitsReg = scalarDef->operands()[1].virtualRegister();
+          MachineInstr *bitsDef = definitionOf(bitsReg);
+          if (!bitsDef || bitsDef->opcode() != Opcode::MOVi32 ||
+              bitsDef->operands().size() != 2 ||
+              bitsDef->operands()[1].kind() !=
+                  MachineOperand::Kind::Immediate ||
+              !onlyUsedAs(bitsReg, Opcode::FMOVSW))
+            continue;
+          bits = static_cast<std::uint32_t>(bitsDef->operands()[1].immediate());
+        }
+
+        auto immediate = classifyNeonSplatImmediate(bits);
+        if (!immediate)
+          continue;
+        MachineOperand destination = it->operands()[0];
+        *it = makeNeonSplatImmediate(*immediate, destination);
+        if (destination.isVirtualRegister())
+          function.registerInfo().setDefinition(destination.virtualRegister(),
+                                                &*it);
+        changed = true;
+      }
+    }
+  }
+
+  if (kind == PreRAOptimizationKind::Peephole) {
+    for (auto &block : function.blocks()) {
+      auto &instructions = block->instructions();
+      for (auto it = instructions.begin(); it != instructions.end();) {
+        if (isZeroIdentity(*it)) {
+          MachineOperand destination = it->operands()[0];
+          MachineOperand source = it->operands()[1];
+          it->setOpcode(Opcode::COPY);
+          it->operands().clear();
+          it->addOperand(std::move(destination)).addOperand(std::move(source));
+          changed = true;
+        }
+        if (it->opcode() == Opcode::COPY && it->operands().size() == 2 &&
+            sameRegister(it->operands()[0], it->operands()[1]) &&
+            it->operands()[0].isPhysicalRegister()) {
+          it = instructions.erase(it);
+          changed = true;
+          continue;
+        }
+        ++it;
+      }
+    }
+  }
+
+  if (kind == PreRAOptimizationKind::LoadStoreOptimization) {
     // Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
     // architectural scale (4/8/16): the pair offset must be a multiple of that
     // scale and fit the signed 7-bit scaled immediate.
     struct AddressForm {
-        VReg root = 0;
-        std::int64_t offset = 0;
-        bool valid = false;
+      VReg root = 0;
+      std::int64_t offset = 0;
+      bool valid = false;
     };
     struct PairKind {
-        Opcode loadOpcode;
-        Opcode storeOpcode;
-        Opcode pairLoadOpcode;
-        Opcode pairStoreOpcode;
-        std::int64_t stride;
+      Opcode loadOpcode;
+      Opcode storeOpcode;
+      Opcode pairLoadOpcode;
+      Opcode pairStoreOpcode;
+      std::int64_t stride;
     };
     static const PairKind kPairKinds[] = {
         {Opcode::LDRWui, Opcode::STRWui, Opcode::LDPWi, Opcode::STPWi, 4},
@@ -418,509 +392,385 @@ bool PreRAMachinePeephole::run(MachineFunction &function) const {
         {Opcode::LDRQui, Opcode::STRQui, Opcode::LDPQi, Opcode::STPQi, 16},
     };
     auto definesVirtual = [](const MachineInstr &instruction, VReg reg) {
-        if (!reg)
-            return false;
-        for (const MachineOperand &operand : instruction.operands())
-            if (operand.isVirtualRegister() && operand.isDef &&
-                operand.virtualRegister() == reg)
-                return true;
+      if (!reg)
         return false;
+      for (const MachineOperand &operand : instruction.operands())
+        if (operand.isVirtualRegister() && operand.isDef &&
+            operand.virtualRegister() == reg)
+          return true;
+      return false;
     };
     for (auto &block : function.blocks()) {
-        bool fused = true;
-        while (fused) {
-            fused = false;
-            auto &instructions = block->instructions();
-            std::unordered_map<VReg, AddressForm> addresses;
-            auto addressOf = [&](const MachineOperand &operand) {
-                AddressForm form;
-                if (!operand.isVirtualRegister() ||
-                    operand.regClass() != RegClass::GPR64)
-                    return form;
-                auto found =
-                    addresses.find(operand.virtualRegister());
-                if (found != addresses.end())
-                    return found->second;
-                form.root = operand.virtualRegister();
-                form.valid = true;
-                return form;
-            };
-
-            struct MemoryCandidate {
-                MachineBasicBlock::InstrList::iterator instruction;
-                AddressForm address;
-                const PairKind *kind = nullptr;
-            };
-            std::vector<MemoryCandidate> loads;
-            std::vector<MemoryCandidate> stores;
-            for (auto it = instructions.begin();
-                 it != instructions.end(); ++it) {
-                if (it->opcode() == Opcode::COPY &&
-                    it->operands().size() == 2 &&
-                    it->operands()[0].isVirtualRegister() &&
-                    it->operands()[0].regClass() ==
-                        RegClass::GPR64) {
-                    AddressForm form =
-                        addressOf(it->operands()[1]);
-                    if (form.valid)
-                        addresses[
-                            it->operands()[0]
-                                .virtualRegister()] = form;
-                } else if (
-                    it->opcode() == Opcode::ADDXri &&
-                    it->operands().size() == 3 &&
-                    it->operands()[0].isVirtualRegister() &&
-                    it->operands()[2].kind() ==
-                        MachineOperand::Kind::Immediate) {
-                    AddressForm form =
-                        addressOf(it->operands()[1]);
-                    if (form.valid) {
-                        form.offset +=
-                            it->operands()[2].immediate();
-                        addresses[
-                            it->operands()[0]
-                                .virtualRegister()] = form;
-                    }
-                }
-
-                const PairKind *kind = nullptr;
-                bool load = false;
-                bool store = false;
-                for (const PairKind &candidate : kPairKinds) {
-                    if (it->opcode() == candidate.loadOpcode) {
-                        kind = &candidate;
-                        load = true;
-                        break;
-                    }
-                    if (it->opcode() == candidate.storeOpcode) {
-                        kind = &candidate;
-                        store = true;
-                        break;
-                    }
-                }
-                if ((!load && !store) ||
-                    it->operands().size() != 3 ||
-                    it->operands()[2].kind() !=
-                        MachineOperand::Kind::Immediate ||
-                    it->memoryOperands().empty() ||
-                    it->memoryOperands().front().isVolatile)
-                    continue;
-                AddressForm form =
-                    addressOf(it->operands()[1]);
-                if (!form.valid)
-                    continue;
-                form.offset +=
-                    it->operands()[2].immediate();
-                (load ? loads : stores).push_back(
-                    MemoryCandidate{it, form, kind});
-            }
-
-            auto tryPair = [&](std::vector<MemoryCandidate> &candidates,
-                               bool load) {
-                for (std::size_t i = 0;
-                     i < candidates.size(); ++i) {
-                    for (std::size_t j = i + 1;
-                         j < candidates.size(); ++j) {
-                        auto &lhs = candidates[i];
-                        auto &rhs = candidates[j];
-                        if (lhs.kind != rhs.kind ||
-                            lhs.address.root !=
-                                rhs.address.root ||
-                            std::llabs(
-                                lhs.address.offset -
-                                rhs.address.offset) !=
-                                lhs.kind->stride)
-                            continue;
-                        std::int64_t stride = lhs.kind->stride;
-                        std::int64_t lowerOffset =
-                            std::min(lhs.address.offset,
-                                     rhs.address.offset);
-                        if (lowerOffset % stride != 0 ||
-                            lowerOffset / stride < -64 ||
-                            lowerOffset / stride > 63)
-                            continue;
-
-                        // Loads are rewritten at the earlier instruction so
-                        // both values become available without moving uses.
-                        // Stores must stay at the later instruction so both
-                        // data operands are already defined.
-                        VReg earlyData = 0;
-                        if (!load &&
-                            lhs.instruction->operands()[0]
-                                .isVirtualRegister())
-                            earlyData = lhs.instruction->operands()[0]
-                                            .virtualRegister();
-
-                        bool memoryBarrier = false;
-                        for (auto scan =
-                                 std::next(lhs.instruction);
-                             scan != rhs.instruction; ++scan) {
-                            if (scan->isCall() ||
-                                scan->mayStore() ||
-                                (!load &&
-                                 scan->mayLoad()) ||
-                                definesVirtual(*scan,
-                                               lhs.address.root) ||
-                                (!load &&
-                                 definesVirtual(*scan,
-                                                earlyData))) {
-                                memoryBarrier = true;
-                                break;
-                            }
-                        }
-                        if (memoryBarrier)
-                            continue;
-
-                        // LDP with Rt == Rt2 is unpredictable.
-                        if (load &&
-                            sameRegister(lhs.instruction->operands()[0],
-                                         rhs.instruction->operands()[0]))
-                            continue;
-
-                        auto lower =
-                            lhs.address.offset < rhs.address.offset
-                                ? lhs.instruction
-                                : rhs.instruction;
-                        auto upper =
-                            lhs.address.offset < rhs.address.offset
-                                ? rhs.instruction
-                                : lhs.instruction;
-                        MachineInstr pair(
-                            load ? lhs.kind->pairLoadOpcode
-                                 : lhs.kind->pairStoreOpcode);
-                        pair.addOperand(
-                                lower->operands()[0])
-                            .addOperand(
-                                upper->operands()[0])
-                            .addOperand(
-                                MachineOperand::vreg(
-                                    lhs.address.root,
-                                    RegClass::GPR64))
-                            .addOperand(
-                                MachineOperand::immediate(
-                                    lowerOffset));
-                        unsigned pairBytes =
-                            static_cast<unsigned>(stride * 2);
-                        unsigned align =
-                            static_cast<unsigned>(stride);
-                        pair.addMemoryOperand(
-                            MachineMemOperand{
-                                load
-                                    ? MachineMemOperand::Access::
-                                          Load
-                                    : MachineMemOperand::Access::
-                                          Store,
-                                pairBytes, align, nullptr,
-                                std::nullopt, lowerOffset,
-                                false});
-
-                        auto replacement =
-                            load ? lhs.instruction
-                                 : rhs.instruction;
-                        auto removed =
-                            load ? rhs.instruction
-                                 : lhs.instruction;
-                        *replacement = std::move(pair);
-                        if (load) {
-                            for (unsigned operand = 0;
-                                 operand < 2; ++operand)
-                                if (replacement->operands()[
-                                        operand]
-                                        .isVirtualRegister())
-                                    function.registerInfo()
-                                        .setDefinition(
-                                            replacement
-                                                ->operands()[
-                                                    operand]
-                                                .virtualRegister(),
-                                            &*replacement);
-                        }
-                        instructions.erase(removed);
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            fused = tryPair(loads, true);
-            if (!fused)
-                fused = tryPair(stores, false);
-            changed |= fused;
-        }
-    }
-
-    if (!function.hasProperty(MachineProperty::HasPHIs)) {
-        auto sinkableOpcode = [](Opcode opcode) {
-            switch (opcode) {
-            case Opcode::MOVi32:
-            case Opcode::MOVi64:
-            case Opcode::MOVIv4Zero:
-            case Opcode::FMOVWS:
-            case Opcode::FMOVSW:
-            case Opcode::COPYXtoW:
-            case Opcode::SXTW:
-            case Opcode::UXTW:
-                return true;
-            default:
-                return false;
-            }
+      bool fused = true;
+      while (fused) {
+        fused = false;
+        auto &instructions = block->instructions();
+        std::unordered_map<VReg, AddressForm> addresses;
+        auto addressOf = [&](const MachineOperand &operand) {
+          AddressForm form;
+          if (!operand.isVirtualRegister() ||
+              operand.regClass() != RegClass::GPR64)
+            return form;
+          auto found = addresses.find(operand.virtualRegister());
+          if (found != addresses.end())
+            return found->second;
+          form.root = operand.virtualRegister();
+          form.valid = true;
+          return form;
         };
 
-        // Sink a single-use, side-effect-free materialization through a
-        // single-predecessor edge.  This is deliberately narrower than
-        // general code sinking: the edge proves availability and prevents a
-        // PHI or alternate predecessor from observing an undefined value.
-        bool sunk = true;
-        while (sunk) {
-            sunk = false;
-            std::unordered_map<VReg, unsigned> useCount;
-            std::unordered_map<VReg, MachineBasicBlock *> useBlock;
-            std::unordered_map<VReg, MachineInstr *> useInstruction;
-            for (auto &owned : function.blocks())
-                for (MachineInstr &instruction :
-                     owned->instructions())
-                    for (const MachineOperand &operand :
-                         instruction.operands())
-                        if (operand.isVirtualRegister() &&
-                            !operand.isDef) {
-                            VReg reg = operand.virtualRegister();
-                            ++useCount[reg];
-                            useBlock[reg] = owned.get();
-                            useInstruction[reg] = &instruction;
-                        }
+        struct MemoryCandidate {
+          MachineBasicBlock::InstrList::iterator instruction;
+          AddressForm address;
+          const PairKind *kind = nullptr;
+        };
+        std::vector<MemoryCandidate> loads;
+        std::vector<MemoryCandidate> stores;
+        for (auto it = instructions.begin(); it != instructions.end(); ++it) {
+          if (it->opcode() == Opcode::COPY && it->operands().size() == 2 &&
+              it->operands()[0].isVirtualRegister() &&
+              it->operands()[0].regClass() == RegClass::GPR64) {
+            AddressForm form = addressOf(it->operands()[1]);
+            if (form.valid)
+              addresses[it->operands()[0].virtualRegister()] = form;
+          } else if (it->opcode() == Opcode::ADDXri &&
+                     it->operands().size() == 3 &&
+                     it->operands()[0].isVirtualRegister() &&
+                     it->operands()[2].kind() ==
+                         MachineOperand::Kind::Immediate) {
+            AddressForm form = addressOf(it->operands()[1]);
+            if (form.valid) {
+              form.offset += it->operands()[2].immediate();
+              addresses[it->operands()[0].virtualRegister()] = form;
+            }
+          }
 
-            for (auto &owned : function.blocks()) {
-                MachineBasicBlock *source = owned.get();
-                auto &sourceInstructions =
-                    source->instructions();
-                for (auto instruction =
-                         sourceInstructions.begin();
-                     instruction != sourceInstructions.end();
-                     ++instruction) {
-                    if (!sinkableOpcode(
-                            instruction->opcode()) ||
-                        instruction->isTerminator() ||
-                        instruction->isCall() ||
-                        instruction->mayLoad() ||
-                        instruction->mayStore() ||
-                        instruction->hasSideEffects())
-                        continue;
-                    VReg definition = 0;
-                    bool valid = true;
-                    for (const MachineOperand &operand :
-                         instruction->operands()) {
-                        if (operand.isPhysicalRegister()) {
-                            valid = false;
-                            break;
-                        }
-                        if (!operand.isVirtualRegister() ||
-                            !operand.isDef)
-                            continue;
-                        if (definition) {
-                            valid = false;
-                            break;
-                        }
-                        definition =
-                            operand.virtualRegister();
-                    }
-                    if (!valid || !definition ||
-                        useCount[definition] != 1)
-                        continue;
-                    MachineBasicBlock *destination =
-                        useBlock[definition];
-                    if (!destination ||
-                        destination == source ||
-                        destination->predecessors().size() != 1 ||
-                        destination->predecessors().front() !=
-                            source)
-                        continue;
+          const PairKind *kind = nullptr;
+          bool load = false;
+          bool store = false;
+          for (const PairKind &candidate : kPairKinds) {
+            if (it->opcode() == candidate.loadOpcode) {
+              kind = &candidate;
+              load = true;
+              break;
+            }
+            if (it->opcode() == candidate.storeOpcode) {
+              kind = &candidate;
+              store = true;
+              break;
+            }
+          }
+          if ((!load && !store) || it->operands().size() != 3 ||
+              it->operands()[2].kind() != MachineOperand::Kind::Immediate ||
+              it->memoryOperands().empty() ||
+              it->memoryOperands().front().isVolatile)
+            continue;
+          AddressForm form = addressOf(it->operands()[1]);
+          if (!form.valid)
+            continue;
+          form.offset += it->operands()[2].immediate();
+          (load ? loads : stores).push_back(MemoryCandidate{it, form, kind});
+        }
 
-                    auto &destinationInstructions =
-                        destination->instructions();
-                    auto insertion = std::find_if(
-                        destinationInstructions.begin(),
-                        destinationInstructions.end(),
-                        [&](const MachineInstr &candidate) {
-                            return &candidate ==
-                                   useInstruction[definition];
-                        });
-                    if (insertion ==
-                        destinationInstructions.end())
-                        continue;
-                    destinationInstructions.splice(
-                        insertion, sourceInstructions,
-                        instruction);
-                    function.clearProperty(
-                        MachineProperty::TracksLiveness);
-                    changed = true;
-                    sunk = true;
-                    break;
+        auto tryPair = [&](std::vector<MemoryCandidate> &candidates,
+                           bool load) {
+          for (std::size_t i = 0; i < candidates.size(); ++i) {
+            for (std::size_t j = i + 1; j < candidates.size(); ++j) {
+              auto &lhs = candidates[i];
+              auto &rhs = candidates[j];
+              if (lhs.kind != rhs.kind ||
+                  lhs.address.root != rhs.address.root ||
+                  std::llabs(lhs.address.offset - rhs.address.offset) !=
+                      lhs.kind->stride)
+                continue;
+              std::int64_t stride = lhs.kind->stride;
+              std::int64_t lowerOffset =
+                  std::min(lhs.address.offset, rhs.address.offset);
+              if (lowerOffset % stride != 0 || lowerOffset / stride < -64 ||
+                  lowerOffset / stride > 63)
+                continue;
+
+              // Loads are rewritten at the earlier instruction so
+              // both values become available without moving uses.
+              // Stores must stay at the later instruction so both
+              // data operands are already defined.
+              VReg earlyData = 0;
+              if (!load && lhs.instruction->operands()[0].isVirtualRegister())
+                earlyData = lhs.instruction->operands()[0].virtualRegister();
+
+              bool memoryBarrier = false;
+              for (auto scan = std::next(lhs.instruction);
+                   scan != rhs.instruction; ++scan) {
+                if (scan->isCall() || scan->mayStore() ||
+                    (!load && scan->mayLoad()) ||
+                    definesVirtual(*scan, lhs.address.root) ||
+                    (!load && definesVirtual(*scan, earlyData))) {
+                  memoryBarrier = true;
+                  break;
                 }
-                if (sunk)
-                    break;
+              }
+              if (memoryBarrier)
+                continue;
+
+              // LDP with Rt == Rt2 is unpredictable.
+              if (load && sameRegister(lhs.instruction->operands()[0],
+                                       rhs.instruction->operands()[0]))
+                continue;
+
+              auto lower = lhs.address.offset < rhs.address.offset
+                               ? lhs.instruction
+                               : rhs.instruction;
+              auto upper = lhs.address.offset < rhs.address.offset
+                               ? rhs.instruction
+                               : lhs.instruction;
+              MachineInstr pair(load ? lhs.kind->pairLoadOpcode
+                                     : lhs.kind->pairStoreOpcode);
+              pair.addOperand(lower->operands()[0])
+                  .addOperand(upper->operands()[0])
+                  .addOperand(
+                      MachineOperand::vreg(lhs.address.root, RegClass::GPR64))
+                  .addOperand(MachineOperand::immediate(lowerOffset));
+              unsigned pairBytes = static_cast<unsigned>(stride * 2);
+              unsigned align = static_cast<unsigned>(stride);
+              pair.addMemoryOperand(MachineMemOperand{
+                  load ? MachineMemOperand::Access::Load
+                       : MachineMemOperand::Access::Store,
+                  pairBytes, align, nullptr, std::nullopt, lowerOffset, false});
+
+              auto replacement = load ? lhs.instruction : rhs.instruction;
+              auto removed = load ? rhs.instruction : lhs.instruction;
+              *replacement = std::move(pair);
+              if (load) {
+                for (unsigned operand = 0; operand < 2; ++operand)
+                  if (replacement->operands()[operand].isVirtualRegister())
+                    function.registerInfo().setDefinition(
+                        replacement->operands()[operand].virtualRegister(),
+                        &*replacement);
+              }
+              instructions.erase(removed);
+              return true;
             }
-        }
+          }
+          return false;
+        };
+
+        fused = tryPair(loads, true);
+        if (!fused)
+          fused = tryPair(stores, false);
+        changed |= fused;
+      }
     }
-    return changed;
+  }
+
+  if (kind == PreRAOptimizationKind::MachineSink &&
+      !function.hasProperty(MachineProperty::HasPHIs)) {
+    auto sinkableOpcode = [](Opcode opcode) {
+      switch (opcode) {
+      case Opcode::MOVi32:
+      case Opcode::MOVi64:
+      case Opcode::MOVIv4Zero:
+      case Opcode::FMOVWS:
+      case Opcode::FMOVSW:
+      case Opcode::COPYXtoW:
+      case Opcode::SXTW:
+      case Opcode::UXTW:
+        return true;
+      default:
+        return false;
+      }
+    };
+
+    // Sink a single-use, side-effect-free materialization through a
+    // single-predecessor edge.  This is deliberately narrower than
+    // general code sinking: the edge proves availability and prevents a
+    // PHI or alternate predecessor from observing an undefined value.
+    bool sunk = true;
+    while (sunk) {
+      sunk = false;
+      std::unordered_map<VReg, unsigned> useCount;
+      std::unordered_map<VReg, MachineBasicBlock *> useBlock;
+      std::unordered_map<VReg, MachineInstr *> useInstruction;
+      for (auto &owned : function.blocks())
+        for (MachineInstr &instruction : owned->instructions())
+          for (const MachineOperand &operand : instruction.operands())
+            if (operand.isVirtualRegister() && !operand.isDef) {
+              VReg reg = operand.virtualRegister();
+              ++useCount[reg];
+              useBlock[reg] = owned.get();
+              useInstruction[reg] = &instruction;
+            }
+
+      for (auto &owned : function.blocks()) {
+        MachineBasicBlock *source = owned.get();
+        auto &sourceInstructions = source->instructions();
+        for (auto instruction = sourceInstructions.begin();
+             instruction != sourceInstructions.end(); ++instruction) {
+          if (!sinkableOpcode(instruction->opcode()) ||
+              instruction->isTerminator() || instruction->isCall() ||
+              instruction->mayLoad() || instruction->mayStore() ||
+              instruction->hasSideEffects())
+            continue;
+          VReg definition = 0;
+          bool valid = true;
+          for (const MachineOperand &operand : instruction->operands()) {
+            if (operand.isPhysicalRegister()) {
+              valid = false;
+              break;
+            }
+            if (!operand.isVirtualRegister() || !operand.isDef)
+              continue;
+            if (definition) {
+              valid = false;
+              break;
+            }
+            definition = operand.virtualRegister();
+          }
+          if (!valid || !definition || useCount[definition] != 1)
+            continue;
+          MachineBasicBlock *destination = useBlock[definition];
+          if (!destination || destination == source ||
+              destination->predecessors().size() != 1 ||
+              destination->predecessors().front() != source)
+            continue;
+
+          auto &destinationInstructions = destination->instructions();
+          auto insertion = std::find_if(
+              destinationInstructions.begin(), destinationInstructions.end(),
+              [&](const MachineInstr &candidate) {
+                return &candidate == useInstruction[definition];
+              });
+          if (insertion == destinationInstructions.end())
+            continue;
+          destinationInstructions.splice(insertion, sourceInstructions,
+                                         instruction);
+          function.clearProperty(MachineProperty::TracksLiveness);
+          changed = true;
+          sunk = true;
+          break;
+        }
+        if (sunk)
+          break;
+      }
+    }
+  }
+  return changed;
 }
 
-bool DeadMachineInstructionElimination::run(
+bool DeadMachineInstructionElimination::run(MachineFunction &function) const {
+  if (!function.hasProperty(MachineProperty::IsSSA))
+    return false;
+
+  std::unordered_map<VReg, unsigned> uses;
+  std::unordered_map<VReg, MachineInstr *> definition;
+  for (auto &block : function.blocks()) {
+    for (MachineInstr &instruction : block->instructions()) {
+      for (const MachineOperand &operand : instruction.operands()) {
+        if (!operand.isVirtualRegister())
+          continue;
+        if (operand.isDef)
+          definition[operand.virtualRegister()] = &instruction;
+        else
+          ++uses[operand.virtualRegister()];
+      }
+    }
+  }
+
+  std::deque<VReg> worklist;
+  for (const auto &[reg, instruction] : definition)
+    if (!uses[reg])
+      worklist.push_back(reg);
+
+  std::unordered_set<MachineInstr *> dead;
+  while (!worklist.empty()) {
+    VReg reg = worklist.front();
+    worklist.pop_front();
+    auto found = definition.find(reg);
+    if (found == definition.end())
+      continue;
+    MachineInstr *instruction = found->second;
+    if (dead.count(instruction) || !removableInstruction(*instruction))
+      continue;
+
+    bool allDefsDead = true;
+    for (const MachineOperand &operand : instruction->operands())
+      if (operand.isVirtualRegister() && operand.isDef &&
+          uses[operand.virtualRegister()] != 0) {
+        allDefsDead = false;
+        break;
+      }
+    if (!allDefsDead)
+      continue;
+
+    dead.insert(instruction);
+    for (const MachineOperand &operand : instruction->operands()) {
+      if (!operand.isVirtualRegister() || operand.isDef)
+        continue;
+      VReg used = operand.virtualRegister();
+      if (uses[used] && --uses[used] == 0)
+        worklist.push_back(used);
+    }
+  }
+
+  if (dead.empty())
+    return false;
+  for (auto &block : function.blocks()) {
+    auto &instructions = block->instructions();
+    for (auto it = instructions.begin(); it != instructions.end();) {
+      if (!dead.count(&*it)) {
+        ++it;
+        continue;
+      }
+      for (const MachineOperand &operand : it->operands())
+        if (operand.isVirtualRegister() && operand.isDef)
+          function.registerInfo().eraseVirtualRegister(
+              operand.virtualRegister());
+      it = instructions.erase(it);
+    }
+  }
+  bool hasPHIs = false;
+  for (const auto &block : function.blocks())
+    hasPHIs |= !block->instructions().empty() &&
+               block->instructions().front().opcode() == Opcode::PHI;
+  if (!hasPHIs)
+    function.clearProperty(MachineProperty::HasPHIs);
+  function.clearProperty(MachineProperty::TracksLiveness);
+  return true;
+}
+
+bool MachineInvariantConstantMotion::run(
     MachineFunction &function) const {
-    if (!function.hasProperty(MachineProperty::IsSSA))
-        return false;
-
-    std::unordered_map<VReg, unsigned> uses;
-    std::unordered_map<VReg, MachineInstr *> definition;
-    for (auto &block : function.blocks()) {
-        for (MachineInstr &instruction : block->instructions()) {
-            for (const MachineOperand &operand : instruction.operands()) {
-                if (!operand.isVirtualRegister())
-                    continue;
-                if (operand.isDef)
-                    definition[operand.virtualRegister()] = &instruction;
-                else
-                    ++uses[operand.virtualRegister()];
-            }
-        }
-    }
-
-    std::deque<VReg> worklist;
-    for (const auto &[reg, instruction] : definition)
-        if (!uses[reg])
-            worklist.push_back(reg);
-
-    std::unordered_set<MachineInstr *> dead;
-    while (!worklist.empty()) {
-        VReg reg = worklist.front();
-        worklist.pop_front();
-        auto found = definition.find(reg);
-        if (found == definition.end())
-            continue;
-        MachineInstr *instruction = found->second;
-        if (dead.count(instruction) ||
-            !removableInstruction(*instruction))
-            continue;
-
-        bool allDefsDead = true;
-        for (const MachineOperand &operand : instruction->operands())
-            if (operand.isVirtualRegister() && operand.isDef &&
-                uses[operand.virtualRegister()] != 0) {
-                allDefsDead = false;
-                break;
-            }
-        if (!allDefsDead)
-            continue;
-
-        dead.insert(instruction);
-        for (const MachineOperand &operand : instruction->operands()) {
-            if (!operand.isVirtualRegister() || operand.isDef)
-                continue;
-            VReg used = operand.virtualRegister();
-            if (uses[used] && --uses[used] == 0)
-                worklist.push_back(used);
-        }
-    }
-
-    if (dead.empty())
-        return false;
-    for (auto &block : function.blocks()) {
-        auto &instructions = block->instructions();
-        for (auto it = instructions.begin(); it != instructions.end();) {
-            if (!dead.count(&*it)) {
-                ++it;
-                continue;
-            }
-            for (const MachineOperand &operand : it->operands())
-                if (operand.isVirtualRegister() && operand.isDef)
-                    function.registerInfo().eraseVirtualRegister(
-                        operand.virtualRegister());
-            it = instructions.erase(it);
-        }
-    }
-    function.clearProperty(MachineProperty::TracksLiveness);
-    return true;
-}
-
-bool MachineLICM::run(MachineFunction &function) const {
     if (function.blocks().empty())
         return false;
 
-    using BlockSet = std::unordered_set<MachineBasicBlock *>;
     std::vector<MachineBasicBlock *> blocks;
     for (const auto &block : function.blocks())
         blocks.push_back(block.get());
-    std::unordered_map<MachineBasicBlock *, BlockSet> dominators;
-    for (MachineBasicBlock *block : blocks) {
-        if (block == function.entryBlock())
-            dominators[block].insert(block);
-        else
-            dominators[block].insert(blocks.begin(), blocks.end());
-    }
-    bool domChanged = true;
-    while (domChanged) {
-        domChanged = false;
-        for (MachineBasicBlock *block : blocks) {
-            if (block == function.entryBlock())
-                continue;
-            BlockSet next;
-            bool first = true;
-            for (MachineBasicBlock *predecessor :
-                 block->predecessors()) {
-                if (first) {
-                    next = dominators[predecessor];
-                    first = false;
-                    continue;
-                }
-                for (auto it = next.begin(); it != next.end();) {
-                    if (!dominators[predecessor].count(*it))
-                        it = next.erase(it);
-                    else
-                        ++it;
-                }
-            }
-            next.insert(block);
-            if (next != dominators[block]) {
-                dominators[block] = std::move(next);
-                domChanged = true;
-            }
-        }
-    }
+
+    MachineDominatorTree dominators;
+    dominators.analyze(function);
+    MachineLoopInfo loopInfo;
+    loopInfo.analyze(function, dominators);
 
     struct Loop {
         MachineBasicBlock *header = nullptr;
         MachineBasicBlock *preheader = nullptr;
-        BlockSet blocks;
+        std::unordered_set<MachineBasicBlock *> blocks;
     };
     std::vector<Loop> loops;
-    for (MachineBasicBlock *tail : blocks) {
-        for (MachineBasicBlock *header : tail->successors()) {
-            if (!dominators[tail].count(header))
-                continue;
-            Loop loop;
-            loop.header = header;
-            loop.blocks.insert(header);
-            loop.blocks.insert(tail);
-            std::vector<MachineBasicBlock *> worklist = {tail};
-            while (!worklist.empty()) {
-                MachineBasicBlock *current = worklist.back();
-                worklist.pop_back();
-                for (MachineBasicBlock *predecessor :
-                     current->predecessors())
-                    if (loop.blocks.insert(predecessor).second &&
-                        predecessor != header)
-                        worklist.push_back(predecessor);
-            }
-            std::vector<MachineBasicBlock *> outside;
-            for (MachineBasicBlock *predecessor :
-                 header->predecessors())
-                if (!loop.blocks.count(predecessor))
-                    outside.push_back(predecessor);
-            if (outside.size() == 1 &&
-                outside.front()->successors().size() == 1)
-                loop.preheader = outside.front();
-            if (loop.preheader)
-                loops.push_back(std::move(loop));
-        }
+    for (const MachineLoop &naturalLoop : loopInfo.loops()) {
+        Loop loop;
+        loop.header = naturalLoop.header;
+        loop.blocks = naturalLoop.blocks;
+        std::vector<MachineBasicBlock *> outside;
+        for (MachineBasicBlock *predecessor :
+             loop.header->predecessors())
+            if (!loop.blocks.count(predecessor))
+                outside.push_back(predecessor);
+        if (outside.size() == 1 &&
+            outside.front()->successors().size() == 1)
+            loop.preheader = outside.front();
+        if (loop.preheader)
+            loops.push_back(std::move(loop));
     }
     std::sort(loops.begin(), loops.end(),
               [](const Loop &lhs, const Loop &rhs) {
@@ -2793,16 +2643,12 @@ bool PostRAAddressingOptimizer::run(
     return changed;
 }
 
-bool MachineBlockPlacement::run(MachineFunction &function) const {
+bool UnreachableMachineBlockElimination::run(
+    MachineFunction &function) const {
     auto &blocks = function.blocks();
     if (blocks.size() < 2)
         return false;
 
-    bool changed = false;
-    // Earlier CFG rewrites may bypass a latch or a split PHI edge after its
-    // instructions have already been formed.  Remove blocks that are no
-    // longer reachable before threading and layout so stale code does not
-    // consume instruction-cache space or distort fallthrough selection.
     std::unordered_set<MachineBasicBlock *> reachable;
     std::vector<MachineBasicBlock *> worklist;
     if (MachineBasicBlock *entry = function.entryBlock()) {
@@ -2817,6 +2663,20 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
                 worklist.push_back(successor);
         }
     }
+
+    if (reachable.size() == blocks.size())
+        return false;
+
+    std::unordered_set<VReg> retainedVRegs;
+    for (const auto &owned : blocks) {
+        if (!reachable.count(owned.get()))
+            continue;
+        for (const MachineInstr &instruction : owned->instructions())
+            for (const MachineOperand &operand : instruction.operands())
+                if (operand.isVirtualRegister())
+                    retainedVRegs.insert(operand.virtualRegister());
+    }
+
     for (auto blockIt = blocks.begin(); blockIt != blocks.end();) {
         MachineBasicBlock *block = blockIt->get();
         if (reachable.count(block)) {
@@ -2832,8 +2692,28 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         for (MachineBasicBlock *successor : successors)
             block->removeSuccessor(successor);
         blockIt = blocks.erase(blockIt);
-        changed = true;
     }
+
+    std::vector<VReg> deadVRegs;
+    for (const auto &[reg, info] :
+         function.registerInfo().virtualRegisters()) {
+        (void)info;
+        if (!retainedVRegs.count(reg))
+            deadVRegs.push_back(reg);
+    }
+    for (VReg reg : deadVRegs)
+        function.registerInfo().eraseVirtualRegister(reg);
+
+    function.clearProperty(MachineProperty::TracksLiveness);
+    return true;
+}
+
+bool MachineBlockPlacement::run(MachineFunction &function) const {
+    auto &blocks = function.blocks();
+    if (blocks.size() < 2)
+        return false;
+
+    bool changed = false;
 
     // Allocation and copy propagation often turn split PHI edges into a
     // single unconditional branch.  Thread all predecessors through such
@@ -3183,6 +3063,169 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         instructions.erase(unconditional);
         changed = true;
     }
+    return changed;
+}
+
+bool AArch64BranchRelaxation::run(MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::FrameFinalized))
+        throw std::logic_error(
+            "branch relaxation requires finalized frame instructions");
+
+    auto emittedSize = [](const MachineInstr &instruction) {
+        if (instruction.opcode() == Opcode::COPYXtoW &&
+            instruction.operands().size() >= 2 &&
+            instruction.operands()[0].isPhysicalRegister() &&
+            instruction.operands()[1].isPhysicalRegister() &&
+            RegisterInfo::aliases(
+                instruction.operands()[0].physicalRegister(),
+                instruction.operands()[1].physicalRegister()))
+            return std::int64_t{0};
+        return std::int64_t{4};
+    };
+    auto targetOperand = [](Opcode opcode) -> unsigned {
+        switch (opcode) {
+        case Opcode::Bcc: return 1;
+        case Opcode::CBZ:
+        case Opcode::CBNZ: return 1;
+        case Opcode::TBZ:
+        case Opcode::TBNZ: return 2;
+        default: return 0;
+        }
+    };
+    auto displacementFits = [](Opcode opcode, std::int64_t displacement) {
+        const std::int64_t range =
+            opcode == Opcode::TBZ || opcode == Opcode::TBNZ
+                ? std::int64_t{1} << 15
+                : std::int64_t{1} << 20;
+        return displacement >= -range && displacement <= range - 4 &&
+               displacement % 4 == 0;
+    };
+
+    bool changed = false;
+    unsigned splitNumber = 0;
+    for (;;) {
+        std::unordered_map<MachineBasicBlock *, std::int64_t> blockOffsets;
+        std::unordered_map<const MachineInstr *, std::int64_t>
+            instructionOffsets;
+        std::int64_t offset = 0;
+        for (const auto &owned : function.blocks()) {
+            blockOffsets[owned.get()] = offset;
+            for (const MachineInstr &instruction : owned->instructions()) {
+                instructionOffsets[&instruction] = offset;
+                offset += emittedSize(instruction);
+            }
+        }
+
+        MachineBasicBlock *source = nullptr;
+        MachineBasicBlock::InstrList::iterator branch;
+        MachineBasicBlock *target = nullptr;
+        bool found = false;
+        for (const auto &owned : function.blocks()) {
+            auto &instructions = owned->instructions();
+            for (auto it = instructions.begin(); it != instructions.end();
+                 ++it) {
+                const Opcode opcode = it->opcode();
+                if (opcode != Opcode::Bcc && opcode != Opcode::CBZ &&
+                    opcode != Opcode::CBNZ && opcode != Opcode::TBZ &&
+                    opcode != Opcode::TBNZ)
+                    continue;
+                const unsigned operand = targetOperand(opcode);
+                if (it->operands().size() <= operand ||
+                    it->operands()[operand].kind() !=
+                        MachineOperand::Kind::BasicBlock)
+                    throw std::logic_error(
+                        "malformed conditional branch during relaxation");
+                MachineBasicBlock *candidate =
+                    it->operands()[operand].basicBlock();
+                const std::int64_t displacement =
+                    blockOffsets.at(candidate) - instructionOffsets.at(&*it);
+                if (displacementFits(opcode, displacement))
+                    continue;
+                source = owned.get();
+                branch = it;
+                target = candidate;
+                found = true;
+                break;
+            }
+            if (found)
+                break;
+        }
+        if (!found)
+            break;
+
+        std::vector<MachineBasicBlock *> originalSuccessors =
+            source->successors();
+        if (originalSuccessors.size() != 2 ||
+            std::find(originalSuccessors.begin(), originalSuccessors.end(),
+                      target) == originalSuccessors.end())
+            throw std::logic_error(
+                "conditional branch does not match a two-way CFG edge");
+
+        MachineBasicBlock &continuation = function.createBlock(
+            "branch.relax." + std::to_string(splitNumber++));
+        continuation.frequency = source->frequency;
+        continuation.loopDepth = source->loopDepth;
+
+        auto &blocks = function.blocks();
+        auto sourcePosition = std::find_if(
+            blocks.begin(), blocks.end(), [&](const auto &owned) {
+                return owned.get() == source;
+            });
+        std::unique_ptr<MachineBasicBlock> continuationOwner =
+            std::move(blocks.back());
+        blocks.pop_back();
+        sourcePosition = std::find_if(
+            blocks.begin(), blocks.end(), [&](const auto &owned) {
+                return owned.get() == source;
+            });
+        blocks.insert(std::next(sourcePosition),
+                      std::move(continuationOwner));
+
+        auto afterBranch = std::next(branch);
+        continuation.instructions().splice(
+            continuation.instructions().end(), source->instructions(),
+            afterBranch, source->instructions().end());
+
+        for (MachineBasicBlock *successor : originalSuccessors)
+            source->removeSuccessor(successor);
+        source->addSuccessor(target);
+        source->addSuccessor(&continuation);
+        for (MachineBasicBlock *successor : originalSuccessors)
+            if (successor != target)
+                continuation.addSuccessor(successor);
+
+        switch (branch->opcode()) {
+        case Opcode::Bcc:
+            branch->operands()[0] = MachineOperand::condition(
+                inverseCondition(branch->operands()[0].condition()));
+            branch->operands()[1] = MachineOperand::block(&continuation);
+            break;
+        case Opcode::CBZ:
+        case Opcode::CBNZ:
+            branch->setOpcode(branch->opcode() == Opcode::CBZ
+                                  ? Opcode::CBNZ
+                                  : Opcode::CBZ);
+            branch->operands()[1] = MachineOperand::block(&continuation);
+            break;
+        case Opcode::TBZ:
+        case Opcode::TBNZ:
+            branch->setOpcode(branch->opcode() == Opcode::TBZ
+                                  ? Opcode::TBNZ
+                                  : Opcode::TBZ);
+            branch->operands()[2] = MachineOperand::block(&continuation);
+            break;
+        default:
+            throw std::logic_error("unsupported branch relaxation opcode");
+        }
+
+        MachineInstr longBranch(Opcode::B);
+        longBranch.addOperand(MachineOperand::block(target));
+        source->instructions().insert(
+            std::next(branch), std::move(longBranch));
+        changed = true;
+    }
+
+    function.setProperty(MachineProperty::BranchesRelaxed);
     return changed;
 }
 

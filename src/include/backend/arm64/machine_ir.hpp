@@ -240,11 +240,17 @@ enum class MachineProperty : std::uint32_t {
     Selected = 1U << 4,
     NoVRegs = 1U << 5,
     FrameFinalized = 1U << 6,
+    BranchesRelaxed = 1U << 7,
 };
 
 constexpr MachineProperty operator|(MachineProperty lhs, MachineProperty rhs) {
     return static_cast<MachineProperty>(
         static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
+}
+
+constexpr MachineProperty operator&(MachineProperty lhs, MachineProperty rhs) {
+    return static_cast<MachineProperty>(
+        static_cast<std::uint32_t>(lhs) & static_cast<std::uint32_t>(rhs));
 }
 
 class MachineFunction {
@@ -278,6 +284,7 @@ public:
     }
 
     bool hasProperty(MachineProperty property) const;
+    bool hasAllProperties(MachineProperty properties) const;
     void setProperty(MachineProperty property);
     void clearProperty(MachineProperty property);
 

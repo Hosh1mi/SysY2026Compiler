@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/regalloc.hpp"
+#include "../../include/backend/arm64/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -58,110 +59,13 @@ unsigned spillAlignment(RegClass regClass) {
                                        : 4;
 }
 
-void computeMachineLoopDepths(MachineFunction &function) {
-    using BlockSet = std::unordered_set<MachineBasicBlock *>;
-    std::vector<MachineBasicBlock *> blocks;
-    for (const auto &owned : function.blocks()) {
-        owned->loopDepth = 0;
-        blocks.push_back(owned.get());
-    }
-    if (blocks.empty())
-        return;
-
-    BlockSet reachable;
-    std::vector<MachineBasicBlock *> reachWorklist = {
-        function.entryBlock()};
-    while (!reachWorklist.empty()) {
-        MachineBasicBlock *block = reachWorklist.back();
-        reachWorklist.pop_back();
-        if (!block || !reachable.insert(block).second)
-            continue;
-        reachWorklist.insert(reachWorklist.end(),
-                             block->successors().begin(),
-                             block->successors().end());
-    }
-
-    std::unordered_map<MachineBasicBlock *, BlockSet> dominators;
-    for (MachineBasicBlock *block : blocks) {
-        if (!reachable.count(block)) {
-            dominators[block].insert(block);
-        } else if (block == function.entryBlock()) {
-            dominators[block].insert(block);
-        } else {
-            dominators[block] = reachable;
-        }
-    }
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (MachineBasicBlock *block : blocks) {
-            if (!reachable.count(block) ||
-                block == function.entryBlock())
-                continue;
-            BlockSet next;
-            bool first = true;
-            for (MachineBasicBlock *predecessor :
-                 block->predecessors()) {
-                if (!reachable.count(predecessor))
-                    continue;
-                if (first) {
-                    next = dominators[predecessor];
-                    first = false;
-                    continue;
-                }
-                for (auto it = next.begin();
-                     it != next.end();) {
-                    if (!dominators[predecessor].count(*it))
-                        it = next.erase(it);
-                    else
-                        ++it;
-                }
-            }
-            next.insert(block);
-            if (next != dominators[block]) {
-                dominators[block] = std::move(next);
-                changed = true;
-            }
-        }
-    }
-
-    std::unordered_map<MachineBasicBlock *, BlockSet> naturalLoops;
-    for (MachineBasicBlock *tail : blocks) {
-        if (!reachable.count(tail))
-            continue;
-        for (MachineBasicBlock *header : tail->successors()) {
-            if (!dominators[tail].count(header))
-                continue;
-            BlockSet &loop = naturalLoops[header];
-            if (loop.empty())
-                loop.insert(header);
-            if (loop.insert(tail).second) {
-                std::vector<MachineBasicBlock *> worklist = {tail};
-                while (!worklist.empty()) {
-                    MachineBasicBlock *current =
-                        worklist.back();
-                    worklist.pop_back();
-                    for (MachineBasicBlock *predecessor :
-                         current->predecessors())
-                        if (reachable.count(predecessor) &&
-                            loop.insert(predecessor).second &&
-                            predecessor != header)
-                            worklist.push_back(predecessor);
-                }
-            }
-        }
-    }
-    for (const auto &[header, loop] : naturalLoops) {
-        (void)header;
-        for (MachineBasicBlock *block : loop)
-            ++block->loopDepth;
-    }
-}
-
 } // namespace
 
 LivenessResult MachineLiveness::run(MachineFunction &function) const {
-    computeMachineLoopDepths(function);
+    MachineDominatorTree dominators;
+    dominators.analyze(function);
+    MachineLoopInfo loops;
+    loops.analyze(function, dominators);
     using RegSet = std::set<VReg>;
     std::unordered_map<MachineBasicBlock *, RegSet> uses;
     std::unordered_map<MachineBasicBlock *, RegSet> defs;
@@ -287,6 +191,8 @@ LivenessResult MachineLiveness::run(MachineFunction &function) const {
 }
 
 bool PhiElimination::run(MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::HasPHIs))
+        return false;
     struct Edge {
         MachineBasicBlock *predecessor;
         MachineBasicBlock *successor;
@@ -422,9 +328,9 @@ bool PhiElimination::run(MachineFunction &function) const {
 
     if (changed) {
         function.clearProperty(MachineProperty::IsSSA);
-        function.clearProperty(MachineProperty::HasPHIs);
         function.clearProperty(MachineProperty::TracksLiveness);
     }
+    function.clearProperty(MachineProperty::HasPHIs);
     return changed;
 }
 

@@ -1,4 +1,5 @@
 #include "../../include/backend/arm64/verifier.hpp"
+#include "../../include/backend/arm64/machine_analysis.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -92,9 +93,17 @@ MachineVerifier::verify(const MachineFunction &function) const {
         !function.hasProperty(MachineProperty::NoVRegs))
         report(nullptr, 0,
                "frame was finalized before register allocation");
+    if (function.hasProperty(MachineProperty::BranchesRelaxed) &&
+        !function.hasProperty(MachineProperty::FrameFinalized))
+        report(nullptr, 0,
+               "branches were relaxed before frame finalization");
 
     std::unordered_map<VReg, const MachineInstr *> definitions;
     std::unordered_set<const MachineInstr *> instructions;
+    std::unordered_map<const MachineInstr *, const MachineBasicBlock *>
+        instructionBlocks;
+    std::unordered_map<const MachineInstr *, unsigned> instructionIndices;
+    bool containsPHI = false;
     for (std::size_t blockIndex = 0;
          blockIndex < function.blocks().size(); ++blockIndex) {
         const auto &block = function.blocks()[blockIndex];
@@ -124,6 +133,8 @@ MachineVerifier::verify(const MachineFunction &function) const {
         unsigned instructionIndex = 0;
         for (const auto &instruction : block->instructions()) {
             instructions.insert(&instruction);
+            instructionBlocks[&instruction] = block.get();
+            instructionIndices[&instruction] = instructionIndex;
             const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
             if (descriptor.opcode == Opcode::Invalid)
                 report(block.get(), instructionIndex,
@@ -138,9 +149,41 @@ MachineVerifier::verify(const MachineFunction &function) const {
                        "parallel-copy marker remains in final MIR");
 
             if (instruction.opcode() == Opcode::PHI) {
+                containsPHI = true;
                 if (sawNonPhi)
                     report(block.get(), instructionIndex,
                            "PHI appears after a non-PHI instruction");
+                if (instruction.operands().size() < 3 ||
+                    instruction.operands().size() % 2 == 0) {
+                    report(block.get(), instructionIndex,
+                           "PHI has malformed incoming operands");
+                } else {
+                    std::unordered_set<const MachineBasicBlock *> incoming;
+                    for (unsigned index = 2;
+                         index < instruction.operands().size(); index += 2) {
+                        const MachineOperand &incomingBlock =
+                            instruction.operands()[index];
+                        if (incomingBlock.kind() !=
+                            MachineOperand::Kind::BasicBlock)
+                            continue;
+                        if (!incoming.insert(
+                                incomingBlock.basicBlock()).second)
+                            report(block.get(), instructionIndex,
+                                   "PHI has duplicate incoming block");
+                        if (std::find(block->predecessors().begin(),
+                                      block->predecessors().end(),
+                                      incomingBlock.basicBlock()) ==
+                            block->predecessors().end())
+                            report(block.get(), instructionIndex,
+                                   "PHI incoming block is not a CFG "
+                                   "predecessor");
+                    }
+                    for (const MachineBasicBlock *predecessor :
+                         block->predecessors())
+                        if (!incoming.count(predecessor))
+                            report(block.get(), instructionIndex,
+                                   "PHI is missing a CFG predecessor");
+                }
             } else {
                 sawNonPhi = true;
             }
@@ -278,6 +321,12 @@ MachineVerifier::verify(const MachineFunction &function) const {
         }
     }
 
+    if (containsPHI != function.hasProperty(MachineProperty::HasPHIs))
+        report(nullptr, 0,
+               containsPHI
+                   ? "MIR contains PHIs without the HasPHIs property"
+                   : "HasPHIs property is set but MIR contains no PHIs");
+
     if (function.hasProperty(MachineProperty::IsSSA)) {
         for (const auto &[reg, info] :
              function.registerInfo().virtualRegisters()) {
@@ -293,6 +342,60 @@ MachineVerifier::verify(const MachineFunction &function) const {
                        "MachineRegisterInfo definition for vreg %" +
                            std::to_string(reg) + " is not in MIR");
         }
+
+        MachineDominatorTree dominators;
+        dominators.analyze(function);
+        for (const auto &block : function.blocks()) {
+            unsigned useInstructionIndex = 0;
+            for (const MachineInstr &instruction : block->instructions()) {
+                for (unsigned operandIndex = 0;
+                     operandIndex < instruction.operands().size();
+                     ++operandIndex) {
+                    const MachineOperand &operand =
+                        instruction.operands()[operandIndex];
+                    if (!operand.isVirtualRegister() || operand.isDef)
+                        continue;
+                    auto definition =
+                        definitions.find(operand.virtualRegister());
+                    if (definition == definitions.end())
+                        continue;
+                    const MachineInstr *definitionInstruction =
+                        definition->second;
+                    const MachineBasicBlock *definitionBlock =
+                        instructionBlocks.at(definitionInstruction);
+
+                    if (instruction.opcode() == Opcode::PHI) {
+                        if (operandIndex + 1 >=
+                                instruction.operands().size() ||
+                            instruction.operands()[operandIndex + 1].kind() !=
+                                MachineOperand::Kind::BasicBlock)
+                            continue;
+                        const MachineBasicBlock *incomingBlock =
+                            instruction.operands()[operandIndex + 1]
+                                .basicBlock();
+                        if (!dominators.dominates(definitionBlock,
+                                                  incomingBlock))
+                            report(block.get(), useInstructionIndex,
+                                   "SSA definition does not dominate PHI "
+                                   "incoming edge");
+                        continue;
+                    }
+
+                    if (!dominators.dominates(definitionBlock,
+                                              block.get())) {
+                        report(block.get(), useInstructionIndex,
+                               "SSA definition does not dominate use");
+                    } else if (definitionBlock == block.get() &&
+                               instructionIndices.at(definitionInstruction) >=
+                                   useInstructionIndex) {
+                        report(block.get(), useInstructionIndex,
+                               "SSA virtual register is used before its "
+                               "definition");
+                    }
+                }
+                ++useInstructionIndex;
+            }
+        }
     }
 
     if (function.hasProperty(MachineProperty::NoVRegs)) {
@@ -302,6 +405,70 @@ MachineVerifier::verify(const MachineFunction &function) const {
                     if (operand.isVirtualRegister())
                         report(block.get(), 0,
                                "virtual register remains in NoVRegs function");
+    }
+
+    if (function.hasProperty(MachineProperty::BranchesRelaxed)) {
+        std::unordered_map<const MachineBasicBlock *, std::int64_t>
+            blockOffsets;
+        std::unordered_map<const MachineInstr *, std::int64_t>
+            instructionOffsets;
+        std::int64_t offset = 0;
+        for (const auto &block : function.blocks()) {
+            blockOffsets[block.get()] = offset;
+            for (const MachineInstr &instruction : block->instructions()) {
+                instructionOffsets[&instruction] = offset;
+                bool elidedCopy =
+                    instruction.opcode() == Opcode::COPYXtoW &&
+                    instruction.operands().size() >= 2 &&
+                    instruction.operands()[0].isPhysicalRegister() &&
+                    instruction.operands()[1].isPhysicalRegister() &&
+                    RegisterInfo::aliases(
+                        instruction.operands()[0].physicalRegister(),
+                        instruction.operands()[1].physicalRegister());
+                if (!elidedCopy)
+                    offset += 4;
+            }
+        }
+
+        for (const auto &block : function.blocks()) {
+            unsigned instructionIndex = 0;
+            for (const MachineInstr &instruction : block->instructions()) {
+                unsigned targetIndex = 0;
+                std::int64_t range = 0;
+                switch (instruction.opcode()) {
+                case Opcode::Bcc:
+                case Opcode::CBZ:
+                case Opcode::CBNZ:
+                    targetIndex = 1;
+                    range = std::int64_t{1} << 20;
+                    break;
+                case Opcode::TBZ:
+                case Opcode::TBNZ:
+                    targetIndex = 2;
+                    range = std::int64_t{1} << 15;
+                    break;
+                default:
+                    ++instructionIndex;
+                    continue;
+                }
+                if (instruction.operands().size() <= targetIndex ||
+                    instruction.operands()[targetIndex].kind() !=
+                        MachineOperand::Kind::BasicBlock) {
+                    ++instructionIndex;
+                    continue;
+                }
+                const MachineBasicBlock *target =
+                    instruction.operands()[targetIndex].basicBlock();
+                const std::int64_t displacement =
+                    blockOffsets.at(target) -
+                    instructionOffsets.at(&instruction);
+                if (displacement < -range || displacement > range - 4 ||
+                    displacement % 4 != 0)
+                    report(block.get(), instructionIndex,
+                           "conditional branch remains out of range");
+                ++instructionIndex;
+            }
+        }
     }
 
     return errors;

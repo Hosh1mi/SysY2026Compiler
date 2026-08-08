@@ -3,12 +3,15 @@
 #include "../../include/backend/arm64/asm_printer.hpp"
 #include "../../include/backend/arm64/frame_lowering.hpp"
 #include "../../include/backend/arm64/isel.hpp"
+#include "../../include/backend/arm64/machine_pass_manager.hpp"
 #include "../../include/backend/arm64/machine_passes.hpp"
+#include "../../include/backend/arm64/parallelRuntime.hpp"
 #include "../../include/backend/arm64/regalloc.hpp"
 #include "../../include/backend/arm64/scheduler.hpp"
 #include "../../include/backend/arm64/verifier.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <functional>
 #include <iostream>
@@ -49,12 +52,13 @@ void AArch64Backend::generate() {
     DAGCombiner combiner;
     AArch64InstructionSelector selector;
     MachineVerifier verifier;
-    PreRAMachinePeephole preRAPeephole;
+    AArch64PreRAOptimizer preRAOptimizer;
     DeadMachineInstructionElimination machineDCE;
-    MachineLICM machineLICM;
+    MachineInvariantConstantMotion invariantConstantMotion;
     AArch64ConditionOptimizer conditionOptimizer;
     PhiElimination phiElimination;
     PreRACFGOptimizer preRACFGOptimizer;
+    UnreachableMachineBlockElimination unreachableBlockElimination;
     A53MachineScheduler scheduler;
     GraphColoringRegisterAllocator registerAllocator;
     PostRAParallelCopyResolver parallelCopyResolver;
@@ -63,8 +67,201 @@ void AArch64Backend::generate() {
     PreRAAddressingFolder addressingFolder;
     PostRAAddressingOptimizer addressingOptimizer;
     MachineBlockPlacement blockPlacement;
+    AArch64BranchRelaxation branchRelaxation;
     AArch64FrameLowering frameLowering;
     AArch64AssemblyPrinter printer;
+
+    MachineFunctionPassManager machinePipeline(
+        &verifier, options_.verifyMachineIR);
+    const MachineProperty selected = MachineProperty::Selected;
+    const MachineProperty selectedSSA =
+        MachineProperty::Selected | MachineProperty::IsSSA;
+    const MachineProperty allocated =
+        MachineProperty::Selected | MachineProperty::NoVRegs;
+    const MachineProperty finalized =
+        allocated | MachineProperty::FrameFinalized;
+
+    auto addPass = [&](std::string name, MachinePassStage stage,
+                       MachineProperty required,
+                       MachineProperty forbidden,
+                       MachineFunctionPassManager::PassRunner runner) {
+        machinePipeline.addPass(
+            std::move(name), stage, {required, forbidden},
+            std::move(runner));
+    };
+
+    auto addPreRAOptimizations = [&](MachinePassStage stage,
+                                     MachineProperty required,
+                                     const std::string &suffix) {
+        auto addOptimization = [&](const std::string &name,
+                                   PreRAOptimizationKind kind) {
+            addPass(name + suffix, stage, required,
+                    MachineProperty::NoVRegs,
+                    [&, kind](MachineFunction &function) {
+                        return preRAOptimizer.run(function, kind);
+                    });
+        };
+        if (!options_.disableMachineCSE)
+            addOptimization("MachineConstantCSE",
+                            PreRAOptimizationKind::ConstantCSE);
+        if (!options_.disablePeephole) {
+            addOptimization(
+                "AArch64VectorImmediateSelection",
+                PreRAOptimizationKind::VectorImmediateSelection);
+            addOptimization("AArch64PreRAPeephole",
+                            PreRAOptimizationKind::Peephole);
+        }
+        if (!options_.disableLoadStoreOptimization)
+            addOptimization(
+                "AArch64LoadStoreOptimization",
+                PreRAOptimizationKind::LoadStoreOptimization);
+        if (!options_.disableMachineSink)
+            addOptimization("MachineSink",
+                            PreRAOptimizationKind::MachineSink);
+    };
+
+    if (options_.optimizationLevel >= 1) {
+        addPreRAOptimizations(
+            MachinePassStage::MachineSSA, selectedSSA, "");
+        if (!options_.disableAddressOptimization) {
+            addPass("AArch64PreRAAddressingFolder",
+                    MachinePassStage::MachineSSA, selectedSSA,
+                    MachineProperty::NoVRegs,
+                    [&](MachineFunction &function) {
+                        return addressingFolder.run(function);
+                    });
+        }
+        addPass("AArch64ConditionOptimizer", MachinePassStage::MachineSSA,
+                selectedSSA, MachineProperty::NoVRegs,
+                [&](MachineFunction &function) {
+                    return conditionOptimizer.run(function);
+                });
+        addPass("MachineDCE", MachinePassStage::MachineSSA, selectedSSA,
+                MachineProperty::NoVRegs,
+                [&](MachineFunction &function) {
+                    bool changed = false;
+                    for (unsigned iteration = 0; iteration < 4; ++iteration) {
+                        const bool localChange = machineDCE.run(function);
+                        changed |= localChange;
+                        if (!localChange)
+                            break;
+                    }
+                    return changed;
+                });
+    }
+
+    addPass("PHIElimination", MachinePassStage::SSAElimination,
+            selectedSSA, MachineProperty::NoVRegs,
+            [&](MachineFunction &function) {
+                return phiElimination.run(function);
+            });
+
+    if (options_.optimizationLevel >= 1) {
+        addPreRAOptimizations(
+            MachinePassStage::PreRegAlloc, selected, "AfterPHI");
+        if (!options_.disableMachineLICM)
+            addPass("MachineInvariantConstantMotion",
+                MachinePassStage::PreRegAlloc, selected,
+                MachineProperty::NoVRegs,
+                [&](MachineFunction &function) {
+                    return invariantConstantMotion.run(function);
+                });
+        addPreRAOptimizations(
+            MachinePassStage::PreRegAlloc, selected, "AfterLICM");
+        if (!options_.disableMachineCFGOptimization)
+            addPass("AArch64PreRACFGOptimizer",
+                MachinePassStage::PreRegAlloc, selected,
+                MachineProperty::NoVRegs,
+                [&](MachineFunction &function) {
+                    return preRACFGOptimizer.run(function);
+                });
+    }
+
+    addPass("UnreachableMachineBlockElimination",
+            MachinePassStage::PreRegAlloc, selected,
+            MachineProperty::NoVRegs,
+            [&](MachineFunction &function) {
+                return unreachableBlockElimination.run(function);
+            });
+
+    if (options_.optimizationLevel >= 1 &&
+        !options_.disablePreSchedule)
+        addPass("A53PreRAScheduler", MachinePassStage::PreRegAlloc,
+                selected, MachineProperty::NoVRegs,
+                [&](MachineFunction &function) {
+                    return scheduler.run(function);
+                });
+
+    addPass("GraphColoringRegisterAllocator", MachinePassStage::RegAlloc,
+            selected, MachineProperty::NoVRegs,
+            [&](MachineFunction &function) {
+                registerAllocator.run(function);
+                return true;
+            });
+    addPass("PostRAParallelCopyResolver", MachinePassStage::PostRegAlloc,
+            allocated, MachineProperty::FrameFinalized,
+            [&](MachineFunction &function) {
+                return parallelCopyResolver.run(function);
+            });
+    addPass("AArch64FinalizeTiedOperands", MachinePassStage::PostRegAlloc,
+            allocated, MachineProperty::FrameFinalized,
+            [&](MachineFunction &function) {
+                return instructionExpansion.run(function);
+            });
+    if (options_.optimizationLevel >= 1 &&
+        !options_.disableCopyPropagation)
+        addPass("PostRACopyPropagation", MachinePassStage::PostRegAlloc,
+                allocated, MachineProperty::FrameFinalized,
+                [&](MachineFunction &function) {
+                    return copyPropagation.run(function);
+                });
+
+    addPass("AArch64FrameLowering", MachinePassStage::FrameFinalization,
+            allocated, MachineProperty::FrameFinalized,
+            [&](MachineFunction &function) {
+                frameLowering.run(function);
+                return true;
+            });
+    if (options_.optimizationLevel >= 1) {
+        if (!options_.disableCopyPropagation)
+            addPass("PostFrameCopyPropagation",
+                    MachinePassStage::FrameFinalization, finalized,
+                    MachineProperty::None,
+                    [&](MachineFunction &function) {
+                        return copyPropagation.run(function);
+                    });
+        if (!options_.disableAddressOptimization)
+            addPass("AArch64PostRAAddressingOptimizer",
+                    MachinePassStage::FrameFinalization, finalized,
+                    MachineProperty::None,
+                    [&](MachineFunction &function) {
+                        return addressingOptimizer.run(function);
+                    });
+        if (!options_.disableBlockPlacement)
+            addPass("MachineBlockPlacement",
+                MachinePassStage::FrameFinalization, finalized,
+                MachineProperty::None,
+                [&](MachineFunction &function) {
+                    return blockPlacement.run(function);
+                });
+    }
+    addPass("AArch64ExpandConstantMaterialization",
+            MachinePassStage::PreEmit, finalized, MachineProperty::None,
+            [&](MachineFunction &function) {
+                return instructionExpansion.expandConstantMaterializations(
+                    function);
+            });
+    if (options_.optimizationLevel >= 1 && !options_.disableSchedule)
+        addPass("A53PostRAScheduler", MachinePassStage::PreEmit,
+                finalized, MachineProperty::None,
+                [&](MachineFunction &function) {
+                    return scheduler.run(function);
+                });
+    addPass("AArch64BranchRelaxation", MachinePassStage::PreEmit,
+            finalized, MachineProperty::BranchesRelaxed,
+            [&](MachineFunction &function) {
+                return branchRelaxation.run(function);
+            });
 
     output_ << "\t.arch armv8-a\n\t.text\n";
     for (Function *function : module_->function_list_) {
@@ -80,60 +277,9 @@ void AArch64Backend::generate() {
         auto machineFunction = selector.select(*dag);
         if (options_.verifyMachineIR)
             verifier.verifyOrThrow(*machineFunction, "instruction-select");
-        if (options_.optimizationLevel >= 1) {
-            if (!options_.disablePeephole) {
-                preRAPeephole.run(*machineFunction);
-                addressingFolder.run(*machineFunction);
-            }
-            conditionOptimizer.run(*machineFunction);
-            for (unsigned iteration = 0; iteration < 4; ++iteration) {
-                if (!machineDCE.run(*machineFunction))
-                    break;
-            }
-            if (options_.verifyMachineIR)
-                verifier.verifyOrThrow(
-                    *machineFunction, "machine-ssa-optimization");
-        }
-        phiElimination.run(*machineFunction);
-        if (options_.optimizationLevel >= 1 &&
-            !options_.disablePeephole) {
-            preRAPeephole.run(*machineFunction);
-            // Critical-edge splitting during PHI elimination creates the
-            // canonical preheaders needed by constant-only Machine LICM.
-            machineLICM.run(*machineFunction);
-            preRAPeephole.run(*machineFunction);
-            preRACFGOptimizer.run(*machineFunction);
-        }
+        machinePipeline.run(*machineFunction);
         if (options_.verifyMachineIR)
-            verifier.verifyOrThrow(*machineFunction, "phi-elimination");
-        if (options_.optimizationLevel >= 1 &&
-            !options_.disablePreSchedule)
-            scheduler.run(*machineFunction);
-        registerAllocator.run(*machineFunction);
-        parallelCopyResolver.run(*machineFunction);
-        instructionExpansion.run(*machineFunction);
-        if (options_.optimizationLevel >= 1 &&
-            !options_.disablePeephole)
-            copyPropagation.run(*machineFunction);
-        if (options_.verifyMachineIR)
-            verifier.verifyOrThrow(*machineFunction, "register-allocation");
-        frameLowering.run(*machineFunction);
-        if (options_.optimizationLevel >= 1) {
-            if (!options_.disablePeephole)
-                copyPropagation.run(*machineFunction);
-            if (!options_.disablePeephole)
-                addressingOptimizer.run(*machineFunction);
-            blockPlacement.run(*machineFunction);
-        }
-        // Expand integer immediates into MOVZ/MOVK before scheduling and
-        // printing so the scheduler can interleave independent pieces.
-        instructionExpansion.expandConstantMaterializations(
-            *machineFunction);
-        if (options_.optimizationLevel >= 1 &&
-            !options_.disableSchedule)
-            scheduler.run(*machineFunction);
-        if (options_.verifyMachineIR)
-            verifier.verifyOrThrow(*machineFunction, "frame-lowering");
+            verifier.verifyOrThrow(*machineFunction, "pre-emit");
         if (options_.dumpMachineIR)
             std::cerr << printMachineIR(*machineFunction);
         printer.printFunction(*machineFunction, output_);
@@ -162,6 +308,62 @@ void AArch64Backend::generate() {
     emitGroup("\t.data", data);
     emitGroup("\t.bss", bss);
     emitGroup("\t.section .rodata", rodata);
+    emitParallelRuntime();
+}
+
+void AArch64Backend::emitParallelRuntime() {
+    auto calledFunction = [](Instruction *instruction) -> Function * {
+        auto *call = dynamic_cast<CallInst *>(instruction);
+        if (!call || call->num_ops_ == 0)
+            return nullptr;
+        return dynamic_cast<Function *>(
+            call->get_operand(call->num_ops_ - 1));
+    };
+
+    bool hasParallelFor = false;
+    for (Function *function : module_->function_list_) {
+        if (function->is_declaration())
+            continue;
+        for (BasicBlock *block : function->basic_blocks_)
+            for (Instruction *instruction : block->instr_list_) {
+                Function *callee = calledFunction(instruction);
+                hasParallelFor |=
+                    callee && callee->name_ == "__sysy_parallel_for";
+            }
+    }
+    if (!hasParallelFor)
+        return;
+
+    std::vector<int> bodyIds;
+    const std::string prefix = "__sysy_par_body_";
+    for (Function *function : module_->function_list_) {
+        if (function->name_.rfind(prefix, 0) != 0)
+            continue;
+        const std::string suffix = function->name_.substr(prefix.size());
+        if (suffix.empty() ||
+            !std::all_of(suffix.begin(), suffix.end(), [](char character) {
+                return std::isdigit(
+                    static_cast<unsigned char>(character));
+            }))
+            continue;
+        bodyIds.push_back(std::stoi(suffix));
+    }
+    std::sort(bodyIds.begin(), bodyIds.end());
+    bodyIds.erase(std::unique(bodyIds.begin(), bodyIds.end()), bodyIds.end());
+
+    output_ << "\n\t.text\n\t.align 2\n"
+            << "\t.global __sysy_par_dispatch\n"
+            << "__sysy_par_dispatch:\n";
+    for (int id : bodyIds)
+        output_ << "\tcmp w0, #" << id << "\n"
+                << "\tb.eq .Lsysy_disp_" << id << "\n";
+    output_ << "\tret\n";
+    for (int id : bodyIds)
+        output_ << ".Lsysy_disp_" << id << ":\n"
+                << "\tmov w0, w1\n"
+                << "\tmov w1, w2\n"
+                << "\tb __sysy_par_body_" << id << "\n";
+    output_ << kSysyParallelRuntimeAsm;
 }
 
 void AArch64Backend::emitGlobal(GlobalVariable *global) {

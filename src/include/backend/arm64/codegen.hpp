@@ -12,6 +12,14 @@ struct BackendOptions {
     bool dumpSelectionDAG = false;
     bool dumpMachineIR = false;
     bool disablePeephole = false;
+    bool disableMachineCSE = false;
+    bool disableLoadStoreOptimization = false;
+    bool disableMachineSink = false;
+    bool disableMachineLICM = false;
+    bool disableMachineCFGOptimization = false;
+    bool disableAddressOptimization = false;
+    bool disableCopyPropagation = false;
+    bool disableBlockPlacement = false;
     bool disableSchedule = false;
     bool disablePreSchedule = false;
 };
@@ -26,6 +34,7 @@ public:
 
 private:
     void emitGlobal(GlobalVariable *global);
+    void emitParallelRuntime();
 
     Module *module_;
     std::ostream &output_;

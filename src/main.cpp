@@ -6,7 +6,6 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
-#include "include/backend/arm64/parallelRuntime.hpp"
 #include "include/backend/arm64/codegen.hpp"
 
 #include <algorithm>
@@ -30,6 +29,14 @@ struct DriverOptions {
     bool dumpIR = false;
     bool verifyIR = false;
     bool disablePeephole = false;
+    bool disableMachineCSE = false;
+    bool disableLoadStoreOptimization = false;
+    bool disableMachineSink = false;
+    bool disableMachineLICM = false;
+    bool disableMachineCFGOptimization = false;
+    bool disableAddressOptimization = false;
+    bool disableCopyPropagation = false;
+    bool disableBlockPlacement = false;
     bool disableSchedule = false;
     bool disablePreSchedule = false;
     bool dumpMachineInstr = false;
@@ -81,6 +88,22 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
             options.verifyIR = true;
         } else if (arg == "--fno-peephole") {
             options.disablePeephole = true;
+        } else if (arg == "--fno-machine-cse") {
+            options.disableMachineCSE = true;
+        } else if (arg == "--fno-load-store-opt") {
+            options.disableLoadStoreOptimization = true;
+        } else if (arg == "--fno-machine-sink") {
+            options.disableMachineSink = true;
+        } else if (arg == "--fno-machine-licm") {
+            options.disableMachineLICM = true;
+        } else if (arg == "--fno-machine-cfg-opt") {
+            options.disableMachineCFGOptimization = true;
+        } else if (arg == "--fno-address-opt") {
+            options.disableAddressOptimization = true;
+        } else if (arg == "--fno-copy-prop") {
+            options.disableCopyPropagation = true;
+        } else if (arg == "--fno-block-placement") {
+            options.disableBlockPlacement = true;
         } else if (arg == "--fno-schedule") {
             options.disableSchedule = true;
         } else if (arg == "--fno-pre-schedule") {
@@ -248,52 +271,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<TailCallOpt>());
 }
 
-static Function *calledFunction(Instruction *inst) {
-    auto *call = dynamic_cast<CallInst *>(inst);
-    if (!call || call->num_ops_ == 0)
-        return nullptr;
-    return dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
-}
-
-static bool hasParallelForCall(Module *module) {
-    for (auto *func : module->function_list_) {
-        if (func->is_declaration())
-            continue;
-        for (auto *bb : func->basic_blocks_) {
-            for (auto *inst : bb->instr_list_) {
-                Function *callee = calledFunction(inst);
-                if (callee && callee->name_ == "__sysy_parallel_for")
-                    return true;
-            }
-        }
-    }
-    return false;
-}
-
-static std::vector<int> parallelBodyIds(Module *module) {
-    std::vector<int> ids;
-    const std::string prefix = "__sysy_par_body_";
-    for (auto *func : module->function_list_) {
-        if (func->name_.rfind(prefix, 0) != 0)
-            continue;
-        std::string suffix = func->name_.substr(prefix.size());
-        if (suffix.empty())
-            continue;
-        bool numeric = true;
-        for (char ch : suffix) {
-            if (!std::isdigit(static_cast<unsigned char>(ch))) {
-                numeric = false;
-                break;
-            }
-        }
-        if (numeric)
-            ids.push_back(std::stoi(suffix));
-    }
-    std::sort(ids.begin(), ids.end());
-    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-    return ids;
-}
-
 } // namespace
 
 extern unique_ptr<CompUnitAST> root;
@@ -346,6 +323,22 @@ int main(int argc, char **argv) {
         backendOptions.dumpMachineIR = options.dumpMachineInstr;
         backendOptions.disablePeephole =
             options.disablePeephole;
+        backendOptions.disableMachineCSE =
+            options.disableMachineCSE;
+        backendOptions.disableLoadStoreOptimization =
+            options.disableLoadStoreOptimization;
+        backendOptions.disableMachineSink =
+            options.disableMachineSink;
+        backendOptions.disableMachineLICM =
+            options.disableMachineLICM;
+        backendOptions.disableMachineCFGOptimization =
+            options.disableMachineCFGOptimization;
+        backendOptions.disableAddressOptimization =
+            options.disableAddressOptimization;
+        backendOptions.disableCopyPropagation =
+            options.disableCopyPropagation;
+        backendOptions.disableBlockPlacement =
+            options.disableBlockPlacement;
         backendOptions.disableSchedule =
             options.disableSchedule;
         backendOptions.disablePreSchedule =
@@ -353,24 +346,6 @@ int main(int argc, char **argv) {
         backend::aarch64::AArch64Backend codegen(
             m.get(), *out, backendOptions);
         codegen.generate();
-        // 并行 runtime + 手写 dispatch（见 parallelizeLoops.cpp 说明）
-        bool hasParallel = hasParallelForCall(m.get());
-        std::vector<int> bodyIds = parallelBodyIds(m.get());
-        if (hasParallel) {
-            *out << "\n\t.text\n\t.align 2\n"
-                 << "\t.global __sysy_par_dispatch\n"
-                 << "__sysy_par_dispatch:\n";
-            for (int id : bodyIds)
-                *out << "\tcmp w0, #" << id << "\n"
-                     << "\tb.eq .Lsysy_disp_" << id << "\n";
-            *out << "\tret\n";
-            for (int id : bodyIds)
-                *out << ".Lsysy_disp_" << id << ":\n"
-                     << "\tmov w0, w1\n"
-                     << "\tmov w1, w2\n"
-                     << "\tb __sysy_par_body_" << id << "\n";
-            *out << kSysyParallelRuntimeAsm;
-        }
     } else if (options.printIR) {
         *out << m->print();
     }

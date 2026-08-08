@@ -136,6 +136,7 @@ struct FunctionDAG {
     explicit FunctionDAG(Function *function) : function(function) {}
 
     Function *function;
+    bool legalized = false;
     std::vector<BasicBlock *> blockOrder;
     std::unordered_map<BasicBlock *, std::unique_ptr<SelectionDAG>> blocks;
     std::unordered_map<Value *, SDValue> values;

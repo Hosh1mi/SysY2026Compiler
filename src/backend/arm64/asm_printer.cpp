@@ -802,9 +802,11 @@ void AArch64AssemblyPrinter::printFunction(
     // instruction selection or invent a temporary register.
     if (!function.hasProperty(MachineProperty::Selected) ||
         !function.hasProperty(MachineProperty::NoVRegs) ||
-        !function.hasProperty(MachineProperty::FrameFinalized))
+        !function.hasProperty(MachineProperty::FrameFinalized) ||
+        !function.hasProperty(MachineProperty::BranchesRelaxed))
         throw std::logic_error(
-            "assembly printing requires selected, allocated, finalized MIR");
+            "assembly printing requires selected, allocated, finalized, "
+            "branch-relaxed MIR");
     output << "\t.p2align 2\n"
            << "\t.global " << function.name() << '\n'
            << "\t.type " << function.name() << ", %function\n"

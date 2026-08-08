@@ -259,6 +259,11 @@ bool MachineFunction::hasProperty(MachineProperty property) const {
     return properties_ & static_cast<std::uint32_t>(property);
 }
 
+bool MachineFunction::hasAllProperties(MachineProperty properties) const {
+    const std::uint32_t mask = static_cast<std::uint32_t>(properties);
+    return (properties_ & mask) == mask;
+}
+
 void MachineFunction::setProperty(MachineProperty property) {
     properties_ |= static_cast<std::uint32_t>(property);
 }
@@ -333,18 +338,48 @@ std::string operandText(const MachineOperand &operand) {
 } // namespace
 
 void printMachineIR(const MachineFunction &function, std::ostream &output) {
-    output << "machine-function " << function.name() << " {\n";
+    output << "# Machine code for function " << function.name() << ":";
+    const struct {
+        MachineProperty property;
+        const char *name;
+    } properties[] = {
+        {MachineProperty::IsSSA, "IsSSA"},
+        {MachineProperty::HasPHIs, "HasPHIs"},
+        {MachineProperty::TracksLiveness, "TracksLiveness"},
+        {MachineProperty::Legalized, "Legalized"},
+        {MachineProperty::Selected, "Selected"},
+        {MachineProperty::NoVRegs, "NoVRegs"},
+        {MachineProperty::FrameFinalized, "FrameFinalized"},
+        {MachineProperty::BranchesRelaxed, "BranchesRelaxed"},
+    };
+    bool firstProperty = true;
+    for (const auto &property : properties) {
+        if (!function.hasProperty(property.property))
+            continue;
+        output << (firstProperty ? " " : ", ") << property.name;
+        firstProperty = false;
+    }
+    output << '\n';
     for (const auto &block : function.blocks()) {
-        output << "  bb." << block->number() << ' ' << block->name() << ':';
+        output << "bb." << block->number();
+        if (!block->name().empty())
+            output << '.' << block->name();
+        output << ":\n";
+        if (!block->predecessors().empty()) {
+            output << "  ; predecessors:";
+            for (const auto *predecessor : block->predecessors())
+                output << " %bb." << predecessor->number();
+            output << '\n';
+        }
         if (!block->successors().empty()) {
-            output << " successors";
+            output << "  successors:";
             for (const auto *successor : block->successors())
                 output << " %bb." << successor->number();
+            output << '\n';
         }
-        output << '\n';
         for (const auto &instruction : block->instructions()) {
             const auto &descriptor = InstrInfo::get(instruction.opcode());
-            output << "    " << descriptor.mnemonic;
+            output << "  " << descriptor.mnemonic;
             bool first = true;
             for (const auto &operand : instruction.operands()) {
                 output << (first ? " " : ", ") << operandText(operand);
@@ -352,8 +387,10 @@ void printMachineIR(const MachineFunction &function, std::ostream &output) {
             }
             output << '\n';
         }
+        output << '\n';
     }
-    output << "}\n";
+    output << "# End machine code for function " << function.name()
+           << ".\n";
 }
 
 std::string printMachineIR(const MachineFunction &function) {

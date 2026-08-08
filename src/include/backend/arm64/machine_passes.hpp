@@ -4,9 +4,18 @@
 
 namespace backend::aarch64 {
 
-class PreRAMachinePeephole {
+enum class PreRAOptimizationKind {
+    ConstantCSE,
+    VectorImmediateSelection,
+    Peephole,
+    LoadStoreOptimization,
+    MachineSink,
+};
+
+class AArch64PreRAOptimizer {
 public:
-    bool run(MachineFunction &function) const;
+    bool run(MachineFunction &function,
+             PreRAOptimizationKind kind) const;
 };
 
 class DeadMachineInstructionElimination {
@@ -14,7 +23,7 @@ public:
     bool run(MachineFunction &function) const;
 };
 
-class MachineLICM {
+class MachineInvariantConstantMotion {
 public:
     bool run(MachineFunction &function) const;
 };
@@ -25,6 +34,11 @@ public:
 };
 
 class PreRACFGOptimizer {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class UnreachableMachineBlockElimination {
 public:
     bool run(MachineFunction &function) const;
 };
@@ -57,6 +71,11 @@ public:
 };
 
 class MachineBlockPlacement {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class AArch64BranchRelaxation {
 public:
     bool run(MachineFunction &function) const;
 };
