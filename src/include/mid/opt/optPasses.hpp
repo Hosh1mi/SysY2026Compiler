@@ -44,6 +44,7 @@
 #include "reassociate.hpp"
 #include "loopVectorize.hpp"
 #include "slpVectorize.hpp"
+#include "vectorCombine.hpp"
 #include "ifConversion.hpp"
 #include "loopInterchange.hpp"
 #include "loopSkewing.hpp"

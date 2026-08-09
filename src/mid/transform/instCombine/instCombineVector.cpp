@@ -149,7 +149,10 @@ Value *visitVectorBinary(BinaryInst *inst) {
         if ((inst->op_id_ == Instruction::Add ||
              inst->op_id_ == Instruction::Sub ||
              inst->op_id_ == Instruction::Or ||
-             inst->op_id_ == Instruction::Xor) &&
+             inst->op_id_ == Instruction::Xor ||
+             inst->op_id_ == Instruction::Shl ||
+             inst->op_id_ == Instruction::LShr ||
+             inst->op_id_ == Instruction::AShr) &&
             isSplat(right, type, 0, 0.0f))
             return left;
         if ((inst->op_id_ == Instruction::Add ||
@@ -163,6 +166,11 @@ Value *visitVectorBinary(BinaryInst *inst) {
         if (inst->op_id_ == Instruction::Mul &&
             isSplat(left, type, 1, 1.0f))
             return right;
+        if ((inst->op_id_ == Instruction::Mul ||
+             inst->op_id_ == Instruction::And) &&
+            (isSplat(left, type, 0, 0.0f) ||
+             isSplat(right, type, 0, 0.0f)))
+            return zeroVector(type);
         if ((inst->op_id_ == Instruction::Sub ||
              inst->op_id_ == Instruction::Xor) &&
             left == right)

@@ -212,6 +212,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SLPVectorize>());
+    pm.addPass(std::make_unique<VectorCombine>());
     pm.addPass(std::make_unique<SplitGEP>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());

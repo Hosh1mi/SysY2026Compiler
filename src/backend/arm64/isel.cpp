@@ -668,6 +668,15 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 
                 SDNode *rhs = node.operands()[1].node;
                 SDNode *lhs = node.operands()[0].node;
+                if (integerVector && node.opcode() == SDOpcode::Sub &&
+                    lhs && lhs->opcode() == SDOpcode::Constant &&
+                    lhs->shuffleMask.empty()) {
+                    MachineInstr negate(Opcode::NEGv4i32);
+                    negate.addOperand(define(node))
+                        .addOperand(use(node.operands()[1]));
+                    append(block, std::move(negate), &node);
+                    break;
+                }
                 if (!integerVector && !floatingVector && !integer64 &&
                     node.opcode() == SDOpcode::Mul) {
                     SDNode *constant = nullptr;

@@ -505,6 +505,24 @@ public:
             bb->parent_->parent_->int32_ty_, vecTy->num_elements_);
         set_operand(2, new ConstantVector(maskTy, maskConsts));
     }
+    // Construct without inserting into a block.  Transformation passes use
+    // this form when the shuffle must dominate the instruction it replaces.
+    ShuffleVectorInst(Value *v1, Value *v2, std::vector<int> mask,
+                      BasicBlock *bb, bool)
+        : Instruction(v1->type_, Instruction::ShuffleVector, 3),
+          mask_(std::move(mask)) {
+        set_operand(0, v1);
+        set_operand(1, v2);
+        std::vector<Constant *> maskConsts;
+        for (int m : mask_)
+            maskConsts.push_back(new ConstantInt(
+                bb->parent_->parent_->int32_ty_, m));
+        auto *vecTy = static_cast<VectorType *>(v1->type_);
+        auto *maskTy = bb->parent_->parent_->get_vector_type(
+            bb->parent_->parent_->int32_ty_, vecTy->num_elements_);
+        set_operand(2, new ConstantVector(maskTy, maskConsts));
+        parent_ = bb;
+    }
     const std::vector<int> &mask() const { return mask_; }
     virtual std::string print() override;
 private:
