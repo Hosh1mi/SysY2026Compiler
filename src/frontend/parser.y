@@ -292,6 +292,9 @@ DefList:
     };
 
 // 定义
+// Scalar initializers go through Exp so braced vector literals can participate
+// in larger expressions (e.g. int4 x = {1,2,3,4} + {5,6,7,8}).  Array
+// initializers keep aggregate InitVal nesting.
 Def:
     ID Arrays ASSIGN InitVal {
         $$ = make_node<DefAST>();
@@ -299,10 +302,11 @@ Def:
         $$->arrays.swap($2->list);
         $$->initVal = unique_ptr<InitValAST>($4);
     }|
-    ID ASSIGN InitVal {
+    ID ASSIGN Exp {
         $$ = make_node<DefAST>();
         $$->id = unique_ptr<string>($1);
-        $$->initVal = unique_ptr<InitValAST>($3);
+        $$->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
+        $$->initVal->exp = unique_ptr<AddExpAST>($3);
     }|
     ID Arrays {
         $$ = make_node<DefAST>();
@@ -327,17 +331,19 @@ Arrays:
 
 
 // 变量或常量初值
+// Aggregate braces are listed first so array-of-vector initializers keep the
+// nested InitVal shape instead of collapsing into expression brace primaries.
 InitVal:
-    Exp {
-        $$ = make_node<InitValAST>();
-        $$->exp = unique_ptr<AddExpAST>($1);
-    }|
     LC RC {
         $$ = make_node<InitValAST>();
     }|
     LC InitValList RC {
         $$ = make_node<InitValAST>();
         $$->initValList.swap($2->list);
+    }|
+    Exp {
+        $$ = make_node<InitValAST>();
+        $$->exp = unique_ptr<AddExpAST>($1);
     };
 
 // Braced initializer used on the right-hand side of a whole-vector assignment.
@@ -474,12 +480,6 @@ Stmt:
         $$->lVal = unique_ptr<LValAST>($1);
         $$->exp = unique_ptr<AddExpAST>($3);
     }|
-    LVal ASSIGN BraceInitVal SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = ASS;
-        $$->lVal = unique_ptr<LValAST>($1);
-        $$->initVal = unique_ptr<InitValAST>($3);
-    }|
     Exp SEMICOLON {
         $$ = make_node<StmtAST>();
         $$->sType = EXP;
@@ -583,6 +583,10 @@ PrimaryExp:
     Number {
         $$ = make_node<PrimaryExpAST>();
         $$->number = unique_ptr<NumberAST>($1);
+    }|
+    BraceInitVal {
+        $$ = make_node<PrimaryExpAST>();
+        $$->initVal = unique_ptr<InitValAST>($1);
     };
 
 // 数值
@@ -599,6 +603,8 @@ Number:
     };
 
 // 一元表达式
+// Lane extracts on calls / parenthesized values are written as dedicated
+// productions so they do not steal `id[i]` from LVal array lowering.
 UnaryExp:
     PrimaryExp {
         $$ = make_node<UnaryExpAST>();
@@ -607,6 +613,22 @@ UnaryExp:
     Call {
         $$ = make_node<UnaryExpAST>();
         $$->call = unique_ptr<CallAST>($1);
+    }|
+    Call LB Exp RB {
+        $$ = make_node<UnaryExpAST>();
+        auto *base = make_node<UnaryExpAST>();
+        base->call = unique_ptr<CallAST>($1);
+        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
+        $$->subscript = unique_ptr<AddExpAST>($3);
+    }|
+    LP Exp RP LB Exp RB {
+        $$ = make_node<UnaryExpAST>();
+        auto *primary = make_node<PrimaryExpAST>();
+        primary->exp = unique_ptr<AddExpAST>($2);
+        auto *base = make_node<UnaryExpAST>();
+        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
+        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
+        $$->subscript = unique_ptr<AddExpAST>($5);
     }|
     UnaryOp UnaryExp {
         $$ = make_node<UnaryExpAST>();

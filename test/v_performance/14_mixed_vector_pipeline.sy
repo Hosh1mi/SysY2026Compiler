@@ -1,0 +1,54 @@
+// Mixed int4/float4 pipeline stressing both NEON banks on one hot path.
+const int N = 32768;
+const int SWEEPS = 1024;
+const int MOD = 10007;
+int4 ivals[N];
+float4 fvals[N];
+int4 iout[N];
+float4 fout[N];
+
+int main() {
+    int seed = getint();
+    int i = 0;
+    while (i < N) {
+        ivals[i] = {seed, seed + 1, seed + 2, seed + 3};
+        fvals[i] = {1.0, 1.5, 2.0, 2.5};
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    int checksum = 0;
+    while (sweep < SWEEPS) {
+        i = 0;
+        while (i < N) {
+            int4 iv = ivals[i] * 3 + 5;
+            float4 fv = fvals[i] * 1.1 + 0.25;
+            iout[i] = iv % MOD;
+            fout[i] = fv;
+            ivals[i] = (iout[i] + iout[i][0]) % MOD;
+            fvals[i] = fv * 0.5 + {0.25, 0.25, 0.25, 0.25};
+            checksum = (checksum + iout[i][0] + iout[i][1]
+                        + iout[i][2] + iout[i][3]) % 1000000007;
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int fchecksum = 0;
+    i = 0;
+    while (i < N) {
+        int l0 = fout[i][0] * 100.0;
+        int l1 = fout[i][1] * 100.0;
+        int l2 = fout[i][2] * 100.0;
+        int l3 = fout[i][3] * 100.0;
+        fchecksum = fchecksum + l0 + l1 + l2 + l3;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    putint(fchecksum);
+    putch(10);
+    return 0;
+}

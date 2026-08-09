@@ -1,0 +1,45 @@
+// Covers a shallow 3D fixed-vector cube with nested indexing and assignment.
+int main() {
+    int4 cube[2][2][2];
+    int z = 0;
+    while (z < 2) {
+        int y = 0;
+        while (y < 2) {
+            int x = 0;
+            while (x < 2) {
+                int base = (z * 4 + y * 2 + x + 1) * 10;
+                cube[z][y][x] = {base, base + 1, base + 2, base + 3};
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        z = z + 1;
+    }
+
+    cube[1][0][1] = cube[0][1][0] + cube[1][1][1];
+    cube[0][0][0][1] = cube[1][0][1][0];
+
+    int checksum = 0;
+    z = 0;
+    while (z < 2) {
+        int y = 0;
+        while (y < 2) {
+            int x = 0;
+            while (x < 2) {
+                checksum = checksum + cube[z][y][x][0] + cube[z][y][x][1]
+                                    + cube[z][y][x][2] + cube[z][y][x][3];
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        z = z + 1;
+    }
+    putint(checksum);
+    putch(10);
+    putint(cube[0][0][0][1]);
+    putch(10);
+    putint(cube[1][0][1][0] + cube[1][0][1][1]
+           + cube[1][0][1][2] + cube[1][0][1][3]);
+    putch(10);
+    return 0;
+}

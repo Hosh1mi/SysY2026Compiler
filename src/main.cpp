@@ -256,7 +256,10 @@ int main(int argc, char **argv) {
         return -1;
     }
 
-    yyparse();
+    if (yyparse() != 0 || !root) {
+        std::cerr << "Parse failed.\n";
+        return -1;
+    }
 
     GenIR genIR;
     root->accept(genIR);

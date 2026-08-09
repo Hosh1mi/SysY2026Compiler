@@ -1,0 +1,65 @@
+// Dense float4 matrix-vector product with output-driven vector refresh.
+const int ROWS = 512;
+const int K = 512;
+const int REPEATS = 384;
+float weights[ROWS][K];
+float4 vectors[K];
+float4 result[ROWS];
+
+int main() {
+    float scale = getfloat();
+    int row = 0;
+    while (row < ROWS) {
+        int col = 0;
+        while (col < K) {
+            weights[row][col] = 0.01 * ((row + col) % 17 + 1);
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+
+    int i = 0;
+    while (i < K) {
+        vectors[i] = {1.0, 1.25, 1.5, 1.75};
+        i = i + 1;
+    }
+
+    starttime();
+    int repeat = 0;
+    while (repeat < REPEATS) {
+        row = 0;
+        while (row < ROWS) {
+            float4 acc = {0.0, 0.0, 0.0, 0.0};
+            int col = 0;
+            while (col < K) {
+                acc = acc + vectors[col] * weights[row][col];
+                col = col + 1;
+            }
+            result[row] = acc * scale;
+            row = row + 1;
+        }
+        i = 0;
+        while (i < K) {
+            int src = i % ROWS;
+            vectors[i] = result[src] * 0.01 + vectors[i] * 0.25
+                         + {0.5, 0.5, 0.5, 0.5};
+            i = i + 1;
+        }
+        repeat = repeat + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    row = 0;
+    while (row < ROWS) {
+        int l0 = result[row][0] * 1000.0;
+        int l1 = result[row][1] * 1000.0;
+        int l2 = result[row][2] * 1000.0;
+        int l3 = result[row][3] * 1000.0;
+        checksum = checksum + l0 + l1 + l2 + l3;
+        row = row + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

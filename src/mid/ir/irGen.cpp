@@ -32,6 +32,7 @@ bool has_br = false;                    // 当前 BB 已发射终止指令
 bool is_single_exp = false;             // 形如 "exp;" 的独立表达式语句
 Value *vectorLaneBase = nullptr;         // lane 左值所属的向量地址
 Value *vectorLaneIndex = nullptr;        // lane 左值的动态/常量下标
+VectorType *expectedVectorType = nullptr; // braced literal type hint from context
 
 static Type *scalarType(Module *module, TYPE element) {
     return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
@@ -84,7 +85,10 @@ static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
     if (!init || (init->exp == nullptr && init->initValList.empty()))
         return new ConstantZero(vectorType);
     if (init->exp) {
+        VectorType *savedExpected = expectedVectorType;
+        expectedVectorType = vectorType;
         init->exp->accept(*gen);
+        expectedVectorType = savedExpected;
         if (recentVal->type_ != vectorType) {
             std::cerr << "a fixed vector copy initializer must have the same type\n";
             std::exit(1);
@@ -125,6 +129,107 @@ static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
                                        new ConstantInt(gen->module->int32_ty_, i),
                                        gen->builder->BB_);
     return result;
+}
+
+// Infer a fixed vector type for a braced literal when no contextual type is set.
+static VectorType *inferVectorLiteralType(Module *module, InitValAST *init) {
+    if (expectedVectorType)
+        return expectedVectorType;
+    bool anyFloat = false;
+    if (init) {
+        for (auto &item : init->initValList) {
+            if (!item || !item->exp || !item->exp->mulExp)
+                continue;
+            auto *unary = item->exp->mulExp->unaryExp.get();
+            // Peel a single unary +/- to reach a number primary.
+            while (unary && unary->unaryExp && !unary->primaryExp &&
+                   !unary->call && !unary->subscript)
+                unary = unary->unaryExp.get();
+            if (unary && unary->primaryExp && unary->primaryExp->number &&
+                !unary->primaryExp->number->isInt)
+                anyFloat = true;
+        }
+    }
+    Type *contained = anyFloat ? module->float32_ty_ : module->int32_ty_;
+    return module->get_vector_type(contained, 4);
+}
+
+// Build a compile-time constant for a nested array-of-vectors aggregate.
+static Constant *buildConstantVectorAggregate(GenIR *gen, InitValAST *init,
+                                              Type *type) {
+    if (auto *vectorType = dynamic_cast<VectorType *>(type)) {
+        Value *value = buildVectorInitializer(gen, init, vectorType);
+        auto *constant = dynamic_cast<Constant *>(value);
+        if (!constant) {
+            std::cerr << "global vector array initializer is not constant\n";
+            std::exit(1);
+        }
+        return constant;
+    }
+
+    auto *arrayType = dynamic_cast<ArrayType *>(type);
+    if (!arrayType) {
+        std::cerr << "unexpected type while initializing a vector array\n";
+        std::exit(1);
+    }
+
+    unsigned length = arrayType->num_elements_;
+    Type *elementType = arrayType->contained_;
+    std::vector<Constant *> elements;
+    if (init && !init->initValList.empty()) {
+        if (init->exp) {
+            std::cerr << "a nested vector array initializer must use braces\n";
+            std::exit(1);
+        }
+        if (init->initValList.size() > length) {
+            std::cerr << "too many vectors in array initializer\n";
+            std::exit(1);
+        }
+        for (auto &item : init->initValList)
+            elements.push_back(
+                buildConstantVectorAggregate(gen, item.get(), elementType));
+    }
+    while (elements.size() < length)
+        elements.push_back(new ConstantZero(elementType));
+    return new ConstantArray(arrayType, elements);
+}
+
+// Store into a local nested array-of-vectors aggregate element by element.
+static void storeLocalVectorAggregate(GenIR *gen, Value *slot, InitValAST *init,
+                                      Type *type) {
+    if (auto *vectorType = dynamic_cast<VectorType *>(type)) {
+        Value *value = init ? buildVectorInitializer(gen, init, vectorType)
+                            : (Value *)new ConstantZero(vectorType);
+        gen->builder->create_store(value, slot);
+        return;
+    }
+
+    auto *arrayType = dynamic_cast<ArrayType *>(type);
+    if (!arrayType) {
+        std::cerr << "unexpected type while initializing a vector array\n";
+        std::exit(1);
+    }
+
+    unsigned length = arrayType->num_elements_;
+    Type *elementType = arrayType->contained_;
+    if (init && init->exp) {
+        std::cerr << "a nested vector array initializer must use braces\n";
+        std::exit(1);
+    }
+    if (init && init->initValList.size() > length) {
+        std::cerr << "too many vectors in array initializer\n";
+        std::exit(1);
+    }
+
+    for (unsigned i = 0; i < length; ++i) {
+        Value *element = gen->builder->create_gep(
+            slot, {new ConstantInt(gen->module->int32_ty_, 0),
+                   new ConstantInt(gen->module->int32_ty_, (int)i)});
+        InitValAST *child = nullptr;
+        if (init && i < init->initValList.size())
+            child = init->initValList[i].get();
+        storeLocalVectorAggregate(gen, element, child, elementType);
+    }
 }
 
 static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
@@ -366,49 +471,41 @@ void GenIR::visit(DefAST &ast) {
     string varName = *ast.id;
     if (auto *vectorType = dynamic_cast<VectorType *>(curType);
         vectorType && !ast.arrays.empty()) {
-        if (ast.arrays.size() != 1) {
-            std::cerr << "multidimensional arrays of fixed vectors are not yet legalized\n";
-            std::exit(1);
-        }
+        (void)vectorType;
         bool wasUseConst = useConst;
         useConst = true;
-        ast.arrays[0]->accept(*this);
-        auto *lengthValue = dynamic_cast<ConstantInt *>(recentVal);
-        useConst = wasUseConst;
-        if (!lengthValue || lengthValue->value_ <= 0) {
-            std::cerr << "fixed vector array length must be a positive constant\n";
-            std::exit(1);
+        std::vector<unsigned> dimensions;
+        dimensions.reserve(ast.arrays.size());
+        for (auto &exp : ast.arrays) {
+            exp->accept(*this);
+            auto *lengthValue = dynamic_cast<ConstantInt *>(recentVal);
+            if (!lengthValue || lengthValue->value_ <= 0) {
+                std::cerr << "fixed vector array length must be a positive constant\n";
+                std::exit(1);
+            }
+            dimensions.push_back((unsigned)lengthValue->value_);
         }
-        unsigned length = lengthValue->value_;
-        auto *arrayType = module->get_array_type(vectorType, length);
+        useConst = wasUseConst;
+
+        // Innermost element remains the fixed vector; outer dims nest ArrayType.
+        Type *aggregateType = curType;
+        for (int i = (int)dimensions.size() - 1; i >= 0; --i)
+            aggregateType =
+                module->get_array_type(aggregateType, dimensions[i]);
 
         if (scope.in_global()) {
             Constant *initializer = nullptr;
-            if (!ast.initVal || ast.initVal->initValList.empty()) {
-                initializer = new ConstantZero(arrayType);
+            if (!ast.initVal ||
+                (ast.initVal->exp == nullptr && ast.initVal->initValList.empty())) {
+                initializer = new ConstantZero(aggregateType);
             } else {
-                if (ast.initVal->initValList.size() > length) {
-                    std::cerr << "too many vectors in array initializer\n";
-                    std::exit(1);
-                }
-                std::vector<Constant *> elements;
                 bool oldConst = useConst;
                 useConst = true;
-                for (auto &item : ast.initVal->initValList) {
-                    Value *value = buildVectorInitializer(this, item.get(), vectorType);
-                    auto *constant = dynamic_cast<Constant *>(value);
-                    if (!constant) {
-                        std::cerr << "global vector array initializer is not constant\n";
-                        std::exit(1);
-                    }
-                    elements.push_back(constant);
-                }
+                initializer = buildConstantVectorAggregate(
+                    this, ast.initVal.get(), aggregateType);
                 useConst = oldConst;
-                while (elements.size() < length)
-                    elements.push_back(new ConstantZero(vectorType));
-                initializer = new ConstantArray(arrayType, elements);
             }
-            auto *global = new GlobalVariable(varName, module.get(), arrayType,
+            auto *global = new GlobalVariable(varName, module.get(), aggregateType,
                                               isConst, initializer);
             if (isConst)
                 global->setSemFlag(SemFlag::ImmutableObject);
@@ -416,20 +513,12 @@ void GenIR::visit(DefAST &ast) {
             return;
         }
 
-        auto *slot = builder->create_alloca(arrayType);
+        auto *slot = builder->create_alloca(aggregateType);
         slot->name_ = varName;
         if (isConst)
             slot->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
         scope.push(varName, slot);
-        for (unsigned i = 0; i < length; ++i) {
-            Value *value = new ConstantZero(vectorType);
-            if (ast.initVal && i < ast.initVal->initValList.size())
-                value = buildVectorInitializer(
-                    this, ast.initVal->initValList[i].get(), vectorType);
-            auto *element = builder->create_gep(
-                slot, {CONST_INT(0), CONST_INT((int)i)});
-            builder->create_store(value, element);
-        }
+        storeLocalVectorAggregate(this, slot, ast.initVal.get(), aggregateType);
         return;
     }
     //全局变量或常量
@@ -892,7 +981,14 @@ void GenIR::visit(StmtAST &ast) {
                 vectorLaneIndex = nullptr;
                 break;
             }
-            ast.exp->accept(*this);
+            {
+                VectorType *savedExpected = expectedVectorType;
+                if (var && var->type_->tid_ == Type::PointerTyID)
+                    expectedVectorType = dynamic_cast<VectorType *>(
+                        static_cast<PointerType *>(var->type_)->contained_);
+                ast.exp->accept(*this);
+                expectedVectorType = savedExpected;
+            }
             auto expval = recentVal;
             if (vectorLaneBase) {
                 auto *vectorType = static_cast<VectorType *>(
@@ -948,7 +1044,11 @@ void GenIR::visit(StmtAST &ast) {
 
 void GenIR::visit(ReturnStmtAST &ast) {
     if (ast.exp != nullptr) {
+        VectorType *savedExpected = expectedVectorType;
+        expectedVectorType =
+            dynamic_cast<VectorType *>(currentFunction->get_return_type());
         ast.exp->accept(*this);
+        expectedVectorType = savedExpected;
         Value *retVal = coerceToReturnType(builder, recentVal,
                                            currentFunction->get_return_type(),
                                            INT32_T, FLOAT_T);
@@ -1119,7 +1219,11 @@ void GenIR::visit(AddExpAST &ast) {
     Value* val[2]; //lVal, rVal
     ast.addExp->accept(*this);
     val[0] = recentVal;
+    VectorType *savedExpected = expectedVectorType;
+    if (auto *lhsVector = dynamic_cast<VectorType *>(val[0]->type_))
+        expectedVectorType = lhsVector;
     ast.mulExp->accept(*this);
+    expectedVectorType = savedExpected;
     val[1] = recentVal;
 
     //若都是常量
@@ -1189,7 +1293,11 @@ void GenIR::visit(MulExpAST &ast) {
     Value* val[2]; //lVal, rVal
     ast.mulExp->accept(*this);
     val[0] = recentVal;
+    VectorType *savedExpected = expectedVectorType;
+    if (auto *lhsVector = dynamic_cast<VectorType *>(val[0]->type_))
+        expectedVectorType = lhsVector;
     ast.unaryExp->accept(*this);
+    expectedVectorType = savedExpected;
     val[1] = recentVal;
 
     //若都是常量
@@ -1271,6 +1379,36 @@ void GenIR::visit(MulExpAST &ast) {
 }
 
 void GenIR::visit(UnaryExpAST &ast) {
+    // Postfix lane extract on any vector-producing unary expression.
+    if (ast.subscript) {
+        ast.unaryExp->accept(*this);
+        Value *base = recentVal;
+        if (auto *pointer = dynamic_cast<PointerType *>(base->type_)) {
+            if (pointer->contained_->tid_ == Type::VectorTyID)
+                base = builder->create_load(base);
+        }
+        auto *vectorType = dynamic_cast<VectorType *>(base->type_);
+        if (!vectorType) {
+            std::cerr << "lane extract requires a fixed vector value\n";
+            std::exit(1);
+        }
+        ast.subscript->accept(*this);
+        Value *index = recentVal;
+        if (auto *constantIndex = dynamic_cast<ConstantInt *>(index)) {
+            if (constantIndex->value_ < 0 ||
+                (unsigned)constantIndex->value_ >= vectorType->num_elements_) {
+                std::cerr << "constant vector lane index is out of range\n";
+                std::exit(1);
+            }
+            if (auto *constantVector = dynamic_cast<ConstantVector *>(base)) {
+                recentVal = constantVector->elements_[constantIndex->value_];
+                return;
+            }
+        }
+        recentVal = new ExtractElementInst(base, index, builder->BB_);
+        return;
+    }
+
     // 为常量算式
     if (useConst) {
         if (ast.primaryExp) {
@@ -1278,8 +1416,21 @@ void GenIR::visit(UnaryExpAST &ast) {
         } else if (ast.unaryExp) {
             ast.unaryExp->accept(*this);
             if (ast.op == UOP_MINUS) {
-                //是整型常量
-                if (dynamic_cast<ConstantInt*>(recentVal)) {
+                if (auto *vector = dynamic_cast<ConstantVector *>(recentVal)) {
+                    auto *type = static_cast<VectorType *>(vector->type_);
+                    std::vector<Constant *> lanes;
+                    for (auto *lane : vector->elements_) {
+                        if (auto *integer = dynamic_cast<ConstantInt *>(lane)) {
+                            lanes.push_back(new ConstantInt(type->contained_,
+                                                            -integer->value_));
+                        } else {
+                            auto *floating = dynamic_cast<ConstantFloat *>(lane);
+                            lanes.push_back(new ConstantFloat(
+                                type->contained_, -floating->value_));
+                        }
+                    }
+                    recentVal = new ConstantVector(type, lanes);
+                } else if (dynamic_cast<ConstantInt*>(recentVal)) {
                     auto temp = (ConstantInt*)recentVal;
                     temp->value_ = -temp->value_;
                     recentVal = temp;
@@ -1349,6 +1500,10 @@ void GenIR::visit(PrimaryExpAST &ast) {
         ast.lval->accept(*this);
     } else if (ast.number) {
         ast.number->accept(*this);
+    } else if (ast.initVal) {
+        VectorType *vectorType = inferVectorLiteralType(module.get(),
+                                                        ast.initVal.get());
+        recentVal = buildVectorInitializer(this, ast.initVal.get(), vectorType);
     }
 }
 
@@ -1591,7 +1746,11 @@ void GenIR::visit(CallAST &ast) {
     is_single_exp = false;
     vector<Value *> args;
     for (int i = 0; i < ast.funcCParamList.size(); i++) {
+        VectorType *savedExpected = expectedVectorType;
+        expectedVectorType =
+            dynamic_cast<VectorType *>(fun->arguments_[i]->type_);
         ast.funcCParamList[i]->accept(*this);
+        expectedVectorType = savedExpected;
         //检查函数形参与实参类型是否匹配
         if (recentVal->type_ == INT32_T && fun->arguments_[i]->type_ == FLOAT_T) {
             recentVal = builder->create_sitofp(recentVal, FLOAT_T);

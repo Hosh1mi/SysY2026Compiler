@@ -253,6 +253,9 @@ public:
   unique_ptr<PrimaryExpAST> primaryExp;
   unique_ptr<CallAST> call;
   unique_ptr<UnaryExpAST> unaryExp;
+  // Postfix lane extract: base[index].  When set, unaryExp is the base and
+  // op is unused.
+  unique_ptr<AddExpAST> subscript;
   UOP op;
   void accept(Visitor &visitor) override;
 };
@@ -262,6 +265,8 @@ public:
   unique_ptr<AddExpAST> exp;
   unique_ptr<LValAST> lval;
   unique_ptr<NumberAST> number;
+  // Braced vector literal usable as a primary operand in any expression.
+  unique_ptr<InitValAST> initVal;
   void accept(Visitor &visitor) override;
 };
 

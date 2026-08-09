@@ -1,0 +1,29 @@
+// Covers empty and partial braced vector initializers, including later lane
+// stores that complete a partially written vector.
+int main() {
+    int4 zeros = {};
+    int4 one = {7};
+    int4 partial = {1, 2};
+    float4 fzeros = {};
+    float4 fone = {1.5};
+    float4 fpartial = {1.0, 2.0};
+
+    partial[2] = 3;
+    partial[3] = 4;
+    fpartial[2] = 3.0;
+    fpartial[3] = 4.0;
+
+    putint(zeros[0] + zeros[1] + zeros[2] + zeros[3]);
+    putch(10);
+    putint(one[0] + one[1] + one[2] + one[3]);
+    putch(10);
+    putint(partial[0] + partial[1] + partial[2] + partial[3]);
+    putch(10);
+    putint(fzeros[0] + fzeros[1] + fzeros[2] + fzeros[3]);
+    putch(10);
+    putint(fone[0] + fone[1] + fone[2] + fone[3]);
+    putch(10);
+    putint(fpartial[0] + fpartial[1] + fpartial[2] + fpartial[3]);
+    putch(10);
+    return 0;
+}

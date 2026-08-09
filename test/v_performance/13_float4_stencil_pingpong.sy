@@ -1,0 +1,49 @@
+// Large float4 1D stencil with ping-pong buffers and non-uniform data.
+const int N = 65536;
+const int SWEEPS = 1536;
+float4 src[N];
+float4 dst[N];
+
+int main() {
+    float damp = getfloat();
+    int i = 0;
+    while (i < N) {
+        float base = 0.01 * (i % 127 + 1);
+        src[i] = {base, base + 0.25, base + 0.5, base + 0.75};
+        dst[i] = {0.0, 0.0, 0.0, 0.0};
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        i = 1;
+        while (i < N - 1) {
+            dst[i] = (src[i - 1] + src[i] * 2.0 + src[i + 1]) * damp;
+            i = i + 1;
+        }
+        dst[0] = src[0];
+        dst[N - 1] = src[N - 1];
+        i = 0;
+        while (i < N) {
+            src[i] = dst[i];
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        int l0 = src[i][0] * 1000.0;
+        int l1 = src[i][1] * 1000.0;
+        int l2 = src[i][2] * 1000.0;
+        int l3 = src[i][3] * 1000.0;
+        checksum = checksum + l0 + l1 + l2 + l3;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}
