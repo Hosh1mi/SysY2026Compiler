@@ -1,0 +1,57 @@
+// Keep two vector values live across a recursive call to exercise spill pairing.
+const int N = 4096;
+const int SWEEPS = 256;
+int4 values[N + 1];
+int4 output[N];
+
+int opaque_step(int value) {
+    if (value <= 0) {
+        return 3;
+    }
+    return opaque_step(value / 2) + 5;
+}
+
+int4 combine_after_call(int4 left, int4 right, int index,
+                        int sweep, int seed) {
+    if (index < 0) {
+        return combine_after_call(left, right, index + 1, sweep, seed);
+    }
+    int step = opaque_step(index + seed);
+    int lane = sweep + step;
+    int4 bias = {lane, lane, lane, lane};
+    return left + right + bias;
+}
+
+int main() {
+    int seed = getint();
+    int i = 0;
+    while (i <= N) {
+        values[i] = {i, i + 1, i + 2, i + 3};
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        i = 0;
+        while (i < N) {
+            int4 left = values[i];
+            int4 right = values[i + 1];
+            output[i] = combine_after_call(left, right, i, sweep, seed);
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        checksum = checksum + output[i][0] + output[i][1]
+                   + output[i][2] + output[i][3];
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

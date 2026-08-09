@@ -2806,6 +2806,133 @@ bool PostRAAddressingOptimizer::run(
 
     bool changed = false;
 
+    // Spill code is inserted after the pre-RA load/store optimizer, and its
+    // frame offsets are not known until frame lowering.  Pair adjacent
+    // 128-bit accesses here once both the physical registers and final stack
+    // addresses are available.
+    for (auto &block : function.blocks()) {
+        auto &instructions = block->instructions();
+        bool paired = true;
+        while (paired) {
+            paired = false;
+            for (auto first = instructions.begin();
+                 first != instructions.end() && !paired; ++first) {
+                const bool load = first->opcode() == Opcode::LDRQui;
+                const bool store = first->opcode() == Opcode::STRQui;
+                if ((!load && !store) || first->operands().size() != 3 ||
+                    !first->operands()[0].isPhysicalRegister() ||
+                    !first->operands()[1].isPhysicalRegister() ||
+                    first->operands()[2].kind() !=
+                        MachineOperand::Kind::Immediate ||
+                    first->memoryOperands().empty() ||
+                    first->memoryOperands().front().isVolatile)
+                    continue;
+
+                const PhysReg base =
+                    first->operands()[1].physicalRegister();
+                if (base != PhysReg::SP && base != PhysReg::X29)
+                    continue;
+                const PhysReg firstData =
+                    first->operands()[0].physicalRegister();
+                const std::int64_t firstOffset =
+                    first->operands()[2].immediate();
+                for (auto second = std::next(first);
+                     second != instructions.end(); ++second) {
+                    const bool sameAccess =
+                        second->opcode() == first->opcode();
+                    bool barrier = second->isCall() ||
+                                   second->isTerminator() ||
+                                   (!sameAccess &&
+                                    (load ? second->mayStore()
+                                          : second->mayLoad() ||
+                                                second->mayStore()));
+                    for (const MachineOperand &operand :
+                         second->operands()) {
+                        if (!operand.isPhysicalRegister())
+                            continue;
+                        if (operand.isDef && RegisterInfo::aliases(
+                                operand.physicalRegister(), base))
+                            barrier = true;
+                        if (!load && operand.isDef &&
+                            RegisterInfo::aliases(
+                                operand.physicalRegister(), firstData))
+                            barrier = true;
+                    }
+                    if (barrier)
+                        break;
+
+                    if (!sameAccess)
+                        continue;
+                    if (second->operands().size() != 3 ||
+                        !second->operands()[0].isPhysicalRegister() ||
+                        !second->operands()[1].isPhysicalRegister() ||
+                        second->operands()[2].kind() !=
+                            MachineOperand::Kind::Immediate ||
+                        second->operands()[1].physicalRegister() != base ||
+                        second->memoryOperands().empty() ||
+                        second->memoryOperands().front().isVolatile)
+                        break;
+
+                    const PhysReg secondData =
+                        second->operands()[0].physicalRegister();
+                    const std::int64_t secondOffset =
+                        second->operands()[2].immediate();
+                    if (std::llabs(firstOffset - secondOffset) != 16)
+                        break;
+                    const std::int64_t lowerOffset =
+                        std::min(firstOffset, secondOffset);
+                    if (lowerOffset % 16 != 0 ||
+                        lowerOffset / 16 < -64 ||
+                        lowerOffset / 16 > 63 ||
+                        (load && firstData == secondData))
+                        break;
+
+                    // Hoisting the second load must not make its physical
+                    // destination visible across an intervening use or def.
+                    if (load) {
+                        bool destinationHazard = false;
+                        for (auto scan = std::next(first);
+                             scan != second; ++scan)
+                            for (const MachineOperand &operand :
+                                 scan->operands())
+                                if (operand.isPhysicalRegister() &&
+                                    RegisterInfo::aliases(
+                                        operand.physicalRegister(),
+                                        secondData))
+                                    destinationHazard = true;
+                        if (destinationHazard)
+                            continue;
+                    }
+
+                    auto lower = firstOffset < secondOffset
+                                     ? first : second;
+                    auto upper = firstOffset < secondOffset
+                                     ? second : first;
+                    MachineInstr pair(load ? Opcode::LDPQi
+                                           : Opcode::STPQi);
+                    pair.addOperand(lower->operands()[0])
+                        .addOperand(upper->operands()[0])
+                        .addOperand(MachineOperand::physReg(
+                            base, RegClass::GPR64))
+                        .addOperand(MachineOperand::immediate(
+                            lowerOffset));
+                    pair.addMemoryOperand(MachineMemOperand{
+                        load ? MachineMemOperand::Access::Load
+                             : MachineMemOperand::Access::Store,
+                        32, 16, nullptr, std::nullopt, lowerOffset, false});
+
+                    auto replacement = load ? first : second;
+                    auto removed = load ? second : first;
+                    *replacement = std::move(pair);
+                    instructions.erase(removed);
+                    paired = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
     auto postIndexedOpcode = [](Opcode opcode) {
         switch (opcode) {
         case Opcode::LDRWui: return Opcode::LDRWpost;

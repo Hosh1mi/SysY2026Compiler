@@ -1653,6 +1653,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 RegClass selectedClass = valueClass(node.operands()[1]);
                 if (selectedClass == RegClass::NEON128) {
                     VReg mask = 0;
+                    bool disposableMask = false;
                     if (valueClass(node.operands()[0]) ==
                         RegClass::NEON128) {
                         mask = resultReg(node.operands()[0]);
@@ -1679,20 +1680,24 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                             append(block, std::move(duplicate));
                         registerInfo.setDefinition(mask,
                                                    &duplicateDefinition);
+                        disposableMask = true;
                     }
 
-                    VReg writableMask =
-                        createTemporary(node.resultTypes().front());
-                    MachineInstr copyMask(Opcode::COPY);
-                    copyMask.addOperand(MachineOperand::vreg(
-                                            writableMask,
-                                            RegClass::NEON128, true))
-                        .addOperand(MachineOperand::vreg(
-                            mask, RegClass::NEON128));
-                    MachineInstr &copyDefinition =
-                        append(block, std::move(copyMask));
-                    registerInfo.setDefinition(writableMask,
-                                               &copyDefinition);
+                    VReg writableMask = mask;
+                    if (!disposableMask) {
+                        writableMask =
+                            createTemporary(node.resultTypes().front());
+                        MachineInstr copyMask(Opcode::COPY);
+                        copyMask.addOperand(MachineOperand::vreg(
+                                                writableMask,
+                                                RegClass::NEON128, true))
+                            .addOperand(MachineOperand::vreg(
+                                mask, RegClass::NEON128));
+                        MachineInstr &copyDefinition =
+                            append(block, std::move(copyMask));
+                        registerInfo.setDefinition(writableMask,
+                                                   &copyDefinition);
+                    }
 
                     MachineInstr select(Opcode::BSLv16i8);
                     select.addOperand(define(node))
@@ -1701,6 +1706,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         .addOperand(use(node.operands()[1]))
                         .addOperand(use(node.operands()[2]));
                     select.operands()[1].tiedTo = 0;
+                    select.operands()[1].isKill = disposableMask;
                     append(block, std::move(select), &node);
                     break;
                 }
@@ -2017,26 +2023,15 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     registerInfo.setDefinition(insertedValue,
                                                &duplicateValueDefinition);
 
-                    VReg writableMask = createTemporary(ValueType::V4I32);
-                    MachineInstr copyMask(Opcode::COPY);
-                    copyMask.addOperand(MachineOperand::vreg(
-                                            writableMask,
-                                            RegClass::NEON128, true))
-                        .addOperand(MachineOperand::vreg(
-                            mask, RegClass::NEON128));
-                    MachineInstr &copyDefinition =
-                        append(block, std::move(copyMask));
-                    registerInfo.setDefinition(writableMask,
-                                               &copyDefinition);
-
                     MachineInstr select(Opcode::BSLv16i8);
                     select.addOperand(define(node))
                         .addOperand(MachineOperand::vreg(
-                            writableMask, RegClass::NEON128))
+                            mask, RegClass::NEON128))
                         .addOperand(MachineOperand::vreg(
                             insertedValue, RegClass::NEON128))
                         .addOperand(use(node.operands()[0]));
                     select.operands()[1].tiedTo = 0;
+                    select.operands()[1].isKill = true;
                     append(block, std::move(select), &node);
                     break;
                 }

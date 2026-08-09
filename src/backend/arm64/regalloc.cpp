@@ -343,6 +343,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
         affinities;
     std::unordered_map<VReg, VReg> tiedPairs;  // tied use -> def
     std::unordered_map<VReg, VReg> tiedDefs;  // tied def -> use
+    std::unordered_map<VReg, VReg> mandatoryTiedPairs;
+    std::unordered_map<VReg, VReg> mandatoryTiedDefs;
     std::unordered_map<VReg, std::vector<PhysReg>> physicalHints;
     std::unordered_map<VReg, std::unordered_set<PhysReg>> forbiddenColors;
     std::vector<VReg> graphNodes;
@@ -373,27 +375,28 @@ bool GraphColoringRegisterAllocator::colorOnce(
     auto addEdge = [&](VReg lhs, VReg rhs) {
         if (lhs == rhs || lhs >= graphIndex.size() ||
             rhs >= graphIndex.size())
-            return;
+            return false;
         std::size_t lhsIndex = graphIndex[lhs];
         std::size_t rhsIndex = graphIndex[rhs];
         if (lhsIndex == kNoGraphIndex ||
             rhsIndex == kNoGraphIndex)
-            return;
+            return false;
         if (!sameRegisterBank(
                 liveness.intervals[lhsIndex].regClass,
                 liveness.intervals[rhsIndex].regClass))
-            return;
+            return false;
         std::size_t lhsWord =
             lhsIndex * graphWords + rhsIndex / 64;
         std::uint64_t rhsBit =
             std::uint64_t{1} << (rhsIndex % 64);
         if (interference[lhsWord] & rhsBit)
-            return;
+            return false;
         interference[lhsWord] |= rhsBit;
         interference[rhsIndex * graphWords + lhsIndex / 64] |=
             std::uint64_t{1} << (lhsIndex % 64);
         ++graphDegree[lhsIndex];
         ++graphDegree[rhsIndex];
+        return true;
     };
 
     auto hasEdge = [&](VReg lhs, VReg rhs) {
@@ -492,6 +495,10 @@ bool GraphColoringRegisterAllocator::colorOnce(
                 VReg tiedUse = operand.virtualRegister();
                 tiedPairs[tiedUse] = tiedDef;
                 tiedDefs[tiedDef] = tiedUse;
+                if (operand.isKill) {
+                    mandatoryTiedPairs[tiedUse] = tiedDef;
+                    mandatoryTiedDefs[tiedDef] = tiedUse;
+                }
                 for (std::size_t j = 0; j < instruction.operands().size(); ++j) {
                     const MachineOperand &other = instruction.operands()[j];
                     if (other.isVirtualRegister() && !other.isDef &&
@@ -586,6 +593,30 @@ bool GraphColoringRegisterAllocator::colorOnce(
             for (VReg def : defs)
                 live.erase(def);
             live.insert(uses.begin(), uses.end());
+        }
+    }
+
+    // A tied use explicitly marked as killed can be contracted with its def:
+    // mirror both neighborhoods so a yet-uncolored neighbor of one endpoint
+    // cannot later take the color already chosen for the other endpoint.
+    // Longer destructive chains keep the conservative repair-copy path to
+    // avoid raising their effective graph degree.
+    bool tiedNeighborhoodChanged = true;
+    while (tiedNeighborhoodChanged) {
+        tiedNeighborhoodChanged = false;
+        for (const auto &[tiedUse, tiedDef] : mandatoryTiedPairs) {
+            std::vector<VReg> useNeighbors;
+            std::vector<VReg> defNeighbors;
+            forEachNeighbor(tiedUse, [&](VReg neighbor) {
+                useNeighbors.push_back(neighbor);
+            });
+            forEachNeighbor(tiedDef, [&](VReg neighbor) {
+                defNeighbors.push_back(neighbor);
+            });
+            for (VReg neighbor : useNeighbors)
+                tiedNeighborhoodChanged |= addEdge(tiedDef, neighbor);
+            for (VReg neighbor : defNeighbors)
+                tiedNeighborhoodChanged |= addEdge(tiedUse, neighbor);
         }
     }
 
@@ -747,28 +778,66 @@ bool GraphColoringRegisterAllocator::colorOnce(
             };
 
             PhysReg selected = PhysReg::NoReg;
-            // Tied pairs must share a register: prefer the partner's color
-            // (the partner cannot be an interference neighbor by
-            // construction, so its color is always available).
-            {
-                VReg partner = 0;
-                auto tiedUse = tiedPairs.find(reg);
-                if (tiedUse != tiedPairs.end())
-                    partner = tiedUse->second;
-                auto tiedDef = tiedDefs.find(reg);
-                if (!partner && tiedDef != tiedDefs.end())
-                    partner = tiedDef->second;
-                if (partner) {
-                    auto assigned = assignments.find(partner);
+            VReg tiedPartner = 0;
+            auto tiedUse = tiedPairs.find(reg);
+            if (tiedUse != tiedPairs.end())
+                tiedPartner = tiedUse->second;
+            auto tiedDef = tiedDefs.find(reg);
+            if (!tiedPartner && tiedDef != tiedDefs.end())
+                tiedPartner = tiedDef->second;
+            bool mandatoryTie = false;
+            auto mandatoryUse = mandatoryTiedPairs.find(reg);
+            if (mandatoryUse != mandatoryTiedPairs.end()) {
+                tiedPartner = mandatoryUse->second;
+                mandatoryTie = true;
+            }
+            auto mandatoryDef = mandatoryTiedDefs.find(reg);
+            if (mandatoryDef != mandatoryTiedDefs.end()) {
+                tiedPartner = mandatoryDef->second;
+                mandatoryTie = true;
+            }
+
+            auto partnerAllows = [&](PhysReg physical) {
+                if (!mandatoryTie || !tiedPartner ||
+                    assignments.count(tiedPartner))
+                    return true;
+                const LiveInterval &partnerInterval =
+                    intervalFor.at(tiedPartner);
+                if (RegisterInfo::isReserved(physical) ||
+                    forbiddenColors[tiedPartner].count(physical) ||
+                    (partnerInterval.crossesCall &&
+                     partnerInterval.regClass == RegClass::NEON128) ||
+                    (partnerInterval.crossesCall &&
+                     RegisterInfo::isCallerSaved(physical)))
+                    return false;
+                bool conflict = false;
+                forEachNeighbor(tiedPartner, [&](VReg neighbor) {
+                    auto assigned = assignments.find(neighbor);
                     if (assigned != assignments.end() &&
-                        allowed(assigned->second))
-                        selected = assigned->second;
-                }
+                        assigned->second == physical)
+                        conflict = true;
+                });
+                return !conflict;
+            };
+            auto jointlyAllowed = [&](PhysReg physical) {
+                return allowed(physical) && partnerAllows(physical);
+            };
+
+            // Tied pairs must share a register: prefer the partner's color
+            // when it is assigned.  If it is still pending, every candidate
+            // must also be legal for that partner so later coloring cannot
+            // split the destructive instruction and require a repair copy.
+            if (tiedPartner) {
+                auto assigned = assignments.find(tiedPartner);
+                if (assigned != assignments.end() &&
+                    allowed(assigned->second))
+                    selected = assigned->second;
             }
             auto hints = physicalHints.find(reg);
-            if (hints != physicalHints.end()) {
+            if (hints != physicalHints.end() &&
+                (selected == PhysReg::NoReg || !mandatoryTie)) {
                 for (PhysReg hint : hints->second)
-                    if (allowed(hint)) {
+                    if (jointlyAllowed(hint)) {
                         selected = hint;
                         break;
                     }
@@ -791,7 +860,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                     (void)weight;
                     auto assigned = assignments.find(affinity);
                     if (assigned != assignments.end() &&
-                        allowed(assigned->second)) {
+                        jointlyAllowed(assigned->second)) {
                         selected = assigned->second;
                         break;
                     }
@@ -800,7 +869,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
             if (selected == PhysReg::NoReg) {
                 for (PhysReg candidate :
                      RegisterInfo::allocationOrder(interval.regClass))
-                    if (allowed(candidate)) {
+                    if (jointlyAllowed(candidate)) {
                         selected = candidate;
                         break;
                     }
