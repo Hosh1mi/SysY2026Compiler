@@ -101,7 +101,7 @@
 %type <lAndExp> LAndExp
 %type <lOrExp> Cond LOrExp
 
-%type <type_spec> BType VoidType VecType
+%type <type_spec> BType VoidType VecType VecWidth
 %type <op> UnaryOp
 
 // %token 定义终结符的语义值类型
@@ -201,29 +201,37 @@ VecType:
     FLOATVECTYPE {
         $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
     }|
-    VECTOR LT INTTYPE COMMA INT GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    VECTOR LT INTTYPE COMMA VecWidth GT {
+        $5->element = TYPE_INT;
+        $$ = $5;
     }|
-    VECTOR LT FLOATTYPE COMMA INT GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    VECTOR LT FLOATTYPE COMMA VecWidth GT {
+        $5->element = TYPE_FLOAT;
+        $$ = $5;
     }|
-    VECTOR LT INT COMMA INTTYPE GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    VECTOR LT VecWidth COMMA INTTYPE GT {
+        $3->element = TYPE_INT;
+        $$ = $3;
     }|
-    VECTOR LT INT COMMA FLOATTYPE GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    VECTOR LT VecWidth COMMA FLOATTYPE GT {
+        $3->element = TYPE_FLOAT;
+        $$ = $3;
     }|
-    VECTOR LP INTTYPE COMMA INT RP {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    VECTOR LP INTTYPE COMMA VecWidth RP {
+        $5->element = TYPE_INT;
+        $$ = $5;
     }|
-    VECTOR LP FLOATTYPE COMMA INT RP {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    VECTOR LP FLOATTYPE COMMA VecWidth RP {
+        $5->element = TYPE_FLOAT;
+        $$ = $5;
     }|
-    VECTOR LB INTTYPE COMMA INT RB {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $5));
+    VECTOR LB INTTYPE COMMA VecWidth RB {
+        $5->element = TYPE_INT;
+        $$ = $5;
     }|
-    VECTOR LB FLOATTYPE COMMA INT RB {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $5));
+    VECTOR LB FLOATTYPE COMMA VecWidth RB {
+        $5->element = TYPE_FLOAT;
+        $$ = $5;
     }|
     VECWIDTH LT INTTYPE GT {
         $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $1));
@@ -231,17 +239,21 @@ VecType:
     VECWIDTH LT FLOATTYPE GT {
         $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
     }|
-    INTTYPE LT INT GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    INTTYPE LT VecWidth GT {
+        $3->element = TYPE_INT;
+        $$ = $3;
     }|
-    FLOATTYPE LT INT GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    FLOATTYPE LT VecWidth GT {
+        $3->element = TYPE_FLOAT;
+        $$ = $3;
     }|
-    INTTYPE LB INT RB {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $3));
+    INTTYPE LB VecWidth RB {
+        $3->element = TYPE_INT;
+        $$ = $3;
     }|
-    FLOATTYPE LB INT RB {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $3));
+    FLOATTYPE LB VecWidth RB {
+        $3->element = TYPE_FLOAT;
+        $$ = $3;
     }|
     VECTOR LT INTTYPE GT {
         $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
@@ -272,6 +284,15 @@ VecType:
     }|
     FLOATTYPE LB RB {
         $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    };
+
+VecWidth:
+    INT {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, $1));
+    }|
+    ID {
+        $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *$1));
+        delete $1;
     };
 
 // 空类型

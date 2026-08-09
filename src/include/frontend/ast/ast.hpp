@@ -23,6 +23,7 @@ struct TypeSpec {
   TYPE element = TYPE_VOID;
   VECTOR_EXTENT extent = VECTOR_EXTENT::SCALAR;
   unsigned lanes = 1;
+  string laneConstant;
 
   TypeSpec() = default;
   TypeSpec(TYPE scalar) : element(scalar) {}
@@ -31,6 +32,14 @@ struct TypeSpec {
     TypeSpec result(element);
     result.extent = VECTOR_EXTENT::FIXED;
     result.lanes = lanes;
+    return result;
+  }
+
+  static TypeSpec fixed(TYPE element, string laneConstant) {
+    TypeSpec result(element);
+    result.extent = VECTOR_EXTENT::FIXED;
+    result.lanes = 0;
+    result.laneConstant = std::move(laneConstant);
     return result;
   }
 
@@ -51,7 +60,8 @@ struct TypeSpec {
   bool operator==(TYPE rhs) const { return isScalar() && element == rhs; }
   bool operator!=(TYPE rhs) const { return !(*this == rhs); }
   bool operator==(const TypeSpec &rhs) const {
-    return element == rhs.element && extent == rhs.extent && lanes == rhs.lanes;
+    return element == rhs.element && extent == rhs.extent &&
+           lanes == rhs.lanes && laneConstant == rhs.laneConstant;
   }
   bool operator!=(const TypeSpec &rhs) const { return !(*this == rhs); }
 };

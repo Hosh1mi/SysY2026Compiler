@@ -38,6 +38,15 @@ public:
     unsigned num_elements_;   // 元素个数
 };
 
+// Backend-visible storage used when a source vector does not fit the native
+// four-lane value type.  It deliberately retains ArrayTyID so generic layout,
+// global-data, GEP, and load/store code can process it as a fixed aggregate.
+class ScalarizedVectorType : public ArrayType {
+public:
+    ScalarizedVectorType(Type* contained, unsigned num_elements)
+        : ArrayType(contained, num_elements) {}
+};
+
 // <4 x i32> : num_elements_ = 4, contained_ = i32
 class VectorType : public Type {
 public:

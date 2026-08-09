@@ -59,6 +59,15 @@ public:
         return vector_map_[{contained, num_elements}];
     }
 
+    ScalarizedVectorType* get_scalarized_vector_type(Type* contained,
+                                                     unsigned num_elements) {
+        if (!scalarized_vector_map_.count({contained, num_elements})) {
+            scalarized_vector_map_[{contained, num_elements}] =
+                new ScalarizedVectorType(contained, num_elements);
+        }
+        return scalarized_vector_map_[{contained, num_elements}];
+    }
+
     Function* getMainFunc();
 
     std::vector<GlobalVariable*> global_list_;
@@ -76,4 +85,6 @@ private:
     std::map<Type*, PointerType*> pointer_map_;
     std::map<std::pair<Type*, int>, ArrayType*> array_map_;
     std::map<std::pair<Type*, int>, VectorType*> vector_map_;
+    std::map<std::pair<Type*, int>, ScalarizedVectorType*>
+        scalarized_vector_map_;
 };
