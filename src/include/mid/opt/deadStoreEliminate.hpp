@@ -1,4 +1,15 @@
 #pragma once
+// DeadStoreEliminate —— 删除被覆盖或冗余回写的死 store。
+//
+// 识别对同一地址的无用写：后续 MustAlias store 覆盖，或 load→同址
+// store 的 writeback 且中间无修改。
+//
+// 典型支持形式：
+//   *p = a; *p = b;              // 前者被覆盖
+//   t = *p; ...; *p = t;         // 无中间修改的回写
+//   Full 模式：跨基本块、由支配关系保证的冗余回写
+//
+// MayAlias 的 store 不删除。成功后去掉对后续可观察状态无贡献的写。
 
 #include "pass.hpp"
 #include "../analysis/basicAliasAnalysis.hpp"

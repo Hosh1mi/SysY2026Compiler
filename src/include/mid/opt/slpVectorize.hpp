@@ -1,22 +1,23 @@
 #pragma once
+// SLPVectorize —— 基本块内将相邻同构标量运算打包为 SIMD。
+//
+// 从相邻 store 出发，沿 use-def 扩展同构运算串，发射 <4 x i32/float>
+// 向量 load / store / 算术。
+//
+// 典型支持形式：
+//   a[i]=x0; a[i+1]=x1; a[i+2]=x2; a[i+3]=x3;   → 向量 store
+//   对应相邻 load 与同构 add/sub/mul（及移位、逻辑、浮点加减乘）
+//
+// 要求访问相邻、运算同构、内存依赖可证安全且代价模型盈利。
+// 本 Pass 做 basic-block 级超字并行；带 induction variable 的循环级
+// 向量化由 LoopVectorize 负责。
+
 #include "../ir/ir.hpp"
 #include "../analysis/basicAliasAnalysis.hpp"
 #include "pass.hpp"
 #include <set>
 #include <vector>
 
-// SLP Vectorizer: 超字级并行向量化（Superword Level Parallelism）。
-//
-// 与 LoopVectorize（循环级，识别 IV-based 的连续访问）互补：
-// SLP 在基本块内寻找同构的相邻标量操作，将其打包为 SIMD 向量操作。
-//
-// 四阶段算法（Sampled Larsen & Amarasinghe, PLDI 2000）：
-//   1. findAdjacentMemoryRefs — 识别相邻的 store 对
-//   2. extendPackSet        — 沿 use-def 链扩展 PackSet
-//   3. combinePacks         — 合并重叠的 Pack
-//   4. scheduleAndEmit      — 调度并发射向量指令
-//
-// 目标：Cortex-A53 NEON 128-bit，支持 <4 x i32> 和 <4 x float>。
 class SLPVectorize : public Pass {
 public:
     void execute(Module *module) override;

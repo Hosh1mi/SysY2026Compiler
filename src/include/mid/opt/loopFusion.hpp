@@ -1,42 +1,13 @@
 #pragma once
-// LoopFusion:
-//   保守的同级相邻循环融合。只处理边界【完全一致】的规范 while 循环：
-//   两侧都有 preheader / header 出口测试 / 单 latch / 单 dedicated exit，
-//   canonical IV（init=0, step=+1, slt bound），且 bound 是同一个 SSA 值
-//   （或等值常量），从而两侧 trip count 恒等。
+// LoopFusion —— 融合边界相同的相邻同级规范 while。
 //
-// 相邻性：
-//   L1 的唯一 exit 经一串中间块到达 L2 的 preheader。中间块只允许
-//   无内存副作用的纯指令与单前驱 LCSSA phi。只依赖循环外值的指令
-//   上提到 L1.preheader；传递 L1 最终状态的 phi 被旁路，依赖该状态的
-//   纯计算下沉到融合循环的出口。下沉值不得作为 L2 的循环输入，也不得
-//   出现在出口 phi 的入边上；这两种情况都要求完整 L1 先执行，不能融合。
+// 在依赖与别名安全时，将两次相同 trip 的相邻循环并为一次遍历。
 //
-// 合法性：
-//   - 标量 SSA：L2 内任何指令不得使用 L1 内定义的值（融合后 L2 看到的
-//     将是中间迭代值而非 L1 完成后的终值）。
-//   - 内存依赖：对 L1×L2 的访存对（至少一端为 store）：
-//       * 基址可证明不别名 → 无关；
-//       * 基址 MustAlias：逐维比较仿射下标 e1(i1)/e2(i2)，只要某一维
-//         在等式成立时强制 i1 <= i2（SIV：i1 - i2 = 非正常数，含 0），
-//         或某一维可证明恒不等（两边都是常数且不同），该对即安全；
-//         否则（任一维都无法给出保证）拒绝。
-//       * 基址 MayAlias、非 GEP 的同址访问、维数不一致 → 拒绝。
-//   - 任一侧循环体内（含后代循环）出现 call → 拒绝。
+// 典型支持形式：
+//   for (i) S1; for (i) S2;（同 bound、canonical while）→ 单循环含 S1;S2
 //
-// 收益保护：
-//   LoopInterchange 紧随本 pass；若任一侧已有依赖分析与 stride 代价模型
-//   认可的 parallel-sink / parallel-float 方案，融合加入的额外 payload
-//   会破坏其 single-child/perfect-nest 形态，因此拒绝融合并保留该方案。
-//
-// 变换（保留 L1 骨架）：
-//   L1.latch 改跳 L2.bodyEntry，L2.latch 改跳 L1.header，
-//   L1.header 的 exit 边改指 L2.exit；L2 的非 IV phi 迁入 L1.header
-//   （preheader 入边 P2→P1），iv2 全部 RAUW 为 iv1（两边迭代区间相同）。
-//   中间块与 L2.header 变不可达，由 removeUnreachableBlocks 回收。
-//   结果仍是 simplified + LCSSA 形态。外层融合后，受影响循环
-//   工作队列重新检查保留的循环、父子关系与相邻同级循环，因此能继续
-//   融合新相邻的子循环或后续循环，无需重扫无关循环。
+// 要求 trip 恒等、无危险内存/SSA 依赖、无 call。若融合会破坏后续
+// LoopInterchange 的可交换形态则拒绝。成功后仍保持 simplified + LCSSA。
 
 #include "../analysis/affineAnalysis.hpp"
 #include "../analysis/argumentAliasAnalysis.hpp"
@@ -54,6 +25,7 @@ public:
 
 private:
     // 规范 while 循环形态：header 做 iv<bound 出口测试，latch 无条件跳回。
+
     struct Shape {
         BasicBlock *preheader = nullptr;
         BasicBlock *header    = nullptr;

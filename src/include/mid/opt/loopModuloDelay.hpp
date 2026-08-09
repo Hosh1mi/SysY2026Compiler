@@ -1,11 +1,16 @@
 #pragma once
+// LoopModuloDelay —— 推迟 loop-carried srem 到出口一次性归约。
+//
+// 用 i64 累加独立贡献，避免每轮有符号取模的回环依赖。
+//
+// 典型支持形式：
+//   acc = (acc + x_i) % M → i64 累加，exit 处一次 reduce
+//
+// 在 LoopRepFold 消费闭式之后、展开破坏模递推形态之前运行。无法证明
+// 与原 srem 语义等价时不变换。
 
 #include "pass.hpp"
 
-// Delay loop-carried signed remainder operations by accumulating independent
-// contributions in i64 and reducing once on the loop exit.  It runs after
-// LoopRepFold has consumed closed forms and before LoopUnroll destroys the
-// canonical modular-recurrence shape.
 class LoopModuloDelay : public Pass {
 public:
     void execute(Module *module) override;

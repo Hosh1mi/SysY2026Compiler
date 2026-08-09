@@ -180,10 +180,6 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LICM>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LoopDeletion>());
-    // Collapse affine and invariant scalar recurrences before a generic
-    // fixed-point guard can add an early-exit edge and before parallelization
-    // considers the remaining loop.  Pattern-specific modular folds stay in
-    // the later aggressive phase.
     pm.addPass(std::make_unique<LoopRepFold>(LoopRepFoldMode::Lite));
     pm.addPass(std::make_unique<LoopFixedPointEliminate>());
     addScalarSimplifyClosure(pm);

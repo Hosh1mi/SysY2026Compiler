@@ -1,23 +1,19 @@
 #pragma once
+// IfConversion —— 将内层循环 if-body 转为 select。
+//
+// 消除循环内条件分支，压平控制流，便于后续向量化等变换。
+//
+// 典型支持形式：
+//   最内层 if (c) x = ...; 纯算术 body → select
+//   store 地址菱形：选地址 + 单一 store
+//
+// 面向结构规则的内层循环；复杂副作用或无法证明安全的分支不转换。
+// 一般 CFG 菱形转 select 由 CFGSimplify 负责。
+
 #include "../analysis/loopInfo.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 
-// IfConversion: 将内层循环中纯算术 if-body 转换为 select，消除条件分支。
-//
-// 目标模式（4块内层循环）：
-//   H  → B or exit    (循环头，出口条件)
-//   B  → T or L       (计算 + 条件分支)
-//   T  → L            (if-body：纯算术/load，无 store/call/div)
-//   L  → H            (latch：phi + store + 归纳变量更新)
-//
-// 变换后（3块）：
-//   H  → B or exit
-//   B  → L            (含 T 的指令 + select 替换 phi)
-//   L  → H
-//
-// 收益：消除循环内条件分支（避免 A53 分支预测开销），并将循环压为 3 块，
-// 使 LoopVectorize 可以向量化（vectorizer 拒绝 >3 块）。
 class IfConversion : public Pass {
 public:
     void execute(Module *module) override;

@@ -1,4 +1,16 @@
 #pragma once
+// Mem2Reg —— 将可提升的 alloca 提升为 SSA（含 phi）。
+//
+// 对标量及可 SROA 的数组 alloca 做 SSA 化，消除局部内存流量。
+//
+// 典型支持形式：
+//   int x; x = ...; use(x) → SSA 值传递
+//   可拆的小数组元素独立提升
+//   多块定义汇合处插入 phi
+//
+// 地址逃逸则不提升。GlobalScalarPromotion 产生的局部镜像随后由本 Pass
+// 提升为 SSA。
+
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 #include "../analysis/dominanceAnalysis.hpp"

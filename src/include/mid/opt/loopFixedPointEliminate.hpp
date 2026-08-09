@@ -1,29 +1,20 @@
 #pragma once
+// LoopFixedPointEliminate —— 非控制状态到达不动点时提前退出。
+//
+// 为可计数循环增加 early-exit：当 loop-carried 非控制状态本轮不变时，
+// 余下迭代冗余。
+//
+// 典型支持形式：
+//   状态 s 经迭代更新，若 s' == s 则可提前结束
+//   计数 IV 仅服务于 trip guard
+//
+// 含 call、存取别名无法证明、或控制状态也参与递推时不变换。
 
 #include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 
-// Stop a counted loop once all of its non-control loop-carried SSA state
-// reaches a runtime fixed point.
-//
-// The transform is deliberately conservative:
-//   - the unit-stride count recurrence must be finite and used only by the
-//     trip-count guard (in the latch for do-while, or in the header for
-//     while);
-//   - after adding an early latch exit to a non-leaf while, no contained loop
-//     is transformed in the same function run;
-//   - the loop may not contain calls;
-//   - loop stores must not alias any loop load;
-//   - every live non-control header phi is compared with its backedge value;
-//   - header phis that only feed their own update (dead self-recurrences)
-//     are ignored — they cannot affect observable state.
-//
-// If the state is unchanged, another iteration has identical scalar inputs
-// and cannot observe memory written by the previous iteration. It therefore
-// repeats the same stores and live-out values, so the remaining counted
-// iterations are redundant.
 class LoopFixedPointEliminate : public Pass {
 public:
     void execute(Module *module) override;

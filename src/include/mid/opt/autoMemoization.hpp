@@ -1,4 +1,16 @@
 #pragma once
+// AutoMemoization —— 为纯自递归 i32 函数自动加记忆化包装。
+//
+// 将重复子问题的自递归计算改为查表 / 哈希缓存后再返回。
+//
+// 典型支持形式：
+//   int f(int n) { if (n < 2) return n; return f(n-1) + f(n-2); }
+//   多参数纯自递归 DP（参数域可推导上界时用稠密表）
+//
+// 要求返回 i32、少量 i32 参数、无 store、外呼均为 pure。参数界可推导
+// 且足够小时用稠密表，否则用定长哈希表。非纯 / 非自递归不处理。
+// 成功后对外为薄包装：命中直接返回，未命中计算并写回缓存。
+
 #include "../opt/pass.hpp"
 
 class BasicAliasAnalysis;
@@ -7,17 +19,6 @@ class BasicBlock;
 class Function;
 class Argument;
 
-// 通用记忆化：将 (纯 + 自递归 + i32 参数) 模式的函数自动加上结果缓存。
-//
-// 结构：原函数体 → `*_memo_body`；数组路径未命中写回另置 `*_memo_fill`，
-// 对外符号为薄包装（命中尽量短）；哈希路径 miss 在包装内直接写回。
-// 自递归仍打包装入口。
-//
-// 两条变换路径：
-//   ① 数组路径（transform）：bound 可推导且乘积 ≤ ARRAY_PRODUCT_LIMIT 时
-//      使用 [2 x i32] 打包的稠密表（[0]=flag,[1]=val），命中/写回同缓存行。
-//   ② 哈希路径（transformHash）：bound 推不出或过大时使用固定大小直接映射
-//      哈希表，槽内存 key 做碰撞比较，永不破坏正确性。
 class AutoMemoization : public Pass {
 public:
     void execute(Module *module) override;

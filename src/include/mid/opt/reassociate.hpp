@@ -1,4 +1,15 @@
 #pragma once
+// Reassociate —— 重结合整数加减乘树并提取公因子。
+//
+// 整理结合律下的运算树，合并同类项、暴露因式分解机会。
+//
+// 典型支持形式：
+//   (a + b) + c 重排以利于 CSE / 常量折叠
+//   A*B + A*C → A*(B+C)
+//   同类项合并
+//
+// 仅整数加减乘树。局部单指令化简由 InstCombine 负责。
+
 #include "pass.hpp"
 #include "../ir/ir.hpp"
 #include <unordered_map>

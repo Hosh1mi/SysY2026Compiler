@@ -1,9 +1,14 @@
 #pragma once
-
-// LoopResetPointElimination detects loop-carried integer memory recurrences
-// whose old state is multiplied by a per-iteration factor.  When factor zero
-// provably overwrites the complete state and the skipped prefix has no other
-// effects, it starts the loop at the last dynamic reset point.
+// LoopResetPointElimination —— 从最后一次乘性零复位开始内存递推。
+//
+// 当 loop-carried 整型状态被每轮因子缩放、且因子为 0 可完整覆盖旧状态时，
+// 跳过无效果前缀，从最后复位点起算。
+//
+// 典型支持形式：
+//   s = (s * f_i) + ...；某次 f_k == 0 清空状态
+//     → 从最后一次清零之后开始
+//
+// 前缀若有其他副作用或复位无法证明完整覆盖则不变换。
 
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"

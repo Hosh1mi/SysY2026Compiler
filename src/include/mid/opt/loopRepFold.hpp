@@ -1,17 +1,21 @@
 #pragma once
+// LoopRepFold —— 折叠纯重复累加与可闭式求和的循环。
+//
+// 将“重复加不变式”或仿射 SCEV 求和等改为闭式，安全时也折叠模递推。
+//
+// 典型支持形式：
+//   total += f;（f 相对 IV 不变）→ total += f * R
+//   total += a*i+b → SCEV 闭式求和后删循环
+//   可证安全的模递推折叠
+//
+// 有副作用或依赖无法闭式化时不折叠。
+
 #include "../analysis/loopInfo.hpp"
 #include "../analysis/scalarEvolution.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 #include <set>
 
-// LoopRepFold: 循环重复折叠
-// 识别并消除"纯重复计数循环"：while (r < R) { total += f(data); r++; }
-// 其中 f(data) 不依赖 r 且不修改 data，变换为: total += f(data) * R（单次执行+乘法）
-// 主要目标：many_mat_cal 中 157 亿次迭代 → T² 次计算 + 1 次乘法
-// 仿射路径：total += a*i+b（i 为常量初值/正步长 IV，界为常量）经 SCEV
-// 识别后直接闭式求和为常量并整体删除循环。
-// 循环结构统一来自 LoopInfo（plan 阶段 3.1）。
 enum class LoopRepFoldMode {
     Lite,
     Aggressive,

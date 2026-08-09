@@ -1,8 +1,13 @@
 #pragma once
-
-// Collapse a loop-carried overwrite to the iteration that produces its live
-// result.  The initial control value is clamped to the last executing value,
-// while the original zero-iteration path remains intact.
+// LastIterationElimination —— 仅关心覆盖型 live-out 时钳到末次迭代。
+//
+// 将循环携带的覆盖写收束到产生最终 live 结果的那一轮。
+//
+// 典型支持形式：
+//   每轮覆盖写同一 live-out，最终只依赖最后一次写入
+//   → 将 IV/控制值钳到末次迭代，保留零次迭代路径
+//
+// 中间迭代若有其他可观察效应则不变换。
 
 #include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/functionTerminationAnalysis.hpp"

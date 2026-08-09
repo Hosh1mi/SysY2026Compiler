@@ -1,4 +1,14 @@
 #pragma once
+// IndVarStrengthReduce —— 将随 IV 线性变化的 GEP 削弱为指针 phi + 步进。
+//
+// 用指针归纳代替每轮完整地址计算。
+//
+// 典型支持形式：
+//   &A[i] / &A[i*k+b]（线性于 IV）→ ptr_phi += step
+//   运行时不变步长的仿射地址
+//
+// 非线性或无法物化步进的地址保持原 GEP。
+
 #include "pass.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "../analysis/scalarEvolution.hpp"
@@ -6,8 +16,6 @@
 #include <set>
 #include <vector>
 
-// IndVarStrengthReduce：把循环内随 IV 线性变化的 GEP 地址计算削弱为
-// 指针 phi + 常量步进。循环结构统一来自 LoopInfo（plan 阶段 3.1）。
 class IndVarStrengthReduce : public Pass {
 public:
     void execute(Module *module) override;

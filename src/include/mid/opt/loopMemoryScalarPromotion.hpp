@@ -1,13 +1,18 @@
 #pragma once
+// LoopMemoryScalarPromotion —— 循环不变指针上的标量内存提升为 alloca 镜像。
+//
+// 当指针循环不变且环内对该单元仅经同一 SSA 指针精确 load/store 时，
+// 用局部镜像承接，条件写回保持语义。
+//
+// 典型支持形式：
+//   for (...) { t = *p; ...; *p = t'; }（p 不变）→ alloca 镜像
+//
+// 逃逸、别名不确定或访问形态不精确则不提升。随后可由 Mem2Reg 成 SSA。
 
 #include "../analysis/basicAliasAnalysis.hpp"
 #include "../analysis/loopInfo.hpp"
 #include "pass.hpp"
 
-// LoopMemoryScalarPromotion:
-// Promote a loop-carried memory cell to a scalar alloca mirror when the pointer
-// is loop-invariant and every loop access to that memory is an exact load/store
-// through the same SSA pointer. A following Mem2Reg turns the mirror into SSA.
 class LoopMemoryScalarPromotion : public Pass {
 public:
     void execute(Module *module) override;

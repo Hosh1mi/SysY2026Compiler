@@ -1,20 +1,19 @@
 #pragma once
+// InductiveRangeCheckElimination —— 用单调 range guard 收紧 trip 域。
+//
+// 将循环内对 IV 的范围检查推导进 trip bound，去掉冗余 guard。
+//
+// 典型支持形式：
+//   for (i = 0; i < N; ++i) if (i < U) body
+//     → 上界收紧为 min(N, U)
+//   递减 IV 对称地抬高下界
+//
+// 需要单 IV、可分析的单调/仿射 guard。成功后迭代域更紧，guard 可消除。
 
 #include "../analysis/loopInfo.hpp"
 #include "../ir/ir.hpp"
 #include "pass.hpp"
 
-// inductiveRangeCheckElimination: 简化版迭代域裁剪。
-// 识别单 IV、单 guard、单 latch 的紧形态循环，把显式 guard 推导成更紧的 trip
-// bound：
-//   - 递增 IV：tightenedUpper = min(origUpper, guardUpper)
-//   - 递减 IV：tightenedLower = max(origLower, guardLower)
-// 支持：
-//   - 非零初值
-//   - 步长 +1 / -1
-//   - invariant、invariant +/- const 形式的 affine guard
-//   - header 直接跳 latch 的 skip-path，或显式 continue 块
-//   - rotated +1 loop 中、body/header 内的单调 guard 链区间裁剪
 class inductiveRangeCheckElimination : public Pass {
 public:
     void execute(Module *module) override;

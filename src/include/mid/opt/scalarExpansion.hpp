@@ -1,8 +1,20 @@
 #pragma once
-// ScalarExpansion:
-//   Rewrites a scalar-reduction loop nest into private scratch storage. The
-//   resulting clear, interchanged compute, and store-back regions remove the
-//   scalar reduction dependence while preserving the original result.
+// ScalarExpansion —— 将标量 reduction 巢展开为私有 scratch 后交换。
+//
+// 用 clear / 交换后的 compute / store-back 去掉标量 reduction 依赖，
+// 使内层可按更优遍历顺序执行。
+//
+// 典型支持形式：
+//   for (p) {
+//     s = init;
+//     for (i) s += f(A[p][i], ...);
+//     B[p] = s;
+//   }
+//   → 私有 scratch 清零 / 交换后的向量友好计算 / 写回
+//
+// 需要 reduction 形态可识别、内存合法且 interchange 代价模型盈利。
+// 与 LoopInterchange 分工：本 Pass 处理需要标量展开的 reduction 巢；
+// 无 loop-carried 依赖的纯并行层下沉由 LoopInterchange 负责。
 
 #include "../analysis/affineAnalysis.hpp"
 #include "../analysis/costModel.hpp"

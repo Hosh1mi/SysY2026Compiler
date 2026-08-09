@@ -1,4 +1,15 @@
 #pragma once
+// InlineExpand —— 基于代价模型的函数内联与有限自递归展开。
+//
+// 将合适的调用点替换为 callee 体，暴露跨函数优化机会。
+//
+// 典型支持形式：
+//   小函数 / 热路径上的普通调用 → 内联
+//   有限次自递归调用点的受控展开
+//
+// 超出代价阈值或不安全的调用保持 call。成功后调用点变为内联后的
+// 控制流与 SSA。
+
 #include "pass.hpp"
 #include <unordered_map>
 #include <unordered_set>
