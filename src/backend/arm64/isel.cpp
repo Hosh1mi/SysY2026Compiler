@@ -1334,6 +1334,224 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             case SDOpcode::ICmp:
             case SDOpcode::FCmp: {
                 bool floating = node.opcode() == SDOpcode::FCmp;
+                bool vectorCompare =
+                    node.resultTypes().front() == ValueType::V4I32;
+                if (vectorCompare) {
+                    auto temporaryCompare = [&](Opcode opcode,
+                                                SDValue left,
+                                                SDValue right) {
+                        VReg result = createTemporary(ValueType::V4I32);
+                        MachineInstr compare(opcode);
+                        compare.addOperand(MachineOperand::vreg(
+                                               result, RegClass::NEON128,
+                                               true))
+                            .addOperand(use(left))
+                            .addOperand(use(right));
+                        MachineInstr &definition =
+                            append(block, std::move(compare));
+                        registerInfo.setDefinition(result, &definition);
+                        return result;
+                    };
+                    auto temporaryLogical = [&](Opcode opcode, VReg left,
+                                                VReg right) {
+                        VReg result = createTemporary(ValueType::V4I32);
+                        MachineInstr logical(opcode);
+                        logical.addOperand(MachineOperand::vreg(
+                                               result, RegClass::NEON128,
+                                               true))
+                            .addOperand(MachineOperand::vreg(
+                                left, RegClass::NEON128))
+                            .addOperand(MachineOperand::vreg(
+                                right, RegClass::NEON128));
+                        MachineInstr &definition =
+                            append(block, std::move(logical));
+                        registerInfo.setDefinition(result, &definition);
+                        return result;
+                    };
+                    auto temporaryNot = [&](VReg value) {
+                        VReg result = createTemporary(ValueType::V4I32);
+                        MachineInstr invert(Opcode::MVNv16i8);
+                        invert.addOperand(MachineOperand::vreg(
+                                              result, RegClass::NEON128,
+                                              true))
+                            .addOperand(MachineOperand::vreg(
+                                value, RegClass::NEON128));
+                        MachineInstr &definition =
+                            append(block, std::move(invert));
+                        registerInfo.setDefinition(result, &definition);
+                        return result;
+                    };
+                    auto emitCompare = [&](Opcode opcode, SDValue left,
+                                           SDValue right) {
+                        MachineInstr compare(opcode);
+                        compare.addOperand(define(node))
+                            .addOperand(use(left))
+                            .addOperand(use(right));
+                        append(block, std::move(compare), &node);
+                    };
+                    auto emitLogical = [&](Opcode opcode, VReg left,
+                                           VReg right) {
+                        MachineInstr logical(opcode);
+                        logical.addOperand(define(node))
+                            .addOperand(MachineOperand::vreg(
+                                left, RegClass::NEON128))
+                            .addOperand(MachineOperand::vreg(
+                                right, RegClass::NEON128));
+                        append(block, std::move(logical), &node);
+                    };
+                    auto emitNot = [&](VReg value) {
+                        MachineInstr invert(Opcode::MVNv16i8);
+                        invert.addOperand(define(node))
+                            .addOperand(MachineOperand::vreg(
+                                value, RegClass::NEON128));
+                        append(block, std::move(invert), &node);
+                    };
+
+                    SDValue left = node.operands()[0];
+                    SDValue right = node.operands()[1];
+                    if (!floating) {
+                        auto predicate =
+                            static_cast<ICmpInst::ICmpOp>(node.predicate);
+                        Opcode opcode = Opcode::Invalid;
+                        bool swap = false;
+                        switch (predicate) {
+                        case ICmpInst::ICMP_EQ:
+                        case ICmpInst::ICMP_NE:
+                            opcode = Opcode::CMEQv4i32;
+                            break;
+                        case ICmpInst::ICMP_SGT:
+                            opcode = Opcode::CMGTv4i32;
+                            break;
+                        case ICmpInst::ICMP_SGE:
+                            opcode = Opcode::CMGEv4i32;
+                            break;
+                        case ICmpInst::ICMP_SLT:
+                            opcode = Opcode::CMGTv4i32;
+                            swap = true;
+                            break;
+                        case ICmpInst::ICMP_SLE:
+                            opcode = Opcode::CMGEv4i32;
+                            swap = true;
+                            break;
+                        case ICmpInst::ICMP_UGT:
+                            opcode = Opcode::CMHIv4i32;
+                            break;
+                        case ICmpInst::ICMP_UGE:
+                            opcode = Opcode::CMHSv4i32;
+                            break;
+                        case ICmpInst::ICMP_ULT:
+                            opcode = Opcode::CMHIv4i32;
+                            swap = true;
+                            break;
+                        case ICmpInst::ICMP_ULE:
+                            opcode = Opcode::CMHSv4i32;
+                            swap = true;
+                            break;
+                        }
+                        if (opcode == Opcode::Invalid)
+                            throw std::logic_error(
+                                "unsupported integer vector predicate");
+                        if (predicate == ICmpInst::ICMP_NE) {
+                            VReg equal = temporaryCompare(opcode, left, right);
+                            emitNot(equal);
+                        } else {
+                            emitCompare(opcode, swap ? right : left,
+                                        swap ? left : right);
+                        }
+                        break;
+                    }
+
+                    auto predicate =
+                        static_cast<FCmpInst::FCmpOp>(node.predicate);
+                    if (predicate == FCmpInst::FCMP_FALSE ||
+                        predicate == FCmpInst::FCMP_TRUE) {
+                        const std::uint32_t value =
+                            predicate == FCmpInst::FCMP_TRUE ? ~0U : 0U;
+                        emitVectorConstant(block, define(node),
+                                           {value, value, value, value},
+                                           &node);
+                        break;
+                    }
+                    if (predicate == FCmpInst::FCMP_OEQ ||
+                        predicate == FCmpInst::FCMP_OGT ||
+                        predicate == FCmpInst::FCMP_OGE ||
+                        predicate == FCmpInst::FCMP_OLT ||
+                        predicate == FCmpInst::FCMP_OLE) {
+                        bool swap = predicate == FCmpInst::FCMP_OLT ||
+                                    predicate == FCmpInst::FCMP_OLE;
+                        Opcode opcode =
+                            predicate == FCmpInst::FCMP_OEQ
+                                ? Opcode::FCMEQv4f32
+                                : predicate == FCmpInst::FCMP_OGE ||
+                                          predicate == FCmpInst::FCMP_OLE
+                                      ? Opcode::FCMGEv4f32
+                                      : Opcode::FCMGTv4f32;
+                        emitCompare(opcode, swap ? right : left,
+                                    swap ? left : right);
+                        break;
+                    }
+
+                    auto orderedMask = [&]() {
+                        VReg ge = temporaryCompare(
+                            Opcode::FCMGEv4f32, left, right);
+                        VReg le = temporaryCompare(
+                            Opcode::FCMGEv4f32, right, left);
+                        return temporaryLogical(Opcode::ORRv16i8, ge, le);
+                    };
+                    if (predicate == FCmpInst::FCMP_ONE) {
+                        VReg greater = temporaryCompare(
+                            Opcode::FCMGTv4f32, left, right);
+                        VReg less = temporaryCompare(
+                            Opcode::FCMGTv4f32, right, left);
+                        emitLogical(Opcode::ORRv16i8, greater, less);
+                        break;
+                    }
+                    if (predicate == FCmpInst::FCMP_UNE) {
+                        VReg equal = temporaryCompare(
+                            Opcode::FCMEQv4f32, left, right);
+                        emitNot(equal);
+                        break;
+                    }
+                    VReg ordered = orderedMask();
+                    if (predicate == FCmpInst::FCMP_ORD) {
+                        MachineInstr copy(Opcode::COPY);
+                        copy.addOperand(define(node))
+                            .addOperand(MachineOperand::vreg(
+                                ordered, RegClass::NEON128));
+                        append(block, std::move(copy), &node);
+                        break;
+                    }
+                    VReg unordered = temporaryNot(ordered);
+                    if (predicate == FCmpInst::FCMP_UNO) {
+                        MachineInstr copy(Opcode::COPY);
+                        copy.addOperand(define(node))
+                            .addOperand(MachineOperand::vreg(
+                                unordered, RegClass::NEON128));
+                        append(block, std::move(copy), &node);
+                        break;
+                    }
+                    Opcode compareOpcode = Opcode::Invalid;
+                    bool swap = false;
+                    if (predicate == FCmpInst::FCMP_UEQ)
+                        compareOpcode = Opcode::FCMEQv4f32;
+                    else if (predicate == FCmpInst::FCMP_UGT ||
+                             predicate == FCmpInst::FCMP_ULT) {
+                        compareOpcode = Opcode::FCMGTv4f32;
+                        swap = predicate == FCmpInst::FCMP_ULT;
+                    } else if (predicate == FCmpInst::FCMP_UGE ||
+                               predicate == FCmpInst::FCMP_ULE) {
+                        compareOpcode = Opcode::FCMGEv4f32;
+                        swap = predicate == FCmpInst::FCMP_ULE;
+                    }
+                    if (compareOpcode == Opcode::Invalid)
+                        throw std::logic_error(
+                            "unsupported floating vector predicate");
+                    VReg compared = temporaryCompare(
+                        compareOpcode, swap ? right : left,
+                        swap ? left : right);
+                    emitLogical(Opcode::ORRv16i8, compared, unordered);
+                    break;
+                }
                 bool integer64 = !floating && node.operands()[0].node &&
                     node.operands()[0].node->resultTypes().front() ==
                         ValueType::I64;
@@ -1430,86 +1648,66 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::Select: {
+                RegClass selectedClass = valueClass(node.operands()[1]);
+                if (selectedClass == RegClass::NEON128) {
+                    VReg mask = 0;
+                    if (valueClass(node.operands()[0]) ==
+                        RegClass::NEON128) {
+                        mask = resultReg(node.operands()[0]);
+                    } else {
+                        VReg scalarMask = createTemporary(ValueType::I32);
+                        MachineInstr negate(Opcode::NEGW);
+                        negate.addOperand(MachineOperand::vreg(
+                                              scalarMask, RegClass::GPR32,
+                                              true))
+                            .addOperand(use(node.operands()[0]));
+                        MachineInstr &negateDefinition =
+                            append(block, std::move(negate));
+                        registerInfo.setDefinition(scalarMask,
+                                                   &negateDefinition);
+
+                        mask = createTemporary(ValueType::V4I32);
+                        MachineInstr duplicate(Opcode::DUPv4i32);
+                        duplicate.addOperand(MachineOperand::vreg(
+                                                 mask, RegClass::NEON128,
+                                                 true))
+                            .addOperand(MachineOperand::vreg(
+                                scalarMask, RegClass::GPR32));
+                        MachineInstr &duplicateDefinition =
+                            append(block, std::move(duplicate));
+                        registerInfo.setDefinition(mask,
+                                                   &duplicateDefinition);
+                    }
+
+                    VReg writableMask =
+                        createTemporary(node.resultTypes().front());
+                    MachineInstr copyMask(Opcode::COPY);
+                    copyMask.addOperand(MachineOperand::vreg(
+                                            writableMask,
+                                            RegClass::NEON128, true))
+                        .addOperand(MachineOperand::vreg(
+                            mask, RegClass::NEON128));
+                    MachineInstr &copyDefinition =
+                        append(block, std::move(copyMask));
+                    registerInfo.setDefinition(writableMask,
+                                               &copyDefinition);
+
+                    MachineInstr select(Opcode::BSLv16i8);
+                    select.addOperand(define(node))
+                        .addOperand(MachineOperand::vreg(
+                            writableMask, RegClass::NEON128))
+                        .addOperand(use(node.operands()[1]))
+                        .addOperand(use(node.operands()[2]));
+                    select.operands()[1].tiedTo = 0;
+                    append(block, std::move(select), &node);
+                    break;
+                }
                 MachineInstr compare(Opcode::CMPWri);
                 compare.addOperand(use(node.operands()[0]))
                     .addOperand(MachineOperand::immediate(0))
                     .addOperand(MachineOperand::physReg(
                         PhysReg::NZCV, RegClass::CCR, true, true));
                 append(block, std::move(compare));
-                RegClass selectedClass = valueClass(node.operands()[1]);
-                if (selectedClass == RegClass::NEON128) {
-                    ValueType vectorType = node.resultTypes().front();
-                    ValueType laneType = vectorType == ValueType::V4F32
-                                             ? ValueType::F32
-                                             : ValueType::I32;
-                    RegClass laneClass = RegisterInfo::classForType(laneType);
-                    VReg current = resultReg(node.operands()[2]);
-                    for (unsigned lane = 0; lane < 4; ++lane) {
-                        auto extractLane = [&](unsigned operandIndex) {
-                            VReg scalar = createTemporary(laneType);
-                            MachineInstr extract(
-                                laneType == ValueType::F32
-                                    ? Opcode::EXTRACTv4f32
-                                    : Opcode::EXTRACTv4i32);
-                            extract
-                                .addOperand(MachineOperand::vreg(
-                                    scalar, laneClass, true))
-                                .addOperand(use(node.operands()[operandIndex]))
-                                .addOperand(MachineOperand::immediate(lane));
-                            MachineInstr &definition =
-                                append(block, std::move(extract));
-                            registerInfo.setDefinition(scalar, &definition);
-                            return scalar;
-                        };
-
-                        VReg trueLane = extractLane(1);
-                        VReg falseLane = extractLane(2);
-                        VReg selectedLane = createTemporary(laneType);
-                        MachineInstr selectLane(
-                            laneType == ValueType::F32 ? Opcode::FCSELS
-                                                      : Opcode::CSELW);
-                        selectLane
-                            .addOperand(MachineOperand::vreg(
-                                selectedLane, laneClass, true))
-                            .addOperand(MachineOperand::vreg(
-                                trueLane, laneClass))
-                            .addOperand(MachineOperand::vreg(
-                                falseLane, laneClass))
-                            .addOperand(MachineOperand::condition(CondCode::NE))
-                            .addOperand(MachineOperand::physReg(
-                                PhysReg::NZCV, RegClass::CCR, false, true));
-                        MachineInstr &selectDefinition =
-                            append(block, std::move(selectLane));
-                        registerInfo.setDefinition(selectedLane,
-                                                   &selectDefinition);
-
-                        bool finalLane = lane == 3;
-                        VReg next = finalLane ? 0 : createTemporary(vectorType);
-                        MachineInstr insert(
-                            laneType == ValueType::F32 ? Opcode::INSv4f32
-                                                      : Opcode::INSv4i32);
-                        insert
-                            .addOperand(finalLane
-                                ? define(node)
-                                : MachineOperand::vreg(
-                                      next, RegClass::NEON128, true))
-                            .addOperand(MachineOperand::vreg(
-                                current, RegClass::NEON128))
-                            .addOperand(MachineOperand::vreg(
-                                selectedLane, laneClass))
-                            .addOperand(MachineOperand::immediate(lane));
-                        insert.operands()[1].tiedTo = 0;
-                        MachineInstr &insertDefinition = append(
-                            block, std::move(insert),
-                            finalLane ? &node : nullptr);
-                        if (!finalLane) {
-                            registerInfo.setDefinition(next,
-                                                       &insertDefinition);
-                            current = next;
-                        }
-                    }
-                    break;
-                }
                 Opcode opcode =
                     selectedClass == RegClass::FPR32 ? Opcode::FCSELS
                     : selectedClass == RegClass::GPR64 ? Opcode::CSELX
@@ -1771,10 +1969,77 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             }
             case SDOpcode::InsertElement: {
                 SDNode *index = node.operands()[2].node;
-                if (!index || index->opcode() != SDOpcode::Constant ||
-                    index->integer < 0 || index->integer >= 4)
-                    throw std::logic_error(
-                        "AArch64 vector insert requires a constant lane");
+                if (!index || index->opcode() != SDOpcode::Constant) {
+                    VReg laneNumbers = createTemporary(ValueType::V4I32);
+                    emitVectorConstant(
+                        block,
+                        MachineOperand::vreg(
+                            laneNumbers, RegClass::NEON128, true),
+                        {0, 1, 2, 3});
+
+                    VReg selectedLane = createTemporary(ValueType::V4I32);
+                    MachineInstr duplicateLane(Opcode::DUPv4i32);
+                    duplicateLane
+                        .addOperand(MachineOperand::vreg(
+                            selectedLane, RegClass::NEON128, true))
+                        .addOperand(use(node.operands()[2]));
+                    MachineInstr &duplicateLaneDefinition =
+                        append(block, std::move(duplicateLane));
+                    registerInfo.setDefinition(selectedLane,
+                                               &duplicateLaneDefinition);
+
+                    VReg mask = createTemporary(ValueType::V4I32);
+                    MachineInstr compare(Opcode::CMEQv4i32);
+                    compare.addOperand(MachineOperand::vreg(
+                                           mask, RegClass::NEON128, true))
+                        .addOperand(MachineOperand::vreg(
+                            laneNumbers, RegClass::NEON128))
+                        .addOperand(MachineOperand::vreg(
+                            selectedLane, RegClass::NEON128));
+                    MachineInstr &compareDefinition =
+                        append(block, std::move(compare));
+                    registerInfo.setDefinition(mask, &compareDefinition);
+
+                    ValueType vectorType = node.resultTypes().front();
+                    VReg insertedValue = createTemporary(vectorType);
+                    MachineInstr duplicateValue(
+                        vectorType == ValueType::V4F32
+                            ? Opcode::DUPv4f32
+                            : Opcode::DUPv4i32);
+                    duplicateValue
+                        .addOperand(MachineOperand::vreg(
+                            insertedValue, RegClass::NEON128, true))
+                        .addOperand(use(node.operands()[1]));
+                    MachineInstr &duplicateValueDefinition =
+                        append(block, std::move(duplicateValue));
+                    registerInfo.setDefinition(insertedValue,
+                                               &duplicateValueDefinition);
+
+                    VReg writableMask = createTemporary(ValueType::V4I32);
+                    MachineInstr copyMask(Opcode::COPY);
+                    copyMask.addOperand(MachineOperand::vreg(
+                                            writableMask,
+                                            RegClass::NEON128, true))
+                        .addOperand(MachineOperand::vreg(
+                            mask, RegClass::NEON128));
+                    MachineInstr &copyDefinition =
+                        append(block, std::move(copyMask));
+                    registerInfo.setDefinition(writableMask,
+                                               &copyDefinition);
+
+                    MachineInstr select(Opcode::BSLv16i8);
+                    select.addOperand(define(node))
+                        .addOperand(MachineOperand::vreg(
+                            writableMask, RegClass::NEON128))
+                        .addOperand(MachineOperand::vreg(
+                            insertedValue, RegClass::NEON128))
+                        .addOperand(use(node.operands()[0]));
+                    select.operands()[1].tiedTo = 0;
+                    append(block, std::move(select), &node);
+                    break;
+                }
+                if (index->integer < 0 || index->integer >= 4)
+                    throw std::logic_error("vector insert lane is out of range");
                 MachineInstr insert(
                     node.resultTypes().front() == ValueType::V4F32
                         ? Opcode::INSv4f32
@@ -1790,10 +2055,56 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             }
             case SDOpcode::ExtractElement: {
                 SDNode *index = node.operands()[1].node;
-                if (!index || index->opcode() != SDOpcode::Constant ||
-                    index->integer < 0 || index->integer >= 4)
-                    throw std::logic_error(
-                        "AArch64 vector extract requires a constant lane");
+                if (!index || index->opcode() != SDOpcode::Constant) {
+                    const int slot =
+                        machineFunction->frameInfo().createStackObject(
+                            16, 16, false);
+                    MachineInstr spill(Opcode::SPILL_STORE);
+                    spill.addOperand(use(node.operands()[0]))
+                        .addOperand(MachineOperand::frameIndex(slot));
+                    spill.addMemoryOperand(MachineMemOperand{
+                        MachineMemOperand::Access::Store, 16, 16, nullptr,
+                        slot, 0, true});
+                    append(block, std::move(spill));
+
+                    VReg base = createTemporary(ValueType::Ptr);
+                    MachineInstr lea(Opcode::LEA_FRAME);
+                    lea.addOperand(MachineOperand::vreg(
+                                       base, RegClass::GPR64, true))
+                        .addOperand(MachineOperand::frameIndex(slot));
+                    MachineInstr &baseDefinition =
+                        append(block, std::move(lea));
+                    registerInfo.setDefinition(base, &baseDefinition);
+
+                    VReg address = createTemporary(ValueType::Ptr);
+                    MachineInstr add(Opcode::ADDXrs);
+                    add.addOperand(MachineOperand::vreg(
+                                       address, RegClass::GPR64, true))
+                        .addOperand(MachineOperand::vreg(
+                            base, RegClass::GPR64))
+                        .addOperand(use(node.operands()[1]))
+                        .addOperand(MachineOperand::immediate(2))
+                        .addOperand(MachineOperand::immediate(1));
+                    MachineInstr &addressDefinition =
+                        append(block, std::move(add));
+                    registerInfo.setDefinition(address, &addressDefinition);
+
+                    MachineInstr load(
+                        node.resultTypes().front() == ValueType::F32
+                            ? Opcode::LDRSui
+                            : Opcode::LDRWui);
+                    load.addOperand(define(node))
+                        .addOperand(MachineOperand::vreg(
+                            address, RegClass::GPR64))
+                        .addOperand(MachineOperand::immediate(0));
+                    load.addMemoryOperand(MachineMemOperand{
+                        MachineMemOperand::Access::Load, 4, 4, nullptr,
+                        slot, std::nullopt, true});
+                    append(block, std::move(load), &node);
+                    break;
+                }
+                if (index->integer < 0 || index->integer >= 4)
+                    throw std::logic_error("vector extract lane is out of range");
                 MachineInstr extract(
                     node.resultTypes().front() == ValueType::F32
                         ? Opcode::EXTRACTv4f32
@@ -1950,65 +2261,76 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 if (matchedExt)
                     break;
 
-                // A two-register TBL table requires consecutive physical
-                // registers, a constraint the general allocator cannot
-                // represent.  Keep common permutations above as native
-                // shuffles and scalarize only the uncommon fallback.
                 const ValueType vectorType = node.resultTypes().front();
-                const ValueType laneType =
-                    vectorType == ValueType::V4F32
-                        ? ValueType::F32 : ValueType::I32;
-                VReg current = createTemporary(vectorType);
-                emitVectorConstant(
-                    block,
-                    MachineOperand::vreg(
-                        current, RegClass::NEON128, true),
-                    std::array<std::uint32_t, 4>{});
-                for (unsigned lane = 0; lane < mask.size(); ++lane) {
-                    const int selected = mask[lane];
-                    const unsigned sourceOperand = selected < 4 ? 0 : 1;
-                    const int sourceLane = selected < 4
-                                               ? selected : selected - 4;
-                    VReg scalar = createTemporary(laneType);
-                    MachineInstr extract(
-                        laneType == ValueType::F32
-                            ? Opcode::EXTRACTv4f32
-                            : Opcode::EXTRACTv4i32);
-                    extract
-                        .addOperand(MachineOperand::vreg(
-                            scalar, RegisterInfo::classForType(laneType),
-                            true))
-                        .addOperand(use(node.operands()[sourceOperand]))
-                        .addOperand(MachineOperand::immediate(sourceLane));
-                    MachineInstr &extractDefinition =
-                        append(block, std::move(extract));
-                    registerInfo.setDefinition(scalar, &extractDefinition);
-
-                    const bool finalLane = lane + 1 == mask.size();
-                    VReg next = finalLane
-                                    ? 0 : createTemporary(vectorType);
-                    MachineOperand destination = finalLane
-                        ? define(node)
-                        : MachineOperand::vreg(
-                              next, RegClass::NEON128, true);
-                    MachineInstr insert(
-                        laneType == ValueType::F32
-                            ? Opcode::INSv4f32 : Opcode::INSv4i32);
-                    insert.addOperand(destination)
-                        .addOperand(MachineOperand::vreg(
-                            current, RegClass::NEON128))
-                        .addOperand(MachineOperand::vreg(
-                            scalar, RegisterInfo::classForType(laneType)))
-                        .addOperand(MachineOperand::immediate(lane));
-                    insert.operands()[1].tiedTo = 0;
-                    MachineInstr &insertDefinition = append(
-                        block, std::move(insert),
-                        finalLane ? &node : nullptr);
-                    if (!finalLane) {
-                        registerInfo.setDefinition(next, &insertDefinition);
-                        current = next;
+                auto byteIndices = [&](unsigned sourceOperand) {
+                    std::array<std::uint32_t, 4> words{};
+                    for (unsigned lane = 0; lane < mask.size(); ++lane) {
+                        const int selected = mask[lane];
+                        const bool belongs = sourceOperand == 0
+                            ? selected >= 0 && selected < 4
+                            : selected >= 4 && selected < 8;
+                        if (!belongs) {
+                            words[lane] = 0x10101010U;
+                            continue;
+                        }
+                        const unsigned sourceLane =
+                            static_cast<unsigned>(selected) & 3U;
+                        const unsigned firstByte = sourceLane * 4;
+                        words[lane] = firstByte |
+                            ((firstByte + 1) << 8) |
+                            ((firstByte + 2) << 16) |
+                            ((firstByte + 3) << 24);
                     }
+                    return words;
+                };
+                auto emitTableLookup = [&](unsigned sourceOperand,
+                                           MachineOperand destination,
+                                           SDNode *definition) -> MachineInstr & {
+                    VReg indices = createTemporary(ValueType::V4I32);
+                    emitVectorConstant(
+                        block,
+                        MachineOperand::vreg(
+                            indices, RegClass::NEON128, true),
+                        byteIndices(sourceOperand));
+                    MachineInstr lookup(Opcode::TBL1v16i8);
+                    lookup.addOperand(destination)
+                        .addOperand(use(node.operands()[sourceOperand]))
+                        .addOperand(MachineOperand::vreg(
+                            indices, RegClass::NEON128));
+                    return append(block, std::move(lookup), definition);
+                };
+
+                const bool onlyFirst = std::all_of(
+                    mask.begin(), mask.end(),
+                    [](int lane) { return lane >= 0 && lane < 4; });
+                const bool onlySecond = std::all_of(
+                    mask.begin(), mask.end(),
+                    [](int lane) { return lane >= 4 && lane < 8; });
+                if (onlyFirst || onlySecond) {
+                    emitTableLookup(onlySecond ? 1U : 0U,
+                                    define(node), &node);
+                    break;
                 }
+
+                VReg first = createTemporary(vectorType);
+                MachineInstr &firstDefinition = emitTableLookup(
+                    0, MachineOperand::vreg(
+                           first, RegClass::NEON128, true),
+                    nullptr);
+                registerInfo.setDefinition(first, &firstDefinition);
+                VReg second = createTemporary(vectorType);
+                MachineInstr &secondDefinition = emitTableLookup(
+                    1, MachineOperand::vreg(
+                           second, RegClass::NEON128, true),
+                    nullptr);
+                registerInfo.setDefinition(second, &secondDefinition);
+                MachineInstr combine(Opcode::ORRv16i8);
+                combine.addOperand(define(node))
+                    .addOperand(MachineOperand::vreg(
+                        first, RegClass::NEON128))
+                    .addOperand(MachineOperand::vreg(
+                        second, RegClass::NEON128));
+                append(block, std::move(combine), &node);
                 break;
             }
             case SDOpcode::VectorReduceAdd: {

@@ -713,6 +713,43 @@ void printInstruction(const MachineFunction &function,
                << ' ' << vectorView(operands[0]) << ", "
                << vectorView(operands[1]) << '\n';
         break;
+    case Opcode::MVNv16i8:
+        output << "\tmvn " << registerName(operands[0]) << ".16b, "
+               << registerName(operands[1]) << ".16b\n";
+        break;
+    case Opcode::CMEQv4i32: case Opcode::CMGTv4i32:
+    case Opcode::CMGEv4i32: case Opcode::CMHIv4i32:
+    case Opcode::CMHSv4i32: case Opcode::FCMEQv4f32:
+    case Opcode::FCMGTv4f32: case Opcode::FCMGEv4f32:
+        output << '\t'
+               << (instruction.opcode() == Opcode::CMEQv4i32 ? "cmeq"
+                   : instruction.opcode() == Opcode::CMGTv4i32 ? "cmgt"
+                   : instruction.opcode() == Opcode::CMGEv4i32 ? "cmge"
+                   : instruction.opcode() == Opcode::CMHIv4i32 ? "cmhi"
+                   : instruction.opcode() == Opcode::CMHSv4i32 ? "cmhs"
+                   : instruction.opcode() == Opcode::FCMEQv4f32 ? "fcmeq"
+                   : instruction.opcode() == Opcode::FCMGTv4f32 ? "fcmgt"
+                                                                 : "fcmge")
+               << ' ' << vectorView(operands[0]) << ", "
+               << vectorView(operands[1]) << ", "
+               << vectorView(operands[2]) << '\n';
+        break;
+    case Opcode::BSLv16i8:
+        if (operands.size() != 4 ||
+            !RegisterInfo::aliases(operands[0].physicalRegister(),
+                                   operands[1].physicalRegister()))
+            throw std::logic_error("unexpanded vector select reached printer");
+        output << "\tbsl " << registerName(operands[0]) << ".16b, "
+               << registerName(operands[2]) << ".16b, "
+               << registerName(operands[3]) << ".16b\n";
+        break;
+    case Opcode::TBL1v16i8:
+        if (operands.size() != 3)
+            throw std::logic_error("malformed single-table vector shuffle");
+        output << "\ttbl " << registerName(operands[0])
+               << ".16b, {" << registerName(operands[1]) << ".16b}, "
+               << registerName(operands[2]) << ".16b\n";
+        break;
     case Opcode::SSHLv4i32:
     case Opcode::USHLv4i32:
         output << '\t'

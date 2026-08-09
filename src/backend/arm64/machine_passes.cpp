@@ -2372,14 +2372,16 @@ bool PostRAInstructionExpansion::run(
                 insert->opcode() == Opcode::MLSv4i32 ||
                 insert->opcode() == Opcode::FMLAv4f32 ||
                 insert->opcode() == Opcode::FMLSv4f32;
-            if (!vectorInsert && !vectorAccumulate)
+            const bool vectorSelect =
+                insert->opcode() == Opcode::BSLv16i8;
+            if (!vectorInsert && !vectorAccumulate && !vectorSelect)
                 continue;
             if (insert->operands().size() != 4 ||
                 !insert->operands()[0].isPhysicalRegister() ||
                 !insert->operands()[0].isDef ||
                 !insert->operands()[1].isPhysicalRegister())
                 throw std::logic_error(
-                    "malformed vector insert after register allocation");
+                    "malformed tied vector instruction after allocation");
             MachineOperand &destination = insert->operands()[0];
             MachineOperand &source = insert->operands()[1];
             if (!sameRegister(destination, source)) {

@@ -329,6 +329,20 @@ Arrays:
         $$->list.push_back(unique_ptr<AddExpAST>($3));
     };
 
+// Define blocks before braced expressions.  In the statement-start parser
+// state, an empty pair of braces can otherwise be reduced as an empty vector
+// literal even though no expression terminator follows it.  Initializer and
+// assignment states do not admit Block, so `int4 value = {}` remains
+// unambiguous there.
+Block:
+    LC RC {
+        $$ = make_node<BlockAST>();
+    }|
+    LC BlockItemList RC {
+        $$ = make_node<BlockAST>();
+        $$->blockItemList.swap($2->list);
+    };
+
 
 // 变量或常量初值
 // Aggregate braces are listed first so array-of-vector initializers keep the
@@ -434,16 +448,6 @@ FuncFParam:
         $$->id = unique_ptr<string>($2);
         $$->isArray = true;
         $$->arrays.swap($5->list);
-    };
-
-// 语句块
-Block:
-    LC RC {
-        $$ = make_node<BlockAST>();
-    }|
-    LC BlockItemList RC {
-        $$ = make_node<BlockAST>();
-        $$->blockItemList.swap($2->list);
     };
 
 // 语句块项列表

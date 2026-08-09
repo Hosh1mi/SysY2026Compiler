@@ -75,8 +75,21 @@ int VectorizationCostModel::shuffleCost(const std::vector<int> &mask) const {
             return 1;
     }
 
-    // The current backend scalarizes uncommon two-source permutations.
-    return 24;
+    const bool firstSource = std::all_of(
+        mask.begin(), mask.end(),
+        [](int lane) { return lane >= 0 && lane < VectorWidth; });
+    const bool secondSource = std::all_of(
+        mask.begin(), mask.end(),
+        [](int lane) {
+            return lane >= VectorWidth && lane < 2 * VectorWidth;
+        });
+    if (firstSource || secondSource)
+        return 3;
+
+    // Two independent table lookups plus a vector OR implement an arbitrary
+    // two-source permutation without constraining allocation to consecutive
+    // table registers.
+    return 7;
 }
 
 int VectorizationCostModel::scalarInstructionCost(

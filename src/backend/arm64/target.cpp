@@ -504,6 +504,25 @@ const InstrDesc &descriptor(Opcode opcode) {
                            : opcode == Opcode::ORRv16i8 ? "orr" : "eor";
         dynamic.explicitDefs = 1; dynamic.explicitOperands = 3;
         dynamic.latency = 6; dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::MVNv16i8:
+        dynamic.mnemonic = "mvn"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 2; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::CMEQv4i32: case Opcode::CMGTv4i32:
+    case Opcode::CMGEv4i32: case Opcode::CMHIv4i32:
+    case Opcode::CMHSv4i32: case Opcode::FCMEQv4f32:
+    case Opcode::FCMGTv4f32: case Opcode::FCMGEv4f32:
+        dynamic.mnemonic = "vector-compare"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 3; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::BSLv16i8:
+        dynamic.mnemonic = "bsl"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 4; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
+    case Opcode::TBL1v16i8:
+        dynamic.mnemonic = "tbl"; dynamic.explicitDefs = 1;
+        dynamic.explicitOperands = 3; dynamic.latency = 6;
+        dynamic.resource = SchedResource::FPALU; break;
     case Opcode::SMINv4i32: case Opcode::SMAXv4i32:
         dynamic.mnemonic =
             opcode == Opcode::SMINv4i32 ? "smin" : "smax";

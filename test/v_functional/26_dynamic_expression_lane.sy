@@ -1,0 +1,21 @@
+// Covers dynamic lane extraction from vector-valued calls and expressions.
+int4 build_int4(int base) {
+    return {base, base + 1, base + 2, base + 3};
+}
+
+float4 build_float4(float base) {
+    return {base, base + 0.5, base + 1.0, base + 1.5};
+}
+
+int main() {
+    int lane = getint();
+    int seed = getint();
+    int integer_lane =
+        (build_int4(seed) + {10, 20, 30, 40})[lane];
+    int floating_lane = build_float4(1.5)[lane] * 10.0;
+    putint(integer_lane);
+    putch(10);
+    putint(floating_lane);
+    putch(10);
+    return 0;
+}
