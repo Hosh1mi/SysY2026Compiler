@@ -19,4 +19,5 @@ test/*
 src/backend/riscv_deprecated/
 src/mid/hira*
 
+__pycache__
 .DS_STORE
