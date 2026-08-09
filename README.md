@@ -23,12 +23,9 @@ gcc out.s ../lib/libsysy.a -o out
 
 | Flag | 作用 |
 |------|------|
-| `-O0` / `-O1` / `-O2` | 优化等级（`-O2`仅用于调试） |
+| `-O0` / `-O1` | 优化等级 |
 | `--dump-ir` | 每个 pass 前后 dump IR |
-| `--verify-ir` | 每个 pass 后校验 IR 完整性（TODO:目前无作用） |
-| `--fno-peephole` | 在 `-O1` 下禁用 peephole 汇编后优化 |
-| `--fno-pre-schedule` | 在 `-O1` 下禁用 preRA 虚拟机器指令调度 |
-| `--fno-schedule` | 在 `-O1` 下禁用 MachineInstr 调度 |
+| `--verify-ir` | 每个 pass 后校验 IR 完整性 |
 | `--dump-pre-machine-instr` | 输出 preRA 虚拟 MachineInstr（vreg defs/uses、latency），dump 到 stderr |
 | `--dump-machine-instr` | 输出每个函数的 MachineInstr 详细信息（opcode类型、defs/uses、latency、标志位），dump 到 stderr |
 
@@ -43,7 +40,3 @@ gcc out.s ../lib/libsysy.a -o out
 ## 项目说明
 
 见`docs/`
-
-## Godbolt-like Visualizer
-
-使用`python3 src/visualizer/server.py`开启服务，网址为`http://127.0.0.1:8787/`
