@@ -6,7 +6,7 @@
 //
 // 典型支持形式：
 //   for (i = lo; i < hi; ++i) A[i] = ...;     → 无依赖 DOALL
-//   ans[i] += ...;                             → 可证的内存归约
+//   ans[i] += ...;                             → 逐元素 read-modify-write
 //   s += term; / s = (s + term) % m;           → 可证的标量加减归约
 //
 // 有 loop-carried 依赖、副作用 call，或无法安全传递 live-in 时不并行化。
@@ -41,7 +41,8 @@ private:
         bool latchComparesIV = false; // latch 中用 iv < bound 表示闭区间末次迭代
     };
 
-    // 归约操作：store 将累加值写回同一内存位置（如 ans[i] = ans[i] + x）
+    // 逐元素 read-modify-write 标记（如 ans[i] = ans[i] + x）。
+    // 地址必须在当前循环维度同迭代；它不豁免 loop-carried 依赖。
 
     struct Reduction {
         Instruction *store;

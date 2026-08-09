@@ -788,9 +788,14 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         }
     }
 
-    // 归约检测：在 store 必须随 IV 变化的硬规则之前，找出归约 store，
-    // 以便为其豁免 DIR_EQ 依赖检查。仅当 store/load 所在块的最内层
-    // 循环恰为当前循环时才视为本循环归约（避免内层循环的归约误判给外层）。
+    LoopInfo &LI = AM->getLoopInfo(func);
+    AffineAnalysis AA(LI);
+    DependenceAnalysis DA(LI, AA);
+    DA.setArgAlias(&argAA);
+    DA.setInductionOverride(&loop, shape.ivPhi);
+
+    // 识别逐元素 read-modify-write。它只用于决定嵌套叶循环是否值得
+    // 支付并行调度开销，绝不能作为跨迭代依赖的合法性豁免。
     std::vector<Reduction> localReductions;
     {
         LoopInfo &LI2 = AM->getLoopInfo(func);
@@ -825,6 +830,19 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 for (unsigned i = 0; i < bin->num_ops_; i++)
                     if (bin->get_operand(i) == a) { usesLoad = true; break; }
                 if (!usesLoad) continue;
+
+                auto dep = DA.test(s, a);
+                int loopDirection = -1;
+                for (size_t i = 0; i < dep.commonLoops.size(); ++i) {
+                    if (dep.commonLoops[i] == &loop) {
+                        loopDirection = static_cast<int>(i);
+                        break;
+                    }
+                }
+                if (dep.provably_independent || loopDirection < 0 ||
+                    loopDirection >= static_cast<int>(dep.direction.size()) ||
+                    dep.direction[loopDirection] != DependenceAnalysis::DIR_EQ)
+                    continue;
                 localReductions.push_back({s, a, sRoot});
                 debugPar("reduction detected: store=" + valueName(s) + " load=" +
                          valueName(a));
@@ -885,11 +903,6 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     // retain the ordinary DOALL checks below.
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
 
-    LoopInfo &LI = AM->getLoopInfo(func);
-    AffineAnalysis AA(LI);
-    DependenceAnalysis DA(LI, AA);
-    DA.setArgAlias(&argAA);
-    DA.setInductionOverride(&loop, shape.ivPhi);
     auto basePriv = [&](Instruction *acc) {
         Value *ptr = acc->is_store() ? acc->get_operand(1) : acc->get_operand(0);
         return privatize->count(gepRootBase(ptr)) != 0;
@@ -912,29 +925,20 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             if (idx < 0 || idx >= (int)r.direction.size())
                 return fail("dependence direction missing for loop");
             if (r.direction[idx] != DependenceAnalysis::DIR_EQ) {
-                // 归约：store→load 跨迭代依赖（DIR_LT）是可结合的
-                bool isReduction = false;
-                for (auto &red : localReductions) {
-                    if ((red.store == s && red.load == a) ||
-                        (red.load == s && red.store == a))
-                        { isReduction = true; break; }
+                if (isParDebugEnabled()) {
+                    debugPar("carried pair store=" + valueName(s) +
+                             " access=" + valueName(a) +
+                             " store-root=" + valueName(gepRootBase(
+                                 s->get_operand(1))) +
+                             " access-root=" + valueName(gepRootBase(
+                                 a->is_store() ? a->get_operand(1)
+                                               : a->get_operand(0))) +
+                             " access-op=" +
+                             (a->is_store() ? "store" : "load") +
+                             " direction=" +
+                             std::to_string(r.direction[idx]));
                 }
-                if (!isReduction) {
-                    if (isParDebugEnabled()) {
-                        debugPar("carried pair store=" + valueName(s) +
-                                 " access=" + valueName(a) +
-                                 " store-root=" + valueName(gepRootBase(
-                                     s->get_operand(1))) +
-                                 " access-root=" + valueName(gepRootBase(
-                                     a->is_store() ? a->get_operand(1)
-                                                   : a->get_operand(0))) +
-                                 " access-op=" +
-                                 (a->is_store() ? "store" : "load") +
-                                 " direction=" +
-                                 std::to_string(r.direction[idx]));
-                    }
-                    return fail("loop carries memory dependence");
-                }
+                return fail("loop carries memory dependence");
             }
         }
     }

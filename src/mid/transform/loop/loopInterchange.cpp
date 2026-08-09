@@ -440,6 +440,35 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     if (!mHeader || !mPre || !mLatch)
         return reject("incomplete inner structure");
 
+    auto *kBranch = dynamic_cast<BranchInst *>(kHeader->get_terminator());
+    auto *mPreBranch = dynamic_cast<BranchInst *>(mPre->get_terminator());
+    BasicBlock *kBodySucc = nullptr;
+    if (kBranch && kBranch->num_ops_ == 3) {
+        for (unsigned i = 1; i < kBranch->num_ops_; ++i) {
+            auto *succ = dynamic_cast<BasicBlock *>(kBranch->get_operand(i));
+            if (succ && K->isInLoop(succ)) kBodySucc = succ;
+        }
+    }
+    if (!mPreBranch || mPreBranch->num_ops_ != 1 ||
+        mPreBranch->get_operand(0) != mHeader || kBodySucc != mPre)
+        return reject("loops are not a directly nested guarded pair");
+
+    // This CFG rewrite moves the inner preheader outside K and turns the old
+    // inner latch into the new outer-loop control block.  Therefore the
+    // connecting block must contain no per-K work, and the latch must contain
+    // only the inner induction update.  If either block also contains loop
+    // body work, a correct interchange must split/clone it before retargeting.
+    for (auto *inst : mPre->instr_list_)
+        if (inst != mPreBranch)
+            return reject("inner preheader contains outer-iteration work");
+
+    const InductionDescriptor *mControl = M->getInductionDescriptor();
+    if (!mControl || !mControl->update || mControl->update->parent_ != mLatch)
+        return reject("inner latch has no isolated induction update");
+    for (auto *inst : mLatch->instr_list_)
+        if (inst != mControl->update && !inst->isTerminator())
+            return reject("inner latch contains loop body work");
+
     if (K->children.size() != 1)
         return reject("outer does not have exactly one child");
 
@@ -534,7 +563,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     // 2. K_header: body → mHeader, exit → mLatch
     {
         BasicBlock *bodySucc = nullptr, *exitSucc = nullptr;
-        auto *term = kHeader->get_terminator();
+        auto *term = kBranch;
         for (unsigned i = 1; i < term->num_ops_; i++) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (!succ) continue;
