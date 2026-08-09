@@ -481,8 +481,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
         }
     }
 
+    std::optional<int> dynamicExtractSlot;
     for (BasicBlock *sourceBlock : functionDAG.blockOrder) {
         MachineBasicBlock &block = *blocks.at(sourceBlock);
+        std::optional<VReg> dynamicExtractBase;
         for (const auto &owned :
              functionDAG.blocks.at(sourceBlock)->nodes()) {
             SDNode &node = *owned;
@@ -2056,32 +2058,40 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
             case SDOpcode::ExtractElement: {
                 SDNode *index = node.operands()[1].node;
                 if (!index || index->opcode() != SDOpcode::Constant) {
-                    const int slot =
-                        machineFunction->frameInfo().createStackObject(
-                            16, 16, false);
+                    if (!dynamicExtractSlot)
+                        dynamicExtractSlot =
+                            machineFunction->frameInfo().createStackObject(
+                                16, 16, false);
                     MachineInstr spill(Opcode::SPILL_STORE);
                     spill.addOperand(use(node.operands()[0]))
-                        .addOperand(MachineOperand::frameIndex(slot));
+                        .addOperand(MachineOperand::frameIndex(
+                            *dynamicExtractSlot));
                     spill.addMemoryOperand(MachineMemOperand{
                         MachineMemOperand::Access::Store, 16, 16, nullptr,
-                        slot, 0, true});
+                        *dynamicExtractSlot, 0, true});
                     append(block, std::move(spill));
 
-                    VReg base = createTemporary(ValueType::Ptr);
-                    MachineInstr lea(Opcode::LEA_FRAME);
-                    lea.addOperand(MachineOperand::vreg(
-                                       base, RegClass::GPR64, true))
-                        .addOperand(MachineOperand::frameIndex(slot));
-                    MachineInstr &baseDefinition =
-                        append(block, std::move(lea));
-                    registerInfo.setDefinition(base, &baseDefinition);
+                    if (!dynamicExtractBase) {
+                        dynamicExtractBase =
+                            createTemporary(ValueType::Ptr);
+                        MachineInstr lea(Opcode::LEA_FRAME);
+                        lea.addOperand(MachineOperand::vreg(
+                                           *dynamicExtractBase,
+                                           RegClass::GPR64, true))
+                            .addOperand(MachineOperand::frameIndex(
+                                *dynamicExtractSlot));
+                        MachineInstr &baseDefinition =
+                            append(block, std::move(lea));
+                        registerInfo.setDefinition(
+                            *dynamicExtractBase, &baseDefinition);
+                    }
 
                     VReg address = createTemporary(ValueType::Ptr);
                     MachineInstr add(Opcode::ADDXrs);
                     add.addOperand(MachineOperand::vreg(
                                        address, RegClass::GPR64, true))
                         .addOperand(MachineOperand::vreg(
-                            base, RegClass::GPR64))
+                            *dynamicExtractBase, RegClass::GPR64))
                         .addOperand(use(node.operands()[1]))
                         .addOperand(MachineOperand::immediate(2))
                         .addOperand(MachineOperand::immediate(1));
@@ -2099,7 +2109,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         .addOperand(MachineOperand::immediate(0));
                     load.addMemoryOperand(MachineMemOperand{
                         MachineMemOperand::Access::Load, 4, 4, nullptr,
-                        slot, std::nullopt, true});
+                        *dynamicExtractSlot, std::nullopt, true});
                     append(block, std::move(load), &node);
                     break;
                 }
@@ -2362,6 +2372,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 break;
             }
             case SDOpcode::Call: {
+                // A shared frame address is cheap within a call-free region,
+                // but keeping it live across a call can force an otherwise
+                // unnecessary callee-saved register or spill.
+                dynamicExtractBase.reset();
                 unsigned integerIndex = 0;
                 unsigned floatIndex = 0;
                 unsigned outgoingStackSize = 0;
