@@ -41,7 +41,7 @@ bool onlyUsedBy(Value *value, Instruction *user) {
     return true;
 }
 
-bool supportedLaneBinary(Instruction::OpID opcode) {
+bool integerLaneBinary(Instruction::OpID opcode) {
     switch (opcode) {
     case Instruction::Add:
     case Instruction::Sub:
@@ -55,10 +55,22 @@ bool supportedLaneBinary(Instruction::OpID opcode) {
     }
 }
 
+bool floatingLaneBinary(Instruction::OpID opcode) {
+    switch (opcode) {
+    case Instruction::FAdd:
+    case Instruction::FSub:
+    case Instruction::FMul:
+    case Instruction::FDiv:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool combineLaneBinary(BinaryInst *binary,
                        const VectorizationCostModel &costs) {
-    if (!supportedLaneBinary(binary->op_id_) ||
-        binary->type_->tid_ != Type::IntegerTyID ||
+    if ((!integerLaneBinary(binary->op_id_) &&
+         !floatingLaneBinary(binary->op_id_)) ||
         binary->use_list_.empty())
         return false;
 
@@ -74,9 +86,20 @@ bool combineLaneBinary(BinaryInst *binary,
     Value *rhsVector = rhs->get_operand(0);
     if (!lhsLane || !rhsLane || *lhsLane != *rhsLane ||
         lhsVector->type_ != rhsVector->type_ ||
-        !isSupportedVectorType(lhsVector->type_) ||
-        static_cast<VectorType *>(lhsVector->type_)->contained_->tid_ !=
-            Type::IntegerTyID)
+        !isSupportedVectorType(lhsVector->type_))
+        return false;
+
+    Type *elementType =
+        static_cast<VectorType *>(lhsVector->type_)->contained_;
+    const bool matchingInteger =
+        integerLaneBinary(binary->op_id_) &&
+        binary->type_->tid_ == Type::IntegerTyID &&
+        elementType->tid_ == Type::IntegerTyID;
+    const bool matchingFloat =
+        floatingLaneBinary(binary->op_id_) &&
+        binary->type_->tid_ == Type::FloatTyID &&
+        elementType->tid_ == Type::FloatTyID;
+    if (!matchingInteger && !matchingFloat)
         return false;
 
     const int removedExtracts = lhs == rhs ? 1 : 2;

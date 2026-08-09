@@ -1,0 +1,24 @@
+// Covers recovery of float vector arithmetic from matching lane operations.
+float4 left_values[1] = {{8.0, 12.0, 20.0, 24.0}};
+float4 right_values[1] = {{2.0, 3.0, 4.0, 6.0}};
+
+int main() {
+    int index = getint();
+    float4 left = left_values[index];
+    float4 right = right_values[index];
+
+    float add_lane = left[0] + right[0];
+    float sub_lane = left[1] - right[1];
+    float mul_lane = left[2] * right[2];
+    float div_lane = left[3] / right[3];
+
+    putint(add_lane);
+    putch(10);
+    putint(sub_lane);
+    putch(10);
+    putint(mul_lane);
+    putch(10);
+    putint(div_lane);
+    putch(10);
+    return 0;
+}

@@ -1,7 +1,7 @@
 #pragma once
 // VectorCombine recovers target-native vector operations from scalarized IR.
 //
-// It combines lane-local integer arithmetic, complete extract/insert rebuilds,
+// It combines lane-local arithmetic, complete extract/insert rebuilds,
 // and adjacent shuffle chains when the shared target cost model predicts a
 // strict reduction.  It deliberately does not infer source-language vector
 // mask or floating-point reassociation semantics.
