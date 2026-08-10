@@ -129,6 +129,16 @@ std::string_view RegisterInfo::name(PhysReg reg, RegClass view) {
     return "<noreg>";
 }
 
+unsigned RegisterInfo::spillSize(RegClass regClass) {
+    return regClass == RegClass::NEON128 ? 16
+         : regClass == RegClass::GPR64 ? 8
+                                       : 4;
+}
+
+unsigned RegisterInfo::spillAlignment(RegClass regClass) {
+    return spillSize(regClass);
+}
+
 const std::vector<PhysReg> &RegisterInfo::allocationOrder(
     RegClass regClass, bool preferCallerSaved) {
     static const std::vector<PhysReg> volatileFirstGprs = {

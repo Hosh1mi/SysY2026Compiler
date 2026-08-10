@@ -313,6 +313,8 @@ public:
     static PhysReg integerArgumentRegister(unsigned index);
     static PhysReg vectorArgumentRegister(unsigned index);
     static std::string_view name(PhysReg reg, RegClass view);
+    static unsigned spillSize(RegClass regClass);
+    static unsigned spillAlignment(RegClass regClass);
     static const std::vector<PhysReg> &allocationOrder(
         RegClass regClass, bool preferCallerSaved = false);
     static const std::vector<PhysReg> &calleeSaved(RegClass regClass);

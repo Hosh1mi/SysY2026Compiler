@@ -18,6 +18,7 @@ using RegSet = std::set<VReg>;
 
 struct MutableInterval {
   double weight = 0.0;
+  double spillCost = 0.0;
   std::vector<MachineSlotRange> segments;
   std::vector<LiveRangeOperand> operands;
 };
@@ -215,6 +216,10 @@ LivenessResult MachineLiveness::run(MachineFunction &function) const {
 
     const double blockWeight =
         std::pow(10.0, std::min(block->loopDepth, 4U));
+    const double loadCost =
+        InstrInfo::get(Opcode::SPILL_LOAD).latency;
+    const double storeCost =
+        InstrInfo::get(Opcode::SPILL_STORE).latency;
     for (MachineInstr &instruction : block->instructions()) {
       for (unsigned index = 0; index < instruction.operands().size();
            ++index) {
@@ -231,6 +236,8 @@ LivenessResult MachineLiveness::run(MachineFunction &function) const {
                              operand.isDef});
         if (!operand.isDef)
           interval.weight += blockWeight;
+        interval.spillCost +=
+            blockWeight * (operand.isDef ? storeCost : loadCost);
       }
     }
     for (VReg reg : result.blockLiveOut[block]) {
@@ -263,8 +270,10 @@ LivenessResult MachineLiveness::run(MachineFunction &function) const {
     result.intervalIndex.emplace(reg, result.intervals.size());
     result.intervals.push_back(LiveInterval{
         reg, function.registerInfo().get(reg).regClass,
-        std::max(1.0, interval.weight), liveAcrossCalls.count(reg) != 0,
-        std::move(interval.segments), std::move(interval.operands)});
+        std::max(1.0, interval.weight),
+        std::max(1.0, interval.spillCost),
+        liveAcrossCalls.count(reg) != 0, std::move(interval.segments),
+        std::move(interval.operands)});
   }
 
   function.setProperty(MachineProperty::TracksLiveness);

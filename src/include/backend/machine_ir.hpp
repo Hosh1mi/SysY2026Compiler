@@ -184,6 +184,7 @@ struct VRegInfo {
     ValueType valueType = ValueType::Invalid;
     MachineInstr *definition = nullptr;
     bool spillTemporary = false;
+    unsigned splitGeneration = 0;
 };
 
 class MachineRegisterInfo {

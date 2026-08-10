@@ -1,31 +1,14 @@
 #include "backend/regalloc.hpp"
-#include "backend/machine_analysis.hpp"
-#include "backend/rematerialization.hpp"
-
+#include "backend/interference_graph.hpp"
+#include "backend/live_range_split_analysis.hpp"
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
 namespace backend::aarch64 {
 namespace {
-
-MachineOperand replacementRegister(const MachineOperand &old, VReg reg,
-                                   RegClass regClass) {
-    MachineOperand replacement =
-        MachineOperand::vreg(reg, regClass, old.isDef);
-    replacement.isImplicit = old.isImplicit;
-    replacement.isKill = old.isKill;
-    replacement.isDead = old.isDead;
-    replacement.isUndef = old.isUndef;
-    replacement.isEarlyClobber = old.isEarlyClobber;
-    replacement.isRenamable = old.isRenamable;
-    replacement.tiedTo = old.tiedTo;
-    return replacement;
-}
 
 MachineOperand replacementRegister(const MachineOperand &old, PhysReg reg) {
     MachineOperand replacement =
@@ -40,177 +23,14 @@ MachineOperand replacementRegister(const MachineOperand &old, PhysReg reg) {
     return replacement;
 }
 
-bool sameRegisterBank(RegClass lhs, RegClass rhs) {
-    bool lhsGPR = lhs == RegClass::GPR32 || lhs == RegClass::GPR64;
-    bool rhsGPR = rhs == RegClass::GPR32 || rhs == RegClass::GPR64;
-    bool lhsVector = lhs == RegClass::FPR32 || lhs == RegClass::NEON128;
-    bool rhsVector = rhs == RegClass::FPR32 || rhs == RegClass::NEON128;
-    return lhsGPR && rhsGPR || lhsVector && rhsVector;
-}
-
-unsigned spillSize(RegClass regClass) {
-    return regClass == RegClass::NEON128 ? 16
-         : regClass == RegClass::GPR64 ? 8
-                                       : 4;
-}
-
-unsigned spillAlignment(RegClass regClass) {
-    return regClass == RegClass::NEON128 ? 16
-         : regClass == RegClass::GPR64 ? 8
-                                       : 4;
-}
-
 } // namespace
-
-bool PhiElimination::run(MachineFunction &function) const {
-    if (!function.hasProperty(MachineProperty::HasPHIs))
-        return false;
-    struct Edge {
-        MachineBasicBlock *predecessor;
-        MachineBasicBlock *successor;
-    };
-    std::vector<Edge> edgesToSplit;
-    for (const auto &successor : function.blocks()) {
-        bool hasPhi = !successor->instructions().empty() &&
-                      successor->instructions().front().opcode() ==
-                          Opcode::PHI;
-        if (!hasPhi)
-            continue;
-        for (MachineBasicBlock *predecessor : successor->predecessors())
-            if (predecessor->successors().size() > 1)
-                edgesToSplit.push_back({predecessor, successor.get()});
-    }
-
-    unsigned splitNumber = 0;
-    for (const Edge &edge : edgesToSplit) {
-        MachineBasicBlock &split = function.createBlock(
-            "phi.edge." + std::to_string(splitNumber++));
-        edge.predecessor->removeSuccessor(edge.successor);
-        edge.predecessor->addSuccessor(&split);
-        split.addSuccessor(edge.successor);
-
-        for (MachineInstr &instruction :
-             edge.predecessor->instructions()) {
-            if (!instruction.isBranch())
-                continue;
-            for (MachineOperand &operand : instruction.operands())
-                if (operand.kind() == MachineOperand::Kind::BasicBlock &&
-                    operand.basicBlock() == edge.successor)
-                    operand = MachineOperand::block(&split);
-        }
-
-        MachineInstr branch(Opcode::B);
-        branch.addOperand(MachineOperand::block(edge.successor));
-        split.append(std::move(branch));
-
-        for (MachineInstr &instruction :
-             edge.successor->instructions()) {
-            if (instruction.opcode() != Opcode::PHI)
-                break;
-            for (std::size_t i = 2; i < instruction.operands().size();
-                 i += 2)
-                if (instruction.operands()[i].kind() ==
-                        MachineOperand::Kind::BasicBlock &&
-                    instruction.operands()[i].basicBlock() ==
-                        edge.predecessor)
-                    instruction.operands()[i] =
-                        MachineOperand::block(&split);
-        }
-    }
-
-    struct Copy {
-        VReg destination;
-        VReg source;
-        RegClass regClass;
-    };
-    std::unordered_map<MachineBasicBlock *, std::vector<Copy>> copies;
-    bool changed = false;
-    for (auto &owned : function.blocks()) {
-        MachineBasicBlock &successor = *owned;
-        auto it = successor.instructions().begin();
-        while (it != successor.instructions().end() &&
-               it->opcode() == Opcode::PHI) {
-            if (it->operands().empty() ||
-                !it->operands()[0].isVirtualRegister() ||
-                !it->operands()[0].isDef)
-                throw std::logic_error("malformed Machine PHI");
-            VReg destination = it->operands()[0].virtualRegister();
-            RegClass regClass = it->operands()[0].regClass();
-            function.registerInfo().setDefinition(destination, nullptr);
-            for (std::size_t i = 1; i + 1 < it->operands().size();
-                 i += 2) {
-                if (!it->operands()[i].isVirtualRegister() ||
-                    it->operands()[i + 1].kind() !=
-                        MachineOperand::Kind::BasicBlock)
-                    throw std::logic_error("malformed Machine PHI incoming");
-                copies[it->operands()[i + 1].basicBlock()].push_back(
-                    Copy{destination,
-                         it->operands()[i].virtualRegister(), regClass});
-            }
-            it = successor.instructions().erase(it);
-            changed = true;
-        }
-    }
-
-    for (auto &[block, pending] : copies) {
-        auto insertion = std::find_if(
-            block->instructions().begin(), block->instructions().end(),
-            [](const MachineInstr &instruction) {
-                return instruction.isTerminator();
-            });
-        while (!pending.empty()) {
-            std::unordered_set<VReg> sources;
-            for (const Copy &copy : pending)
-                sources.insert(copy.source);
-            auto ready = std::find_if(
-                pending.begin(), pending.end(), [&](const Copy &copy) {
-                    return copy.destination == copy.source ||
-                           !sources.count(copy.destination);
-                });
-            if (ready != pending.end()) {
-                Copy copy = *ready;
-                pending.erase(ready);
-                if (copy.destination == copy.source)
-                    continue;
-                MachineInstr instruction(Opcode::COPY);
-                instruction
-                    .addOperand(MachineOperand::vreg(
-                        copy.destination, copy.regClass, true))
-                    .addOperand(MachineOperand::vreg(
-                        copy.source, copy.regClass));
-                block->instructions().insert(insertion,
-                                             std::move(instruction));
-                continue;
-            }
-
-            Copy cycle = pending.front();
-            VReg temporary = function.registerInfo().createVirtualRegister(
-                cycle.regClass,
-                function.registerInfo().get(cycle.source).valueType);
-            MachineInstr save(Opcode::COPY);
-            save.addOperand(MachineOperand::vreg(
-                                temporary, cycle.regClass, true))
-                .addOperand(MachineOperand::vreg(
-                    cycle.source, cycle.regClass));
-            block->instructions().insert(insertion, std::move(save));
-            for (Copy &copy : pending)
-                if (copy.source == cycle.source)
-                    copy.source = temporary;
-        }
-    }
-
-    if (changed) {
-        function.clearProperty(MachineProperty::IsSSA);
-        function.clearProperty(MachineProperty::TracksLiveness);
-    }
-    function.clearProperty(MachineProperty::HasPHIs);
-    return changed;
-}
 
 bool GraphColoringRegisterAllocator::colorOnce(
     MachineFunction &function, const LivenessResult &liveness,
     std::unordered_map<VReg, PhysReg> &assignments,
-    std::vector<VReg> &spills) const {
+    std::vector<VReg> &spills,
+    LiveRangeSplitPlans &splitPlans) const {
+    splitPlans = {};
     std::unordered_map<VReg, LiveInterval> intervalFor;
     std::unordered_map<VReg, std::unordered_map<VReg, double>>
         affinities;
@@ -219,93 +39,12 @@ bool GraphColoringRegisterAllocator::colorOnce(
     std::unordered_map<VReg, VReg> mandatoryTiedPairs;
     std::unordered_map<VReg, VReg> mandatoryTiedDefs;
     std::unordered_map<VReg, std::vector<PhysReg>> physicalHints;
-    std::unordered_map<VReg, std::unordered_set<PhysReg>> forbiddenColors;
-    std::vector<VReg> graphNodes;
-    graphNodes.reserve(liveness.intervals.size());
-    VReg maximumVReg = 0;
-    for (const LiveInterval &interval : liveness.intervals)
-        maximumVReg = std::max(maximumVReg, interval.reg);
-    constexpr std::size_t kNoGraphIndex =
-        std::numeric_limits<std::size_t>::max();
-    std::vector<std::size_t> graphIndex(
-        static_cast<std::size_t>(maximumVReg) + 1,
-        kNoGraphIndex);
+    ForbiddenColorMap forbiddenColors;
     for (const LiveInterval &interval : liveness.intervals) {
         intervalFor.emplace(interval.reg, interval);
-        graphIndex[interval.reg] = graphNodes.size();
-        graphNodes.push_back(interval.reg);
     }
 
-    // Interference becomes dense in valid programs with hundreds of
-    // simultaneously-live values.  Per-edge tree/hash nodes make that case
-    // allocation-bound, so store the same undirected Chaitin-Briggs graph as
-    // a compact bit matrix.  This also gives constant-time duplicate checks.
-    const std::size_t graphWords = (graphNodes.size() + 63) / 64;
-    std::vector<std::uint64_t> interference(
-        graphNodes.size() * graphWords, 0);
-    std::vector<unsigned> graphDegree(graphNodes.size(), 0);
-
-    auto addEdge = [&](VReg lhs, VReg rhs) {
-        if (lhs == rhs || lhs >= graphIndex.size() ||
-            rhs >= graphIndex.size())
-            return false;
-        std::size_t lhsIndex = graphIndex[lhs];
-        std::size_t rhsIndex = graphIndex[rhs];
-        if (lhsIndex == kNoGraphIndex ||
-            rhsIndex == kNoGraphIndex)
-            return false;
-        if (!sameRegisterBank(
-                liveness.intervals[lhsIndex].regClass,
-                liveness.intervals[rhsIndex].regClass))
-            return false;
-        std::size_t lhsWord =
-            lhsIndex * graphWords + rhsIndex / 64;
-        std::uint64_t rhsBit =
-            std::uint64_t{1} << (rhsIndex % 64);
-        if (interference[lhsWord] & rhsBit)
-            return false;
-        interference[lhsWord] |= rhsBit;
-        interference[rhsIndex * graphWords + lhsIndex / 64] |=
-            std::uint64_t{1} << (lhsIndex % 64);
-        ++graphDegree[lhsIndex];
-        ++graphDegree[rhsIndex];
-        return true;
-    };
-
-    auto hasEdge = [&](VReg lhs, VReg rhs) {
-        if (lhs >= graphIndex.size() ||
-            rhs >= graphIndex.size())
-            return false;
-        std::size_t lhsIndex = graphIndex[lhs];
-        std::size_t rhsIndex = graphIndex[rhs];
-        if (lhsIndex == kNoGraphIndex ||
-            rhsIndex == kNoGraphIndex)
-            return false;
-        return (interference[
-                    lhsIndex * graphWords + rhsIndex / 64] &
-                (std::uint64_t{1} << (rhsIndex % 64))) != 0;
-    };
-
-    auto forEachNeighbor = [&](VReg reg, auto &&callback) {
-        if (reg >= graphIndex.size() ||
-            graphIndex[reg] == kNoGraphIndex)
-            return;
-        const std::uint64_t *row =
-            interference.data() + graphIndex[reg] * graphWords;
-        for (std::size_t wordIndex = 0;
-             wordIndex < graphWords; ++wordIndex) {
-            std::uint64_t word = row[wordIndex];
-            while (word) {
-                unsigned bit =
-                    static_cast<unsigned>(__builtin_ctzll(word));
-                std::size_t neighborIndex =
-                    wordIndex * 64 + bit;
-                if (neighborIndex < graphNodes.size())
-                    callback(graphNodes[neighborIndex]);
-                word &= word - 1;
-            }
-        }
-    };
+    InterferenceGraph graph(liveness.intervals);
 
     for (const auto &owned : function.blocks()) {
         for (const MachineInstr &instruction : owned->instructions()) {
@@ -344,7 +83,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
 
             for (std::size_t i = 0; i < defs.size(); ++i)
                 for (std::size_t j = i + 1; j < defs.size(); ++j)
-                    addEdge(defs[i], defs[j]);
+                    graph.addEdge(defs[i], defs[j]);
             // Read-only operands may legally share a physical register for
             // ordinary AArch64 instructions.  Distinctness is represented by
             // tied, early-clobber, and def/live constraints below rather than
@@ -378,7 +117,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                     if (other.isVirtualRegister() && !other.isDef &&
                         i != j &&
                         static_cast<std::size_t>(operand.tiedTo) != j)
-                        addEdge(tiedDef, other.virtualRegister());
+                        graph.addEdge(tiedDef, other.virtualRegister());
                 }
             }
 
@@ -396,8 +135,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
                     if (!use.isVirtualRegister() || use.isDef ||
                         use.tiedTo == static_cast<int>(defIndex))
                         continue;
-                    addEdge(operand.virtualRegister(),
-                            use.virtualRegister());
+                    graph.addEdge(operand.virtualRegister(),
+                                  use.virtualRegister());
                 }
             }
         }
@@ -437,7 +176,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                 for (VReg liveReg : live) {
                     if (def == copyDef && liveReg == copyUse)
                         continue;
-                    addEdge(def, liveReg);
+                    graph.addEdge(def, liveReg);
                 }
             }
             for (PhysReg physical : physicalDefs) {
@@ -481,16 +220,14 @@ bool GraphColoringRegisterAllocator::colorOnce(
         for (const auto &[tiedUse, tiedDef] : mandatoryTiedPairs) {
             std::vector<VReg> useNeighbors;
             std::vector<VReg> defNeighbors;
-            forEachNeighbor(tiedUse, [&](VReg neighbor) {
+            for (VReg neighbor : graph.neighbors(tiedUse))
                 useNeighbors.push_back(neighbor);
-            });
-            forEachNeighbor(tiedDef, [&](VReg neighbor) {
+            for (VReg neighbor : graph.neighbors(tiedDef))
                 defNeighbors.push_back(neighbor);
-            });
             for (VReg neighbor : useNeighbors)
-                tiedNeighborhoodChanged |= addEdge(tiedDef, neighbor);
+                tiedNeighborhoodChanged |= graph.addEdge(tiedDef, neighbor);
             for (VReg neighbor : defNeighbors)
-                tiedNeighborhoodChanged |= addEdge(tiedUse, neighbor);
+                tiedNeighborhoodChanged |= graph.addEdge(tiedUse, neighbor);
         }
     }
 
@@ -573,7 +310,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
         std::unordered_set<VReg> remaining(nodes.begin(), nodes.end());
         std::set<VReg> lowDegree;
         for (VReg reg : nodes) {
-            degree[reg] = graphDegree[graphIndex[reg]];
+            degree[reg] = graph.degree(reg);
             const LiveInterval &interval = intervalFor.at(reg);
             unsigned availableColors = 0;
             for (PhysReg physical :
@@ -627,14 +364,14 @@ bool GraphColoringRegisterAllocator::colorOnce(
             remaining.erase(selected);
             lowDegree.erase(selected);
             simplifyStack.push_back(selected);
-            forEachNeighbor(selected, [&](VReg neighbor) {
+            for (VReg neighbor : graph.neighbors(selected)) {
                 if (remaining.count(neighbor) && degree[neighbor] > 0) {
                     --degree[neighbor];
                     if (degree[neighbor] <
                         availableColorCount[neighbor])
                         lowDegree.insert(neighbor);
                 }
-            });
+            }
         }
 
         while (!simplifyStack.empty()) {
@@ -642,11 +379,11 @@ bool GraphColoringRegisterAllocator::colorOnce(
             simplifyStack.pop_back();
             const LiveInterval &interval = intervalFor.at(reg);
             std::set<PhysReg> unavailable;
-            forEachNeighbor(reg, [&](VReg neighbor) {
+            for (VReg neighbor : graph.neighbors(reg)) {
                 auto assigned = assignments.find(neighbor);
                 if (assigned != assignments.end())
                     unavailable.insert(assigned->second);
-            });
+            }
             auto allowed = [&](PhysReg physical) {
                 return !RegisterInfo::isReserved(physical) &&
                        !unavailable.count(physical) &&
@@ -691,12 +428,12 @@ bool GraphColoringRegisterAllocator::colorOnce(
                      RegisterInfo::isCallerSaved(physical)))
                     return false;
                 bool conflict = false;
-                forEachNeighbor(tiedPartner, [&](VReg neighbor) {
+                for (VReg neighbor : graph.neighbors(tiedPartner)) {
                     auto assigned = assignments.find(neighbor);
                     if (assigned != assignments.end() &&
                         assigned->second == physical)
                         conflict = true;
-                });
+                }
                 return !conflict;
             };
             auto jointlyAllowed = [&](PhysReg physical) {
@@ -766,8 +503,13 @@ bool GraphColoringRegisterAllocator::colorOnce(
     colorBank(true);
     std::sort(spills.begin(), spills.end());
     spills.erase(std::unique(spills.begin(), spills.end()), spills.end());
-    if (!spills.empty())
+    if (!spills.empty()) {
+        LiveRangeSplitAnalysis splitAnalysis;
+        splitPlans = splitAnalysis.analyze(
+            function, liveness, graph, assignments, spills,
+            forbiddenColors);
         return false;
+    }
 
     // Optimistic recoloring completes the graph-coloring copy-coalescing
     // step.  It joins a non-interfering COPY pair whenever one endpoint can
@@ -814,7 +556,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
         for (const AffinityEdge &edge : affinityEdges) {
             VReg reg = edge.lhs;
             VReg partner = edge.rhs;
-            if (hasEdge(reg, partner) ||
+            if (graph.hasEdge(reg, partner) ||
                 !assignments.count(reg) ||
                 !assignments.count(partner) ||
                 assignments[reg] == assignments[partner])
@@ -830,11 +572,11 @@ bool GraphColoringRegisterAllocator::colorOnce(
                          RegisterInfo::isCallerSaved(color)))
                         return false;
                     bool conflict = false;
-                    forEachNeighbor(value, [&](VReg neighbor) {
+                    for (VReg neighbor : graph.neighbors(value)) {
                         if (assignments.count(neighbor) &&
                             assignments[neighbor] == color)
                             conflict = true;
-                    });
+                    }
                     return !conflict;
                 };
                 if (edge.weight >=
@@ -854,139 +596,6 @@ bool GraphColoringRegisterAllocator::colorOnce(
             break;
     }
     return true;
-}
-
-void GraphColoringRegisterAllocator::insertSpills(
-    MachineFunction &function, const std::vector<VReg> &spills,
-    std::unordered_map<VReg, int> &spillSlots) const {
-    std::unordered_set<VReg> spilled(spills.begin(), spills.end());
-    MachineRegisterIndex registers(function);
-    RematerializationAnalysis rematerializationAnalysis;
-    RematerializationAnalysis::RecipeMap rematerializations =
-        rematerializationAnalysis.analyze(function, registers, spills);
-
-    for (VReg reg : spills) {
-        if (rematerializations.count(reg))
-            continue;
-        if (spillSlots.count(reg))
-            continue;
-        RegClass regClass = function.registerInfo().get(reg).regClass;
-        spillSlots.emplace(
-            reg, function.frameInfo().createStackObject(
-                     spillSize(regClass), spillAlignment(regClass), true));
-    }
-
-    for (auto &owned : function.blocks()) {
-        auto &instructions = owned->instructions();
-        for (auto it = instructions.begin(); it != instructions.end(); ++it) {
-            std::unordered_map<VReg, VReg> temporaries;
-            std::unordered_set<VReg> needsLoad;
-            std::unordered_set<VReg> needsStore;
-            for (const MachineOperand &operand : it->operands()) {
-                if (!operand.isVirtualRegister() ||
-                    !spilled.count(operand.virtualRegister()))
-                    continue;
-                VReg old = operand.virtualRegister();
-                if (!operand.isDef)
-                    needsLoad.insert(old);
-                else
-                    needsStore.insert(old);
-                if (!temporaries.count(old)) {
-                    const VRegInfo &info = function.registerInfo().get(old);
-                    temporaries.emplace(
-                        old, function.registerInfo().createVirtualRegister(
-                                 info.regClass, info.valueType));
-                    function.registerInfo()
-                        .get(temporaries.at(old))
-                        .spillTemporary = true;
-                }
-            }
-            if (temporaries.empty())
-                continue;
-
-            for (VReg old : needsLoad) {
-                VReg temporary = temporaries.at(old);
-                RegClass regClass =
-                    function.registerInfo().get(old).regClass;
-                auto rematerialization =
-                    rematerializations.find(old);
-                if (rematerialization !=
-                    rematerializations.end()) {
-                    MachineInstr materialized =
-                        rematerialization->second.clone(temporary);
-                    auto inserted = instructions.insert(
-                        it, std::move(materialized));
-                    function.registerInfo().setDefinition(
-                        temporary, &*inserted);
-                    continue;
-                }
-                MachineInstr load(Opcode::SPILL_LOAD);
-                load.addOperand(MachineOperand::vreg(
-                                    temporary, regClass, true))
-                    .addOperand(MachineOperand::frameIndex(
-                        spillSlots.at(old)));
-                load.addMemoryOperand(MachineMemOperand{
-                    MachineMemOperand::Access::Load, spillSize(regClass),
-                    spillAlignment(regClass), nullptr, spillSlots.at(old), 0,
-                    false});
-                auto inserted = instructions.insert(it, std::move(load));
-                function.registerInfo().setDefinition(temporary, &*inserted);
-            }
-
-            for (MachineOperand &operand : it->operands()) {
-                if (!operand.isVirtualRegister() ||
-                    !spilled.count(operand.virtualRegister()))
-                    continue;
-                VReg old = operand.virtualRegister();
-                operand = replacementRegister(
-                    operand, temporaries.at(old),
-                    function.registerInfo().get(old).regClass);
-                if (operand.isDef)
-                    function.registerInfo().setDefinition(
-                        temporaries.at(old), &*it);
-            }
-
-            auto after = std::next(it);
-            for (VReg old : needsStore) {
-                if (rematerializations.count(old))
-                    continue;
-                VReg temporary = temporaries.at(old);
-                RegClass regClass =
-                    function.registerInfo().get(old).regClass;
-                MachineInstr store(Opcode::SPILL_STORE);
-                store.addOperand(MachineOperand::vreg(
-                                     temporary, regClass))
-                    .addOperand(MachineOperand::frameIndex(
-                        spillSlots.at(old)));
-                store.addMemoryOperand(MachineMemOperand{
-                    MachineMemOperand::Access::Store, spillSize(regClass),
-                    spillAlignment(regClass), nullptr, spillSlots.at(old), 0,
-                    false});
-                instructions.insert(after, std::move(store));
-            }
-        }
-    }
-
-    // Each use now has its own short-lived materialization, so the original
-    // long-lived definition is dead and must not consume a color in the next
-    // allocation round.
-    std::unordered_set<MachineInstr *> deadDefinitions;
-    for (const auto &[reg, recipe] : rematerializations) {
-        (void)reg;
-        deadDefinitions.insert(recipe.definition);
-    }
-    for (auto &owned : function.blocks()) {
-        auto &instructions = owned->instructions();
-        for (auto it = instructions.begin();
-             it != instructions.end();) {
-            if (!deadDefinitions.count(&*it)) {
-                ++it;
-                continue;
-            }
-            it = instructions.erase(it);
-        }
-    }
-    function.clearProperty(MachineProperty::TracksLiveness);
 }
 
 void GraphColoringRegisterAllocator::rewriteVirtualRegisters(
@@ -1015,95 +624,56 @@ void GraphColoringRegisterAllocator::rewriteVirtualRegisters(
 
 void GraphColoringRegisterAllocator::run(MachineFunction &function) const {
     MachineLiveness analysis;
+    LiveRangeEdit liveRangeEdit;
     std::unordered_map<VReg, int> spillSlots;
-    constexpr unsigned kMaximumSpillRounds = 32;
-    for (unsigned round = 0; round < kMaximumSpillRounds; ++round) {
+    double committedSplitCost = 0.0;
+    double bestRepairObjective =
+        std::numeric_limits<double>::infinity();
+    constexpr unsigned kMaximumAllocationRounds = 64;
+    for (unsigned round = 0; round < kMaximumAllocationRounds; ++round) {
         LivenessResult liveness = analysis.run(function);
         std::unordered_map<VReg, PhysReg> assignments;
         std::vector<VReg> spills;
-        if (colorOnce(function, liveness, assignments, spills)) {
+        LiveRangeSplitPlans splitPlans;
+        if (colorOnce(function, liveness, assignments, spills, splitPlans)) {
             rewriteVirtualRegisters(function, assignments);
             return;
         }
+
+        double unresolvedSpillCost = 0.0;
+        for (VReg spill : spills) {
+            const LiveInterval *interval = liveness.find(spill);
+            if (interval)
+                unresolvedSpillCost += interval->spillCost;
+        }
+        const double repairObjective =
+            unresolvedSpillCost + committedSplitCost;
+        const bool repairMadeProgress =
+            repairObjective < bestRepairObjective;
+
+        bool splitApplied = false;
+        if (repairMadeProgress) {
+            bestRepairObjective = repairObjective;
+            for (const LocalSplitPlan &splitPlan : splitPlans.local) {
+                if (!liveRangeEdit.splitLocalGap(
+                        function, liveness, splitPlan, spillSlots))
+                    continue;
+                committedSplitCost += splitPlan.estimatedCost;
+                splitApplied = true;
+            }
+        }
+        if (splitApplied)
+            continue;
         insertSpills(function, spills, spillSlots);
+        // Spilling creates a different interference problem.  A later repair
+        // sequence starts with a fresh objective instead of comparing against
+        // the completed sequence that led to this rewrite.
+        committedSplitCost = 0.0;
+        bestRepairObjective =
+            std::numeric_limits<double>::infinity();
     }
     throw std::logic_error(
         "register allocation exceeded the bounded spill iteration limit");
-}
-
-bool PostRAParallelCopyResolver::run(MachineFunction &function) const {
-    if (!function.hasProperty(MachineProperty::NoVRegs))
-        throw std::logic_error(
-            "parallel physical copies require completed allocation");
-
-    struct Copy {
-        PhysReg destination = PhysReg::NoReg;
-        PhysReg source = PhysReg::NoReg;
-        RegClass regClass = RegClass::Invalid;
-    };
-    bool changed = false;
-    for (auto &owned : function.blocks()) {
-        auto &instructions = owned->instructions();
-        for (auto it = instructions.begin(); it != instructions.end();) {
-            if (!it->parallelCopyGroup) {
-                ++it;
-                continue;
-            }
-
-            const unsigned group = it->parallelCopyGroup;
-            std::vector<Copy> pending;
-            while (it != instructions.end() &&
-                   it->parallelCopyGroup == group) {
-                if (it->opcode() != Opcode::COPY ||
-                    it->operands().size() != 2 ||
-                    !it->operands()[0].isPhysicalRegister() ||
-                    !it->operands()[1].isPhysicalRegister())
-                    throw std::logic_error(
-                        "malformed allocated parallel copy");
-                pending.push_back(Copy{
-                    it->operands()[0].physicalRegister(),
-                    it->operands()[1].physicalRegister(),
-                    it->operands()[0].regClass()});
-                it = instructions.erase(it);
-            }
-            auto insertion = it;
-
-            auto emitCopy = [&](const Copy &copy) {
-                if (copy.destination == copy.source)
-                    return;
-                MachineInstr instruction(Opcode::COPY);
-                instruction
-                    .addOperand(MachineOperand::physReg(
-                        copy.destination, copy.regClass, true))
-                    .addOperand(MachineOperand::physReg(
-                        copy.source, copy.regClass));
-                instructions.insert(insertion, std::move(instruction));
-            };
-
-            while (!pending.empty()) {
-                std::unordered_set<PhysReg> sources;
-                for (const Copy &copy : pending)
-                    sources.insert(copy.source);
-                auto ready = std::find_if(
-                    pending.begin(), pending.end(), [&](const Copy &copy) {
-                        return copy.destination == copy.source ||
-                               !sources.count(copy.destination);
-                    });
-                if (ready != pending.end()) {
-                    Copy copy = *ready;
-                    pending.erase(ready);
-                    emitCopy(copy);
-                    continue;
-                }
-
-                throw std::logic_error(
-                    "register allocation produced an unresolved "
-                    "physical parallel-copy cycle");
-            }
-            changed = true;
-        }
-    }
-    return changed;
 }
 
 } // namespace backend::aarch64

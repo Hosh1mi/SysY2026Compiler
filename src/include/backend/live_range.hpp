@@ -60,6 +60,7 @@ struct LiveInterval {
   VReg reg = 0;
   RegClass regClass = RegClass::Invalid;
   double weight = 0.0;
+  double spillCost = 0.0;
   bool crossesCall = false;
   std::vector<MachineSlotRange> segments;
   std::vector<LiveRangeOperand> operands;
