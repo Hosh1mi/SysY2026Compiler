@@ -1,4 +1,4 @@
-#include "../../include/backend/arm64/scheduler.hpp"
+#include "backend/scheduler.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -17,6 +17,10 @@ RegisterKey registerKey(const MachineOperand &operand) {
         return (1ULL << 63) |
                static_cast<unsigned>(operand.physicalRegister());
     return operand.virtualRegister();
+}
+
+RegisterKey registerKey(PhysReg reg) {
+    return (1ULL << 63) | static_cast<unsigned>(reg);
 }
 
 struct Node {
@@ -88,6 +92,10 @@ bool scheduleRegion(
             (operand.isDef ? nodes[i].defs : nodes[i].uses)
                 .insert(registerKey(operand));
         }
+        if (instruction.readsRegister(PhysReg::NZCV))
+            nodes[i].uses.insert(registerKey(PhysReg::NZCV));
+        if (instruction.definesRegister(PhysReg::NZCV))
+            nodes[i].defs.insert(registerKey(PhysReg::NZCV));
     }
 
     for (unsigned i = 0; i < nodes.size(); ++i) {

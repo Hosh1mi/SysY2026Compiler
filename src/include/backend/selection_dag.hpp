@@ -1,7 +1,7 @@
 #pragma once
 
 #include "machine_ir.hpp"
-#include "../../mid/ir/ir.hpp"
+#include "../mid/ir/ir.hpp"
 
 #include <cstdint>
 #include <memory>

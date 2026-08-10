@@ -1,11 +1,73 @@
 // This file computes MachineFunction dominance and natural-loop information
 // once in a reusable form instead of embedding subtly different algorithms in
 // individual transformations.
-#include "../../include/backend/arm64/machine_analysis.hpp"
+#include "backend/machine_analysis.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace backend::aarch64 {
+
+MachineOperand &MachineRegisterReference::operand() const {
+  return instruction->operands().at(operandIndex);
+}
+
+void MachineRegisterIndex::rebuild(MachineFunction &function) {
+  definitions_.clear();
+  uses_.clear();
+  for (const auto &owned : function.blocks()) {
+    MachineBasicBlock *block = owned.get();
+    for (MachineInstr &instruction : block->instructions()) {
+      for (unsigned index = 0; index < instruction.operands().size(); ++index) {
+        MachineOperand &operand = instruction.operands()[index];
+        if (!operand.isVirtualRegister())
+          continue;
+        MachineRegisterReference reference{block, &instruction, index};
+        (operand.isDef ? definitions_ : uses_)
+            [operand.virtualRegister()].push_back(reference);
+      }
+    }
+  }
+}
+
+const std::vector<MachineRegisterReference> &
+MachineRegisterIndex::definitions(VReg reg) const {
+  static const std::vector<MachineRegisterReference> empty;
+  auto found = definitions_.find(reg);
+  return found == definitions_.end() ? empty : found->second;
+}
+
+const std::vector<MachineRegisterReference> &
+MachineRegisterIndex::uses(VReg reg) const {
+  static const std::vector<MachineRegisterReference> empty;
+  auto found = uses_.find(reg);
+  return found == uses_.end() ? empty : found->second;
+}
+
+MachineInstr *MachineRegisterIndex::uniqueDefinition(VReg reg) const {
+  const auto &references = definitions(reg);
+  return references.size() == 1 ? references.front().instruction : nullptr;
+}
+
+MachineBasicBlock *
+MachineRegisterIndex::uniqueDefinitionBlock(VReg reg) const {
+  const auto &references = definitions(reg);
+  return references.size() == 1 ? references.front().block : nullptr;
+}
+
+unsigned MachineRegisterIndex::useCount(VReg reg) const {
+  return static_cast<unsigned>(uses(reg).size());
+}
+
+bool MachineRegisterIndex::allUsesHaveOpcode(VReg reg, Opcode opcode) const {
+  const auto &references = uses(reg);
+  if (references.empty())
+    return false;
+  return std::all_of(references.begin(), references.end(),
+                     [opcode](const MachineRegisterReference &reference) {
+                       return reference.instruction->opcode() == opcode;
+                     });
+}
 
 void MachineDominatorTree::analyze(const MachineFunction &function) {
   reachable_.clear();

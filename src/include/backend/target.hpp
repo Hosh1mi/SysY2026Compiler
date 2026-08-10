@@ -308,6 +308,10 @@ public:
     static bool isReserved(PhysReg reg);
     static bool isCallerSaved(PhysReg reg);
     static bool isCalleeSaved(PhysReg reg);
+    static bool isArgumentRegister(PhysReg reg);
+    static bool isReturnRegister(PhysReg reg);
+    static PhysReg integerArgumentRegister(unsigned index);
+    static PhysReg vectorArgumentRegister(unsigned index);
     static std::string_view name(PhysReg reg, RegClass view);
     static const std::vector<PhysReg> &allocationOrder(RegClass regClass);
     static const std::vector<PhysReg> &calleeSaved(RegClass regClass);
@@ -316,9 +320,10 @@ public:
 // 指令查询工具：描述表、立即数合法性、是否可交换；isel/peephole/调度等使用。
 class InstrInfo {
 public:
-    static const InstrDesc &get(Opcode opcode);
+    static InstrDesc get(Opcode opcode);
     static bool acceptsImmediate(Opcode opcode, std::int64_t immediate);
     static bool isCommutable(Opcode opcode);
+    static CondCode inverseCondition(CondCode condition);
 };
 
 } // namespace backend::aarch64

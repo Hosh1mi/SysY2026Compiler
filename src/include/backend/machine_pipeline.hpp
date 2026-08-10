@@ -3,8 +3,10 @@
 #pragma once
 
 #include "frame_lowering.hpp"
+#include "cfg_optimizations.hpp"
 #include "machine_pass_manager.hpp"
-#include "machine_passes.hpp"
+#include "post_ra_optimizations.hpp"
+#include "pre_ra_optimizations.hpp"
 #include "regalloc.hpp"
 #include "scheduler.hpp"
 

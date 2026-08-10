@@ -1,22 +1,9 @@
-#include "../../include/backend/arm64/target.hpp"
-
-#include <array>
-#include <stdexcept>
+// This file owns opcode semantics, immediate constraints, condition handling,
+// and scheduling metadata shared by all machine-code stages.
+#include "backend/target.hpp"
 
 namespace backend::aarch64 {
 namespace {
-
-constexpr unsigned regNumber(PhysReg reg) {
-    return static_cast<unsigned>(reg);
-}
-
-bool isX(PhysReg reg) {
-    return reg >= PhysReg::X0 && reg <= PhysReg::X30;
-}
-
-bool isV(PhysReg reg) {
-    return reg >= PhysReg::V0 && reg <= PhysReg::V31;
-}
 
 bool isLogicalImmediate32(std::uint32_t value) {
     if (value == 0 || value == UINT32_MAX)
@@ -61,7 +48,7 @@ const InstrDesc kInvalid{};
     InstrDesc{Opcode::OP, MNEMONIC, DEFS, OPS, false, false, false, false, \
               false, false, false, false, false, false, LATENCY, RESOURCE}
 
-const InstrDesc &descriptor(Opcode opcode) {
+InstrDesc descriptor(Opcode opcode) {
     switch (opcode) {
     case Opcode::PHI: {
         static const InstrDesc value{
@@ -158,12 +145,18 @@ const InstrDesc &descriptor(Opcode opcode) {
     case Opcode::CSELW:
     case Opcode::CSELX:
     case Opcode::FCSELS: {
-        static const InstrDesc w = DESC(CSELW, "csel", 1, 4, 1,
-                                        SchedResource::ALU);
-        static const InstrDesc x = DESC(CSELX, "csel", 1, 4, 1,
-                                        SchedResource::ALU);
-        static const InstrDesc s = DESC(FCSELS, "fcsel", 1, 4, 2,
-                                        SchedResource::FPALU);
+        static const InstrDesc w{
+            Opcode::CSELW, "csel", 1, 4, false, false, false, false,
+            false, false, false, false, false, true, 1,
+            SchedResource::ALU};
+        static const InstrDesc x{
+            Opcode::CSELX, "csel", 1, 4, false, false, false, false,
+            false, false, false, false, false, true, 1,
+            SchedResource::ALU};
+        static const InstrDesc s{
+            Opcode::FCSELS, "fcsel", 1, 4, false, false, false, false,
+            false, false, false, false, false, true, 2,
+            SchedResource::FPALU};
         return opcode == Opcode::CSELW ? w : opcode == Opcode::CSELX ? x : s;
     }
     case Opcode::CSETW: {
@@ -354,8 +347,7 @@ const InstrDesc &descriptor(Opcode opcode) {
     // Loads, stores, address arithmetic, and vector instructions share a
     // compact fallback descriptor construction.  They remain fully typed by
     // opcode; only common scheduling properties are grouped here.
-    static thread_local InstrDesc dynamic;
-    dynamic = {};
+    InstrDesc dynamic;
     dynamic.opcode = opcode;
     dynamic.latency = 1;
     dynamic.resource = SchedResource::ALU;
@@ -600,140 +592,7 @@ const InstrDesc &descriptor(Opcode opcode) {
 
 } // namespace
 
-RegClass RegisterInfo::classForType(ValueType type) {
-    switch (type) {
-    case ValueType::I1:
-    case ValueType::I32:
-        return RegClass::GPR32;
-    case ValueType::I64:
-    case ValueType::Ptr:
-        return RegClass::GPR64;
-    case ValueType::F32:
-        return RegClass::FPR32;
-    case ValueType::V4I32:
-    case ValueType::V4F32:
-        return RegClass::NEON128;
-    case ValueType::Flags:
-        return RegClass::CCR;
-    default:
-        return RegClass::Invalid;
-    }
-}
-
-bool RegisterInfo::isGPR(PhysReg reg) {
-    return isX(reg) || reg == PhysReg::SP || reg == PhysReg::XZR;
-}
-
-bool RegisterInfo::isVector(PhysReg reg) {
-    return isV(reg);
-}
-
-bool RegisterInfo::aliases(PhysReg lhs, PhysReg rhs) {
-    return lhs != PhysReg::NoReg && lhs == rhs;
-}
-
-bool RegisterInfo::isReserved(PhysReg reg) {
-    return reg == PhysReg::NoReg || reg == PhysReg::SP ||
-           reg == PhysReg::XZR || reg == PhysReg::X18 ||
-           reg == PhysReg::X29 || reg == PhysReg::X30 ||
-           reg == PhysReg::NZCV;
-}
-
-bool RegisterInfo::isCallerSaved(PhysReg reg) {
-    if (reg >= PhysReg::X0 && reg <= PhysReg::X17)
-        return reg != PhysReg::X18;
-    return reg >= PhysReg::V0 && reg <= PhysReg::V7 ||
-           reg >= PhysReg::V16 && reg <= PhysReg::V31;
-}
-
-bool RegisterInfo::isCalleeSaved(PhysReg reg) {
-    return reg >= PhysReg::X19 && reg <= PhysReg::X28 ||
-           reg >= PhysReg::V8 && reg <= PhysReg::V15;
-}
-
-std::string_view RegisterInfo::name(PhysReg reg, RegClass view) {
-    static const std::array<std::string_view, 31> xNames = {
-        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
-        "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
-        "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
-        "x24", "x25", "x26", "x27", "x28", "x29", "x30"};
-    static const std::array<std::string_view, 31> wNames = {
-        "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7",
-        "w8", "w9", "w10", "w11", "w12", "w13", "w14", "w15",
-        "w16", "w17", "w18", "w19", "w20", "w21", "w22", "w23",
-        "w24", "w25", "w26", "w27", "w28", "w29", "w30"};
-    static const std::array<std::string_view, 32> vNames = {
-        "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7",
-        "v8", "v9", "v10", "v11", "v12", "v13", "v14", "v15",
-        "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23",
-        "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"};
-    static const std::array<std::string_view, 32> sNames = {
-        "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-        "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
-        "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
-        "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31"};
-
-    if (isX(reg)) {
-        unsigned index = regNumber(reg) - regNumber(PhysReg::X0);
-        return view == RegClass::GPR32 ? wNames[index] : xNames[index];
-    }
-    if (isV(reg)) {
-        unsigned index = regNumber(reg) - regNumber(PhysReg::V0);
-        return view == RegClass::FPR32 ? sNames[index] : vNames[index];
-    }
-    if (reg == PhysReg::SP)
-        return view == RegClass::GPR32 ? "wsp" : "sp";
-    if (reg == PhysReg::XZR)
-        return view == RegClass::GPR32 ? "wzr" : "xzr";
-    if (reg == PhysReg::NZCV)
-        return "nzcv";
-    return "<noreg>";
-}
-
-const std::vector<PhysReg> &RegisterInfo::allocationOrder(RegClass regClass) {
-    static const std::vector<PhysReg> gprs = {
-        PhysReg::X9, PhysReg::X10, PhysReg::X11, PhysReg::X12,
-        PhysReg::X13, PhysReg::X14, PhysReg::X15,
-        PhysReg::X16, PhysReg::X17,
-        PhysReg::X19, PhysReg::X20, PhysReg::X21, PhysReg::X22,
-        PhysReg::X23, PhysReg::X24, PhysReg::X25, PhysReg::X26,
-        PhysReg::X27, PhysReg::X28,
-        PhysReg::X8, PhysReg::X7, PhysReg::X6, PhysReg::X5,
-        PhysReg::X4, PhysReg::X3, PhysReg::X2, PhysReg::X1, PhysReg::X0};
-    static const std::vector<PhysReg> vectors = {
-        PhysReg::V16, PhysReg::V17, PhysReg::V18, PhysReg::V19,
-        PhysReg::V20, PhysReg::V21, PhysReg::V22, PhysReg::V23,
-        PhysReg::V24, PhysReg::V25, PhysReg::V26, PhysReg::V27,
-        PhysReg::V28, PhysReg::V29, PhysReg::V30, PhysReg::V31,
-        PhysReg::V8, PhysReg::V9, PhysReg::V10, PhysReg::V11,
-        PhysReg::V12, PhysReg::V13, PhysReg::V14, PhysReg::V15,
-        PhysReg::V7, PhysReg::V6, PhysReg::V5, PhysReg::V4,
-        PhysReg::V3, PhysReg::V2, PhysReg::V1, PhysReg::V0};
-    static const std::vector<PhysReg> none;
-    if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
-        return gprs;
-    if (regClass == RegClass::FPR32 || regClass == RegClass::NEON128)
-        return vectors;
-    return none;
-}
-
-const std::vector<PhysReg> &RegisterInfo::calleeSaved(RegClass regClass) {
-    static const std::vector<PhysReg> gprs = {
-        PhysReg::X19, PhysReg::X20, PhysReg::X21, PhysReg::X22,
-        PhysReg::X23, PhysReg::X24, PhysReg::X25, PhysReg::X26,
-        PhysReg::X27, PhysReg::X28};
-    static const std::vector<PhysReg> vectors = {
-        PhysReg::V8, PhysReg::V9, PhysReg::V10, PhysReg::V11,
-        PhysReg::V12, PhysReg::V13, PhysReg::V14, PhysReg::V15};
-    static const std::vector<PhysReg> none;
-    if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
-        return gprs;
-    if (regClass == RegClass::FPR32 || regClass == RegClass::NEON128)
-        return vectors;
-    return none;
-}
-
-const InstrDesc &InstrInfo::get(Opcode opcode) {
+InstrDesc InstrInfo::get(Opcode opcode) {
     return descriptor(opcode);
 }
 
@@ -790,6 +649,27 @@ bool InstrInfo::isCommutable(Opcode opcode) {
     default:
         return false;
     }
+}
+
+CondCode InstrInfo::inverseCondition(CondCode condition) {
+    switch (condition) {
+    case CondCode::EQ: return CondCode::NE;
+    case CondCode::NE: return CondCode::EQ;
+    case CondCode::HS: return CondCode::LO;
+    case CondCode::LO: return CondCode::HS;
+    case CondCode::MI: return CondCode::PL;
+    case CondCode::PL: return CondCode::MI;
+    case CondCode::VS: return CondCode::VC;
+    case CondCode::VC: return CondCode::VS;
+    case CondCode::HI: return CondCode::LS;
+    case CondCode::LS: return CondCode::HI;
+    case CondCode::GE: return CondCode::LT;
+    case CondCode::LT: return CondCode::GE;
+    case CondCode::GT: return CondCode::LE;
+    case CondCode::LE: return CondCode::GT;
+    case CondCode::AL: return CondCode::AL;
+    }
+    return CondCode::AL;
 }
 
 } // namespace backend::aarch64

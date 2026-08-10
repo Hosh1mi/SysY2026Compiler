@@ -1,9 +1,9 @@
 // Assemble the staged AArch64 MachineFunction pipeline.
 // Pass selection follows optimization level only — there are no per-pass
 // disable switches; optional transforms are either in the O≥1 sequence or not.
-#include "../../include/backend/arm64/machine_pipeline.hpp"
+#include "backend/machine_pipeline.hpp"
 
-#include "../../include/backend/arm64/codegen.hpp"
+#include "backend/codegen.hpp"
 
 namespace backend::aarch64 {
 namespace {

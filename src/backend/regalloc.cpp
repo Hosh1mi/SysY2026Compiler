@@ -1,5 +1,5 @@
-#include "../../include/backend/arm64/regalloc.hpp"
-#include "../../include/backend/arm64/machine_analysis.hpp"
+#include "backend/regalloc.hpp"
+#include "backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -264,6 +264,7 @@ bool PhiElimination::run(MachineFunction &function) const {
                 throw std::logic_error("malformed Machine PHI");
             VReg destination = it->operands()[0].virtualRegister();
             RegClass regClass = it->operands()[0].regClass();
+            function.registerInfo().setDefinition(destination, nullptr);
             for (std::size_t i = 1; i + 1 < it->operands().size();
                  i += 2) {
                 if (!it->operands()[i].isVirtualRegister() ||
@@ -980,9 +981,9 @@ void GraphColoringRegisterAllocator::insertSpills(
     std::unordered_map<VReg, int> &spillSlots) const {
     std::unordered_set<VReg> spilled(spills.begin(), spills.end());
     std::unordered_map<VReg, MachineInstr *> rematerializations;
+    MachineRegisterIndex registers(function);
     for (VReg reg : spills) {
-        const VRegInfo &info = function.registerInfo().get(reg);
-        MachineInstr *definition = info.definition;
+        MachineInstr *definition = registers.uniqueDefinition(reg);
         if (!definition ||
             (definition->opcode() != Opcode::MOVi32 &&
              definition->opcode() != Opcode::MOVi64 &&

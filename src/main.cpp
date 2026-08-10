@@ -6,7 +6,7 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
-#include "include/backend/arm64/codegen.hpp"
+#include "backend/codegen.hpp"
 
 #include <algorithm>
 #include <cctype>

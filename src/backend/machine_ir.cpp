@@ -1,4 +1,4 @@
-#include "../../include/backend/arm64/machine_ir.hpp"
+#include "backend/machine_ir.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -100,6 +100,15 @@ bool MachineOperand::isRegister() const {
     return isVirtualRegister() || isPhysicalRegister();
 }
 
+bool MachineOperand::isSameRegisterAs(const MachineOperand &other) const {
+    if (isVirtualRegister() && other.isVirtualRegister())
+        return virtualRegister() == other.virtualRegister();
+    if (isPhysicalRegister() && other.isPhysicalRegister())
+        return RegisterInfo::aliases(physicalRegister(),
+                                     other.physicalRegister());
+    return false;
+}
+
 MachineInstr &MachineInstr::addOperand(MachineOperand operand) {
     operands_.push_back(std::move(operand));
     return *this;
@@ -136,6 +145,30 @@ bool MachineInstr::hasSideEffects() const {
 
 bool MachineInstr::isPseudo() const {
     return InstrInfo::get(opcode_).pseudo;
+}
+
+bool MachineInstr::readsRegister(PhysReg reg) const {
+    if (reg == PhysReg::NZCV && InstrInfo::get(opcode_).usesFlags)
+        return true;
+    for (const MachineOperand &operand : operands_)
+        if (operand.isPhysicalRegister() && !operand.isDef &&
+            RegisterInfo::aliases(operand.physicalRegister(), reg))
+            return true;
+    return false;
+}
+
+bool MachineInstr::definesRegister(PhysReg reg) const {
+    if (reg == PhysReg::NZCV && InstrInfo::get(opcode_).setsFlags)
+        return true;
+    for (const MachineOperand &operand : operands_) {
+        if (operand.isPhysicalRegister() && operand.isDef &&
+            RegisterInfo::aliases(operand.physicalRegister(), reg))
+            return true;
+        if (operand.kind() == MachineOperand::Kind::RegisterMask &&
+            !operand.registerMask().preserves(reg))
+            return true;
+    }
+    return false;
 }
 
 MachineInstr &MachineBasicBlock::append(MachineInstr instruction) {

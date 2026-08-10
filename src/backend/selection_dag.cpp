@@ -1,5 +1,5 @@
-#include "../../include/backend/arm64/selection_dag.hpp"
-#include "../../include/mid/ir/intrinsics.hpp"
+#include "backend/selection_dag.hpp"
+#include "mid/ir/intrinsics.hpp"
 
 #include <algorithm>
 #include <cstdlib>

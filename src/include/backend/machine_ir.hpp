@@ -57,6 +57,7 @@ public:
 
     Kind kind() const { return kind_; }
     bool isRegister() const;
+    bool isSameRegisterAs(const MachineOperand &other) const;
     bool isVirtualRegister() const { return kind_ == Kind::VirtualRegister; }
     bool isPhysicalRegister() const { return kind_ == Kind::PhysicalRegister; }
 
@@ -130,6 +131,8 @@ public:
     bool mayStore() const;
     bool hasSideEffects() const;
     bool isPseudo() const;
+    bool readsRegister(PhysReg reg) const;
+    bool definesRegister(PhysReg reg) const;
 
     unsigned debugLine = 0;
     unsigned slotIndex = 0;

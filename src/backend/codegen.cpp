@@ -1,10 +1,10 @@
-#include "../../include/backend/arm64/codegen.hpp"
+#include "backend/codegen.hpp"
 
-#include "../../include/backend/arm64/asm_printer.hpp"
-#include "../../include/backend/arm64/isel.hpp"
-#include "../../include/backend/arm64/machine_pipeline.hpp"
-#include "../../include/backend/arm64/parallelRuntime.hpp"
-#include "../../include/backend/arm64/verifier.hpp"
+#include "backend/asm_printer.hpp"
+#include "backend/isel.hpp"
+#include "backend/machine_pipeline.hpp"
+#include "backend/parallelRuntime.hpp"
+#include "backend/verifier.hpp"
 
 #include <algorithm>
 #include <cctype>

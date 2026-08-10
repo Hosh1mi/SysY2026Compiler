@@ -11,6 +11,38 @@
 
 namespace backend::aarch64 {
 
+struct MachineRegisterReference {
+  MachineBasicBlock *block = nullptr;
+  MachineInstr *instruction = nullptr;
+  unsigned operandIndex = 0;
+
+  MachineOperand &operand() const;
+};
+
+// A rebuildable snapshot of virtual-register definitions and uses.  It keeps
+// mutation cheap while giving passes one shared, non-dangling query surface.
+class MachineRegisterIndex {
+public:
+  MachineRegisterIndex() = default;
+  explicit MachineRegisterIndex(MachineFunction &function) {
+    rebuild(function);
+  }
+
+  void rebuild(MachineFunction &function);
+  const std::vector<MachineRegisterReference> &definitions(VReg reg) const;
+  const std::vector<MachineRegisterReference> &uses(VReg reg) const;
+  MachineInstr *uniqueDefinition(VReg reg) const;
+  MachineBasicBlock *uniqueDefinitionBlock(VReg reg) const;
+  unsigned useCount(VReg reg) const;
+  bool allUsesHaveOpcode(VReg reg, Opcode opcode) const;
+
+private:
+  using ReferenceMap =
+      std::unordered_map<VReg, std::vector<MachineRegisterReference>>;
+  ReferenceMap definitions_;
+  ReferenceMap uses_;
+};
+
 class MachineDominatorTree {
 public:
   void analyze(const MachineFunction &function);

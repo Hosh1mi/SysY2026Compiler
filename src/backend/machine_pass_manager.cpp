@@ -1,8 +1,8 @@
 // This file executes the staged MachineFunction pipeline and provides the
 // common diagnostics expected from a production code-generation pipeline.
-#include "../../include/backend/arm64/machine_pass_manager.hpp"
+#include "backend/machine_pass_manager.hpp"
 
-#include "../../include/backend/arm64/verifier.hpp"
+#include "backend/verifier.hpp"
 
 #include <chrono>
 #include <cstdlib>
