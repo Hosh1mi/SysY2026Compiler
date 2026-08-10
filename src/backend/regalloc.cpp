@@ -1,5 +1,6 @@
 #include "backend/regalloc.hpp"
 #include "backend/machine_analysis.hpp"
+#include "backend/rematerialization.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -60,135 +61,6 @@ unsigned spillAlignment(RegClass regClass) {
 }
 
 } // namespace
-
-LivenessResult MachineLiveness::run(MachineFunction &function) const {
-    MachineDominatorTree dominators;
-    dominators.analyze(function);
-    MachineLoopInfo loops;
-    loops.analyze(function, dominators);
-    using RegSet = std::set<VReg>;
-    std::unordered_map<MachineBasicBlock *, RegSet> uses;
-    std::unordered_map<MachineBasicBlock *, RegSet> defs;
-    std::unordered_map<MachineBasicBlock *, RegSet> liveIn;
-    std::unordered_map<MachineBasicBlock *, RegSet> liveOut;
-    std::unordered_map<MachineBasicBlock *, unsigned> blockStart;
-    std::unordered_map<MachineBasicBlock *, unsigned> blockEnd;
-    std::unordered_map<const MachineInstr *, unsigned> slots;
-
-    unsigned slot = 2;
-    for (auto &owned : function.blocks()) {
-        MachineBasicBlock *block = owned.get();
-        blockStart[block] = slot;
-        for (MachineInstr &instruction : block->instructions()) {
-            instruction.slotIndex = slot;
-            slots[&instruction] = slot;
-            for (const MachineOperand &operand : instruction.operands()) {
-                if (!operand.isVirtualRegister())
-                    continue;
-                VReg reg = operand.virtualRegister();
-                if (operand.isDef) {
-                    defs[block].insert(reg);
-                } else if (!defs[block].count(reg)) {
-                    uses[block].insert(reg);
-                }
-            }
-            slot += 2;
-        }
-        blockEnd[block] = std::max(blockStart[block] + 1, slot);
-        slot += 2;
-    }
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (auto blockIt = function.blocks().rbegin();
-             blockIt != function.blocks().rend(); ++blockIt) {
-            MachineBasicBlock *block = blockIt->get();
-            RegSet newOut;
-            for (MachineBasicBlock *successor : block->successors())
-                newOut.insert(liveIn[successor].begin(),
-                              liveIn[successor].end());
-            RegSet newIn = uses[block];
-            for (VReg reg : newOut)
-                if (!defs[block].count(reg))
-                    newIn.insert(reg);
-            if (newOut != liveOut[block] || newIn != liveIn[block]) {
-                liveOut[block] = std::move(newOut);
-                liveIn[block] = std::move(newIn);
-                changed = true;
-            }
-        }
-    }
-
-    std::unordered_set<VReg> liveAcrossCalls;
-    for (auto &owned : function.blocks()) {
-        RegSet live = liveOut[owned.get()];
-        for (auto it = owned->instructions().rbegin();
-             it != owned->instructions().rend(); ++it) {
-            if (it->isCall())
-                liveAcrossCalls.insert(live.begin(), live.end());
-            for (const MachineOperand &operand : it->operands())
-                if (operand.isVirtualRegister() &&
-                    operand.isDef)
-                    live.erase(operand.virtualRegister());
-            for (const MachineOperand &operand : it->operands())
-                if (operand.isVirtualRegister() &&
-                    !operand.isDef)
-                    live.insert(operand.virtualRegister());
-        }
-    }
-
-    struct MutableInterval {
-        unsigned start = std::numeric_limits<unsigned>::max();
-        unsigned end = 0;
-        double weight = 0.0;
-    };
-    std::unordered_map<VReg, MutableInterval> mutableIntervals;
-    for (auto &owned : function.blocks()) {
-        MachineBasicBlock *block = owned.get();
-        double blockWeight =
-            std::pow(10.0, std::min(block->loopDepth, 4U));
-        for (const MachineInstr &instruction : block->instructions()) {
-            unsigned instructionSlot = slots.at(&instruction);
-            for (const MachineOperand &operand : instruction.operands()) {
-                if (!operand.isVirtualRegister())
-                    continue;
-                auto &interval =
-                    mutableIntervals[operand.virtualRegister()];
-                interval.start = std::min(interval.start, instructionSlot);
-                interval.end =
-                    std::max(interval.end, instructionSlot + 1);
-                if (!operand.isDef)
-                    interval.weight += blockWeight;
-            }
-        }
-        for (VReg reg : liveIn[block]) {
-            auto &interval = mutableIntervals[reg];
-            interval.start = std::min(interval.start, blockStart[block]);
-        }
-        for (VReg reg : liveOut[block]) {
-            auto &interval = mutableIntervals[reg];
-            interval.end = std::max(interval.end, blockEnd[block]);
-        }
-    }
-
-    LivenessResult result;
-    result.intervals.reserve(mutableIntervals.size());
-    for (const auto &[reg, interval] : mutableIntervals) {
-        if (interval.start == std::numeric_limits<unsigned>::max())
-            continue;
-        result.intervals.push_back(LiveInterval{
-            reg, function.registerInfo().get(reg).regClass,
-            interval.start, std::max(interval.end, interval.start + 1),
-            std::max(1.0, interval.weight),
-            liveAcrossCalls.count(reg) != 0});
-    }
-
-    result.blockLiveOut = std::move(liveOut);
-
-    function.setProperty(MachineProperty::TracksLiveness);
-    return result;
-}
 
 bool PhiElimination::run(MachineFunction &function) const {
     if (!function.hasProperty(MachineProperty::HasPHIs))
@@ -988,26 +860,10 @@ void GraphColoringRegisterAllocator::insertSpills(
     MachineFunction &function, const std::vector<VReg> &spills,
     std::unordered_map<VReg, int> &spillSlots) const {
     std::unordered_set<VReg> spilled(spills.begin(), spills.end());
-    std::unordered_map<VReg, MachineInstr *> rematerializations;
     MachineRegisterIndex registers(function);
-    for (VReg reg : spills) {
-        MachineInstr *definition = registers.uniqueDefinition(reg);
-        if (!definition ||
-            (definition->opcode() != Opcode::MOVi32 &&
-             definition->opcode() != Opcode::MOVi64 &&
-             definition->opcode() != Opcode::MOVIv4Zero) ||
-            definition->operands().empty() ||
-            !definition->operands()[0].isVirtualRegister() ||
-            definition->operands()[0].virtualRegister() != reg)
-            continue;
-        bool hasVirtualUse = false;
-        for (const MachineOperand &operand :
-             definition->operands())
-            hasVirtualUse |=
-                operand.isVirtualRegister() && !operand.isDef;
-        if (!hasVirtualUse)
-            rematerializations.emplace(reg, definition);
-    }
+    RematerializationAnalysis rematerializationAnalysis;
+    RematerializationAnalysis::RecipeMap rematerializations =
+        rematerializationAnalysis.analyze(function, registers, spills);
 
     for (VReg reg : spills) {
         if (rematerializations.count(reg))
@@ -1057,10 +913,7 @@ void GraphColoringRegisterAllocator::insertSpills(
                 if (rematerialization !=
                     rematerializations.end()) {
                     MachineInstr materialized =
-                        *rematerialization->second;
-                    materialized.operands()[0] =
-                        MachineOperand::vreg(
-                            temporary, regClass, true);
+                        rematerialization->second.clone(temporary);
                     auto inserted = instructions.insert(
                         it, std::move(materialized));
                     function.registerInfo().setDefinition(
@@ -1118,9 +971,9 @@ void GraphColoringRegisterAllocator::insertSpills(
     // long-lived definition is dead and must not consume a color in the next
     // allocation round.
     std::unordered_set<MachineInstr *> deadDefinitions;
-    for (const auto &[reg, definition] : rematerializations) {
+    for (const auto &[reg, recipe] : rematerializations) {
         (void)reg;
-        deadDefinitions.insert(definition);
+        deadDefinitions.insert(recipe.definition);
     }
     for (auto &owned : function.blocks()) {
         auto &instructions = owned->instructions();

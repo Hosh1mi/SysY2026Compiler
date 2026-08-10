@@ -324,6 +324,9 @@ public:
     static InstrDesc get(Opcode opcode);
     static bool acceptsImmediate(Opcode opcode, std::int64_t immediate);
     static bool isCommutable(Opcode opcode);
+    // Zero means that cloning this opcode at a use is not legal.  A positive
+    // result estimates its target cost relative to a spill reload.
+    static unsigned rematerializationCost(Opcode opcode);
     static CondCode inverseCondition(CondCode condition);
 };
 

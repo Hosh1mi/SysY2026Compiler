@@ -9,6 +9,7 @@
 #include "pre_ra_optimizations.hpp"
 #include "regalloc.hpp"
 #include "scheduler.hpp"
+#include "spill_optimization.hpp"
 
 namespace backend::aarch64 {
 
@@ -26,6 +27,7 @@ struct MachinePipelineServices {
   UnreachableMachineBlockElimination unreachableBlockElimination;
   A53MachineScheduler scheduler;
   GraphColoringRegisterAllocator registerAllocator;
+  PostRASpillSlotOptimizer spillSlotOptimizer;
   PostRAParallelCopyResolver parallelCopyResolver;
   PostRAInstructionExpansion instructionExpansion;
   PostRACopyPropagation copyPropagation;

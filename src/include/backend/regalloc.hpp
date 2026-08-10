@@ -1,35 +1,11 @@
 #pragma once
 
-#include "machine_ir.hpp"
+#include "live_range.hpp"
 
-#include <set>
 #include <unordered_map>
 #include <vector>
 
 namespace backend::aarch64 {
-
-struct LiveInterval {
-    VReg reg = 0;
-    RegClass regClass = RegClass::Invalid;
-    unsigned start = 0;
-    unsigned end = 0;
-    double weight = 0.0;
-    bool crossesCall = false;
-
-    bool overlaps(const LiveInterval &other) const {
-        return start < other.end && other.start < end;
-    }
-};
-
-struct LivenessResult {
-    std::vector<LiveInterval> intervals;
-    std::unordered_map<MachineBasicBlock *, std::set<VReg>> blockLiveOut;
-};
-
-class MachineLiveness {
-public:
-    LivenessResult run(MachineFunction &function) const;
-};
 
 class PhiElimination {
 public:

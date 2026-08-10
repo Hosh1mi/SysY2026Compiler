@@ -560,7 +560,6 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     .addOperand(
                         MachineOperand::immediate(node.integer));
                 selection.emit(block, std::move(materialize), &node);
-                registerInfo.get(results.at(&node)).rematerializable = true;
                 break;
             }
             case SDOpcode::FPConstant: {
@@ -602,7 +601,6 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     .addOperand(MachineOperand::vreg(page, RegClass::GPR64))
                     .addOperand(MachineOperand::global(node.symbol));
                 selection.emit(block, std::move(add), &node);
-                registerInfo.get(results.at(&node)).rematerializable = true;
                 break;
             }
             case SDOpcode::FrameIndex: {

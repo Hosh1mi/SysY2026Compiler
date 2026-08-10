@@ -202,7 +202,7 @@ VReg MachineRegisterInfo::createVirtualRegister(RegClass regClass,
                                                 ValueType valueType) {
     VReg reg = nextVirtualRegister_++;
     virtualRegisters_.emplace(
-        reg, VRegInfo{regClass, valueType, nullptr, false, false});
+        reg, VRegInfo{regClass, valueType, nullptr, false});
     return reg;
 }
 

@@ -183,7 +183,6 @@ struct VRegInfo {
     RegClass regClass = RegClass::Invalid;
     ValueType valueType = ValueType::Invalid;
     MachineInstr *definition = nullptr;
-    bool rematerializable = false;
     bool spillTemporary = false;
 };
 

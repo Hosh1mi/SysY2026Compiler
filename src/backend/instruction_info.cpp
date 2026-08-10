@@ -651,6 +651,25 @@ bool InstrInfo::isCommutable(Opcode opcode) {
     }
 }
 
+unsigned InstrInfo::rematerializationCost(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::MOVi32:
+    case Opcode::MOVi64:
+    case Opcode::ADRP:
+    case Opcode::LEA_FRAME:
+        return 1;
+    case Opcode::MOVIv4Zero:
+    case Opcode::MOVIv4s:
+    case Opcode::MOVIv4sMsl:
+    case Opcode::MVNIv4s:
+    case Opcode::MOVIv16b:
+    case Opcode::FMOVv4s:
+        return 2;
+    default:
+        return 0;
+    }
+}
+
 CondCode InstrInfo::inverseCondition(CondCode condition) {
     switch (condition) {
     case CondCode::EQ: return CondCode::NE;

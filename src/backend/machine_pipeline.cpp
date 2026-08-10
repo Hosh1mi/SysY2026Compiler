@@ -138,6 +138,13 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
             return services.redundantCopyElimination.run(function);
           });
   if (optimize)
+    addPass(pipeline, "PostRASpillSlotOptimizer",
+            MachinePassStage::PostRegAlloc, allocated,
+            MachineProperty::FrameFinalized,
+            [&services](MachineFunction &function) {
+              return services.spillSlotOptimizer.run(function);
+            });
+  if (optimize)
     addPass(pipeline, "PostRACopyPropagation", MachinePassStage::PostRegAlloc,
             allocated, MachineProperty::FrameFinalized,
             [&services](MachineFunction &function) {
