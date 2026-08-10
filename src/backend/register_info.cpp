@@ -129,8 +129,18 @@ std::string_view RegisterInfo::name(PhysReg reg, RegClass view) {
     return "<noreg>";
 }
 
-const std::vector<PhysReg> &RegisterInfo::allocationOrder(RegClass regClass) {
-    static const std::vector<PhysReg> gprs = {
+const std::vector<PhysReg> &RegisterInfo::allocationOrder(
+    RegClass regClass, bool preferCallerSaved) {
+    static const std::vector<PhysReg> volatileFirstGprs = {
+        PhysReg::X9, PhysReg::X10, PhysReg::X11, PhysReg::X12,
+        PhysReg::X13, PhysReg::X14, PhysReg::X15,
+        PhysReg::X16, PhysReg::X17,
+        PhysReg::X8, PhysReg::X7, PhysReg::X6, PhysReg::X5,
+        PhysReg::X4, PhysReg::X3, PhysReg::X2, PhysReg::X1, PhysReg::X0,
+        PhysReg::X19, PhysReg::X20, PhysReg::X21, PhysReg::X22,
+        PhysReg::X23, PhysReg::X24, PhysReg::X25, PhysReg::X26,
+        PhysReg::X27, PhysReg::X28};
+    static const std::vector<PhysReg> preservedFirstGprs = {
         PhysReg::X9, PhysReg::X10, PhysReg::X11, PhysReg::X12,
         PhysReg::X13, PhysReg::X14, PhysReg::X15,
         PhysReg::X16, PhysReg::X17,
@@ -139,7 +149,16 @@ const std::vector<PhysReg> &RegisterInfo::allocationOrder(RegClass regClass) {
         PhysReg::X27, PhysReg::X28,
         PhysReg::X8, PhysReg::X7, PhysReg::X6, PhysReg::X5,
         PhysReg::X4, PhysReg::X3, PhysReg::X2, PhysReg::X1, PhysReg::X0};
-    static const std::vector<PhysReg> vectors = {
+    static const std::vector<PhysReg> volatileFirstVectors = {
+        PhysReg::V16, PhysReg::V17, PhysReg::V18, PhysReg::V19,
+        PhysReg::V20, PhysReg::V21, PhysReg::V22, PhysReg::V23,
+        PhysReg::V24, PhysReg::V25, PhysReg::V26, PhysReg::V27,
+        PhysReg::V28, PhysReg::V29, PhysReg::V30, PhysReg::V31,
+        PhysReg::V7, PhysReg::V6, PhysReg::V5, PhysReg::V4,
+        PhysReg::V3, PhysReg::V2, PhysReg::V1, PhysReg::V0,
+        PhysReg::V8, PhysReg::V9, PhysReg::V10, PhysReg::V11,
+        PhysReg::V12, PhysReg::V13, PhysReg::V14, PhysReg::V15};
+    static const std::vector<PhysReg> preservedFirstVectors = {
         PhysReg::V16, PhysReg::V17, PhysReg::V18, PhysReg::V19,
         PhysReg::V20, PhysReg::V21, PhysReg::V22, PhysReg::V23,
         PhysReg::V24, PhysReg::V25, PhysReg::V26, PhysReg::V27,
@@ -150,9 +169,10 @@ const std::vector<PhysReg> &RegisterInfo::allocationOrder(RegClass regClass) {
         PhysReg::V3, PhysReg::V2, PhysReg::V1, PhysReg::V0};
     static const std::vector<PhysReg> none;
     if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
-        return gprs;
+        return preferCallerSaved ? volatileFirstGprs : preservedFirstGprs;
     if (regClass == RegClass::FPR32 || regClass == RegClass::NEON128)
-        return vectors;
+        return preferCallerSaved ? volatileFirstVectors
+                                 : preservedFirstVectors;
     return none;
 }
 

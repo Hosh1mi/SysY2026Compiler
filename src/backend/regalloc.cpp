@@ -473,9 +473,10 @@ bool GraphColoringRegisterAllocator::colorOnce(
             for (std::size_t i = 0; i < defs.size(); ++i)
                 for (std::size_t j = i + 1; j < defs.size(); ++j)
                     addEdge(defs[i], defs[j]);
-            for (std::size_t i = 0; i < uses.size(); ++i)
-                for (std::size_t j = i + 1; j < uses.size(); ++j)
-                    addEdge(uses[i], uses[j]);
+            // Read-only operands may legally share a physical register for
+            // ordinary AArch64 instructions.  Distinctness is represented by
+            // tied, early-clobber, and def/live constraints below rather than
+            // by conservatively connecting every pair of uses.
 
             // Tied operands (e.g. fmla/fmls accumulate into vd in place):
             // the tied use must share the destination register, while the
@@ -679,6 +680,11 @@ bool GraphColoringRegisterAllocator::colorOnce(
     }
 
     auto colorBank = [&](bool vectorBank) {
+        // Callee-saved registers have no preservation benefit in a leaf and
+        // would only create prologue/epilogue traffic.  Functions containing
+        // calls retain the preserved-first order so copy affinities spanning
+        // call boundaries are not disrupted merely to avoid a frame save.
+        const bool preferCallerSaved = !function.frameInfo().hasCalls;
         std::vector<VReg> nodes;
         for (const auto &[reg, interval] : intervalFor) {
             bool isVector = interval.regClass == RegClass::FPR32 ||
@@ -699,7 +705,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
             const LiveInterval &interval = intervalFor.at(reg);
             unsigned availableColors = 0;
             for (PhysReg physical :
-                 RegisterInfo::allocationOrder(interval.regClass)) {
+                 RegisterInfo::allocationOrder(interval.regClass,
+                                               preferCallerSaved)) {
                 if (RegisterInfo::isReserved(physical) ||
                     forbiddenColors[reg].count(physical))
                     continue;
@@ -869,7 +876,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
             }
             if (selected == PhysReg::NoReg) {
                 for (PhysReg candidate :
-                     RegisterInfo::allocationOrder(interval.regClass))
+                     RegisterInfo::allocationOrder(interval.regClass,
+                                                   preferCallerSaved))
                     if (jointlyAllowed(candidate)) {
                         selected = candidate;
                         break;
