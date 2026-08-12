@@ -38,6 +38,7 @@ enum class SemFlag : uint32_t {
         // BasicBlock：wavefront 调度已证明该循环维度内不存在跨迭代依赖
 };
 
+// 合并两个独立语义位，允许一次向 Value::setSemFlag 传入多个标记。
 inline SemFlag operator|(SemFlag a, SemFlag b) {
     return static_cast<SemFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
