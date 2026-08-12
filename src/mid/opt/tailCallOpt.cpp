@@ -1,4 +1,5 @@
 #include "../../include/mid/opt/tailCallOpt.hpp"
+#include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <vector>
@@ -164,5 +165,6 @@ bool TailCallOpt::runOnFunction(Function *func) {
             canonicalizePattern2(site.call, site.bb, site.retBB);
         site.call->set_tail(true);
     }
+    removeUnreachableBlocks(func);
     return true;
 }
