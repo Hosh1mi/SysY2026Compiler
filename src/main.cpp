@@ -1,4 +1,5 @@
 #include "include/frontend/ast/ast.hpp"
+#include "include/frontend/ast/astPrinter.hpp"
 #include "include/frontend/parser.hpp"
 #include "include/frontend/validation.hpp"
 
@@ -28,6 +29,7 @@ struct DriverOptions {
     std::string output = "-";
     int optLevel = 0;
     bool dumpIR = false;
+    bool dumpAST = false;
     bool verifyIR = false;
     bool dumpMachineInstr = false;
     bool dumpPreMachineInstr = false;
@@ -74,6 +76,8 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
                 return false;
         } else if (arg == "--dump-ir") {
             options.dumpIR = true;
+        } else if (arg == "--dump-ast") {
+            options.dumpAST = true;
         } else if (arg == "--verify-ir") {
             options.verifyIR = true;
         } else if (arg == "--dump-machine-instr") {
@@ -238,7 +242,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
 
 } // namespace
 
-extern unique_ptr<CompUnitAST> root;
+extern std::unique_ptr<CompUnitAST> root;
 extern int yyparse();
 extern FILE *yyin;
 extern void initFileName(const char *name);
@@ -264,6 +268,9 @@ int main(int argc, char **argv) {
         std::cerr << "Parse failed.\n";
         return -1;
     }
+
+    if (options.dumpAST)
+        dumpAST(*root, std::cerr);
 
     std::string frontendError;
     if (!validateFrontend(*root, frontendError)) {

@@ -67,7 +67,7 @@
 
 
 /* First part of user prologue.  */
-#line 10 "/workspace/src/frontend/parser.y"
+#line 25 "/workspace/src/frontend/parser.y"
 
     #include <cstdio>
     #include <cstdlib>
@@ -729,20 +729,20 @@ static const yytype_int8 yytranslate[] =
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
 static const yytype_int16 yyrline[] =
 {
-       0,   271,   271,   277,   281,   288,   292,   299,   307,   318,
-     321,   330,   340,   349,   358,   367,   376,   380,   384,   395,
-     403,   406,   412,   415,   425,   431,   435,   441,   445,   454,
-     461,   469,   476,   482,   488,   495,   499,   510,   513,   524,
-     527,   532,   538,   541,   546,   553,   556,   564,   568,   575,
-     584,   595,   598,   604,   608,   615,   622,   629,   641,   645,
-     652,   656,   663,   667,   673,   678,   682,   686,   691,   696,
-     701,   709,   714,   723,   731,   735,   741,   750,   753,   757,
-     763,   771,   775,   781,   787,   795,   801,   807,   813,   817,
-     824,   833,   841,   847,   851,   860,   864,   868,   872,   879,
-     884,   894,   898,   902,   909,   918,   926,   931,   941,   944,
-     947,   953,   957,   963,   967,   981,   985,   991,   997,  1006,
-    1010,  1016,  1025,  1029,  1035,  1041,  1047,  1056,  1060,  1066,
-    1075,  1079,  1087,  1091
+       0,   262,   262,   268,   273,   281,   282,   286,   290,   297,
+     300,   309,   319,   328,   337,   346,   355,   359,   363,   374,
+     382,   385,   391,   394,   404,   410,   414,   420,   424,   433,
+     438,   447,   452,   459,   463,   470,   474,   485,   488,   499,
+     502,   506,   511,   514,   518,   524,   527,   534,   538,   545,
+     550,   557,   560,   566,   570,   577,   581,   585,   593,   598,
+     606,   609,   616,   619,   623,   626,   629,   632,   635,   636,
+     637,   641,   645,   653,   660,   663,   669,   678,   681,   682,
+     687,   694,   695,   700,   705,   712,   713,   714,   715,   716,
+     720,   724,   730,   736,   740,   749,   750,   751,   752,   758,
+     761,   769,   770,   771,   775,   779,   785,   789,   798,   801,
+     804,   810,   815,   822,   825,   838,   839,   844,   849,   857,
+     858,   863,   871,   872,   877,   882,   887,   895,   896,   901,
+     909,   910,   918,   919
 };
 #endif
 
@@ -1593,290 +1593,290 @@ yydestruct (const char *yymsg,
   switch (yykind)
     {
     case YYSYMBOL_ID: /* ID  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).token); }
 #line 1599 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_STRING_LITERAL: /* STRING_LITERAL  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).token); }
 #line 1605 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_CompUnit: /* CompUnit  */
-#line 255 "/workspace/src/frontend/parser.y"
+#line 248 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).compUnit); }
 #line 1611 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_DeclDef: /* DeclDef  */
-#line 255 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).declDef); }
+#line 248 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).topLevel); }
 #line 1617 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Decl: /* Decl  */
-#line 255 "/workspace/src/frontend/parser.y"
+#line 248 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).decl); }
 #line 1623 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_BType: /* BType  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).type_spec); }
 #line 1629 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_VecType: /* VecType  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).type_spec); }
 #line 1635 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_VecWidth: /* VecWidth  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).type_spec); }
 #line 1641 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_VoidType: /* VoidType  */
-#line 262 "/workspace/src/frontend/parser.y"
+#line 253 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).type_spec); }
 #line 1647 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_ConstDefList: /* ConstDefList  */
-#line 255 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).defList); }
+#line 248 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).objectDefList); }
 #line 1653 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_VarDefList: /* VarDefList  */
-#line 255 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).defList); }
+#line 248 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).objectDefList); }
 #line 1659 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_ConstDef: /* ConstDef  */
-#line 255 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).def); }
+#line 249 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).objectDef); }
 #line 1665 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_VarDef: /* VarDef  */
-#line 255 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).def); }
+#line 249 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).objectDef); }
 #line 1671 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Arrays: /* Arrays  */
-#line 256 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).arrays); }
+#line 249 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).exprList); }
 #line 1677 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Block: /* Block  */
-#line 257 "/workspace/src/frontend/parser.y"
+#line 250 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).block); }
 #line 1683 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_InitVal: /* InitVal  */
-#line 256 "/workspace/src/frontend/parser.y"
+#line 249 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).initVal); }
 #line 1689 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_ConstInitVal: /* ConstInitVal  */
-#line 256 "/workspace/src/frontend/parser.y"
+#line 249 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).initVal); }
 #line 1695 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_BraceInitVal: /* BraceInitVal  */
-#line 256 "/workspace/src/frontend/parser.y"
+#line 249 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).initVal); }
 #line 1701 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_InitValList: /* InitValList  */
-#line 256 "/workspace/src/frontend/parser.y"
+#line 249 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).initValList); }
 #line 1707 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_FuncDef: /* FuncDef  */
-#line 256 "/workspace/src/frontend/parser.y"
+#line 250 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).funcDef); }
 #line 1713 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_OptFuncFParamList: /* OptFuncFParamList  */
-#line 257 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).FuncFParamList); }
+#line 250 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).funcParamList); }
 #line 1719 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_FuncFParamList: /* FuncFParamList  */
-#line 257 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).FuncFParamList); }
+#line 250 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).funcParamList); }
 #line 1725 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_FuncFParam: /* FuncFParam  */
-#line 257 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).funcFParam); }
+#line 250 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).funcParam); }
 #line 1731 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_BlockItemList: /* BlockItemList  */
-#line 258 "/workspace/src/frontend/parser.y"
+#line 251 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).blockItemList); }
 #line 1737 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_BlockItem: /* BlockItem  */
-#line 258 "/workspace/src/frontend/parser.y"
+#line 251 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).blockItem); }
 #line 1743 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Stmt: /* Stmt  */
-#line 258 "/workspace/src/frontend/parser.y"
+#line 251 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).stmt); }
 #line 1749 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_SelectStmt: /* SelectStmt  */
-#line 259 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).selectStmt); }
+#line 251 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).stmt); }
 #line 1755 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_IterationStmt: /* IterationStmt  */
-#line 259 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).iterationStmt); }
+#line 251 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).stmt); }
 #line 1761 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_ReturnStmt: /* ReturnStmt  */
-#line 258 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).returnStmt); }
+#line 251 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).stmt); }
 #line 1767 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Exp: /* Exp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).addExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1773 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_NonBraceExp: /* NonBraceExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).addExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1779 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_NonBraceAddExp: /* NonBraceAddExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).addExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1785 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_NonBraceMulExp: /* NonBraceMulExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).mulExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1791 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_NonBraceUnaryExp: /* NonBraceUnaryExp  */
-#line 260 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).unaryExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1797 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Cond: /* Cond  */
-#line 262 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).lOrExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1803 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_LVal: /* LVal  */
-#line 259 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).lVal); }
+#line 251 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).lValue); }
 #line 1809 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_PrimaryExp: /* PrimaryExp  */
-#line 259 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).primaryExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1815 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Number: /* Number  */
-#line 260 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).number); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1821 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_UnaryExp: /* UnaryExp  */
-#line 260 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).unaryExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1827 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_Call: /* Call  */
-#line 260 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).call); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).callExpr); }
 #line 1833 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_FuncCParamList: /* FuncCParamList  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).funcCParamList); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).callArgList); }
 #line 1839 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_FuncCParam: /* FuncCParam  */
-#line 260 "/workspace/src/frontend/parser.y"
+#line 252 "/workspace/src/frontend/parser.y"
             { delete ((*yyvaluep).callArg); }
 #line 1845 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_MulExp: /* MulExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).mulExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1851 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_AddExp: /* AddExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).addExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1857 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_RelExp: /* RelExp  */
-#line 261 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).relExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1863 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_EqExp: /* EqExp  */
-#line 262 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).eqExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1869 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_LAndExp: /* LAndExp  */
-#line 262 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).lAndExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1875 "/workspace/src/frontend/parser.cpp"
         break;
 
     case YYSYMBOL_LOrExp: /* LOrExp  */
-#line 262 "/workspace/src/frontend/parser.y"
-            { delete ((*yyvaluep).lOrExp); }
+#line 252 "/workspace/src/frontend/parser.y"
+            { delete ((*yyvaluep).expr); }
 #line 1881 "/workspace/src/frontend/parser.cpp"
         break;
 
@@ -2173,7 +2173,7 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* Program: CompUnit  */
-#line 271 "/workspace/src/frontend/parser.y"
+#line 262 "/workspace/src/frontend/parser.y"
              {
         root = unique_ptr<CompUnitAST>((yyvsp[0].compUnit));
     }
@@ -2181,85 +2181,73 @@ yyreduce:
     break;
 
   case 3: /* CompUnit: CompUnit DeclDef  */
-#line 277 "/workspace/src/frontend/parser.y"
+#line 268 "/workspace/src/frontend/parser.y"
                      {
         (yyval.compUnit) = (yyvsp[-1].compUnit);
-        (yyval.compUnit)->declDefList.push_back(unique_ptr<DeclDefAST>((yyvsp[0].declDef)));
+        (yyval.compUnit)->items.push_back(std::move(*(yyvsp[0].topLevel)));
+        delete (yyvsp[0].topLevel);
     }
-#line 2190 "/workspace/src/frontend/parser.cpp"
+#line 2191 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 4: /* CompUnit: DeclDef  */
-#line 281 "/workspace/src/frontend/parser.y"
+#line 273 "/workspace/src/frontend/parser.y"
             {
         (yyval.compUnit) = make_node<CompUnitAST>();
-        (yyval.compUnit)->declDefList.push_back(unique_ptr<DeclDefAST>((yyvsp[0].declDef)));
+        (yyval.compUnit)->items.push_back(std::move(*(yyvsp[0].topLevel)));
+        delete (yyvsp[0].topLevel);
     }
-#line 2199 "/workspace/src/frontend/parser.cpp"
+#line 2201 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 5: /* DeclDef: Decl  */
-#line 288 "/workspace/src/frontend/parser.y"
-         {
-        (yyval.declDef) = make_node<DeclDefAST>();
-        (yyval.declDef)->Decl = unique_ptr<DeclAST>((yyvsp[0].decl));
-    }
-#line 2208 "/workspace/src/frontend/parser.cpp"
+#line 281 "/workspace/src/frontend/parser.y"
+         { (yyval.topLevel) = make_node<TopLevelItem>(unique_ptr<DeclAST>((yyvsp[0].decl))); }
+#line 2207 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 6: /* DeclDef: FuncDef  */
-#line 292 "/workspace/src/frontend/parser.y"
-            {
-        (yyval.declDef) = make_node<DeclDefAST>();
-        (yyval.declDef)->funcDef = unique_ptr<FuncDefAST>((yyvsp[0].funcDef));
-    }
-#line 2217 "/workspace/src/frontend/parser.cpp"
+#line 282 "/workspace/src/frontend/parser.y"
+            { (yyval.topLevel) = make_node<TopLevelItem>(unique_ptr<FuncDefAST>((yyvsp[0].funcDef))); }
+#line 2213 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 7: /* Decl: CONST BType ConstDefList SEMICOLON  */
-#line 299 "/workspace/src/frontend/parser.y"
+#line 286 "/workspace/src/frontend/parser.y"
                                        {
-        (yyval.decl) = make_node<DeclAST>();
-        (yyval.decl)->isConst = true;
-        (yyval.decl)->bType = *(yyvsp[-2].type_spec);
-        delete (yyvsp[-2].type_spec);
-        (yyval.decl)->defList.swap((yyvsp[-1].defList)->list);
-        delete (yyvsp[-1].defList);
+        (yyval.decl) = make_node<DeclAST>(*(yyvsp[-2].type_spec), true, std::move((yyvsp[-1].objectDefList)->values));
+        delete (yyvsp[-2].type_spec); delete (yyvsp[-1].objectDefList);
     }
-#line 2230 "/workspace/src/frontend/parser.cpp"
+#line 2222 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 8: /* Decl: BType VarDefList SEMICOLON  */
-#line 307 "/workspace/src/frontend/parser.y"
+#line 290 "/workspace/src/frontend/parser.y"
                                {
-        (yyval.decl) = make_node<DeclAST>();
-        (yyval.decl)->isConst = false;
-        (yyval.decl)->bType = *(yyvsp[-2].type_spec);
-        delete (yyvsp[-2].type_spec);
-        (yyval.decl)->defList.swap((yyvsp[-1].defList)->list);
-        delete (yyvsp[-1].defList);
+        (yyval.decl) = make_node<DeclAST>(*(yyvsp[-2].type_spec), false, std::move((yyvsp[-1].objectDefList)->values));
+        delete (yyvsp[-2].type_spec); delete (yyvsp[-1].objectDefList);
     }
-#line 2243 "/workspace/src/frontend/parser.cpp"
+#line 2231 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 9: /* BType: BASICTYPE  */
-#line 318 "/workspace/src/frontend/parser.y"
+#line 297 "/workspace/src/frontend/parser.y"
               {
         (yyval.type_spec) = new TypeSpec(static_cast<TYPE>((yyvsp[0].int_val)));
     }
-#line 2251 "/workspace/src/frontend/parser.cpp"
+#line 2239 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 10: /* BType: VecType  */
-#line 321 "/workspace/src/frontend/parser.y"
+#line 300 "/workspace/src/frontend/parser.y"
             {
         (yyval.type_spec) = (yyvsp[0].type_spec);
     }
-#line 2259 "/workspace/src/frontend/parser.cpp"
+#line 2247 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 11: /* VecType: ID  */
-#line 330 "/workspace/src/frontend/parser.y"
+#line 309 "/workspace/src/frontend/parser.y"
        {
         auto type = simpleVectorType(*(yyvsp[0].token));
         if (!type) {
@@ -2270,11 +2258,11 @@ yyreduce:
         (yyval.type_spec) = new TypeSpec(*type);
         delete (yyvsp[0].token);
     }
-#line 2274 "/workspace/src/frontend/parser.cpp"
+#line 2262 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 12: /* VecType: ID LT BASICTYPE COMMA VecWidth GT  */
-#line 340 "/workspace/src/frontend/parser.y"
+#line 319 "/workspace/src/frontend/parser.y"
                                       {
         if (!isVectorConstructor(*(yyvsp[-5].token))) {
             yyerror(("unknown vector constructor '" + *(yyvsp[-5].token) + "'").c_str());
@@ -2284,11 +2272,11 @@ yyreduce:
         (yyval.type_spec) = (yyvsp[-1].type_spec);
         delete (yyvsp[-5].token);
     }
-#line 2288 "/workspace/src/frontend/parser.cpp"
+#line 2276 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 13: /* VecType: ID LT VecWidth COMMA BASICTYPE GT  */
-#line 349 "/workspace/src/frontend/parser.y"
+#line 328 "/workspace/src/frontend/parser.y"
                                       {
         if (!isVectorConstructor(*(yyvsp[-5].token))) {
             yyerror(("unknown vector constructor '" + *(yyvsp[-5].token) + "'").c_str());
@@ -2298,11 +2286,11 @@ yyreduce:
         (yyval.type_spec) = (yyvsp[-3].type_spec);
         delete (yyvsp[-5].token);
     }
-#line 2302 "/workspace/src/frontend/parser.cpp"
+#line 2290 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 14: /* VecType: ID LP BASICTYPE COMMA VecWidth RP  */
-#line 358 "/workspace/src/frontend/parser.y"
+#line 337 "/workspace/src/frontend/parser.y"
                                       {
         if (!isVectorConstructor(*(yyvsp[-5].token))) {
             yyerror(("unknown vector constructor '" + *(yyvsp[-5].token) + "'").c_str());
@@ -2312,11 +2300,11 @@ yyreduce:
         (yyval.type_spec) = (yyvsp[-1].type_spec);
         delete (yyvsp[-5].token);
     }
-#line 2316 "/workspace/src/frontend/parser.cpp"
+#line 2304 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 15: /* VecType: ID LB BASICTYPE COMMA VecWidth RB  */
-#line 367 "/workspace/src/frontend/parser.y"
+#line 346 "/workspace/src/frontend/parser.y"
                                       {
         if (!isVectorConstructor(*(yyvsp[-5].token))) {
             yyerror(("unknown vector constructor '" + *(yyvsp[-5].token) + "'").c_str());
@@ -2326,29 +2314,29 @@ yyreduce:
         (yyval.type_spec) = (yyvsp[-1].type_spec);
         delete (yyvsp[-5].token);
     }
-#line 2330 "/workspace/src/frontend/parser.cpp"
+#line 2318 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 16: /* VecType: BASICTYPE LT VecWidth GT  */
-#line 376 "/workspace/src/frontend/parser.y"
+#line 355 "/workspace/src/frontend/parser.y"
                              {
         (yyvsp[-1].type_spec)->element = static_cast<TYPE>((yyvsp[-3].int_val));
         (yyval.type_spec) = (yyvsp[-1].type_spec);
     }
-#line 2339 "/workspace/src/frontend/parser.cpp"
+#line 2327 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 17: /* VecType: BASICTYPE LB VecWidth RB  */
-#line 380 "/workspace/src/frontend/parser.y"
+#line 359 "/workspace/src/frontend/parser.y"
                              {
         (yyvsp[-1].type_spec)->element = static_cast<TYPE>((yyvsp[-3].int_val));
         (yyval.type_spec) = (yyvsp[-1].type_spec);
     }
-#line 2348 "/workspace/src/frontend/parser.cpp"
+#line 2336 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 18: /* VecType: ID LT BASICTYPE GT  */
-#line 384 "/workspace/src/frontend/parser.y"
+#line 363 "/workspace/src/frontend/parser.y"
                        {
         if (isVectorConstructor(*(yyvsp[-3].token)))
             (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>((yyvsp[-1].int_val))));
@@ -2360,11 +2348,11 @@ yyreduce:
         }
         delete (yyvsp[-3].token);
     }
-#line 2364 "/workspace/src/frontend/parser.cpp"
+#line 2352 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 19: /* VecType: ID LP BASICTYPE RP  */
-#line 395 "/workspace/src/frontend/parser.y"
+#line 374 "/workspace/src/frontend/parser.y"
                        {
         if (!isVectorConstructor(*(yyvsp[-3].token))) {
             yyerror(("unknown vector constructor '" + *(yyvsp[-3].token) + "'").c_str());
@@ -2373,35 +2361,35 @@ yyreduce:
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>((yyvsp[-1].int_val))));
         delete (yyvsp[-3].token);
     }
-#line 2377 "/workspace/src/frontend/parser.cpp"
+#line 2365 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 20: /* VecType: BASICTYPE LT GT  */
-#line 403 "/workspace/src/frontend/parser.y"
+#line 382 "/workspace/src/frontend/parser.y"
                     {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>((yyvsp[-2].int_val))));
     }
-#line 2385 "/workspace/src/frontend/parser.cpp"
+#line 2373 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 21: /* VecType: BASICTYPE LB RB  */
-#line 406 "/workspace/src/frontend/parser.y"
+#line 385 "/workspace/src/frontend/parser.y"
                     {
         (yyval.type_spec) = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>((yyvsp[-2].int_val))));
     }
-#line 2393 "/workspace/src/frontend/parser.cpp"
+#line 2381 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 22: /* VecWidth: INT  */
-#line 412 "/workspace/src/frontend/parser.y"
+#line 391 "/workspace/src/frontend/parser.y"
         {
         (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_VOID, (yyvsp[0].int_val)));
     }
-#line 2401 "/workspace/src/frontend/parser.cpp"
+#line 2389 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 23: /* VecWidth: ID  */
-#line 415 "/workspace/src/frontend/parser.y"
+#line 394 "/workspace/src/frontend/parser.y"
        {
         if (auto width = vectorWidthAlias(*(yyvsp[0].token)))
             (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *width));
@@ -2409,895 +2397,773 @@ yyreduce:
             (yyval.type_spec) = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *(yyvsp[0].token)));
         delete (yyvsp[0].token);
     }
-#line 2413 "/workspace/src/frontend/parser.cpp"
+#line 2401 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 24: /* VoidType: VOID  */
-#line 425 "/workspace/src/frontend/parser.y"
+#line 404 "/workspace/src/frontend/parser.y"
          {
         (yyval.type_spec) = new TypeSpec(TYPE_VOID);
     }
-#line 2421 "/workspace/src/frontend/parser.cpp"
+#line 2409 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 25: /* ConstDefList: ConstDef  */
-#line 431 "/workspace/src/frontend/parser.y"
+#line 410 "/workspace/src/frontend/parser.y"
              {
-        (yyval.defList) = make_node<DefListAST>();
-        (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
+        (yyval.objectDefList) = make_node<ObjectDefList>();
+        (yyval.objectDefList)->values.push_back(unique_ptr<ObjectDefAST>((yyvsp[0].objectDef)));
     }
-#line 2430 "/workspace/src/frontend/parser.cpp"
+#line 2418 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 26: /* ConstDefList: ConstDefList COMMA ConstDef  */
-#line 435 "/workspace/src/frontend/parser.y"
+#line 414 "/workspace/src/frontend/parser.y"
                                 {
-        (yyval.defList) = (yyvsp[-2].defList);
-        (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
+        (yyval.objectDefList) = (yyvsp[-2].objectDefList);
+        (yyval.objectDefList)->values.push_back(unique_ptr<ObjectDefAST>((yyvsp[0].objectDef)));
     }
-#line 2439 "/workspace/src/frontend/parser.cpp"
+#line 2427 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 27: /* VarDefList: VarDef  */
-#line 441 "/workspace/src/frontend/parser.y"
+#line 420 "/workspace/src/frontend/parser.y"
            {
-        (yyval.defList) = make_node<DefListAST>();
-        (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
+        (yyval.objectDefList) = make_node<ObjectDefList>();
+        (yyval.objectDefList)->values.push_back(unique_ptr<ObjectDefAST>((yyvsp[0].objectDef)));
     }
-#line 2448 "/workspace/src/frontend/parser.cpp"
+#line 2436 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 28: /* VarDefList: VarDefList COMMA VarDef  */
-#line 445 "/workspace/src/frontend/parser.y"
+#line 424 "/workspace/src/frontend/parser.y"
                             {
-        (yyval.defList) = (yyvsp[-2].defList);
-        (yyval.defList)->list.push_back(unique_ptr<DefAST>((yyvsp[0].def)));
+        (yyval.objectDefList) = (yyvsp[-2].objectDefList);
+        (yyval.objectDefList)->values.push_back(unique_ptr<ObjectDefAST>((yyvsp[0].objectDef)));
     }
-#line 2457 "/workspace/src/frontend/parser.cpp"
+#line 2445 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 29: /* ConstDef: ID Arrays ASSIGN ConstInitVal  */
-#line 454 "/workspace/src/frontend/parser.y"
+#line 433 "/workspace/src/frontend/parser.y"
                                   {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[-3].token));
-        (yyval.def)->arrays.swap((yyvsp[-2].arrays)->list);
-        delete (yyvsp[-2].arrays);
-        (yyval.def)->initVal = unique_ptr<InitValAST>((yyvsp[0].initVal));
+        (yyval.objectDef) = make_node<ObjectDefAST>(std::move(*(yyvsp[-3].token)), std::move((yyvsp[-2].exprList)->values),
+                                     unique_ptr<InitValAST>((yyvsp[0].initVal)));
+        delete (yyvsp[-3].token); delete (yyvsp[-2].exprList);
     }
-#line 2469 "/workspace/src/frontend/parser.cpp"
+#line 2455 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 30: /* ConstDef: ID ASSIGN Exp  */
-#line 461 "/workspace/src/frontend/parser.y"
+#line 438 "/workspace/src/frontend/parser.y"
                   {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[-2].token));
-        (yyval.def)->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
-        (yyval.def)->initVal->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
+        (yyval.objectDef) = make_node<ObjectDefAST>(
+            std::move(*(yyvsp[-2].token)), std::vector<unique_ptr<ExprAST>>{},
+            unique_ptr<InitValAST>(make_node<InitValAST>(
+                unique_ptr<ExprAST>((yyvsp[0].expr)))));
+        delete (yyvsp[-2].token);
     }
-#line 2480 "/workspace/src/frontend/parser.cpp"
+#line 2467 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 31: /* VarDef: ID Arrays ASSIGN InitVal  */
-#line 469 "/workspace/src/frontend/parser.y"
+#line 447 "/workspace/src/frontend/parser.y"
                              {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[-3].token));
-        (yyval.def)->arrays.swap((yyvsp[-2].arrays)->list);
-        delete (yyvsp[-2].arrays);
-        (yyval.def)->initVal = unique_ptr<InitValAST>((yyvsp[0].initVal));
+        (yyval.objectDef) = make_node<ObjectDefAST>(std::move(*(yyvsp[-3].token)), std::move((yyvsp[-2].exprList)->values),
+                                     unique_ptr<InitValAST>((yyvsp[0].initVal)));
+        delete (yyvsp[-3].token); delete (yyvsp[-2].exprList);
     }
-#line 2492 "/workspace/src/frontend/parser.cpp"
+#line 2477 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 32: /* VarDef: ID ASSIGN Exp  */
-#line 476 "/workspace/src/frontend/parser.y"
+#line 452 "/workspace/src/frontend/parser.y"
                   {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[-2].token));
-        (yyval.def)->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
-        (yyval.def)->initVal->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
+        (yyval.objectDef) = make_node<ObjectDefAST>(
+            std::move(*(yyvsp[-2].token)), std::vector<unique_ptr<ExprAST>>{},
+            unique_ptr<InitValAST>(make_node<InitValAST>(
+                unique_ptr<ExprAST>((yyvsp[0].expr)))));
+        delete (yyvsp[-2].token);
     }
-#line 2503 "/workspace/src/frontend/parser.cpp"
+#line 2489 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 33: /* VarDef: ID Arrays  */
-#line 482 "/workspace/src/frontend/parser.y"
+#line 459 "/workspace/src/frontend/parser.y"
               {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[-1].token));
-        (yyval.def)->arrays.swap((yyvsp[0].arrays)->list);
-        delete (yyvsp[0].arrays);
+        (yyval.objectDef) = make_node<ObjectDefAST>(std::move(*(yyvsp[-1].token)), std::move((yyvsp[0].exprList)->values));
+        delete (yyvsp[-1].token); delete (yyvsp[0].exprList);
     }
-#line 2514 "/workspace/src/frontend/parser.cpp"
+#line 2498 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 34: /* VarDef: ID  */
-#line 488 "/workspace/src/frontend/parser.y"
+#line 463 "/workspace/src/frontend/parser.y"
        {
-        (yyval.def) = make_node<DefAST>();
-        (yyval.def)->id = unique_ptr<string>((yyvsp[0].token));
+        (yyval.objectDef) = make_node<ObjectDefAST>(std::move(*(yyvsp[0].token)));
+        delete (yyvsp[0].token);
     }
-#line 2523 "/workspace/src/frontend/parser.cpp"
+#line 2507 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 35: /* Arrays: LB Exp RB  */
-#line 495 "/workspace/src/frontend/parser.y"
+#line 470 "/workspace/src/frontend/parser.y"
               {
-        (yyval.arrays) = make_node<ArraysAST>();
-        (yyval.arrays)->list.push_back(unique_ptr<AddExpAST>((yyvsp[-1].addExp)));
+        (yyval.exprList) = make_node<ExprList>();
+        (yyval.exprList)->values.push_back(unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 2532 "/workspace/src/frontend/parser.cpp"
+#line 2516 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 36: /* Arrays: Arrays LB Exp RB  */
-#line 499 "/workspace/src/frontend/parser.y"
+#line 474 "/workspace/src/frontend/parser.y"
                      {
-        (yyval.arrays) = (yyvsp[-3].arrays);
-        (yyval.arrays)->list.push_back(unique_ptr<AddExpAST>((yyvsp[-1].addExp)));
+        (yyval.exprList) = (yyvsp[-3].exprList);
+        (yyval.exprList)->values.push_back(unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 2541 "/workspace/src/frontend/parser.cpp"
+#line 2525 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 37: /* Block: LC RC  */
-#line 510 "/workspace/src/frontend/parser.y"
+#line 485 "/workspace/src/frontend/parser.y"
           {
         (yyval.block) = make_node<BlockAST>();
     }
-#line 2549 "/workspace/src/frontend/parser.cpp"
+#line 2533 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 38: /* Block: LC BlockItemList RC  */
-#line 513 "/workspace/src/frontend/parser.y"
+#line 488 "/workspace/src/frontend/parser.y"
                         {
         (yyval.block) = make_node<BlockAST>();
-        (yyval.block)->blockItemList.swap((yyvsp[-1].blockItemList)->list);
+        (yyval.block)->items.swap(*(yyvsp[-1].blockItemList));
         delete (yyvsp[-1].blockItemList);
     }
-#line 2559 "/workspace/src/frontend/parser.cpp"
+#line 2543 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 39: /* InitVal: LC RC  */
+#line 499 "/workspace/src/frontend/parser.y"
+          {
+        (yyval.initVal) = make_node<InitValAST>();
+    }
+#line 2551 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 40: /* InitVal: LC InitValList RC  */
+#line 502 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.initVal) = make_node<InitValAST>(std::move((yyvsp[-1].initValList)->values));
+        delete (yyvsp[-1].initValList);
+    }
+#line 2560 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 41: /* InitVal: NonBraceExp  */
+#line 506 "/workspace/src/frontend/parser.y"
+                {
+        (yyval.initVal) = make_node<InitValAST>(unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2568 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 42: /* ConstInitVal: LC RC  */
+#line 511 "/workspace/src/frontend/parser.y"
+          {
+        (yyval.initVal) = make_node<InitValAST>();
+    }
+#line 2576 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 43: /* ConstInitVal: LC InitValList RC  */
+#line 514 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.initVal) = make_node<InitValAST>(std::move((yyvsp[-1].initValList)->values));
+        delete (yyvsp[-1].initValList);
+    }
+#line 2585 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 44: /* ConstInitVal: NonBraceExp  */
+#line 518 "/workspace/src/frontend/parser.y"
+                {
+        (yyval.initVal) = make_node<InitValAST>(unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2593 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 45: /* BraceInitVal: LC RC  */
 #line 524 "/workspace/src/frontend/parser.y"
           {
         (yyval.initVal) = make_node<InitValAST>();
     }
-#line 2567 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 40: /* InitVal: LC InitValList RC  */
-#line 527 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.initVal) = make_node<InitValAST>();
-        (yyval.initVal)->initValList.swap((yyvsp[-1].initValList)->list);
-        delete (yyvsp[-1].initValList);
-    }
-#line 2577 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 41: /* InitVal: NonBraceExp  */
-#line 532 "/workspace/src/frontend/parser.y"
-                {
-        (yyval.initVal) = make_node<InitValAST>();
-        (yyval.initVal)->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 2586 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 42: /* ConstInitVal: LC RC  */
-#line 538 "/workspace/src/frontend/parser.y"
-          {
-        (yyval.initVal) = make_node<InitValAST>();
-    }
-#line 2594 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 43: /* ConstInitVal: LC InitValList RC  */
-#line 541 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.initVal) = make_node<InitValAST>();
-        (yyval.initVal)->initValList.swap((yyvsp[-1].initValList)->list);
-        delete (yyvsp[-1].initValList);
-    }
-#line 2604 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 44: /* ConstInitVal: NonBraceExp  */
-#line 546 "/workspace/src/frontend/parser.y"
-                {
-        (yyval.initVal) = make_node<InitValAST>();
-        (yyval.initVal)->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 2613 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 45: /* BraceInitVal: LC RC  */
-#line 553 "/workspace/src/frontend/parser.y"
-          {
-        (yyval.initVal) = make_node<InitValAST>();
-    }
-#line 2621 "/workspace/src/frontend/parser.cpp"
+#line 2601 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 46: /* BraceInitVal: LC InitValList RC  */
-#line 556 "/workspace/src/frontend/parser.y"
+#line 527 "/workspace/src/frontend/parser.y"
                       {
-        (yyval.initVal) = make_node<InitValAST>();
-        (yyval.initVal)->initValList.swap((yyvsp[-1].initValList)->list);
+        (yyval.initVal) = make_node<InitValAST>(std::move((yyvsp[-1].initValList)->values));
         delete (yyvsp[-1].initValList);
     }
-#line 2631 "/workspace/src/frontend/parser.cpp"
+#line 2610 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 47: /* InitValList: InitValList COMMA InitVal  */
-#line 564 "/workspace/src/frontend/parser.y"
+#line 534 "/workspace/src/frontend/parser.y"
                             {
     (yyval.initValList) = (yyvsp[-2].initValList);
-    (yyval.initValList)->list.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
+    (yyval.initValList)->values.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
   }
-#line 2640 "/workspace/src/frontend/parser.cpp"
+#line 2619 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 48: /* InitValList: InitVal  */
-#line 568 "/workspace/src/frontend/parser.y"
+#line 538 "/workspace/src/frontend/parser.y"
           {
-    (yyval.initValList) = make_node<InitValListAST>();
-    (yyval.initValList)->list.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
+    (yyval.initValList) = make_node<InitValList>();
+    (yyval.initValList)->values.push_back(unique_ptr<InitValAST>((yyvsp[0].initVal)));
   }
-#line 2649 "/workspace/src/frontend/parser.cpp"
+#line 2628 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 49: /* FuncDef: BType ID LP OptFuncFParamList RP Block  */
-#line 575 "/workspace/src/frontend/parser.y"
+#line 545 "/workspace/src/frontend/parser.y"
                                            {
-        (yyval.funcDef) = make_node<FuncDefAST>();
-        (yyval.funcDef)->funcType = *(yyvsp[-5].type_spec);
-        delete (yyvsp[-5].type_spec);
-        (yyval.funcDef)->id = unique_ptr<string>((yyvsp[-4].token));
-        (yyval.funcDef)->funcFParamList.swap((yyvsp[-2].FuncFParamList)->list);
-        delete (yyvsp[-2].FuncFParamList);
-        (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
+        (yyval.funcDef) = make_node<FuncDefAST>(*(yyvsp[-5].type_spec), std::move(*(yyvsp[-4].token)),
+            std::move((yyvsp[-2].funcParamList)->values), unique_ptr<BlockAST>((yyvsp[0].block)));
+        delete (yyvsp[-5].type_spec); delete (yyvsp[-4].token); delete (yyvsp[-2].funcParamList);
     }
-#line 2663 "/workspace/src/frontend/parser.cpp"
+#line 2638 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 50: /* FuncDef: VoidType ID LP OptFuncFParamList RP Block  */
-#line 584 "/workspace/src/frontend/parser.y"
+#line 550 "/workspace/src/frontend/parser.y"
                                               {
-        (yyval.funcDef) = make_node<FuncDefAST>();
-        (yyval.funcDef)->funcType = *(yyvsp[-5].type_spec);
-        delete (yyvsp[-5].type_spec);
-        (yyval.funcDef)->id = unique_ptr<string>((yyvsp[-4].token));
-        (yyval.funcDef)->funcFParamList.swap((yyvsp[-2].FuncFParamList)->list);
-        delete (yyvsp[-2].FuncFParamList);
-        (yyval.funcDef)->block = unique_ptr<BlockAST>((yyvsp[0].block));
+        (yyval.funcDef) = make_node<FuncDefAST>(*(yyvsp[-5].type_spec), std::move(*(yyvsp[-4].token)),
+            std::move((yyvsp[-2].funcParamList)->values), unique_ptr<BlockAST>((yyvsp[0].block)));
+        delete (yyvsp[-5].type_spec); delete (yyvsp[-4].token); delete (yyvsp[-2].funcParamList);
     }
-#line 2677 "/workspace/src/frontend/parser.cpp"
+#line 2648 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 51: /* OptFuncFParamList: %empty  */
-#line 595 "/workspace/src/frontend/parser.y"
+#line 557 "/workspace/src/frontend/parser.y"
            {
-        (yyval.FuncFParamList) = make_node<FuncFParamListAST>();
+        (yyval.funcParamList) = make_node<FuncParamList>();
     }
-#line 2685 "/workspace/src/frontend/parser.cpp"
+#line 2656 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 52: /* OptFuncFParamList: FuncFParamList  */
-#line 598 "/workspace/src/frontend/parser.y"
+#line 560 "/workspace/src/frontend/parser.y"
                    {
-        (yyval.FuncFParamList) = (yyvsp[0].FuncFParamList);
+        (yyval.funcParamList) = (yyvsp[0].funcParamList);
     }
-#line 2693 "/workspace/src/frontend/parser.cpp"
+#line 2664 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 53: /* FuncFParamList: FuncFParam  */
-#line 604 "/workspace/src/frontend/parser.y"
+#line 566 "/workspace/src/frontend/parser.y"
                {
-        (yyval.FuncFParamList) = make_node<FuncFParamListAST>();
-        (yyval.FuncFParamList)->list.push_back(unique_ptr<FuncFParamAST>((yyvsp[0].funcFParam)));
+        (yyval.funcParamList) = make_node<FuncParamList>();
+        (yyval.funcParamList)->values.push_back(unique_ptr<FuncParamAST>((yyvsp[0].funcParam)));
     }
-#line 2702 "/workspace/src/frontend/parser.cpp"
+#line 2673 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 54: /* FuncFParamList: FuncFParamList COMMA FuncFParam  */
-#line 608 "/workspace/src/frontend/parser.y"
+#line 570 "/workspace/src/frontend/parser.y"
                                     {
-        (yyval.FuncFParamList) = (yyvsp[-2].FuncFParamList);
-        (yyval.FuncFParamList)->list.push_back(unique_ptr<FuncFParamAST>((yyvsp[0].funcFParam)));
+        (yyval.funcParamList) = (yyvsp[-2].funcParamList);
+        (yyval.funcParamList)->values.push_back(unique_ptr<FuncParamAST>((yyvsp[0].funcParam)));
     }
-#line 2711 "/workspace/src/frontend/parser.cpp"
+#line 2682 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 55: /* FuncFParam: BType ID  */
-#line 615 "/workspace/src/frontend/parser.y"
+#line 577 "/workspace/src/frontend/parser.y"
              {
-        (yyval.funcFParam) = make_node<FuncFParamAST>();
-        (yyval.funcFParam)->bType = *(yyvsp[-1].type_spec);
-        delete (yyvsp[-1].type_spec);
-        (yyval.funcFParam)->id = unique_ptr<string>((yyvsp[0].token));
-        (yyval.funcFParam)->isArray = false;
+        (yyval.funcParam) = make_node<FuncParamAST>(*(yyvsp[-1].type_spec), std::move(*(yyvsp[0].token)));
+        delete (yyvsp[-1].type_spec); delete (yyvsp[0].token);
     }
-#line 2723 "/workspace/src/frontend/parser.cpp"
+#line 2691 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 56: /* FuncFParam: BType ID LB RB  */
-#line 622 "/workspace/src/frontend/parser.y"
+#line 581 "/workspace/src/frontend/parser.y"
                    {
-        (yyval.funcFParam) = make_node<FuncFParamAST>();
-        (yyval.funcFParam)->bType = *(yyvsp[-3].type_spec);
-        delete (yyvsp[-3].type_spec);
-        (yyval.funcFParam)->id = unique_ptr<string>((yyvsp[-2].token));
-        (yyval.funcFParam)->isArray = true;
+        (yyval.funcParam) = make_node<FuncParamAST>(*(yyvsp[-3].type_spec), std::move(*(yyvsp[-2].token)), true);
+        delete (yyvsp[-3].type_spec); delete (yyvsp[-2].token);
     }
-#line 2735 "/workspace/src/frontend/parser.cpp"
+#line 2700 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 57: /* FuncFParam: BType ID LB RB Arrays  */
-#line 629 "/workspace/src/frontend/parser.y"
+#line 585 "/workspace/src/frontend/parser.y"
                           {
-        (yyval.funcFParam) = make_node<FuncFParamAST>();
-        (yyval.funcFParam)->bType = *(yyvsp[-4].type_spec);
-        delete (yyvsp[-4].type_spec);
-        (yyval.funcFParam)->id = unique_ptr<string>((yyvsp[-3].token));
-        (yyval.funcFParam)->isArray = true;
-        (yyval.funcFParam)->arrays.swap((yyvsp[0].arrays)->list);
-        delete (yyvsp[0].arrays);
+        (yyval.funcParam) = make_node<FuncParamAST>(*(yyvsp[-4].type_spec), std::move(*(yyvsp[-3].token)), true,
+                                     std::move((yyvsp[0].exprList)->values));
+        delete (yyvsp[-4].type_spec); delete (yyvsp[-3].token); delete (yyvsp[0].exprList);
     }
-#line 2749 "/workspace/src/frontend/parser.cpp"
+#line 2710 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 58: /* BlockItemList: BlockItem  */
-#line 641 "/workspace/src/frontend/parser.y"
+#line 593 "/workspace/src/frontend/parser.y"
               {
-        (yyval.blockItemList) = make_node<BlockItemListAST>();
-        (yyval.blockItemList)->list.push_back(unique_ptr<BlockItemAST>((yyvsp[0].blockItem)));
+        (yyval.blockItemList) = make_node<BlockItemList>();
+        (yyval.blockItemList)->push_back(std::move(*(yyvsp[0].blockItem)));
+        delete (yyvsp[0].blockItem);
     }
-#line 2758 "/workspace/src/frontend/parser.cpp"
+#line 2720 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 59: /* BlockItemList: BlockItemList BlockItem  */
-#line 645 "/workspace/src/frontend/parser.y"
+#line 598 "/workspace/src/frontend/parser.y"
                             {
         (yyval.blockItemList) = (yyvsp[-1].blockItemList);
-        (yyval.blockItemList)->list.push_back(unique_ptr<BlockItemAST>((yyvsp[0].blockItem)));
+        (yyval.blockItemList)->push_back(std::move(*(yyvsp[0].blockItem)));
+        delete (yyvsp[0].blockItem);
     }
-#line 2767 "/workspace/src/frontend/parser.cpp"
+#line 2730 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 60: /* BlockItem: Decl  */
-#line 652 "/workspace/src/frontend/parser.y"
+#line 606 "/workspace/src/frontend/parser.y"
          {
-        (yyval.blockItem) = make_node<BlockItemAST>();
-        (yyval.blockItem)->decl = unique_ptr<DeclAST>((yyvsp[0].decl));
+        (yyval.blockItem) = make_node<BlockItemAST>(unique_ptr<DeclAST>((yyvsp[0].decl)));
     }
-#line 2776 "/workspace/src/frontend/parser.cpp"
+#line 2738 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 61: /* BlockItem: Stmt  */
-#line 656 "/workspace/src/frontend/parser.y"
+#line 609 "/workspace/src/frontend/parser.y"
          {
-        (yyval.blockItem) = make_node<BlockItemAST>();
-        (yyval.blockItem)->stmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
+        (yyval.blockItem) = make_node<BlockItemAST>(unique_ptr<StmtAST>((yyvsp[0].stmt)));
     }
-#line 2785 "/workspace/src/frontend/parser.cpp"
+#line 2746 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 62: /* Stmt: SEMICOLON  */
-#line 663 "/workspace/src/frontend/parser.y"
+#line 616 "/workspace/src/frontend/parser.y"
               {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = SEMI;
+        (yyval.stmt) = make_node<EmptyStmtAST>();
     }
-#line 2794 "/workspace/src/frontend/parser.cpp"
+#line 2754 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 63: /* Stmt: LVal ASSIGN Exp SEMICOLON  */
-#line 667 "/workspace/src/frontend/parser.y"
+#line 619 "/workspace/src/frontend/parser.y"
                               {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = ASS;
-        (yyval.stmt)->lVal = unique_ptr<LValAST>((yyvsp[-3].lVal));
-        (yyval.stmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
+        (yyval.stmt) = make_node<AssignStmtAST>(unique_ptr<LValueAST>((yyvsp[-3].lValue)),
+                                      unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 2805 "/workspace/src/frontend/parser.cpp"
+#line 2763 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 64: /* Stmt: NonBraceExp SEMICOLON  */
-#line 673 "/workspace/src/frontend/parser.y"
+#line 623 "/workspace/src/frontend/parser.y"
                           {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = EXP;
-        (yyval.stmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
+        (yyval.stmt) = make_node<ExprStmtAST>(unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 2815 "/workspace/src/frontend/parser.cpp"
+#line 2771 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 65: /* Stmt: CONTINUE SEMICOLON  */
-#line 678 "/workspace/src/frontend/parser.y"
+#line 626 "/workspace/src/frontend/parser.y"
                        {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = CONT;
+        (yyval.stmt) = make_node<ContinueStmtAST>();
     }
-#line 2824 "/workspace/src/frontend/parser.cpp"
+#line 2779 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 66: /* Stmt: BREAK SEMICOLON  */
-#line 682 "/workspace/src/frontend/parser.y"
+#line 629 "/workspace/src/frontend/parser.y"
                     {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = BRE;
+        (yyval.stmt) = make_node<BreakStmtAST>();
     }
-#line 2833 "/workspace/src/frontend/parser.cpp"
+#line 2787 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 67: /* Stmt: Block  */
-#line 686 "/workspace/src/frontend/parser.y"
+#line 632 "/workspace/src/frontend/parser.y"
           {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = BLK;
-        (yyval.stmt)->block = unique_ptr<BlockAST>((yyvsp[0].block));
+        (yyval.stmt) = make_node<BlockStmtAST>(unique_ptr<BlockAST>((yyvsp[0].block)));
     }
-#line 2843 "/workspace/src/frontend/parser.cpp"
+#line 2795 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 68: /* Stmt: ReturnStmt  */
-#line 691 "/workspace/src/frontend/parser.y"
-               {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = RET;
-        (yyval.stmt)->returnStmt = unique_ptr<ReturnStmtAST>((yyvsp[0].returnStmt));
-    }
-#line 2853 "/workspace/src/frontend/parser.cpp"
+#line 635 "/workspace/src/frontend/parser.y"
+               { (yyval.stmt) = (yyvsp[0].stmt); }
+#line 2801 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 69: /* Stmt: SelectStmt  */
-#line 696 "/workspace/src/frontend/parser.y"
-               {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = SEL;
-        (yyval.stmt)->selectStmt = unique_ptr<SelectStmtAST>((yyvsp[0].selectStmt));
-    }
-#line 2863 "/workspace/src/frontend/parser.cpp"
+#line 636 "/workspace/src/frontend/parser.y"
+               { (yyval.stmt) = (yyvsp[0].stmt); }
+#line 2807 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 70: /* Stmt: IterationStmt  */
-#line 701 "/workspace/src/frontend/parser.y"
-                  {
-        (yyval.stmt) = make_node<StmtAST>();
-        (yyval.stmt)->sType = ITER;
-        (yyval.stmt)->iterationStmt = unique_ptr<IterationStmtAST>((yyvsp[0].iterationStmt));
-    }
-#line 2873 "/workspace/src/frontend/parser.cpp"
+#line 637 "/workspace/src/frontend/parser.y"
+                  { (yyval.stmt) = (yyvsp[0].stmt); }
+#line 2813 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 71: /* SelectStmt: IF LP Cond RP Stmt  */
-#line 709 "/workspace/src/frontend/parser.y"
+#line 641 "/workspace/src/frontend/parser.y"
                                              {
-        (yyval.selectStmt) = make_node<SelectStmtAST>();
-        (yyval.selectStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
-        (yyval.selectStmt)->ifStmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
+        (yyval.stmt) = make_node<IfStmtAST>(unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                  unique_ptr<StmtAST>((yyvsp[0].stmt)));
     }
-#line 2883 "/workspace/src/frontend/parser.cpp"
+#line 2822 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 72: /* SelectStmt: IF LP Cond RP Stmt ELSE Stmt  */
-#line 714 "/workspace/src/frontend/parser.y"
+#line 645 "/workspace/src/frontend/parser.y"
                                  {
-        (yyval.selectStmt) = make_node<SelectStmtAST>();
-        (yyval.selectStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-4].lOrExp));
-        (yyval.selectStmt)->ifStmt = unique_ptr<StmtAST>((yyvsp[-2].stmt));
-        (yyval.selectStmt)->elseStmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
+        (yyval.stmt) = make_node<IfStmtAST>(unique_ptr<ExprAST>((yyvsp[-4].expr)),
+                                  unique_ptr<StmtAST>((yyvsp[-2].stmt)),
+                                  unique_ptr<StmtAST>((yyvsp[0].stmt)));
     }
-#line 2894 "/workspace/src/frontend/parser.cpp"
+#line 2832 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 73: /* IterationStmt: WHILE LP Cond RP Stmt  */
-#line 723 "/workspace/src/frontend/parser.y"
+#line 653 "/workspace/src/frontend/parser.y"
                           {
-        (yyval.iterationStmt) = make_node<IterationStmtAST>();
-        (yyval.iterationStmt)->cond = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
-        (yyval.iterationStmt)->stmt = unique_ptr<StmtAST>((yyvsp[0].stmt));
+        (yyval.stmt) = make_node<WhileStmtAST>(unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                     unique_ptr<StmtAST>((yyvsp[0].stmt)));
     }
-#line 2904 "/workspace/src/frontend/parser.cpp"
+#line 2841 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 74: /* ReturnStmt: RETURN Exp SEMICOLON  */
-#line 731 "/workspace/src/frontend/parser.y"
+#line 660 "/workspace/src/frontend/parser.y"
                          {
-        (yyval.returnStmt) = make_node<ReturnStmtAST>();
-        (yyval.returnStmt)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
+        (yyval.stmt) = make_node<ReturnStmtAST>(unique_ptr<ExprAST>((yyvsp[-1].expr)));
+    }
+#line 2849 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 75: /* ReturnStmt: RETURN SEMICOLON  */
+#line 663 "/workspace/src/frontend/parser.y"
+                     {
+        (yyval.stmt) = make_node<ReturnStmtAST>();
+    }
+#line 2857 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 76: /* Exp: AddExp  */
+#line 669 "/workspace/src/frontend/parser.y"
+           {
+        (yyval.expr) = (yyvsp[0].expr);
+    }
+#line 2865 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 77: /* NonBraceExp: NonBraceAddExp  */
+#line 678 "/workspace/src/frontend/parser.y"
+                   { (yyval.expr) = (yyvsp[0].expr); }
+#line 2871 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 78: /* NonBraceAddExp: NonBraceMulExp  */
+#line 681 "/workspace/src/frontend/parser.y"
+                   { (yyval.expr) = (yyvsp[0].expr); }
+#line 2877 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 79: /* NonBraceAddExp: NonBraceAddExp ADD MulExp  */
+#line 682 "/workspace/src/frontend/parser.y"
+                              {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Add,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2887 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 80: /* NonBraceAddExp: NonBraceAddExp MINUS MulExp  */
+#line 687 "/workspace/src/frontend/parser.y"
+                                {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Subtract,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2897 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 81: /* NonBraceMulExp: NonBraceUnaryExp  */
+#line 694 "/workspace/src/frontend/parser.y"
+                     { (yyval.expr) = (yyvsp[0].expr); }
+#line 2903 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 82: /* NonBraceMulExp: NonBraceMulExp MUL UnaryExp  */
+#line 695 "/workspace/src/frontend/parser.y"
+                                {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Multiply,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
 #line 2913 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 75: /* ReturnStmt: RETURN SEMICOLON  */
-#line 735 "/workspace/src/frontend/parser.y"
-                     {
-        (yyval.returnStmt) = make_node<ReturnStmtAST>();
-    }
-#line 2921 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 76: /* Exp: AddExp  */
-#line 741 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.addExp) = (yyvsp[0].addExp);
-    }
-#line 2929 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 77: /* NonBraceExp: NonBraceAddExp  */
-#line 750 "/workspace/src/frontend/parser.y"
-                   { (yyval.addExp) = (yyvsp[0].addExp); }
-#line 2935 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 78: /* NonBraceAddExp: NonBraceMulExp  */
-#line 753 "/workspace/src/frontend/parser.y"
-                   {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
-    }
-#line 2944 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 79: /* NonBraceAddExp: NonBraceAddExp ADD MulExp  */
-#line 757 "/workspace/src/frontend/parser.y"
-                              {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
-        (yyval.addExp)->op = AOP_ADD;
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
-    }
-#line 2955 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 80: /* NonBraceAddExp: NonBraceAddExp MINUS MulExp  */
-#line 763 "/workspace/src/frontend/parser.y"
+  case 83: /* NonBraceMulExp: NonBraceMulExp DIV UnaryExp  */
+#line 700 "/workspace/src/frontend/parser.y"
                                 {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
-        (yyval.addExp)->op = AOP_MINUS;
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Divide,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2923 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 84: /* NonBraceMulExp: NonBraceMulExp MOD UnaryExp  */
+#line 705 "/workspace/src/frontend/parser.y"
+                                {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Remainder,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 2933 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 85: /* NonBraceUnaryExp: LP Exp RP  */
+#line 712 "/workspace/src/frontend/parser.y"
+              { (yyval.expr) = (yyvsp[-1].expr); }
+#line 2939 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 86: /* NonBraceUnaryExp: LVal  */
+#line 713 "/workspace/src/frontend/parser.y"
+         { (yyval.expr) = (yyvsp[0].lValue); }
+#line 2945 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 87: /* NonBraceUnaryExp: Number  */
+#line 714 "/workspace/src/frontend/parser.y"
+           { (yyval.expr) = (yyvsp[0].expr); }
+#line 2951 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 88: /* NonBraceUnaryExp: Call  */
+#line 715 "/workspace/src/frontend/parser.y"
+         { (yyval.expr) = (yyvsp[0].callExpr); }
+#line 2957 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 89: /* NonBraceUnaryExp: Call LB Exp RB  */
+#line 716 "/workspace/src/frontend/parser.y"
+                   {
+        (yyval.expr) = make_node<SubscriptExprAST>(unique_ptr<ExprAST>((yyvsp[-3].callExpr)),
+                                         unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
 #line 2966 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 81: /* NonBraceMulExp: NonBraceUnaryExp  */
-#line 771 "/workspace/src/frontend/parser.y"
-                     {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
+  case 90: /* NonBraceUnaryExp: LP Exp RP LB Exp RB  */
+#line 720 "/workspace/src/frontend/parser.y"
+                        {
+        (yyval.expr) = make_node<SubscriptExprAST>(unique_ptr<ExprAST>((yyvsp[-4].expr)),
+                                         unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
 #line 2975 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 82: /* NonBraceMulExp: NonBraceMulExp MUL UnaryExp  */
-#line 775 "/workspace/src/frontend/parser.y"
-                                {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_MUL;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
-    }
-#line 2986 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 83: /* NonBraceMulExp: NonBraceMulExp DIV UnaryExp  */
-#line 781 "/workspace/src/frontend/parser.y"
-                                {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_DIV;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
-    }
-#line 2997 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 84: /* NonBraceMulExp: NonBraceMulExp MOD UnaryExp  */
-#line 787 "/workspace/src/frontend/parser.y"
-                                {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_MOD;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
-    }
-#line 3008 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 85: /* NonBraceUnaryExp: LP Exp RP  */
-#line 795 "/workspace/src/frontend/parser.y"
-              {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
-        (yyval.unaryExp)->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }
-#line 3019 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 86: /* NonBraceUnaryExp: LVal  */
-#line 801 "/workspace/src/frontend/parser.y"
-         {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->lval = unique_ptr<LValAST>((yyvsp[0].lVal));
-        (yyval.unaryExp)->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }
-#line 3030 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 87: /* NonBraceUnaryExp: Number  */
-#line 807 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->number = unique_ptr<NumberAST>((yyvsp[0].number));
-        (yyval.unaryExp)->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }
-#line 3041 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 88: /* NonBraceUnaryExp: Call  */
-#line 813 "/workspace/src/frontend/parser.y"
-         {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        (yyval.unaryExp)->call = unique_ptr<CallAST>((yyvsp[0].call));
-    }
-#line 3050 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 89: /* NonBraceUnaryExp: Call LB Exp RB  */
-#line 817 "/workspace/src/frontend/parser.y"
-                   {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *base = make_node<UnaryExpAST>();
-        base->call = unique_ptr<CallAST>((yyvsp[-3].call));
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>(base);
-        (yyval.unaryExp)->subscript = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
-    }
-#line 3062 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 90: /* NonBraceUnaryExp: LP Exp RP LB Exp RB  */
-#line 824 "/workspace/src/frontend/parser.y"
-                        {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>((yyvsp[-4].addExp));
-        auto *base = make_node<UnaryExpAST>();
-        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>(base);
-        (yyval.unaryExp)->subscript = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
-    }
-#line 3076 "/workspace/src/frontend/parser.cpp"
-    break;
-
   case 91: /* NonBraceUnaryExp: UnaryOp UnaryExp  */
-#line 833 "/workspace/src/frontend/parser.y"
+#line 724 "/workspace/src/frontend/parser.y"
                      {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        (yyval.unaryExp)->op = (yyvsp[-1].op);
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
+        (yyval.expr) = make_node<UnaryExprAST>((yyvsp[-1].unaryOp), unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
-#line 3086 "/workspace/src/frontend/parser.cpp"
+#line 2983 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 92: /* Cond: LOrExp  */
-#line 841 "/workspace/src/frontend/parser.y"
+#line 730 "/workspace/src/frontend/parser.y"
            {
-        (yyval.lOrExp) = (yyvsp[0].lOrExp);
+        (yyval.expr) = (yyvsp[0].expr);
     }
-#line 3094 "/workspace/src/frontend/parser.cpp"
+#line 2991 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 93: /* LVal: ID  */
-#line 847 "/workspace/src/frontend/parser.y"
+#line 736 "/workspace/src/frontend/parser.y"
        {
-        (yyval.lVal) = make_node<LValAST>();
-        (yyval.lVal)->id = unique_ptr<string>((yyvsp[0].token));
+        (yyval.lValue) = make_node<LValueAST>(std::move(*(yyvsp[0].token)));
+        delete (yyvsp[0].token);
     }
-#line 3103 "/workspace/src/frontend/parser.cpp"
+#line 3000 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 94: /* LVal: ID Arrays  */
-#line 851 "/workspace/src/frontend/parser.y"
+#line 740 "/workspace/src/frontend/parser.y"
               {
-        (yyval.lVal) = make_node<LValAST>();
-        (yyval.lVal)->id = unique_ptr<string>((yyvsp[-1].token));
-        (yyval.lVal)->arrays.swap((yyvsp[0].arrays)->list);
-        delete (yyvsp[0].arrays);
+        (yyval.lValue) = make_node<LValueAST>(std::move(*(yyvsp[-1].token)));
+        delete (yyvsp[-1].token);
+        (yyval.lValue)->indices.swap((yyvsp[0].exprList)->values);
+        delete (yyvsp[0].exprList);
     }
-#line 3114 "/workspace/src/frontend/parser.cpp"
+#line 3011 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 95: /* PrimaryExp: LP Exp RP  */
-#line 860 "/workspace/src/frontend/parser.y"
-              {
-        (yyval.primaryExp) = make_node<PrimaryExpAST>();
-        (yyval.primaryExp)->exp = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
-    }
-#line 3123 "/workspace/src/frontend/parser.cpp"
+#line 749 "/workspace/src/frontend/parser.y"
+              { (yyval.expr) = (yyvsp[-1].expr); }
+#line 3017 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 96: /* PrimaryExp: LVal  */
-#line 864 "/workspace/src/frontend/parser.y"
-         {
-        (yyval.primaryExp) = make_node<PrimaryExpAST>();
-        (yyval.primaryExp)->lval = unique_ptr<LValAST>((yyvsp[0].lVal));
-    }
-#line 3132 "/workspace/src/frontend/parser.cpp"
+#line 750 "/workspace/src/frontend/parser.y"
+         { (yyval.expr) = (yyvsp[0].lValue); }
+#line 3023 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 97: /* PrimaryExp: Number  */
-#line 868 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.primaryExp) = make_node<PrimaryExpAST>();
-        (yyval.primaryExp)->number = unique_ptr<NumberAST>((yyvsp[0].number));
-    }
-#line 3141 "/workspace/src/frontend/parser.cpp"
+#line 751 "/workspace/src/frontend/parser.y"
+           { (yyval.expr) = (yyvsp[0].expr); }
+#line 3029 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 98: /* PrimaryExp: BraceInitVal  */
-#line 872 "/workspace/src/frontend/parser.y"
+#line 752 "/workspace/src/frontend/parser.y"
                  {
-        (yyval.primaryExp) = make_node<PrimaryExpAST>();
-        (yyval.primaryExp)->initVal = unique_ptr<InitValAST>((yyvsp[0].initVal));
+        (yyval.expr) = make_node<AggregateExprAST>(unique_ptr<InitValAST>((yyvsp[0].initVal)));
     }
-#line 3150 "/workspace/src/frontend/parser.cpp"
+#line 3037 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 99: /* Number: INT  */
-#line 879 "/workspace/src/frontend/parser.y"
+#line 758 "/workspace/src/frontend/parser.y"
         {
-        (yyval.number) = make_node<NumberAST>();
-        (yyval.number)->isInt = true;
-        (yyval.number)->intval = (yyvsp[0].int_val);
+        (yyval.expr) = make_node<LiteralExprAST>((yyvsp[0].int_val));
     }
-#line 3160 "/workspace/src/frontend/parser.cpp"
+#line 3045 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 100: /* Number: FLOAT  */
-#line 884 "/workspace/src/frontend/parser.y"
+#line 761 "/workspace/src/frontend/parser.y"
           {
-        (yyval.number) = make_node<NumberAST>();
-        (yyval.number)->isInt = false;
-        (yyval.number)->floatval = (yyvsp[0].float_val);
+        (yyval.expr) = make_node<LiteralExprAST>((yyvsp[0].float_val));
     }
-#line 3170 "/workspace/src/frontend/parser.cpp"
+#line 3053 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 101: /* UnaryExp: PrimaryExp  */
-#line 894 "/workspace/src/frontend/parser.y"
-               {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        (yyval.unaryExp)->primaryExp = unique_ptr<PrimaryExpAST>((yyvsp[0].primaryExp));
-    }
-#line 3179 "/workspace/src/frontend/parser.cpp"
+#line 769 "/workspace/src/frontend/parser.y"
+               { (yyval.expr) = (yyvsp[0].expr); }
+#line 3059 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 102: /* UnaryExp: Call  */
-#line 898 "/workspace/src/frontend/parser.y"
-         {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        (yyval.unaryExp)->call = unique_ptr<CallAST>((yyvsp[0].call));
-    }
-#line 3188 "/workspace/src/frontend/parser.cpp"
+#line 770 "/workspace/src/frontend/parser.y"
+         { (yyval.expr) = (yyvsp[0].callExpr); }
+#line 3065 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 103: /* UnaryExp: Call LB Exp RB  */
-#line 902 "/workspace/src/frontend/parser.y"
+#line 771 "/workspace/src/frontend/parser.y"
                    {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *base = make_node<UnaryExpAST>();
-        base->call = unique_ptr<CallAST>((yyvsp[-3].call));
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>(base);
-        (yyval.unaryExp)->subscript = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
+        (yyval.expr) = make_node<SubscriptExprAST>(unique_ptr<ExprAST>((yyvsp[-3].callExpr)),
+                                         unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 3200 "/workspace/src/frontend/parser.cpp"
+#line 3074 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 104: /* UnaryExp: LP Exp RP LB Exp RB  */
-#line 909 "/workspace/src/frontend/parser.y"
+#line 775 "/workspace/src/frontend/parser.y"
                         {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>((yyvsp[-4].addExp));
-        auto *base = make_node<UnaryExpAST>();
-        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>(base);
-        (yyval.unaryExp)->subscript = unique_ptr<AddExpAST>((yyvsp[-1].addExp));
+        (yyval.expr) = make_node<SubscriptExprAST>(unique_ptr<ExprAST>((yyvsp[-4].expr)),
+                                         unique_ptr<ExprAST>((yyvsp[-1].expr)));
     }
-#line 3214 "/workspace/src/frontend/parser.cpp"
+#line 3083 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 105: /* UnaryExp: UnaryOp UnaryExp  */
-#line 918 "/workspace/src/frontend/parser.y"
+#line 779 "/workspace/src/frontend/parser.y"
                      {
-        (yyval.unaryExp) = make_node<UnaryExpAST>();
-        (yyval.unaryExp)->op = (yyvsp[-1].op);
-        (yyval.unaryExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
+        (yyval.expr) = make_node<UnaryExprAST>((yyvsp[-1].unaryOp), unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
-#line 3224 "/workspace/src/frontend/parser.cpp"
+#line 3091 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 106: /* Call: ID LP RP  */
-#line 926 "/workspace/src/frontend/parser.y"
+#line 785 "/workspace/src/frontend/parser.y"
              {
-        (yyval.call) = make_node<CallAST>();
-        (yyval.call)->id = unique_ptr<string>((yyvsp[-2].token));
-        (yyval.call)->lineno = (yylsp[-2]).first_line;
+        (yyval.callExpr) = make_node<CallExprAST>(std::move(*(yyvsp[-2].token)), (yylsp[-2]).first_line);
+        delete (yyvsp[-2].token);
     }
-#line 3234 "/workspace/src/frontend/parser.cpp"
+#line 3100 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 107: /* Call: ID LP FuncCParamList RP  */
-#line 931 "/workspace/src/frontend/parser.y"
+#line 789 "/workspace/src/frontend/parser.y"
                             {
-        (yyval.call) = make_node<CallAST>();
-        (yyval.call)->id = unique_ptr<string>((yyvsp[-3].token));
-        (yyval.call)->funcCParamList.swap((yyvsp[-1].funcCParamList)->list);
-        delete (yyvsp[-1].funcCParamList);
-        (yyval.call)->lineno = (yylsp[-3]).first_line;
+        (yyval.callExpr) = make_node<CallExprAST>(std::move(*(yyvsp[-3].token)), (yylsp[-3]).first_line);
+        delete (yyvsp[-3].token);
+        (yyval.callExpr)->arguments.swap(*(yyvsp[-1].callArgList));
+        delete (yyvsp[-1].callArgList);
     }
-#line 3246 "/workspace/src/frontend/parser.cpp"
+#line 3111 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 108: /* UnaryOp: ADD  */
-#line 941 "/workspace/src/frontend/parser.y"
+#line 798 "/workspace/src/frontend/parser.y"
         {
-        (yyval.op) = UOP_ADD;
+        (yyval.unaryOp) = UnaryOp::Plus;
     }
-#line 3254 "/workspace/src/frontend/parser.cpp"
+#line 3119 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 109: /* UnaryOp: MINUS  */
-#line 944 "/workspace/src/frontend/parser.y"
+#line 801 "/workspace/src/frontend/parser.y"
           {
-        (yyval.op) = UOP_MINUS;
+        (yyval.unaryOp) = UnaryOp::Minus;
     }
-#line 3262 "/workspace/src/frontend/parser.cpp"
+#line 3127 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 110: /* UnaryOp: NOT  */
-#line 947 "/workspace/src/frontend/parser.y"
+#line 804 "/workspace/src/frontend/parser.y"
         {
-        (yyval.op) = UOP_NOT;
+        (yyval.unaryOp) = UnaryOp::LogicalNot;
     }
-#line 3270 "/workspace/src/frontend/parser.cpp"
+#line 3135 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 111: /* FuncCParamList: FuncCParam  */
-#line 953 "/workspace/src/frontend/parser.y"
+#line 810 "/workspace/src/frontend/parser.y"
                {
-        (yyval.funcCParamList) = make_node<FuncCParamListAST>();
-        (yyval.funcCParamList)->list.push_back(unique_ptr<CallArgAST>((yyvsp[0].callArg)));
+        (yyval.callArgList) = make_node<CallArgList>();
+        (yyval.callArgList)->push_back(std::move(*(yyvsp[0].callArg)));
+        delete (yyvsp[0].callArg);
     }
-#line 3279 "/workspace/src/frontend/parser.cpp"
+#line 3145 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 112: /* FuncCParamList: FuncCParamList COMMA FuncCParam  */
-#line 957 "/workspace/src/frontend/parser.y"
+#line 815 "/workspace/src/frontend/parser.y"
                                     {
-        (yyval.funcCParamList) = (yyvsp[-2].funcCParamList);
-        (yyval.funcCParamList)->list.push_back(unique_ptr<CallArgAST>((yyvsp[0].callArg)));
+        (yyval.callArgList) = (yyvsp[-2].callArgList);
+        (yyval.callArgList)->push_back(std::move(*(yyvsp[0].callArg)));
+        delete (yyvsp[0].callArg);
     }
-#line 3288 "/workspace/src/frontend/parser.cpp"
+#line 3155 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 113: /* FuncCParam: Exp  */
-#line 963 "/workspace/src/frontend/parser.y"
+#line 822 "/workspace/src/frontend/parser.y"
         {
-        (yyval.callArg) = make_node<CallArgAST>();
-        (yyval.callArg)->exp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
+        (yyval.callArg) = make_node<CallArgumentAST>(unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
-#line 3297 "/workspace/src/frontend/parser.cpp"
+#line 3163 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 114: /* FuncCParam: STRING_LITERAL  */
-#line 967 "/workspace/src/frontend/parser.y"
+#line 825 "/workspace/src/frontend/parser.y"
                    {
         string decoded;
         if (!decodeStringLiteral(*(yyvsp[0].token), decoded)) {
@@ -3305,210 +3171,180 @@ yyreduce:
             delete (yyvsp[0].token);
             YYERROR;
         }
-        (yyval.callArg) = make_node<CallArgAST>();
-        (yyval.callArg)->stringLiteral = unique_ptr<string>(new string(std::move(decoded)));
+        (yyval.callArg) = make_node<CallArgumentAST>(std::move(decoded));
         delete (yyvsp[0].token);
     }
-#line 3313 "/workspace/src/frontend/parser.cpp"
+#line 3178 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 115: /* MulExp: UnaryExp  */
-#line 981 "/workspace/src/frontend/parser.y"
-             {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
-    }
-#line 3322 "/workspace/src/frontend/parser.cpp"
+#line 838 "/workspace/src/frontend/parser.y"
+             { (yyval.expr) = (yyvsp[0].expr); }
+#line 3184 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 116: /* MulExp: MulExp MUL UnaryExp  */
-#line 985 "/workspace/src/frontend/parser.y"
+#line 839 "/workspace/src/frontend/parser.y"
                         {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_MUL;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Multiply,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
-#line 3333 "/workspace/src/frontend/parser.cpp"
+#line 3194 "/workspace/src/frontend/parser.cpp"
     break;
 
   case 117: /* MulExp: MulExp DIV UnaryExp  */
-#line 991 "/workspace/src/frontend/parser.y"
+#line 844 "/workspace/src/frontend/parser.y"
                         {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_DIV;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Divide,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3204 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 118: /* MulExp: MulExp MOD UnaryExp  */
+#line 849 "/workspace/src/frontend/parser.y"
+                        {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Remainder,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3214 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 119: /* AddExp: MulExp  */
+#line 857 "/workspace/src/frontend/parser.y"
+           { (yyval.expr) = (yyvsp[0].expr); }
+#line 3220 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 120: /* AddExp: AddExp ADD MulExp  */
+#line 858 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Add,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3230 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 121: /* AddExp: AddExp MINUS MulExp  */
+#line 863 "/workspace/src/frontend/parser.y"
+                        {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Subtract,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3240 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 122: /* RelExp: AddExp  */
+#line 871 "/workspace/src/frontend/parser.y"
+           { (yyval.expr) = (yyvsp[0].expr); }
+#line 3246 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 123: /* RelExp: RelExp GTE AddExp  */
+#line 872 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::GreaterEqual,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3256 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 124: /* RelExp: RelExp LTE AddExp  */
+#line 877 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::LessEqual,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3266 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 125: /* RelExp: RelExp GT AddExp  */
+#line 882 "/workspace/src/frontend/parser.y"
+                     {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Greater,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3276 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 126: /* RelExp: RelExp LT AddExp  */
+#line 887 "/workspace/src/frontend/parser.y"
+                     {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Less,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3286 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 127: /* EqExp: RelExp  */
+#line 895 "/workspace/src/frontend/parser.y"
+           { (yyval.expr) = (yyvsp[0].expr); }
+#line 3292 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 128: /* EqExp: EqExp EQ RelExp  */
+#line 896 "/workspace/src/frontend/parser.y"
+                    {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::Equal,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3302 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 129: /* EqExp: EqExp NEQ RelExp  */
+#line 901 "/workspace/src/frontend/parser.y"
+                     {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::NotEqual,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3312 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 130: /* LAndExp: EqExp  */
+#line 909 "/workspace/src/frontend/parser.y"
+          { (yyval.expr) = (yyvsp[0].expr); }
+#line 3318 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 131: /* LAndExp: LAndExp AND EqExp  */
+#line 910 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::LogicalAnd,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
+    }
+#line 3328 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 132: /* LOrExp: LAndExp  */
+#line 918 "/workspace/src/frontend/parser.y"
+            { (yyval.expr) = (yyvsp[0].expr); }
+#line 3334 "/workspace/src/frontend/parser.cpp"
+    break;
+
+  case 133: /* LOrExp: LOrExp OR LAndExp  */
+#line 919 "/workspace/src/frontend/parser.y"
+                      {
+        (yyval.expr) = make_node<BinaryExprAST>(BinaryOp::LogicalOr,
+                                      unique_ptr<ExprAST>((yyvsp[-2].expr)),
+                                      unique_ptr<ExprAST>((yyvsp[0].expr)));
     }
 #line 3344 "/workspace/src/frontend/parser.cpp"
     break;
 
-  case 118: /* MulExp: MulExp MOD UnaryExp  */
-#line 997 "/workspace/src/frontend/parser.y"
-                        {
-        (yyval.mulExp) = make_node<MulExpAST>();
-        (yyval.mulExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[-2].mulExp));
-        (yyval.mulExp)->op = MOP_MOD;
-        (yyval.mulExp)->unaryExp = unique_ptr<UnaryExpAST>((yyvsp[0].unaryExp));
-    }
-#line 3355 "/workspace/src/frontend/parser.cpp"
-    break;
 
-  case 119: /* AddExp: MulExp  */
-#line 1006 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
-    }
-#line 3364 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 120: /* AddExp: AddExp ADD MulExp  */
-#line 1010 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
-        (yyval.addExp)->op = AOP_ADD;
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
-    }
-#line 3375 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 121: /* AddExp: AddExp MINUS MulExp  */
-#line 1016 "/workspace/src/frontend/parser.y"
-                        {
-        (yyval.addExp) = make_node<AddExpAST>();
-        (yyval.addExp)->addExp = unique_ptr<AddExpAST>((yyvsp[-2].addExp));
-        (yyval.addExp)->op = AOP_MINUS;
-        (yyval.addExp)->mulExp = unique_ptr<MulExpAST>((yyvsp[0].mulExp));
-    }
-#line 3386 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 122: /* RelExp: AddExp  */
-#line 1025 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.relExp) = make_node<RelExpAST>();
-        (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 3395 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 123: /* RelExp: RelExp GTE AddExp  */
-#line 1029 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.relExp) = make_node<RelExpAST>();
-        (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
-        (yyval.relExp)->op = ROP_GTE;
-        (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 3406 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 124: /* RelExp: RelExp LTE AddExp  */
-#line 1035 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.relExp) = make_node<RelExpAST>();
-        (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
-        (yyval.relExp)->op = ROP_LTE;
-        (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 3417 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 125: /* RelExp: RelExp GT AddExp  */
-#line 1041 "/workspace/src/frontend/parser.y"
-                     {
-        (yyval.relExp) = make_node<RelExpAST>();
-        (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
-        (yyval.relExp)->op = ROP_GT;
-        (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 3428 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 126: /* RelExp: RelExp LT AddExp  */
-#line 1047 "/workspace/src/frontend/parser.y"
-                     {
-        (yyval.relExp) = make_node<RelExpAST>();
-        (yyval.relExp)->relExp = unique_ptr<RelExpAST>((yyvsp[-2].relExp));
-        (yyval.relExp)->op = ROP_LT;
-        (yyval.relExp)->addExp = unique_ptr<AddExpAST>((yyvsp[0].addExp));
-    }
-#line 3439 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 127: /* EqExp: RelExp  */
-#line 1056 "/workspace/src/frontend/parser.y"
-           {
-        (yyval.eqExp) = make_node<EqExpAST>();
-        (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
-    }
-#line 3448 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 128: /* EqExp: EqExp EQ RelExp  */
-#line 1060 "/workspace/src/frontend/parser.y"
-                    {
-        (yyval.eqExp) = make_node<EqExpAST>();
-        (yyval.eqExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[-2].eqExp));
-        (yyval.eqExp)->op = EOP_EQ;
-        (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
-    }
-#line 3459 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 129: /* EqExp: EqExp NEQ RelExp  */
-#line 1066 "/workspace/src/frontend/parser.y"
-                     {
-        (yyval.eqExp) = make_node<EqExpAST>();
-        (yyval.eqExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[-2].eqExp));
-        (yyval.eqExp)->op = EOP_NEQ;
-        (yyval.eqExp)->relExp = unique_ptr<RelExpAST>((yyvsp[0].relExp));
-    }
-#line 3470 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 130: /* LAndExp: EqExp  */
-#line 1075 "/workspace/src/frontend/parser.y"
-          {
-        (yyval.lAndExp) = make_node<LAndExpAST>();
-        (yyval.lAndExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[0].eqExp));
-    }
-#line 3479 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 131: /* LAndExp: LAndExp AND EqExp  */
-#line 1079 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.lAndExp) = make_node<LAndExpAST>();
-        (yyval.lAndExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[-2].lAndExp));
-        (yyval.lAndExp)->eqExp = unique_ptr<EqExpAST>((yyvsp[0].eqExp));
-    }
-#line 3489 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 132: /* LOrExp: LAndExp  */
-#line 1087 "/workspace/src/frontend/parser.y"
-            {
-        (yyval.lOrExp) = make_node<LOrExpAST>();
-        (yyval.lOrExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[0].lAndExp));
-    }
-#line 3498 "/workspace/src/frontend/parser.cpp"
-    break;
-
-  case 133: /* LOrExp: LOrExp OR LAndExp  */
-#line 1091 "/workspace/src/frontend/parser.y"
-                      {
-        (yyval.lOrExp) = make_node<LOrExpAST>();
-        (yyval.lOrExp)->lOrExp = unique_ptr<LOrExpAST>((yyvsp[-2].lOrExp));
-        (yyval.lOrExp)->lAndExp = unique_ptr<LAndExpAST>((yyvsp[0].lAndExp));
-    }
-#line 3508 "/workspace/src/frontend/parser.cpp"
-    break;
-
-
-#line 3512 "/workspace/src/frontend/parser.cpp"
+#line 3348 "/workspace/src/frontend/parser.cpp"
 
       default: break;
     }
@@ -3737,7 +3573,7 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 1096 "/workspace/src/frontend/parser.y"
+#line 924 "/workspace/src/frontend/parser.y"
 
 
 void initFileName(const char *name) {

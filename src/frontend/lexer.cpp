@@ -927,7 +927,7 @@ YY_RULE_SETUP
 case 9:
 YY_RULE_SETUP
 #line 54 "/workspace/src/frontend/lexer.l"
-{ yylval.token = new string(yytext); LEXER_DEBUG_TOKEN("STRING_LITERAL"); return STRING_LITERAL; }
+{ yylval.token = new std::string(yytext); LEXER_DEBUG_TOKEN("STRING_LITERAL"); return STRING_LITERAL; }
 	YY_BREAK
 case 10:
 YY_RULE_SETUP
@@ -982,7 +982,7 @@ YY_RULE_SETUP
 case 20:
 YY_RULE_SETUP
 #line 67 "/workspace/src/frontend/lexer.l"
-{ yylval.token = new string(yytext); LEXER_DEBUG_TOKEN("ID"); return ID; }
+{ yylval.token = new std::string(yytext); LEXER_DEBUG_TOKEN("ID"); return ID; }
 	YY_BREAK
 case 21:
 YY_RULE_SETUP
@@ -2143,4 +2143,3 @@ void yyfree (void * ptr )
 #define YYTABLES_NAME "yytables"
 
 #line 104 "/workspace/src/frontend/lexer.l"
-

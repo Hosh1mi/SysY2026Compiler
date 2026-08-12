@@ -5,6 +5,21 @@
 %code requires {
     #include "ast/ast.hpp"
     #include <string>
+
+    // Parser-only storage for comma-separated lists.  These helpers disappear
+    // after reduction and are not part of the AST/IRGen contract.
+    template <typename T>
+    struct ParsedList {
+        std::vector<std::unique_ptr<T>> values;
+    };
+
+    using ObjectDefList = ParsedList<ObjectDefAST>;
+    using ExprList = ParsedList<ExprAST>;
+    using InitValList = ParsedList<InitValAST>;
+    using FuncParamList = ParsedList<FuncParamAST>;
+    using TopLevelItem = TopLevelItemAST;
+    using BlockItemList = std::vector<BlockItemAST>;
+    using CallArgList = std::vector<CallArgumentAST>;
 }
 
 %{
@@ -161,79 +176,57 @@
 
 %union {
     CompUnitAST* compUnit;
-    DeclDefAST* declDef;
+    TopLevelItem* topLevel;
     DeclAST* decl;
-    DefListAST* defList;
-    DefAST* def;
-    ArraysAST* arrays;
-    InitValListAST* initValList;
+    ObjectDefList* objectDefList;
+    ObjectDefAST* objectDef;
+    ExprList* exprList;
+    InitValList* initValList;
     InitValAST* initVal;
     FuncDefAST* funcDef;
-    FuncFParamListAST* FuncFParamList;
-    FuncFParamAST* funcFParam;
+    FuncParamList* funcParamList;
+    FuncParamAST* funcParam;
     BlockAST* block;
-    BlockItemListAST* blockItemList;
+    BlockItemList* blockItemList;
     BlockItemAST* blockItem;
     StmtAST* stmt;
-    ReturnStmtAST* returnStmt;
-    SelectStmtAST* selectStmt;
-    IterationStmtAST* iterationStmt;
-    LValAST* lVal;
-    PrimaryExpAST* primaryExp;
-    NumberAST* number;
-    UnaryExpAST* unaryExp;
-    CallAST* call;
-    CallArgAST* callArg;
-    FuncCParamListAST* funcCParamList;
-    MulExpAST* mulExp;
-    AddExpAST* addExp;
-    RelExpAST* relExp;
-    EqExpAST* eqExp;
-    LAndExpAST* lAndExp;
-    LOrExpAST* lOrExp;
+    LValueAST* lValue;
+    ExprAST* expr;
+    CallExprAST* callExpr;
+    CallArgumentAST* callArg;
+    CallArgList* callArgList;
     TypeSpec* type_spec;
-    UOP op;
-    string* token;
+    UnaryOp unaryOp;
+    std::string* token;
     int int_val;
     float float_val;
 }
 
 %type <compUnit> CompUnit
-%type <declDef> DeclDef
+%type <topLevel> DeclDef
 %type <decl> Decl
-%type <defList> ConstDefList VarDefList
-%type <def> ConstDef VarDef
-%type <arrays> Arrays
+%type <objectDefList> ConstDefList VarDefList
+%type <objectDef> ConstDef VarDef
+%type <exprList> Arrays
 %type <initValList> InitValList
 %type <initVal> ConstInitVal InitVal BraceInitVal
 %type <funcDef> FuncDef
-%type <FuncFParamList> FuncFParamList OptFuncFParamList
-%type <funcFParam> FuncFParam
+%type <funcParamList> FuncFParamList OptFuncFParamList
+%type <funcParam> FuncFParam
 %type <block> Block
 %type <blockItemList> BlockItemList
 %type <blockItem> BlockItem
-%type <stmt> Stmt
-%type <returnStmt> ReturnStmt
-%type <selectStmt> SelectStmt
-%type <iterationStmt> IterationStmt
-%type <lVal> LVal
-%type <primaryExp> PrimaryExp
-%type <number> Number
-%type <unaryExp> UnaryExp
-%type <call> Call
+%type <stmt> Stmt ReturnStmt SelectStmt IterationStmt
+%type <lValue> LVal
+%type <expr> PrimaryExp Number UnaryExp MulExp AddExp Exp NonBraceExp
+%type <expr> NonBraceAddExp NonBraceMulExp NonBraceUnaryExp
+%type <expr> RelExp EqExp LAndExp Cond LOrExp
+%type <callExpr> Call
 %type <callArg> FuncCParam
-%type <funcCParamList> FuncCParamList
-%type <mulExp> MulExp
-%type <addExp> AddExp Exp NonBraceExp NonBraceAddExp
-%type <mulExp> NonBraceMulExp
-%type <unaryExp> NonBraceUnaryExp
-%type <relExp> RelExp
-%type <eqExp> EqExp
-%type <lAndExp> LAndExp
-%type <lOrExp> Cond LOrExp
+%type <callArgList> FuncCParamList
 
 %type <type_spec> BType VoidType VecType VecWidth
-%type <op> UnaryOp
+%type <unaryOp> UnaryOp
 
 // %token 定义终结符的语义值类型
 %token <int_val> INT           // 指定INT字面量的语义值是type_int，有词法分析得到的数值
@@ -252,14 +245,12 @@
 // Every pointer-valued semantic object is owned either by the AST action that
 // consumes it or by Bison while it is on the parse stack.  These destructors
 // make syntax-error paths leak-free.
-%destructor { delete $$; } <compUnit> <declDef> <decl> <defList> <def>
-%destructor { delete $$; } <arrays> <initValList> <initVal> <funcDef>
-%destructor { delete $$; } <FuncFParamList> <funcFParam> <block>
-%destructor { delete $$; } <blockItemList> <blockItem> <stmt> <returnStmt>
-%destructor { delete $$; } <selectStmt> <iterationStmt> <lVal> <primaryExp>
-%destructor { delete $$; } <number> <unaryExp> <call> <callArg>
-%destructor { delete $$; } <funcCParamList> <mulExp> <addExp> <relExp>
-%destructor { delete $$; } <eqExp> <lAndExp> <lOrExp> <type_spec> <token>
+%destructor { delete $$; } <compUnit> <topLevel> <decl> <objectDefList>
+%destructor { delete $$; } <objectDef> <exprList> <initValList> <initVal>
+%destructor { delete $$; } <funcDef> <funcParamList> <funcParam> <block>
+%destructor { delete $$; } <blockItemList> <blockItem> <stmt> <lValue>
+%destructor { delete $$; } <expr> <callExpr> <callArg> <callArgList>
+%destructor { delete $$; } <type_spec> <token>
 
 %precedence LOWER_THEN_ELSE
 %precedence ELSE
@@ -276,41 +267,29 @@ Program:
 CompUnit:
     CompUnit DeclDef {
         $$ = $1;
-        $$->declDefList.push_back(unique_ptr<DeclDefAST>($2));
+        $$->items.push_back(std::move(*$2));
+        delete $2;
     }|
     DeclDef {
         $$ = make_node<CompUnitAST>();
-        $$->declDefList.push_back(unique_ptr<DeclDefAST>($1));
+        $$->items.push_back(std::move(*$1));
+        delete $1;
     };
 
-//声明或者函数定义
+// A top-level item is already a semantic node; no DeclDef wrapper is built.
 DeclDef:
-    Decl {
-        $$ = make_node<DeclDefAST>();
-        $$->Decl = unique_ptr<DeclAST>($1);
-    }|
-    FuncDef {
-        $$ = make_node<DeclDefAST>();
-        $$->funcDef = unique_ptr<FuncDefAST>($1);
-    };
+    Decl { $$ = make_node<TopLevelItem>(unique_ptr<DeclAST>($1)); }|
+    FuncDef { $$ = make_node<TopLevelItem>(unique_ptr<FuncDefAST>($1)); };
 
 // 变量或常量声明
 Decl:
     CONST BType ConstDefList SEMICOLON {
-        $$ = make_node<DeclAST>();
-        $$->isConst = true;
-        $$->bType = *$2;
-        delete $2;
-        $$->defList.swap($3->list);
-        delete $3;
+        $$ = make_node<DeclAST>(*$2, true, std::move($3->values));
+        delete $2; delete $3;
     }|
     BType VarDefList SEMICOLON {
-        $$ = make_node<DeclAST>();
-        $$->isConst = false;
-        $$->bType = *$1;
-        delete $1;
-        $$->defList.swap($2->list);
-        delete $2;
+        $$ = make_node<DeclAST>(*$1, false, std::move($2->values));
+        delete $1; delete $2;
     };
 
 // 基本类型
@@ -429,22 +408,22 @@ VoidType:
 // 定义列表
 ConstDefList:
     ConstDef {
-        $$ = make_node<DefListAST>();
-        $$->list.push_back(unique_ptr<DefAST>($1));
+        $$ = make_node<ObjectDefList>();
+        $$->values.push_back(unique_ptr<ObjectDefAST>($1));
     }|
     ConstDefList COMMA ConstDef {
         $$ = $1;
-        $$->list.push_back(unique_ptr<DefAST>($3));
+        $$->values.push_back(unique_ptr<ObjectDefAST>($3));
     };
 
 VarDefList:
     VarDef {
-        $$ = make_node<DefListAST>();
-        $$->list.push_back(unique_ptr<DefAST>($1));
+        $$ = make_node<ObjectDefList>();
+        $$->values.push_back(unique_ptr<ObjectDefAST>($1));
     }|
     VarDefList COMMA VarDef {
         $$ = $1;
-        $$->list.push_back(unique_ptr<DefAST>($3));
+        $$->values.push_back(unique_ptr<ObjectDefAST>($3));
     };
 
 // Constants and variables deliberately have separate productions.  Besides
@@ -452,53 +431,49 @@ VarDefList:
 // to represent in the AST.
 ConstDef:
     ID Arrays ASSIGN ConstInitVal {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->arrays.swap($2->list);
-        delete $2;
-        $$->initVal = unique_ptr<InitValAST>($4);
+        $$ = make_node<ObjectDefAST>(std::move(*$1), std::move($2->values),
+                                     unique_ptr<InitValAST>($4));
+        delete $1; delete $2;
     }|
     ID ASSIGN Exp {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
-        $$->initVal->exp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<ObjectDefAST>(
+            std::move(*$1), std::vector<unique_ptr<ExprAST>>{},
+            unique_ptr<InitValAST>(make_node<InitValAST>(
+                unique_ptr<ExprAST>($3))));
+        delete $1;
     };
 
 VarDef:
     ID Arrays ASSIGN InitVal {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->arrays.swap($2->list);
-        delete $2;
-        $$->initVal = unique_ptr<InitValAST>($4);
+        $$ = make_node<ObjectDefAST>(std::move(*$1), std::move($2->values),
+                                     unique_ptr<InitValAST>($4));
+        delete $1; delete $2;
     }|
     ID ASSIGN Exp {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
-        $$->initVal->exp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<ObjectDefAST>(
+            std::move(*$1), std::vector<unique_ptr<ExprAST>>{},
+            unique_ptr<InitValAST>(make_node<InitValAST>(
+                unique_ptr<ExprAST>($3))));
+        delete $1;
     }|
     ID Arrays {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->arrays.swap($2->list);
-        delete $2;
+        $$ = make_node<ObjectDefAST>(std::move(*$1), std::move($2->values));
+        delete $1; delete $2;
     }|
     ID {
-        $$ = make_node<DefAST>();
-        $$->id = unique_ptr<string>($1);
+        $$ = make_node<ObjectDefAST>(std::move(*$1));
+        delete $1;
     };
 
 // 数组
 Arrays:
     LB Exp RB {
-        $$ = make_node<ArraysAST>();
-        $$->list.push_back(unique_ptr<AddExpAST>($2));
+        $$ = make_node<ExprList>();
+        $$->values.push_back(unique_ptr<ExprAST>($2));
     }|
     Arrays LB Exp RB {
         $$ = $1;
-        $$->list.push_back(unique_ptr<AddExpAST>($3));
+        $$->values.push_back(unique_ptr<ExprAST>($3));
     };
 
 // Define blocks before braced expressions.  In the statement-start parser
@@ -512,7 +487,7 @@ Block:
     }|
     LC BlockItemList RC {
         $$ = make_node<BlockAST>();
-        $$->blockItemList.swap($2->list);
+        $$->items.swap(*$2);
         delete $2;
     };
 
@@ -525,13 +500,11 @@ InitVal:
         $$ = make_node<InitValAST>();
     }|
     LC InitValList RC {
-        $$ = make_node<InitValAST>();
-        $$->initValList.swap($2->list);
+        $$ = make_node<InitValAST>(std::move($2->values));
         delete $2;
     }|
     NonBraceExp {
-        $$ = make_node<InitValAST>();
-        $$->exp = unique_ptr<AddExpAST>($1);
+        $$ = make_node<InitValAST>(unique_ptr<ExprAST>($1));
     };
 
 ConstInitVal:
@@ -539,13 +512,11 @@ ConstInitVal:
         $$ = make_node<InitValAST>();
     }|
     LC InitValList RC {
-        $$ = make_node<InitValAST>();
-        $$->initValList.swap($2->list);
+        $$ = make_node<InitValAST>(std::move($2->values));
         delete $2;
     }|
     NonBraceExp {
-        $$ = make_node<InitValAST>();
-        $$->exp = unique_ptr<AddExpAST>($1);
+        $$ = make_node<InitValAST>(unique_ptr<ExprAST>($1));
     };
 
 // Braced initializer used on the right-hand side of a whole-vector assignment.
@@ -554,8 +525,7 @@ BraceInitVal:
         $$ = make_node<InitValAST>();
     }|
     LC InitValList RC {
-        $$ = make_node<InitValAST>();
-        $$->initValList.swap($2->list);
+        $$ = make_node<InitValAST>(std::move($2->values));
         delete $2;
     };
 
@@ -563,37 +533,29 @@ BraceInitVal:
 InitValList:
   InitValList COMMA InitVal {
     $$ = $1;
-    $$->list.push_back(unique_ptr<InitValAST>($3));
+    $$->values.push_back(unique_ptr<InitValAST>($3));
   }|
   InitVal {
-    $$ = make_node<InitValListAST>();
-    $$->list.push_back(unique_ptr<InitValAST>($1));
+    $$ = make_node<InitValList>();
+    $$->values.push_back(unique_ptr<InitValAST>($1));
   };
 
 // 函数定义
 FuncDef:
     BType ID LP OptFuncFParamList RP Block {
-        $$ = make_node<FuncDefAST>();
-        $$->funcType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->funcFParamList.swap($4->list);
-        delete $4;
-        $$->block = unique_ptr<BlockAST>($6);
+        $$ = make_node<FuncDefAST>(*$1, std::move(*$2),
+            std::move($4->values), unique_ptr<BlockAST>($6));
+        delete $1; delete $2; delete $4;
     }|
     VoidType ID LP OptFuncFParamList RP Block {
-        $$ = make_node<FuncDefAST>();
-        $$->funcType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->funcFParamList.swap($4->list);
-        delete $4;
-        $$->block = unique_ptr<BlockAST>($6);
+        $$ = make_node<FuncDefAST>(*$1, std::move(*$2),
+            std::move($4->values), unique_ptr<BlockAST>($6));
+        delete $1; delete $2; delete $4;
     };
 
 OptFuncFParamList:
     %empty {
-        $$ = make_node<FuncFParamListAST>();
+        $$ = make_node<FuncParamList>();
     }|
     FuncFParamList {
         $$ = $1;
@@ -602,135 +564,101 @@ OptFuncFParamList:
 // 函数形参列表
 FuncFParamList:
     FuncFParam {
-        $$ = make_node<FuncFParamListAST>();
-        $$->list.push_back(unique_ptr<FuncFParamAST>($1));
+        $$ = make_node<FuncParamList>();
+        $$->values.push_back(unique_ptr<FuncParamAST>($1));
     }|
     FuncFParamList COMMA FuncFParam {
         $$ = $1;
-        $$->list.push_back(unique_ptr<FuncFParamAST>($3));
+        $$->values.push_back(unique_ptr<FuncParamAST>($3));
     };
 
 // 函数形参
 FuncFParam:
     BType ID {
-        $$ = make_node<FuncFParamAST>();
-        $$->bType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->isArray = false;
+        $$ = make_node<FuncParamAST>(*$1, std::move(*$2));
+        delete $1; delete $2;
     }|
     BType ID LB RB {
-        $$ = make_node<FuncFParamAST>();
-        $$->bType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->isArray = true;
+        $$ = make_node<FuncParamAST>(*$1, std::move(*$2), true);
+        delete $1; delete $2;
     }|
     BType ID LB RB Arrays {
-        $$ = make_node<FuncFParamAST>();
-        $$->bType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->isArray = true;
-        $$->arrays.swap($5->list);
-        delete $5;
+        $$ = make_node<FuncParamAST>(*$1, std::move(*$2), true,
+                                     std::move($5->values));
+        delete $1; delete $2; delete $5;
     };
 
 // 语句块项列表
 BlockItemList:
     BlockItem {
-        $$ = make_node<BlockItemListAST>();
-        $$->list.push_back(unique_ptr<BlockItemAST>($1));
+        $$ = make_node<BlockItemList>();
+        $$->push_back(std::move(*$1));
+        delete $1;
     }|
     BlockItemList BlockItem {
         $$ = $1;
-        $$->list.push_back(unique_ptr<BlockItemAST>($2));
+        $$->push_back(std::move(*$2));
+        delete $2;
     };
 
 // 语句块项
 BlockItem:
     Decl {
-        $$ = make_node<BlockItemAST>();
-        $$->decl = unique_ptr<DeclAST>($1);
+        $$ = make_node<BlockItemAST>(unique_ptr<DeclAST>($1));
     }|
     Stmt {
-        $$ = make_node<BlockItemAST>();
-        $$->stmt = unique_ptr<StmtAST>($1);
+        $$ = make_node<BlockItemAST>(unique_ptr<StmtAST>($1));
     };
 
-// 语句，根据type判断是何种类型的Stmt
+// Each statement production creates its concrete semantic node.  There is no
+// tag plus a collection of mostly-null fields for IRGen to decode.
 Stmt:
     SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = SEMI;
+        $$ = make_node<EmptyStmtAST>();
     }|
     LVal ASSIGN Exp SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = ASS;
-        $$->lVal = unique_ptr<LValAST>($1);
-        $$->exp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<AssignStmtAST>(unique_ptr<LValueAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     NonBraceExp SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = EXP;
-        $$->exp = unique_ptr<AddExpAST>($1);
+        $$ = make_node<ExprStmtAST>(unique_ptr<ExprAST>($1));
     }|
     CONTINUE SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = CONT;
+        $$ = make_node<ContinueStmtAST>();
     }|
     BREAK SEMICOLON {
-        $$ = make_node<StmtAST>();
-        $$->sType = BRE;
+        $$ = make_node<BreakStmtAST>();
     }|
     Block {
-        $$ = make_node<StmtAST>();
-        $$->sType = BLK;
-        $$->block = unique_ptr<BlockAST>($1);
+        $$ = make_node<BlockStmtAST>(unique_ptr<BlockAST>($1));
     }|
-    ReturnStmt {
-        $$ = make_node<StmtAST>();
-        $$->sType = RET;
-        $$->returnStmt = unique_ptr<ReturnStmtAST>($1);
-    }|
-    SelectStmt {
-        $$ = make_node<StmtAST>();
-        $$->sType = SEL;
-        $$->selectStmt = unique_ptr<SelectStmtAST>($1);
-    }|
-    IterationStmt {
-        $$ = make_node<StmtAST>();
-        $$->sType = ITER;
-        $$->iterationStmt = unique_ptr<IterationStmtAST>($1);
-    };
+    ReturnStmt { $$ = $1; }|
+    SelectStmt { $$ = $1; }|
+    IterationStmt { $$ = $1; };
 
 //选择语句
 SelectStmt:
     IF LP Cond RP Stmt %prec LOWER_THEN_ELSE {
-        $$ = make_node<SelectStmtAST>();
-        $$->cond = unique_ptr<LOrExpAST>($3);
-        $$->ifStmt = unique_ptr<StmtAST>($5);
+        $$ = make_node<IfStmtAST>(unique_ptr<ExprAST>($3),
+                                  unique_ptr<StmtAST>($5));
     }|
     IF LP Cond RP Stmt ELSE Stmt {
-        $$ = make_node<SelectStmtAST>();
-        $$->cond = unique_ptr<LOrExpAST>($3);
-        $$->ifStmt = unique_ptr<StmtAST>($5);
-        $$->elseStmt = unique_ptr<StmtAST>($7);
+        $$ = make_node<IfStmtAST>(unique_ptr<ExprAST>($3),
+                                  unique_ptr<StmtAST>($5),
+                                  unique_ptr<StmtAST>($7));
     };
 
 //循环语句
 IterationStmt:
     WHILE LP Cond RP Stmt {
-        $$ = make_node<IterationStmtAST>();
-        $$->cond = unique_ptr<LOrExpAST>($3);
-        $$->stmt = unique_ptr<StmtAST>($5);
+        $$ = make_node<WhileStmtAST>(unique_ptr<ExprAST>($3),
+                                     unique_ptr<StmtAST>($5));
     };
 
 //返回语句
 ReturnStmt:
     RETURN Exp SEMICOLON {
-        $$ = make_node<ReturnStmtAST>();
-        $$->exp = unique_ptr<AddExpAST>($2);
+        $$ = make_node<ReturnStmtAST>(unique_ptr<ExprAST>($2));
     }|
     RETURN SEMICOLON {
         $$ = make_node<ReturnStmtAST>();
@@ -750,90 +678,51 @@ NonBraceExp:
     NonBraceAddExp { $$ = $1; };
 
 NonBraceAddExp:
-    NonBraceMulExp {
-        $$ = make_node<AddExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-    }|
+    NonBraceMulExp { $$ = $1; }|
     NonBraceAddExp ADD MulExp {
-        $$ = make_node<AddExpAST>();
-        $$->addExp = unique_ptr<AddExpAST>($1);
-        $$->op = AOP_ADD;
-        $$->mulExp = unique_ptr<MulExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Add,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     NonBraceAddExp MINUS MulExp {
-        $$ = make_node<AddExpAST>();
-        $$->addExp = unique_ptr<AddExpAST>($1);
-        $$->op = AOP_MINUS;
-        $$->mulExp = unique_ptr<MulExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Subtract,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 NonBraceMulExp:
-    NonBraceUnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->unaryExp = unique_ptr<UnaryExpAST>($1);
-    }|
+    NonBraceUnaryExp { $$ = $1; }|
     NonBraceMulExp MUL UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_MUL;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Multiply,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     NonBraceMulExp DIV UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_DIV;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Divide,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     NonBraceMulExp MOD UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_MOD;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Remainder,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 NonBraceUnaryExp:
-    LP Exp RP {
-        $$ = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>($2);
-        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }|
-    LVal {
-        $$ = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->lval = unique_ptr<LValAST>($1);
-        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }|
-    Number {
-        $$ = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->number = unique_ptr<NumberAST>($1);
-        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-    }|
-    Call {
-        $$ = make_node<UnaryExpAST>();
-        $$->call = unique_ptr<CallAST>($1);
-    }|
+    LP Exp RP { $$ = $2; }|
+    LVal { $$ = $1; }|
+    Number { $$ = $1; }|
+    Call { $$ = $1; }|
     Call LB Exp RB {
-        $$ = make_node<UnaryExpAST>();
-        auto *base = make_node<UnaryExpAST>();
-        base->call = unique_ptr<CallAST>($1);
-        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
-        $$->subscript = unique_ptr<AddExpAST>($3);
+        $$ = make_node<SubscriptExprAST>(unique_ptr<ExprAST>($1),
+                                         unique_ptr<ExprAST>($3));
     }|
     LP Exp RP LB Exp RB {
-        $$ = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>($2);
-        auto *base = make_node<UnaryExpAST>();
-        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
-        $$->subscript = unique_ptr<AddExpAST>($5);
+        $$ = make_node<SubscriptExprAST>(unique_ptr<ExprAST>($2),
+                                         unique_ptr<ExprAST>($5));
     }|
     UnaryOp UnaryExp {
-        $$ = make_node<UnaryExpAST>();
-        $$->op = $1;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($2);
+        $$ = make_node<UnaryExprAST>($1, unique_ptr<ExprAST>($2));
     };
 
 // 条件表达式
@@ -845,124 +734,93 @@ Cond:
 // 左值表达式
 LVal:
     ID {
-        $$ = make_node<LValAST>();
-        $$->id = unique_ptr<string>($1);
+        $$ = make_node<LValueAST>(std::move(*$1));
+        delete $1;
     }|
     ID Arrays {
-        $$ = make_node<LValAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->arrays.swap($2->list);
+        $$ = make_node<LValueAST>(std::move(*$1));
+        delete $1;
+        $$->indices.swap($2->values);
         delete $2;
     };
 
 // 基本表达式
 PrimaryExp:
-    LP Exp RP {
-        $$ = make_node<PrimaryExpAST>();
-        $$->exp = unique_ptr<AddExpAST>($2);
-    }|
-    LVal {
-        $$ = make_node<PrimaryExpAST>();
-        $$->lval = unique_ptr<LValAST>($1);
-    }|
-    Number {
-        $$ = make_node<PrimaryExpAST>();
-        $$->number = unique_ptr<NumberAST>($1);
-    }|
+    LP Exp RP { $$ = $2; }|
+    LVal { $$ = $1; }|
+    Number { $$ = $1; }|
     BraceInitVal {
-        $$ = make_node<PrimaryExpAST>();
-        $$->initVal = unique_ptr<InitValAST>($1);
+        $$ = make_node<AggregateExprAST>(unique_ptr<InitValAST>($1));
     };
 
 // 数值
 Number:
     INT {
-        $$ = make_node<NumberAST>();
-        $$->isInt = true;
-        $$->intval = $1;
+        $$ = make_node<LiteralExprAST>($1);
     }|
     FLOAT {
-        $$ = make_node<NumberAST>();
-        $$->isInt = false;
-        $$->floatval = $1;
+        $$ = make_node<LiteralExprAST>($1);
     };
 
 // 一元表达式
 // Lane extracts on calls / parenthesized values are written as dedicated
 // productions so they do not steal `id[i]` from LVal array lowering.
 UnaryExp:
-    PrimaryExp {
-        $$ = make_node<UnaryExpAST>();
-        $$->primaryExp = unique_ptr<PrimaryExpAST>($1);
-    }|
-    Call {
-        $$ = make_node<UnaryExpAST>();
-        $$->call = unique_ptr<CallAST>($1);
-    }|
+    PrimaryExp { $$ = $1; }|
+    Call { $$ = $1; }|
     Call LB Exp RB {
-        $$ = make_node<UnaryExpAST>();
-        auto *base = make_node<UnaryExpAST>();
-        base->call = unique_ptr<CallAST>($1);
-        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
-        $$->subscript = unique_ptr<AddExpAST>($3);
+        $$ = make_node<SubscriptExprAST>(unique_ptr<ExprAST>($1),
+                                         unique_ptr<ExprAST>($3));
     }|
     LP Exp RP LB Exp RB {
-        $$ = make_node<UnaryExpAST>();
-        auto *primary = make_node<PrimaryExpAST>();
-        primary->exp = unique_ptr<AddExpAST>($2);
-        auto *base = make_node<UnaryExpAST>();
-        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
-        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
-        $$->subscript = unique_ptr<AddExpAST>($5);
+        $$ = make_node<SubscriptExprAST>(unique_ptr<ExprAST>($2),
+                                         unique_ptr<ExprAST>($5));
     }|
     UnaryOp UnaryExp {
-        $$ = make_node<UnaryExpAST>();
-        $$->op = $1;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($2);
+        $$ = make_node<UnaryExprAST>($1, unique_ptr<ExprAST>($2));
     };
 
 //函数调用
 Call:
     ID LP RP {
-        $$ = make_node<CallAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->lineno = @1.first_line;
+        $$ = make_node<CallExprAST>(std::move(*$1), @1.first_line);
+        delete $1;
     }|
     ID LP FuncCParamList RP {
-        $$ = make_node<CallAST>();
-        $$->id = unique_ptr<string>($1);
-        $$->funcCParamList.swap($3->list);
+        $$ = make_node<CallExprAST>(std::move(*$1), @1.first_line);
+        delete $1;
+        $$->arguments.swap(*$3);
         delete $3;
-        $$->lineno = @1.first_line;
     };
 
 // 单目运算符,这里可能与优先级相关，不删除该非终结符
 UnaryOp:
     ADD {
-        $$ = UOP_ADD;
+        $$ = UnaryOp::Plus;
     }|
     MINUS {
-        $$ = UOP_MINUS;
+        $$ = UnaryOp::Minus;
     }|
     NOT {
-        $$ = UOP_NOT;
+        $$ = UnaryOp::LogicalNot;
     };
 
 // 函数实参表
 FuncCParamList:
     FuncCParam {
-        $$ = make_node<FuncCParamListAST>();
-        $$->list.push_back(unique_ptr<CallArgAST>($1));
+        $$ = make_node<CallArgList>();
+        $$->push_back(std::move(*$1));
+        delete $1;
     }|
     FuncCParamList COMMA FuncCParam {
         $$ = $1;
-        $$->list.push_back(unique_ptr<CallArgAST>($3));
+        $$->push_back(std::move(*$3));
+        delete $3;
     };
 
 FuncCParam:
     Exp {
-        $$ = make_node<CallArgAST>();
-        $$->exp = unique_ptr<AddExpAST>($1);
+        $$ = make_node<CallArgumentAST>(unique_ptr<ExprAST>($1));
     }|
     STRING_LITERAL {
         string decoded;
@@ -971,127 +829,97 @@ FuncCParam:
             delete $1;
             YYERROR;
         }
-        $$ = make_node<CallArgAST>();
-        $$->stringLiteral = unique_ptr<string>(new string(std::move(decoded)));
+        $$ = make_node<CallArgumentAST>(std::move(decoded));
         delete $1;
     };
 
 //乘除模表达式
 MulExp:
-    UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->unaryExp = unique_ptr<UnaryExpAST>($1);
-    }|
+    UnaryExp { $$ = $1; }|
     MulExp MUL UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_MUL;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Multiply,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     MulExp DIV UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_DIV;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Divide,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     MulExp MOD UnaryExp {
-        $$ = make_node<MulExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-        $$->op = MOP_MOD;
-        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Remainder,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 // 加减表达式
 AddExp:
-    MulExp {
-        $$ = make_node<AddExpAST>();
-        $$->mulExp = unique_ptr<MulExpAST>($1);
-    }|
+    MulExp { $$ = $1; }|
     AddExp ADD MulExp {
-        $$ = make_node<AddExpAST>();
-        $$->addExp = unique_ptr<AddExpAST>($1);
-        $$->op = AOP_ADD;
-        $$->mulExp = unique_ptr<MulExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Add,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     AddExp MINUS MulExp {
-        $$ = make_node<AddExpAST>();
-        $$->addExp = unique_ptr<AddExpAST>($1);
-        $$->op = AOP_MINUS;
-        $$->mulExp = unique_ptr<MulExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Subtract,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 // 关系表达式
 RelExp:
-    AddExp {
-        $$ = make_node<RelExpAST>();
-        $$->addExp = unique_ptr<AddExpAST>($1);
-    }|
+    AddExp { $$ = $1; }|
     RelExp GTE AddExp {
-        $$ = make_node<RelExpAST>();
-        $$->relExp = unique_ptr<RelExpAST>($1);
-        $$->op = ROP_GTE;
-        $$->addExp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::GreaterEqual,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     RelExp LTE AddExp {
-        $$ = make_node<RelExpAST>();
-        $$->relExp = unique_ptr<RelExpAST>($1);
-        $$->op = ROP_LTE;
-        $$->addExp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::LessEqual,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     RelExp GT AddExp {
-        $$ = make_node<RelExpAST>();
-        $$->relExp = unique_ptr<RelExpAST>($1);
-        $$->op = ROP_GT;
-        $$->addExp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Greater,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     RelExp LT AddExp {
-        $$ = make_node<RelExpAST>();
-        $$->relExp = unique_ptr<RelExpAST>($1);
-        $$->op = ROP_LT;
-        $$->addExp = unique_ptr<AddExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Less,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 // 相等性表达式
 EqExp:
-    RelExp {
-        $$ = make_node<EqExpAST>();
-        $$->relExp = unique_ptr<RelExpAST>($1);
-    }|
+    RelExp { $$ = $1; }|
     EqExp EQ RelExp {
-        $$ = make_node<EqExpAST>();
-        $$->eqExp = unique_ptr<EqExpAST>($1);
-        $$->op = EOP_EQ;
-        $$->relExp = unique_ptr<RelExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::Equal,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     }|
     EqExp NEQ RelExp {
-        $$ = make_node<EqExpAST>();
-        $$->eqExp = unique_ptr<EqExpAST>($1);
-        $$->op = EOP_NEQ;
-        $$->relExp = unique_ptr<RelExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::NotEqual,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 // 逻辑与表达式
 LAndExp:
-    EqExp {
-        $$ = make_node<LAndExpAST>();
-        $$->eqExp = unique_ptr<EqExpAST>($1);
-    }|
+    EqExp { $$ = $1; }|
     LAndExp AND EqExp {
-        $$ = make_node<LAndExpAST>();
-        $$->lAndExp = unique_ptr<LAndExpAST>($1);
-        $$->eqExp = unique_ptr<EqExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::LogicalAnd,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 // 逻辑或表达式
 LOrExp:
-    LAndExp {
-        $$ = make_node<LOrExpAST>();
-        $$->lAndExp = unique_ptr<LAndExpAST>($1);
-    }|
+    LAndExp { $$ = $1; }|
     LOrExp OR LAndExp {
-        $$ = make_node<LOrExpAST>();
-        $$->lOrExp = unique_ptr<LOrExpAST>($1);
-        $$->lAndExp = unique_ptr<LAndExpAST>($3);
+        $$ = make_node<BinaryExprAST>(BinaryOp::LogicalOr,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 %%
 

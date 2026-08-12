@@ -50,7 +50,22 @@ extern int yydebug;
     #include "ast/ast.hpp"
     #include <string>
 
-#line 54 "/workspace/src/include/frontend/parser.hpp"
+    // Parser-only storage for comma-separated lists.  These helpers disappear
+    // after reduction and are not part of the AST/IRGen contract.
+    template <typename T>
+    struct ParsedList {
+        std::vector<std::unique_ptr<T>> values;
+    };
+
+    using ObjectDefList = ParsedList<ObjectDefAST>;
+    using ExprList = ParsedList<ExprAST>;
+    using InitValList = ParsedList<InitValAST>;
+    using FuncParamList = ParsedList<FuncParamAST>;
+    using TopLevelItem = TopLevelItemAST;
+    using BlockItemList = std::vector<BlockItemAST>;
+    using CallArgList = std::vector<CallArgumentAST>;
+
+#line 69 "/workspace/src/include/frontend/parser.hpp"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -107,46 +122,35 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 162 "/workspace/src/frontend/parser.y"
+#line 177 "/workspace/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
-    DeclDefAST* declDef;
+    TopLevelItem* topLevel;
     DeclAST* decl;
-    DefListAST* defList;
-    DefAST* def;
-    ArraysAST* arrays;
-    InitValListAST* initValList;
+    ObjectDefList* objectDefList;
+    ObjectDefAST* objectDef;
+    ExprList* exprList;
+    InitValList* initValList;
     InitValAST* initVal;
     FuncDefAST* funcDef;
-    FuncFParamListAST* FuncFParamList;
-    FuncFParamAST* funcFParam;
+    FuncParamList* funcParamList;
+    FuncParamAST* funcParam;
     BlockAST* block;
-    BlockItemListAST* blockItemList;
+    BlockItemList* blockItemList;
     BlockItemAST* blockItem;
     StmtAST* stmt;
-    ReturnStmtAST* returnStmt;
-    SelectStmtAST* selectStmt;
-    IterationStmtAST* iterationStmt;
-    LValAST* lVal;
-    PrimaryExpAST* primaryExp;
-    NumberAST* number;
-    UnaryExpAST* unaryExp;
-    CallAST* call;
-    CallArgAST* callArg;
-    FuncCParamListAST* funcCParamList;
-    MulExpAST* mulExp;
-    AddExpAST* addExp;
-    RelExpAST* relExp;
-    EqExpAST* eqExp;
-    LAndExpAST* lAndExp;
-    LOrExpAST* lOrExp;
+    LValueAST* lValue;
+    ExprAST* expr;
+    CallExprAST* callExpr;
+    CallArgumentAST* callArg;
+    CallArgList* callArgList;
     TypeSpec* type_spec;
-    UOP op;
-    string* token;
+    UnaryOp unaryOp;
+    std::string* token;
     int int_val;
     float float_val;
 
-#line 150 "/workspace/src/include/frontend/parser.hpp"
+#line 154 "/workspace/src/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;

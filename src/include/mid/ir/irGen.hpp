@@ -3,6 +3,9 @@
 #include "../../frontend/ast/ast.hpp"
 #include <map>
 #define ENABLE_PROFILING_HOOKS
+
+using std::unique_ptr;
+using std::vector;
 class Scope {
 public:
     // enter a new scope
@@ -47,29 +50,28 @@ private:
 class GenIR: public Visitor {
 public:
     void visit(CompUnitAST &ast) override;
-    void visit(DeclDefAST &ast) override;
     void visit(DeclAST &ast) override;
-    void visit(DefAST &ast) override;
+    void visit(ObjectDefAST &ast) override;
     void visit(InitValAST &ast) override;
     void visit(FuncDefAST &ast) override;
-    void visit(FuncFParamAST &ast) override;
+    void visit(FuncParamAST &ast) override;
     void visit(BlockAST &ast) override;
-    void visit(BlockItemAST &ast) override;
-    void visit(StmtAST &ast) override;
+    void visit(EmptyStmtAST &ast) override;
+    void visit(AssignStmtAST &ast) override;
+    void visit(ExprStmtAST &ast) override;
+    void visit(BreakStmtAST &ast) override;
+    void visit(ContinueStmtAST &ast) override;
     void visit(ReturnStmtAST &ast) override;
-    void visit(SelectStmtAST &ast) override;
-    void visit(IterationStmtAST &ast) override;
-    void visit(AddExpAST &ast) override;
-    void visit(LValAST &ast) override;
-    void visit(MulExpAST &ast) override;
-    void visit(UnaryExpAST &ast) override;
-    void visit(PrimaryExpAST &ast) override;
-    void visit(CallAST &ast) override;
-    void visit(NumberAST &ast) override;
-    void visit(RelExpAST &ast) override;
-    void visit(EqExpAST &ast) override;
-    void visit(LAndExpAST &ast) override;
-    void visit(LOrExpAST &ast) override;
+    void visit(BlockStmtAST &ast) override;
+    void visit(IfStmtAST &ast) override;
+    void visit(WhileStmtAST &ast) override;
+    void visit(LiteralExprAST &ast) override;
+    void visit(LValueAST &ast) override;
+    void visit(CallExprAST &ast) override;
+    void visit(UnaryExprAST &ast) override;
+    void visit(BinaryExprAST &ast) override;
+    void visit(SubscriptExprAST &ast) override;
+    void visit(AggregateExprAST &ast) override;
 
     IRStmtBuilder *builder;
     Scope scope;
@@ -244,4 +246,8 @@ public:
     bool checkCalType(Value **val, int *intVal, float *floatVal);
 
     void checkCalType(Value **val);
+
+    // Kept separate only to keep the arithmetic lowering readable; this is
+    // not an AST distinction.
+    void lowerMultiplicative(BinaryExprAST &ast);
 };

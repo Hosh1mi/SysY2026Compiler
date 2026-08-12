@@ -51,7 +51,7 @@ StringLiteral \"([^\\\"\n]|\\.)*\"
 
 {INT_LIT}       { yylval.int_val = strtol(yytext, nullptr, 0); LEXER_DEBUG_TOKEN("INT"); return INT; }
 {FLOAT_LIT}     { yylval.float_val = strtof(yytext, nullptr); LEXER_DEBUG_TOKEN("FLOAT"); return FLOAT; }
-{StringLiteral} { yylval.token = new string(yytext); LEXER_DEBUG_TOKEN("STRING_LITERAL"); return STRING_LITERAL; }
+{StringLiteral} { yylval.token = new std::string(yytext); LEXER_DEBUG_TOKEN("STRING_LITERAL"); return STRING_LITERAL; }
 
 "int"           { yylval.int_val = TYPE_INT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
 "float"         { yylval.int_val = TYPE_FLOAT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
@@ -64,7 +64,7 @@ StringLiteral \"([^\\\"\n]|\\.)*\"
 "break"         { LEXER_DEBUG_TOKEN("BREAK"); return BREAK; }
 "continue"      { LEXER_DEBUG_TOKEN("CONTINUE"); return CONTINUE; }
 
-{Identifier}    { yylval.token = new string(yytext); LEXER_DEBUG_TOKEN("ID"); return ID; }
+{Identifier}    { yylval.token = new std::string(yytext); LEXER_DEBUG_TOKEN("ID"); return ID; }
 
 ">="            { LEXER_DEBUG_TOKEN("GTE"); return GTE; }
 "<="            { LEXER_DEBUG_TOKEN("LTE"); return LTE; }
