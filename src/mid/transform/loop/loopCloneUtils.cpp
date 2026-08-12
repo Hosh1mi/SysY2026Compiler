@@ -8,7 +8,7 @@
 namespace loop_clone {
 
 Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return phi->get_operand(i);
     }
@@ -17,7 +17,7 @@ Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
 
 bool removeIncomingFrom(PhiInst *phi, BasicBlock *pred) {
     bool removed = false;
-    for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+    for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
         if (phi->get_operand(i + 1) == pred) {
             phi->remove_operands(i, i + 1);
             removed = true;
@@ -106,7 +106,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *destBB,
         if (failIfNull(base))
             return nullptr;
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < gi->num_ops_; ++i) {
+        for (unsigned i = 1; i < gi->num_ops(); ++i) {
             Value *idx = remap(gi->get_operand(i));
             if (failIfNull(idx))
                 return nullptr;
@@ -140,7 +140,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *destBB,
         Value *a = remap(zi->get_operand(0));
         if (failIfNull(a))
             return nullptr;
-        auto *inst = new ZextInst(zi->op_id_, a, zi->dest_ty_, destBB);
+        auto *inst = new ZextInst(zi->op_id_, a, zi->type_, destBB);
         inst->copySemFlagsFrom(zi);
         valueMap[orig] = inst;
         return inst;
@@ -149,7 +149,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *destBB,
         Value *a = remap(fp->get_operand(0));
         if (failIfNull(a))
             return nullptr;
-        auto *inst = new FpToSiInst(fp->op_id_, a, fp->dest_ty_, destBB);
+        auto *inst = new FpToSiInst(fp->op_id_, a, fp->type_, destBB);
         inst->copySemFlagsFrom(fp);
         valueMap[orig] = inst;
         return inst;
@@ -158,7 +158,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *destBB,
         Value *a = remap(sf->get_operand(0));
         if (failIfNull(a))
             return nullptr;
-        auto *inst = new SiToFpInst(sf->op_id_, a, sf->dest_ty_, destBB);
+        auto *inst = new SiToFpInst(sf->op_id_, a, sf->type_, destBB);
         inst->copySemFlagsFrom(sf);
         valueMap[orig] = inst;
         return inst;
@@ -167,18 +167,18 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *destBB,
         Value *a = remap(bc->get_operand(0));
         if (failIfNull(a))
             return nullptr;
-        auto *inst = new Bitcast(bc->op_id_, a, bc->dest_ty_, destBB);
+        auto *inst = new Bitcast(bc->op_id_, a, bc->type_, destBB);
         inst->copySemFlagsFrom(bc);
         valueMap[orig] = inst;
         return inst;
     }
     if (auto *ci = dynamic_cast<CallInst *>(orig)) {
         // Last operand is the callee function.
-        auto *callee = dynamic_cast<Function *>(ci->get_operand(ci->num_ops_ - 1));
+        auto *callee = dynamic_cast<Function *>(ci->get_operand(ci->num_ops() - 1));
         if (!callee)
             return nullptr;
         std::vector<Value *> args;
-        for (unsigned i = 0; i + 1 < ci->num_ops_; ++i) {
+        for (unsigned i = 0; i + 1 < ci->num_ops(); ++i) {
             Value *arg = remap(ci->get_operand(i));
             if (failIfNull(arg))
                 return nullptr;

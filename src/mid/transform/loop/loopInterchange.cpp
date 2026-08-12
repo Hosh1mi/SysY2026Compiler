@@ -31,7 +31,7 @@ std::vector<Instruction *> storeSlice(BasicBlock *B) {
     while (!work.empty()) {
         auto *x = work.back();
         work.pop_back();
-        for (unsigned i = 0; i < x->num_ops_; i++) {
+        for (unsigned i = 0; i < x->num_ops(); i++) {
             auto *op = dynamic_cast<Instruction *>(x->get_operand(i));
             if (!op || op->parent_ != B || op->is_phi()) continue;
             if (inW.insert(op).second) work.push_back(op);
@@ -119,20 +119,20 @@ Instruction *cloneInstInto(Instruction *orig, BasicBlock *dest, ValMap &vm,
         cl = new FCmpInst(fi->fcmp_op_, C(fi->get_operand(0)), C(fi->get_operand(1)), dest);
     } else if (auto *gi = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < gi->num_ops_; i++) idxs.push_back(C(gi->get_operand(i)));
+        for (unsigned i = 1; i < gi->num_ops(); i++) idxs.push_back(C(gi->get_operand(i)));
         cl = new GetElementPtrInst(C(gi->get_operand(0)), idxs, dest);
     } else if (auto *li = dynamic_cast<LoadInst *>(orig)) {
         cl = new LoadInst(C(li->get_operand(0)), dest);
     } else if (auto *st = dynamic_cast<StoreInst *>(orig)) {
         cl = new StoreInst(C(st->get_operand(0)), C(st->get_operand(1)), dest);
     } else if (auto *zi = dynamic_cast<ZextInst *>(orig)) {
-        cl = new ZextInst(zi->op_id_, C(zi->get_operand(0)), zi->dest_ty_, dest);
+        cl = new ZextInst(zi->op_id_, C(zi->get_operand(0)), zi->type_, dest);
     } else if (auto *fp = dynamic_cast<FpToSiInst *>(orig)) {
-        cl = new FpToSiInst(fp->op_id_, C(fp->get_operand(0)), fp->dest_ty_, dest);
+        cl = new FpToSiInst(fp->op_id_, C(fp->get_operand(0)), fp->type_, dest);
     } else if (auto *sf = dynamic_cast<SiToFpInst *>(orig)) {
-        cl = new SiToFpInst(sf->op_id_, C(sf->get_operand(0)), sf->dest_ty_, dest);
+        cl = new SiToFpInst(sf->op_id_, C(sf->get_operand(0)), sf->type_, dest);
     } else if (auto *bc = dynamic_cast<Bitcast *>(orig)) {
-        cl = new Bitcast(bc->op_id_, C(bc->get_operand(0)), bc->dest_ty_, dest);
+        cl = new Bitcast(bc->op_id_, C(bc->get_operand(0)), bc->type_, dest);
     } else {
         ok = false;
         return nullptr;
@@ -160,7 +160,7 @@ Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
 
 void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     auto *term = pred->get_terminator();
-    for (unsigned i = 0; i < term->num_ops_; i++)
+    for (unsigned i = 0; i < term->num_ops(); i++)
         if (term->get_operand(i) == oldT) term->set_operand(i, newT);
     pred->remove_succ_basic_block(oldT);
     oldT->remove_pre_basic_block(pred);
@@ -171,7 +171,7 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
-        for (unsigned i = 0; i + 1 < inst->num_ops_; i += 2)
+        for (unsigned i = 0; i + 1 < inst->num_ops(); i += 2)
             if (inst->get_operand(i + 1) == oldPred)
                 inst->set_operand(i + 1, newPred);
     }
@@ -205,7 +205,7 @@ bool applyParallelSink(Function *func, Loop *K,
     }
 
     auto *kbr = dynamic_cast<BranchInst *>(kHeader->get_terminator());
-    if (!kbr || kbr->num_ops_ != 3)
+    if (!kbr || kbr->num_ops() != 3)
         return reject("header is not conditionally branched");
     auto *t1 = dynamic_cast<BasicBlock *>(kbr->get_operand(1));
     auto *t2 = dynamic_cast<BasicBlock *>(kbr->get_operand(2));
@@ -237,7 +237,7 @@ bool applyParallelSink(Function *func, Loop *K,
     while (!dependencyWork.empty()) {
         Instruction *value = dependencyWork.back();
         dependencyWork.pop_back();
-        for (unsigned i = 0; i < value->num_ops_; ++i) {
+        for (unsigned i = 0; i < value->num_ops(); ++i) {
             auto *dependency =
                 dynamic_cast<Instruction *>(value->get_operand(i));
             if (!dependency || !dependency->parent_ ||
@@ -272,7 +272,7 @@ bool applyParallelSink(Function *func, Loop *K,
     for (auto *w : unionW) {
         if (w->is_store()) continue;
         for (auto &u : w->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(u.val_);
+            auto *user = u.user_;
             if (!user || !unionW.count(user)) {
                 if (debugEnabled()) {
                     std::cerr << "[LoopInterchange] escaping slice value="
@@ -294,7 +294,7 @@ bool applyParallelSink(Function *func, Loop *K,
     }
     
     for (auto &u : kIV->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(u.val_);
+        auto *user = u.user_;
         if (!user) return reject("induction has a non-instruction use");
         if (unionW.count(user)) continue;
         if (user->parent_ == kHeader || user->parent_ == kLatch) continue;
@@ -305,7 +305,7 @@ bool applyParallelSink(Function *func, Loop *K,
     }
   
     for (auto *w : unionW) {
-        for (unsigned i = 0; i < w->num_ops_; i++) {
+        for (unsigned i = 0; i < w->num_ops(); i++) {
             auto *op = dynamic_cast<Instruction *>(w->get_operand(i));
             if (!op || op == kIV || unionW.count(op)) continue;
             if (!DT.dominates(op->parent_, w->parent_))
@@ -337,7 +337,7 @@ bool applyParallelSink(Function *func, Loop *K,
 
         BasicBlock *bTail = newBB("tail");
         std::vector<BasicBlock *> origSuccs;
-        for (unsigned i = 0; i < origTerm->num_ops_; i++)
+        for (unsigned i = 0; i < origTerm->num_ops(); i++)
             if (auto *s = dynamic_cast<BasicBlock *>(origTerm->get_operand(i)))
                 origSuccs.push_back(s);
 
@@ -443,13 +443,13 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     auto *kBranch = dynamic_cast<BranchInst *>(kHeader->get_terminator());
     auto *mPreBranch = dynamic_cast<BranchInst *>(mPre->get_terminator());
     BasicBlock *kBodySucc = nullptr;
-    if (kBranch && kBranch->num_ops_ == 3) {
-        for (unsigned i = 1; i < kBranch->num_ops_; ++i) {
+    if (kBranch && kBranch->num_ops() == 3) {
+        for (unsigned i = 1; i < kBranch->num_ops(); ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(kBranch->get_operand(i));
             if (succ && K->isInLoop(succ)) kBodySucc = succ;
         }
     }
-    if (!mPreBranch || mPreBranch->num_ops_ != 1 ||
+    if (!mPreBranch || mPreBranch->num_ops() != 1 ||
         mPreBranch->get_operand(0) != mHeader || kBodySucc != mPre)
         return reject("loops are not a directly nested guarded pair");
 
@@ -493,13 +493,13 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     if (mPhis.empty()) return reject("inner header has no phi nodes");
 
     auto *mBranch = dynamic_cast<BranchInst *>(mHeader->get_terminator());
-    auto *mGuard = mBranch && mBranch->num_ops_ == 3
+    auto *mGuard = mBranch && mBranch->num_ops() == 3
                        ? dynamic_cast<ICmpInst *>(mBranch->get_operand(0))
                        : nullptr;
     BasicBlock *mBodySucc = nullptr;
     BasicBlock *mExitSucc = nullptr;
-    if (mBranch && mBranch->num_ops_ == 3) {
-        for (unsigned i = 1; i < mBranch->num_ops_; ++i) {
+    if (mBranch && mBranch->num_ops() == 3) {
+        for (unsigned i = 1; i < mBranch->num_ops(); ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(mBranch->get_operand(i));
             if (!succ) continue;
             if (M->isInLoop(succ)) mBodySucc = succ;
@@ -541,14 +541,14 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     new BranchInst(mGuard, mPre, kExit, mOuter);
 
     for (auto *phi : mPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == mPre)
                 phi->set_operand(i + 1, kPre);
     }
     for (auto *inst : kHeader->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == kPre)
                 phi->set_operand(i + 1, mPre);
     }
@@ -564,7 +564,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
     {
         BasicBlock *bodySucc = nullptr, *exitSucc = nullptr;
         auto *term = kBranch;
-        for (unsigned i = 1; i < term->num_ops_; i++) {
+        for (unsigned i = 1; i < term->num_ops(); i++) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (!succ) continue;
             if (K->isInLoop(succ)) bodySucc = succ;

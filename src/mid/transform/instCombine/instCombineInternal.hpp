@@ -43,7 +43,7 @@ inline bool sameConstantValue(Value *lhs, Value *rhs) {
 
 inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
     if (!lhs || !rhs) return false;
-    if (lhs->op_id_ != rhs->op_id_ || lhs->num_ops_ != rhs->num_ops_)
+    if (lhs->op_id_ != rhs->op_id_ || lhs->num_ops() != rhs->num_ops())
         return false;
     if (lhs->type_ != rhs->type_) return false;
     if (lhs->sem_flags_ != rhs->sem_flags_) return false;
@@ -55,7 +55,7 @@ inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
         auto *rc = dynamic_cast<FCmpInst *>(rhs);
         if (!rc || lc->fcmp_op_ != rc->fcmp_op_) return false;
     }
-    for (unsigned i = 0; i < lhs->num_ops_; ++i) {
+    for (unsigned i = 0; i < lhs->num_ops(); ++i) {
         if (!sameConstantValue(lhs->get_operand(i), rhs->get_operand(i)))
             return false;
     }
@@ -180,7 +180,7 @@ inline bool canProveAddOneNoWrap(BinaryInst *inst) {
     };
     for (auto *pred : bb->pre_bbs_) {
         auto *predTerm = dynamic_cast<BranchInst *>(pred->get_terminator());
-        if (!predTerm || predTerm->num_ops_ != 3 || predTerm->get_operand(1) != bb)
+        if (!predTerm || predTerm->num_ops() != 3 || predTerm->get_operand(1) != bb)
             continue;
         if (checkCmp(dynamic_cast<ICmpInst *>(predTerm->get_operand(0))))
             return true;
@@ -228,7 +228,7 @@ inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {
     int mask = (1 << k) - 1;
     for (auto *pred : ctx->pre_bbs_) {
         auto *br = pred->get_terminator();
-        if (!br || br->op_id_ != Instruction::Br || br->num_ops_ < 3)
+        if (!br || br->op_id_ != Instruction::Br || br->num_ops() < 3)
             continue;
         auto *cond = dynamic_cast<ICmpInst*>(br->get_operand(0));
         if (!cond || cond->icmp_op_ != ICmpInst::ICMP_EQ) continue;

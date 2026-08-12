@@ -66,7 +66,7 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
     if (!preheader)
         return false;
     auto *preTerm = preheader->get_terminator();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != loop.header)
         return false;
     BasicBlock *exit = loop.singleExit();
@@ -84,7 +84,7 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
             if (inst->is_store() || inst->is_call())
                 return false;
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.isInLoop(user->parent_))
                     return false;
             }
@@ -98,7 +98,7 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromLoop = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!pred || !loop.isInLoop(pred)) continue;
             Value *val = phi->get_operand(i);
@@ -119,7 +119,7 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromLoop = nullptr;
-        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+        for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!pred || !loop.isInLoop(pred)) continue;
             fromLoop = phi->get_operand(i);
@@ -169,12 +169,12 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
     auto *headerBr = loop.header->get_terminator();
     auto *latchBr = latch->get_terminator();
     if (!preheaderBr || !preheaderBr->is_br() ||
-        preheaderBr->num_ops_ != 1 ||
+        preheaderBr->num_ops() != 1 ||
         preheaderBr->get_operand(0) != loop.header ||
-        !headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3 ||
+        !headerBr || !headerBr->is_br() || headerBr->num_ops() != 3 ||
         headerBr->get_operand(1) != latch ||
         headerBr->get_operand(2) != exit ||
-        !latchBr || !latchBr->is_br() || latchBr->num_ops_ != 1 ||
+        !latchBr || !latchBr->is_br() || latchBr->num_ops() != 1 ||
         latchBr->get_operand(0) != loop.header)
         return false;
 
@@ -189,7 +189,7 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         compare->get_operand(1) != bound)
         return false;
     for (const auto &use : compare->use_list_) {
-        if (use.val_ != headerBr) return false;
+        if (use.user_ != headerBr) return false;
     }
 
     struct PhiInfo {
@@ -201,10 +201,10 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
     for (auto *inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ != 4) return false;
+        if (phi->num_ops() != 4) return false;
         Value *initial = nullptr;
         Value *afterIteration = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred == preheader)
                 initial = phi->get_operand(i);
@@ -232,13 +232,13 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
     // of a header phi to be an exit phi on the edge that will move to latch.
     for (const auto &info : phis) {
         for (const auto &use : info.phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ || loop.isInLoop(user->parent_))
                 continue;
             auto *exitPhi = dynamic_cast<PhiInst *>(user);
             if (!exitPhi || exitPhi->parent_ != exit ||
-                use.arg_no_ + 1 >= exitPhi->num_ops_ ||
-                exitPhi->get_operand(use.arg_no_ + 1) != loop.header)
+                use.operand_index_ + 1 >= exitPhi->num_ops() ||
+                exitPhi->get_operand(use.operand_index_ + 1) != loop.header)
                 return false;
         }
     }
@@ -253,10 +253,10 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         std::vector<std::pair<Instruction *, unsigned>> insideUses;
         std::vector<std::pair<Instruction *, unsigned>> outsideUses;
         for (const auto &use : info.phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ || user == compare || user == headerBr)
                 continue;
-            auto entry = std::make_pair(user, use.arg_no_);
+            auto entry = std::make_pair(user, use.operand_index_);
             if (loop.isInLoop(user->parent_))
                 insideUses.push_back(entry);
             else
@@ -273,7 +273,7 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == loop.header)
                 phi->set_operand(i + 1, latch);
         }

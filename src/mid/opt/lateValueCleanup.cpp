@@ -54,7 +54,7 @@ bool isPureValueInst(Instruction *inst) {
 }
 
 bool sameExpression(Instruction *a, Instruction *b) {
-    if (!a || !b || a->op_id_ != b->op_id_ || a->num_ops_ != b->num_ops_)
+    if (!a || !b || a->op_id_ != b->op_id_ || a->num_ops() != b->num_ops())
         return false;
     if (auto *ac = dynamic_cast<ICmpInst *>(a)) {
         auto *bc = dynamic_cast<ICmpInst *>(b);
@@ -66,7 +66,7 @@ bool sameExpression(Instruction *a, Instruction *b) {
         if (!bc || ac->fcmp_op_ != bc->fcmp_op_)
             return false;
     }
-    for (unsigned i = 0; i < a->num_ops_; ++i) {
+    for (unsigned i = 0; i < a->num_ops(); ++i) {
         if (!sameValue(a->get_operand(i), b->get_operand(i)))
             return false;
     }

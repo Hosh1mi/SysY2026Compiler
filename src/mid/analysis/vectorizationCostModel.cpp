@@ -13,9 +13,9 @@ int arithmeticCost(const Instruction *inst, bool vector) {
     auto *binary = dynamic_cast<const BinaryInst *>(inst);
     if (!binary) {
         auto *call = dynamic_cast<const CallInst *>(inst);
-        auto *callee = call && call->num_ops_
+        auto *callee = call && call->num_ops()
                            ? dynamic_cast<Function *>(
-                                 call->get_operand(call->num_ops_ - 1))
+                                 call->get_operand(call->num_ops() - 1))
                            : nullptr;
         return callee && isSignedMinMaxIntrinsic(callee)
                    ? (vector ? 3 : 1)

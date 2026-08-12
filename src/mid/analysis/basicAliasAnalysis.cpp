@@ -91,7 +91,7 @@ BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) c
         info.offsetBytes += baseInfo.offsetBytes;
 
         Type *curTy = static_cast<PointerType *>(base->type_)->contained_;
-        for (unsigned i = 1; i < gep->num_ops_; i++) {
+        for (unsigned i = 1; i < gep->num_ops(); i++) {
             auto *ci = dynamic_cast<ConstantInt *>(gep->get_operand(i));
             if (!ci) {
                 info.hasConstantOffset = false;
@@ -261,7 +261,7 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
             if (inst->is_call()) {
                 auto *call = static_cast<CallInst *>(inst);
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 // Intrinsics and other declarations can carry a proven pure
                 // contract even though they have no body to summarize.  Treat
                 // that contract before the generic declaration fallback;
@@ -290,7 +290,7 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
                 for (auto &record : calleeSummary.locationEffects) {
                     MemoryLocation actualLoc = record.loc;
                     if (auto *arg = dynamic_cast<Argument *>(record.loc.ptr)) {
-                        if (arg->arg_no_ < call->num_ops_ - 1)
+                        if (arg->arg_no_ < call->num_ops() - 1)
                             actualLoc = getMemoryLocation(call->get_operand(arg->arg_no_));
                     }
                     addLocationEffect(summary, actualLoc, record.effect);
@@ -366,7 +366,7 @@ ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
     if (!call || !ptr) return ModRefInfo::ModRef;
 
     auto *callee = dynamic_cast<Function *>(
-        call->get_operand(call->num_ops_ - 1));
+        call->get_operand(call->num_ops() - 1));
     if (!callee) return ModRefInfo::ModRef;
     if (callee->hasSemFlag(SemFlag::FnPure) || isPure(callee))
         return ModRefInfo::NoModRef;
@@ -387,7 +387,7 @@ ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
         PointerInfo effectInfo = getPointerInfo(record.loc.ptr);
         if (auto *formal = dynamic_cast<Argument *>(effectInfo.base)) {
             if (formal->parent_ != callee ||
-                formal->arg_no_ >= call->num_ops_ - 1) {
+                formal->arg_no_ >= call->num_ops() - 1) {
                 return ModRefInfo::ModRef;
             }
 
@@ -441,7 +441,7 @@ bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
 bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
     PointerInfo info = getPointerInfo(ptr);
     auto *alloca = dynamic_cast<AllocaInst *>(info.base);
-    return alloca && alloca->alloca_ty_->tid_ == Type::ArrayTyID;
+    return alloca && alloca->allocated_type()->tid_ == Type::ArrayTyID;
 }
 
 bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
@@ -487,7 +487,7 @@ Value *resolveUnderlyingObject(Value *value,
     if (!visiting.insert(phi).second) return nullptr;
 
     Value *object = nullptr;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         Value *incoming = phi->get_operand(i);
         std::unordered_set<Value *> derivedVisited;
         if (isPointerDerivedFrom(incoming, phi, derivedVisited))
@@ -521,7 +521,7 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
         return true;
 
     for (const auto &use : value->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user)
             return false;
 
@@ -529,7 +529,7 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
             continue;
 
         if (user->is_store()) {
-            if (use.arg_no_ == 0)
+            if (use.operand_index_ == 0)
                 return false;
             continue;
         }
@@ -539,16 +539,16 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
 
         if (user->is_call()) {
             auto *call = static_cast<CallInst *>(user);
-            if (use.arg_no_ >= call->num_ops_ - 1)
+            if (use.operand_index_ >= call->num_ops() - 1)
                 return false;
 
             auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             if (!callee || callee->is_declaration())
                 return false;
-            if (use.arg_no_ >= callee->arguments_.size())
+            if (use.operand_index_ >= callee->arguments_.size())
                 return false;
-            if (!isNoCapture(callee, callee->arguments_[use.arg_no_]))
+            if (!isNoCapture(callee, callee->arguments_[use.operand_index_]))
                 return false;
             continue;
         }
@@ -577,22 +577,22 @@ bool BasicAliasAnalysis::immutableObjectHasSafeUses(
         return value != nullptr;
 
     for (const Use &use : value->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user) return false;
         if (user->is_load()) continue;
         if (user->is_store()) {
-            if (use.arg_no_ == 0) return false;
+            if (use.operand_index_ == 0) return false;
             continue;
         }
         if (user->is_call()) {
             auto *call = static_cast<CallInst *>(user);
-            if (use.arg_no_ >= call->num_ops_ - 1) return false;
+            if (use.operand_index_ >= call->num_ops() - 1) return false;
             auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             if (!callee || callee->is_declaration() ||
-                use.arg_no_ >= callee->arguments_.size())
+                use.operand_index_ >= callee->arguments_.size())
                 return false;
-            Argument *formal = callee->arguments_[use.arg_no_];
+            Argument *formal = callee->arguments_[use.operand_index_];
             if (!isNoCapture(callee, formal) ||
                 isModSet(getFunctionModRef(callee, formal)))
                 return false;

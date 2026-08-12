@@ -89,7 +89,7 @@ static bool evaluateICmpConstants(ICmpInst::ICmpOp pred, int lhs, int rhs) {
 
 static Value *getIncomingValueForPred(PhiInst *phi, BasicBlock *pred) {
     if (!phi || !pred) return nullptr;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return phi->get_operand(i);
     }
@@ -100,7 +100,7 @@ static void collectEdgeFacts(BasicBlock *fromBB, BasicBlock *toBB,
                              BoolFactMap &boolFacts, ICmpFactMap &cmpFacts) {
     if (!fromBB || !toBB) return;
     auto *br = dynamic_cast<BranchInst *>(fromBB->get_terminator());
-    if (!br || br->num_ops_ != 3) return;
+    if (!br || br->num_ops() != 3) return;
 
     auto *trueDest = dynamic_cast<BasicBlock *>(br->get_operand(1));
     auto *falseDest = dynamic_cast<BasicBlock *>(br->get_operand(2));
@@ -126,7 +126,7 @@ static void collectDominatingEdgeFacts(const QueryState &state,
     Loop *contextLoop = state.loopInfo->getLoopFor(state.block);
     for (auto *bb : state.func->basic_blocks_) {
         auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
-        if (!br || br->num_ops_ != 3 || !bb->parent_)
+        if (!br || br->num_ops() != 3 || !bb->parent_)
             continue;
 
         Loop *branchLoop = state.loopInfo->getLoopFor(bb);

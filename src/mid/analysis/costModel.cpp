@@ -27,7 +27,7 @@ long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
     long elem_bytes = bytesOfElement(cur);
     if (elem_bytes < 0) return -1;
 
-    unsigned n_idx = gep->num_ops_ - 1;
+    unsigned n_idx = gep->num_ops() - 1;
     if (n_idx == 0) return 0;
 
     // GEP 字节权重：消耗第 m 个索引后剩余类型的 sizeof

@@ -14,7 +14,7 @@ static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
     for (auto *instr : succ->instr_list_) {
         if (!instr->is_phi()) continue;
         auto *phi = static_cast<PhiInst *>(instr);
-        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+        for (int i = phi->num_ops() - 1; i >= 0; i -= 2) {
             if (phi->get_operand(i) == deadBlock)
                 phi->remove_operands(i - 1, i);
         }
@@ -39,7 +39,7 @@ static void removeUnreachableBlocks(Function *func) {
         worklist.pop();
         auto *term = bb->get_terminator();
         if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
+        for (unsigned i = 0; i < term->num_ops(); ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (succ && reachable.insert(succ).second)
                 worklist.push(succ);
@@ -55,7 +55,7 @@ static void removeUnreachableBlocks(Function *func) {
     for (auto *bb : dead) {
         auto *term = bb->get_terminator();
         if (term) {
-            for (unsigned i = 0; i < term->num_ops_; ++i) {
+            for (unsigned i = 0; i < term->num_ops(); ++i) {
                 auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
                 if (succ && reachable.count(succ)) {
                     removeBBFromPhi(bb, succ);
@@ -180,7 +180,7 @@ bool SCCP::runOnFunction(Function *func) {
             auto *t = b->get_terminator();
             if (!t || !t->is_br()) continue;
             auto *br = dynamic_cast<BranchInst*>(t);
-            if (br && br->num_ops_ == 3) {
+            if (br && br->num_ops() == 3) {
                 auto cond = getLat(br->get_operand(0));
                 if (cond.isConstant()) {
                     auto *taken = static_cast<BasicBlock*>(
@@ -198,7 +198,7 @@ bool SCCP::runOnFunction(Function *func) {
                         }
                     }
                 }
-            } else if (br && br->num_ops_ == 1) {
+            } else if (br && br->num_ops() == 1) {
                 auto *s = static_cast<BasicBlock*>(br->get_operand(0));
                 if (reachable.insert(s).second) {
                     q.push(s);
@@ -212,7 +212,7 @@ bool SCCP::runOnFunction(Function *func) {
                 if (inst->is_phi()) {
                     auto *phi = static_cast<PhiInst*>(inst);
                     LatticeValue val = LV_UNDEF;
-                    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                         if (!reachable.count(static_cast<BasicBlock*>(phi->get_operand(i + 1))))
                             continue;
                         val = meet(val, getLat(phi->get_operand(i)));
@@ -311,7 +311,7 @@ bool SCCP::runOnFunction(Function *func) {
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
         auto *br = dynamic_cast<BranchInst*>(term);
-        if (!br || br->num_ops_ != 3) continue;
+        if (!br || br->num_ops() != 3) continue;
         Value *cond = br->get_operand(0);
         auto condLat = getLat(cond);
         if (!condLat.isConstant()) continue;

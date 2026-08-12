@@ -11,7 +11,7 @@ namespace {
 
 bool isScratchAlloca(AllocaInst *alloca, int size) {
     if (!alloca || !alloca->isLoopExpansionScratch()) return false;
-    auto *arr = dynamic_cast<ArrayType *>(alloca->alloca_ty_);
+    auto *arr = dynamic_cast<ArrayType *>(alloca->allocated_type());
     return arr && static_cast<int>(arr->num_elements_) == size;
 }
 
@@ -49,7 +49,7 @@ Instruction *firstNonPhi(BasicBlock *bb) {
 BasicBlock *loopBodyEntry(Loop *loop) {
     if (!loop || !loop->header) return nullptr;
     auto *br = dynamic_cast<BranchInst *>(loop->header->get_terminator());
-    if (!br || br->num_ops_ != 3) return nullptr;
+    if (!br || br->num_ops() != 3) return nullptr;
     auto *t = dynamic_cast<BasicBlock *>(br->get_operand(1));
     auto *f = dynamic_cast<BasicBlock *>(br->get_operand(2));
     if (t && loop->blocks.count(t)) return t;
@@ -61,7 +61,7 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     auto *term = pred ? pred->get_terminator() : nullptr;
     if (!term || !term->is_br()) return;
     bool changed = false;
-    for (unsigned i = 0; i < term->num_ops_; i++) {
+    for (unsigned i = 0; i < term->num_ops(); i++) {
         if (term->get_operand(i) == oldT) {
             term->set_operand(i, newT);
             changed = true;
@@ -77,7 +77,7 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
-        for (unsigned i = 0; i + 1 < inst->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < inst->num_ops(); i += 2) {
             if (inst->get_operand(i + 1) == oldPred)
                 inst->set_operand(i + 1, newPred);
         }
@@ -156,10 +156,10 @@ void replaceUsesInLoop(PhiInst *oldPhi, Value *replacement, StoreInst *deadStore
                        Loop *parentLoop) {
     auto uses = oldPhi->use_list_;
     for (const auto &use : uses) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || user == oldPhi || user == deadStore) continue;
         if (!user->parent_ || !parentLoop->blocks.count(user->parent_)) continue;
-        user->set_operand(use.arg_no_, replacement);
+        user->set_operand(use.operand_index_, replacement);
     }
 }
 
@@ -203,23 +203,23 @@ Instruction *cloneBodyInstruction(Instruction *orig, BasicBlock *dest,
                              R(cmp->get_operand(1)), dest);
     } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < gep->num_ops_; ++i)
+        for (unsigned i = 1; i < gep->num_ops(); ++i)
             indices.push_back(R(gep->get_operand(i)));
         clone = new GetElementPtrInst(R(gep->get_operand(0)), indices, dest);
     } else if (auto *load = dynamic_cast<LoadInst *>(orig)) {
         clone = new LoadInst(R(load->get_operand(0)), dest);
     } else if (auto *zext = dynamic_cast<ZextInst *>(orig)) {
         clone = new ZextInst(zext->op_id_, R(zext->get_operand(0)),
-                             zext->dest_ty_, dest);
+                             zext->type_, dest);
     } else if (auto *cast = dynamic_cast<FpToSiInst *>(orig)) {
         clone = new FpToSiInst(cast->op_id_, R(cast->get_operand(0)),
-                               cast->dest_ty_, dest);
+                               cast->type_, dest);
     } else if (auto *cast = dynamic_cast<SiToFpInst *>(orig)) {
         clone = new SiToFpInst(cast->op_id_, R(cast->get_operand(0)),
-                               cast->dest_ty_, dest);
+                               cast->type_, dest);
     } else if (auto *cast = dynamic_cast<Bitcast *>(orig)) {
         clone = new Bitcast(cast->op_id_, R(cast->get_operand(0)),
-                            cast->dest_ty_, dest);
+                            cast->type_, dest);
     } else if (auto *select = dynamic_cast<SelectInst *>(orig)) {
         clone = new SelectInst(R(select->get_operand(0)),
                                R(select->get_operand(1)),
@@ -245,7 +245,7 @@ Value *clonePureValue(Value *value, BasicBlock *dest, ValueMap &map,
         !visiting.insert(value).second)
         return nullptr;
 
-    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+    for (unsigned i = 0; i < inst->num_ops(); ++i) {
         if (dynamic_cast<BasicBlock *>(inst->get_operand(i))) continue;
         if (!clonePureValue(inst->get_operand(i), dest, map, visiting, scope))
             return nullptr;
@@ -320,7 +320,7 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
         return false;
 
     auto *preTerm = P_preheader->get_terminator();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != P->header)
         return false;
 
@@ -483,7 +483,7 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
             auto *oldPhi = static_cast<PhiInst *>(inst);
             if (reductionPhis.count(oldPhi)) continue;
             auto *newPhi = static_cast<PhiInst *>(valueMap[oldPhi]);
-            for (unsigned i = 0; i < oldPhi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < oldPhi->num_ops(); i += 2) {
                 auto *oldPred = static_cast<BasicBlock *>(
                     oldPhi->get_operand(i + 1));
                 if (oldPred == L_header || oldPred == L->preheader) continue;
@@ -507,7 +507,7 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
         }
 
         auto *oldBranch = static_cast<BranchInst *>(oldBlock->get_terminator());
-        if (oldBranch->num_ops_ == 1) {
+        if (oldBranch->num_ops() == 1) {
             BasicBlock *dest = mappedBlock(static_cast<BasicBlock *>(
                 oldBranch->get_operand(0)));
             if (!dest) return false;
@@ -547,8 +547,8 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
         auto *value = new LoadInst(loadGEP, storeBody);
         std::vector<Value *> destinationIndices;
         auto *originalGEP = entry.reduction.gep_store;
-        unsigned last = originalGEP->num_ops_ - 1;
-        for (unsigned i = 1; i < originalGEP->num_ops_; ++i)
+        unsigned last = originalGEP->num_ops() - 1;
+        for (unsigned i = 1; i < originalGEP->num_ops(); ++i)
             destinationIndices.push_back(
                 i == last ? static_cast<Value *>(storeIV)
                           : originalGEP->get_operand(i));

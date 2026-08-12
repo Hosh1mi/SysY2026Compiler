@@ -53,7 +53,7 @@ bool valueDependsOn(Value *value, Value *target,
     if (value == target) return true;
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction || !visited.insert(value).second) return false;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         if (dynamic_cast<BasicBlock *>(instruction->get_operand(i))) continue;
         if (valueDependsOn(instruction->get_operand(i), target, visited))
             return true;
@@ -83,7 +83,7 @@ bool sameAccessIsInjective(Instruction *access, Loop &loop,
     }
     ivLoops[loopIV] = &loop;
 
-    for (unsigned index = 1; index < gep->num_ops_; ++index) {
+    for (unsigned index = 1; index < gep->num_ops(); ++index) {
         AffineExpr expression = affine.analyze(gep->get_operand(index));
         if (!expression.valid || expression.coeffOf(loopIV) == 0) continue;
 
@@ -232,10 +232,10 @@ void replaceUsesOutsideOutlinedLoop(Value *oldValue, Value *newValue,
                                     Function *outlinedBody) {
     std::vector<std::pair<Instruction *, unsigned>> fixes;
     for (auto &use : oldValue->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && !blocks.count(user->parent_) &&
             (!outlinedBody || user->parent_->parent_ != outlinedBody))
-            fixes.push_back({user, use.arg_no_});
+            fixes.push_back({user, use.operand_index_});
     }
     for (auto &fix : fixes)
         fix.first->set_operand(fix.second, newValue);
@@ -246,7 +246,7 @@ void replaceUsesOutsideOutlinedLoop(Value *oldValue, Value *newValue,
 bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
     if (!isScalarExpansionScratch(root)) return false;
     for (auto &use : root->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !blocks.count(user->parent_)) return false;
     }
     return true;
@@ -266,12 +266,12 @@ long long typeBytes(Type *ty) {
 long long scratchBytes(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     if (!alloca) return -1;
-    return typeBytes(alloca->alloca_ty_);
+    return typeBytes(alloca->allocated_type());
 }
 
 Type *scratchAllocaType(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
-    return alloca ? alloca->alloca_ty_ : nullptr;
+    return alloca ? alloca->allocated_type() : nullptr;
 }
 
 bool isAllowedReductionTerm(Value *value, const Loop &loop,
@@ -299,7 +299,7 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
         return true;
 
     auto allOperandsAllowed = [&]() {
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             Value *op = inst->get_operand(i);
             if (dynamic_cast<BasicBlock *>(op) || dynamic_cast<Function *>(op))
                 continue;
@@ -329,7 +329,7 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
         Value *ptr = load->get_operand(0);
         if (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr)) {
             ok = isAcceptedMemoryRoot(gepRootBase(gep));
-            for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
+            for (unsigned i = 1; ok && i < gep->num_ops(); ++i)
                 ok = isAllowedReductionTerm(gep->get_operand(i), loop,
                                             accumulator, ivPhi, ivNext,
                                             visiting, BAA);
@@ -338,21 +338,21 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
         }
     } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(inst)) {
         ok = isAcceptedMemoryRoot(gepRootBase(gep));
-        for (unsigned i = 1; ok && i < gep->num_ops_; ++i)
+        for (unsigned i = 1; ok && i < gep->num_ops(); ++i)
             ok = isAllowedReductionTerm(gep->get_operand(i), loop,
                                         accumulator, ivPhi, ivNext, visiting,
                                         BAA);
     } else if (auto *call = dynamic_cast<CallInst *>(inst)) {
         auto *callee = dynamic_cast<Function *>(
-            call->get_operand(call->num_ops_ - 1));
+            call->get_operand(call->num_ops() - 1));
         ok = callee && BAA.isPure(callee);
-        for (unsigned i = 0; ok && i + 1 < call->num_ops_; ++i)
+        for (unsigned i = 0; ok && i + 1 < call->num_ops(); ++i)
             ok = isAllowedReductionTerm(call->get_operand(i), loop,
                                         accumulator, ivPhi, ivNext, visiting,
                                         BAA);
     } else if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
         ok = true;
-        for (unsigned i = 0; ok && i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; ok && i < phi->num_ops(); i += 2)
             ok = isAllowedReductionTerm(phi->get_operand(i), loop,
                                         accumulator, ivPhi, ivNext, visiting,
                                         BAA);
@@ -407,7 +407,7 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
         Value *init = nullptr;
         Instruction *next = nullptr;
         bool badPred = false;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred == loop.preheader) {
                 init = phi->get_operand(i);
@@ -430,7 +430,7 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
     for (auto &candidate : ivCandidates) {
         for (BasicBlock *cand : {loop.header, latch}) {
             auto *term = cand->get_terminator();
-            if (!term || term->num_ops_ != 3) continue; // 非 cond br
+            if (!term || term->num_ops() != 3) continue; // 非 cond br
             auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
             if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) continue;
             Value *lhs = cmp->get_operand(0);
@@ -460,7 +460,7 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
     for (auto *bb : loop.blocksOrdered) {
         auto *term = bb->get_terminator();
         if (!term) return fail("block without terminator");
-        for (unsigned i = 0; i < term->num_ops_; i++) {
+        for (unsigned i = 0; i < term->num_ops(); i++) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (!succ || loop.blocks.count(succ)) continue;
             if (bb == shape.exitingBlock && succ == exitBlock) continue;
@@ -488,7 +488,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         for (auto inst : bb->instr_list_) {
             if (auto *call = dynamic_cast<CallInst *>(inst)) {
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (!callee || !BAA.isPure(callee))
                     return fail("call in loop");
             }
@@ -531,7 +531,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
 
         Value *init = nullptr;
         Value *latchVal = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred == loop.preheader)
                 init = phi->get_operand(i);
@@ -613,7 +613,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                     bool usesLiveOutUpdate = false;
                     bool usesLiveOutFinal = false;
                     bool usesLiveOutModuloInput = false;
-                    for (unsigned i = 0; i < user->num_ops_; ++i) {
+                    for (unsigned i = 0; i < user->num_ops(); ++i) {
                         Value *op = user->get_operand(i);
                         usesLiveOutUpdate |=
                             std::find(red.liveOutUpdateValues.begin(),
@@ -639,7 +639,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                         bool onlyForwardsReductionUpdate = true;
                         bool onlyForwardsReductionFinal = true;
                         bool hasLoopIncoming = false;
-                        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                             auto *pred =
                                 dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
                             if (!loop.blocks.count(pred))
@@ -734,7 +734,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 if (loop.blocks.count(userBB)) continue;
                 for (auto *user : userBB->instr_list_) {
                     bool usesInst = false;
-                    for (unsigned i = 0; i < user->num_ops_; ++i)
+                    for (unsigned i = 0; i < user->num_ops(); ++i)
                         usesInst |= user->get_operand(i) == inst;
                     if (!usesInst) continue;
 
@@ -771,7 +771,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     // live-in 类型限制：i32 和指针可通过 ctx 传递；其它类型仍保守拒绝。
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
-            for (unsigned i = 0; i < inst->num_ops_; i++) {
+            for (unsigned i = 0; i < inst->num_ops(); i++) {
                 Value *op = inst->get_operand(i);
                 if (dynamic_cast<Constant *>(op) ||
                     dynamic_cast<GlobalVariable *>(op) ||
@@ -812,7 +812,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             if (!sGep) continue;
             // 确认 store 地址随本循环 IV 变化
             bool variesWithThisIV = false;
-            for (unsigned i = 1; i < sGep->num_ops_; i++) {
+            for (unsigned i = 1; i < sGep->num_ops(); i++) {
                 auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
                     SE2.getSCEV(sGep->get_operand(i)));
                 if (rec && rec->loop() == &loop) { variesWithThisIV = true; break; }
@@ -827,7 +827,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                 auto *aGep = dynamic_cast<GetElementPtrInst *>(aPtr);
                 if (!aGep || gepRootBase(aGep) != sRoot) continue;
                 bool usesLoad = false;
-                for (unsigned i = 0; i < bin->num_ops_; i++)
+                for (unsigned i = 0; i < bin->num_ops(); i++)
                     if (bin->get_operand(i) == a) { usesLoad = true; break; }
                 if (!usesLoad) continue;
 
@@ -870,7 +870,7 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         Value *base = gep ? gepRootBase(gep) : nullptr;
 
         bool variesWithIV = false;
-        for (unsigned i = 1; gep && i < gep->num_ops_; i++) {
+        for (unsigned i = 1; gep && i < gep->num_ops(); i++) {
             auto *rec = dynamic_cast<const SCEVAddRecExpr *>(
                 SE.getSCEV(gep->get_operand(i)));
             if (rec && rec->loop() == &loop) { variesWithIV = true; break; }
@@ -990,7 +990,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
 
     auto *entry = new BasicBlock(module, "label_par_entry", bodyFn);
     auto *retbb = new BasicBlock(module, "label_par_ret", bodyFn);
-    auto *builder = new IRStmtBuilder(retbb, module);
+    auto *builder = new IRStmtBuilder(retbb);
 
     for (auto &red : scalarReds) {
         if (!red.mod || red.moduloSource != ScalarModuloSource::LiveOutModulo)
@@ -999,7 +999,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                    red.update, red.mod, shape.latch, true);
         shape.latch->add_instruction_before_terminator(rem);
         red.rem = rem;
-        for (unsigned i = 0; i < red.phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < red.phi->num_ops(); i += 2) {
             if (red.phi->get_operand(i + 1) ==
                 static_cast<Value *>(shape.latch)) {
                 red.phi->set_operand(i, rem);
@@ -1012,7 +1012,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     std::vector<Value *> liveIns;
     for (auto *bb : loop.blocksOrdered) {
         for (auto inst : bb->instr_list_) {
-            for (unsigned i = 0; i < inst->num_ops_; i++) {
+            for (unsigned i = 0; i < inst->num_ops(); i++) {
                 Value *op = inst->get_operand(i);
                 if (dynamic_cast<Constant *>(op) ||
                     dynamic_cast<GlobalVariable *>(op) ||
@@ -1038,9 +1038,9 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
         auto *priv = builder->create_alloca(allocTy);
         std::vector<std::pair<Instruction *, unsigned>> fixes;
         for (auto &use : scratch->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && loop.blocks.count(user->parent_))
-                fixes.push_back({user, use.arg_no_});
+                fixes.push_back({user, use.operand_index_});
         }
         for (auto &f : fixes)
             f.first->set_operand(f.second, priv);
@@ -1103,16 +1103,16 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
         Value *v = liveIns[k];
         std::vector<std::pair<Instruction *, unsigned>> fixes;
         for (auto &use : v->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && loop.blocks.count(user->parent_))
-                fixes.push_back({user, use.arg_no_});
+                fixes.push_back({user, use.operand_index_});
         }
         for (auto &f : fixes)
             f.first->set_operand(f.second, ctxLoads[k]);
     }
 
     // IV init → lo（入边块 preheader → entry）；出口比较 bound → hi
-    for (unsigned i = 0; i < shape.ivPhi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < shape.ivPhi->num_ops(); i += 2) {
         if (shape.ivPhi->get_operand(i + 1) ==
             static_cast<Value *>(loop.preheader)) {
             shape.ivPhi->set_operand(i, lo);
@@ -1120,7 +1120,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
         }
     }
     for (auto &red : scalarReds) {
-        for (unsigned i = 0; i < red.phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < red.phi->num_ops(); i += 2) {
             if (red.phi->get_operand(i + 1) ==
                 static_cast<Value *>(loop.preheader))
                 red.phi->set_operand(i + 1, entry);
@@ -1156,7 +1156,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
 
     // 出口边 → ret 块
     auto *exitTerm = shape.exitingBlock->get_terminator();
-    for (unsigned i = 0; i < exitTerm->num_ops_; i++) {
+    for (unsigned i = 0; i < exitTerm->num_ops(); i++) {
         if (exitTerm->get_operand(i) == static_cast<Value *>(shape.exitBlock))
             exitTerm->set_operand(i, retbb);
     }
@@ -1195,7 +1195,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
         for (auto *value : exitForwardValues) {
             auto *phi = dynamic_cast<PhiInst *>(value);
             if (!phi || phi->parent_ != shape.exitBlock) continue;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i + 1) !=
                     static_cast<Value *>(shape.exitingBlock))
                     continue;
@@ -1218,7 +1218,7 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
     shape.exitBlock->add_pre_basic_block(parCall);
 
     auto *preTerm = loop.preheader->get_terminator();
-    for (unsigned i = 0; i < preTerm->num_ops_; i++) {
+    for (unsigned i = 0; i < preTerm->num_ops(); i++) {
         if (preTerm->get_operand(i) == static_cast<Value *>(loop.header))
             preTerm->set_operand(i, parCall);
     }

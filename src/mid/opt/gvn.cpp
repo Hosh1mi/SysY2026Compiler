@@ -46,7 +46,7 @@ std::unordered_map<BasicBlock*, unsigned> countPredsFromTerminators(Function *fu
         Instruction *term = bb->get_terminator();
         if (!term || !term->is_br())
             continue;
-        if (term->num_ops_ == 1) {
+        if (term->num_ops() == 1) {
             cnt[static_cast<BasicBlock*>(term->get_operand(0))]++;
         } else {
             cnt[static_cast<BasicBlock*>(term->get_operand(1))]++;
@@ -78,7 +78,7 @@ ExprSignature makeLoadSig(Instruction *load, uint64_t gen,
 // 等价仅在同一块内成立，调用方使用块局部表。
 ExprSignature makePhiSig(Instruction *phi) {
     std::vector<std::pair<Value*, Value*>> pairs;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
         pairs.emplace_back(phi->get_operand(i + 1),
                            get_canonical_constant(phi->get_operand(i)));
     std::sort(pairs.begin(), pairs.end());
@@ -168,7 +168,7 @@ void gvnDfs(BasicBlock *bb,
             Value *common = nullptr;
             Value *replacement = nullptr;
             bool trivial = true;
-            for (unsigned i = 0; i + 1 < inst->num_ops_; i += 2) {
+            for (unsigned i = 0; i + 1 < inst->num_ops(); i += 2) {
                 Value *v = inst->get_operand(i);
                 if (v == inst)
                     continue;
@@ -212,7 +212,7 @@ void gvnDfs(BasicBlock *bb,
         if (inst->is_call()) {
             auto *call = static_cast<CallInst*>(inst);
             auto *callee =
-                dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
+                dynamic_cast<Function*>(call->get_operand(call->num_ops() - 1));
             if (isPureCall(callee, *st.BAA)) {
                 tryCSE(inst, compute_signature(inst, kEmptyVnMap));
             } else if (!isReadOnlyCall(callee, *st.BAA)) {

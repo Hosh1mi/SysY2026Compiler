@@ -45,7 +45,7 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
     if (inst->op_id_ == Instruction::ICmp) {
         bool allBranchUseInLoop = !inst->use_list_.empty();
         for (auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->is_br()) { allBranchUseInLoop = false; break; }
             if (!loop.blocks.count(user->parent_)) { allBranchUseInLoop = false; break; }
         }
@@ -56,7 +56,7 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
         if (inst->is_void()) return false;
         auto *call = static_cast<CallInst *>(inst);
         auto *callee = dynamic_cast<Function *>(
-            call->get_operand(call->num_ops_ - 1));
+            call->get_operand(call->num_ops() - 1));
         return callee &&
                (callee->hasSemFlag(SemFlag::FnPure) || BAA.isPure(callee));
     }
@@ -101,8 +101,8 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA,
                 if (!isSafeToHoist(inst, loop, *BAA, LI)) continue;
 
                 bool allInvariant = true;
-                unsigned operandLimit = inst->is_call() ? inst->num_ops_ - 1
-                                                        : inst->num_ops_;
+                unsigned operandLimit = inst->is_call() ? inst->num_ops() - 1
+                                                        : inst->num_ops();
                 for (unsigned i = 0; i < operandLimit; i++) {
                     if (!isInvariant(inst->get_operand(i), loop.blocks, toHoist)) {
                         allInvariant = false;
@@ -154,7 +154,7 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
             bool selfLoop = true;
             bool valid = true;
 
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 Value *incVal = phi->get_operand(i);
                 Value *incBB  = phi->get_operand(i + 1);
                 if (incBB == latch) {

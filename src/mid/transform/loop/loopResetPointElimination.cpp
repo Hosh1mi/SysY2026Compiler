@@ -29,14 +29,14 @@ void debugLog(const std::string &message) {
 }
 
 Value *incomingFrom(PhiInst *phi, BasicBlock *predecessor) {
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
         if (phi->get_operand(i + 1) == predecessor)
             return phi->get_operand(i);
     return nullptr;
 }
 
 bool removePhiIncoming(PhiInst *phi, BasicBlock *predecessor) {
-    for (int i = static_cast<int>(phi->num_ops_) - 1; i >= 1; i -= 2) {
+    for (int i = static_cast<int>(phi->num_ops()) - 1; i >= 1; i -= 2) {
         if (phi->get_operand(static_cast<unsigned>(i)) == predecessor) {
             phi->remove_operands(i - 1, i);
             return true;
@@ -72,7 +72,7 @@ bool valueDependsOnImpl(Value *value, Value *needle,
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction || !visited.insert(value).second)
         return false;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         Value *operand = instruction->get_operand(i);
         if (dynamic_cast<BasicBlock *>(operand) ||
             dynamic_cast<Function *>(operand))
@@ -100,7 +100,7 @@ void collectLoadsImpl(Value *value, std::set<LoadInst *> &loads,
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction)
         return;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         Value *operand = instruction->get_operand(i);
         if (!dynamic_cast<BasicBlock *>(operand) &&
             !dynamic_cast<Function *>(operand))
@@ -125,7 +125,7 @@ bool containsUnexpectedPhiImpl(Value *value, const Loop &loop,
         return false;
     if (dynamic_cast<PhiInst *>(instruction) && loop.isInLoop(instruction))
         return true;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         Value *operand = instruction->get_operand(i);
         if (dynamic_cast<BasicBlock *>(operand) ||
             dynamic_cast<Function *>(operand))
@@ -150,7 +150,7 @@ bool hasUnsafeLiveOut(const Loop &loop, PhiInst *induction) {
             bool safeInductionValue = instruction == induction ||
                                       instruction == inductionUpdate;
             for (const Use &use : instruction->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.isInLoop(user) &&
                     !safeInductionValue)
                     return true;
@@ -250,7 +250,7 @@ bool blockEntersLoop(BasicBlock *block, const Loop &loop) {
     if (loop.isInLoop(block))
         return true;
     auto *branch = dynamic_cast<BranchInst *>(block->get_terminator());
-    return branch && branch->num_ops_ == 1 &&
+    return branch && branch->num_ops() == 1 &&
            loop.isInLoop(dynamic_cast<BasicBlock *>(branch->get_operand(0)));
 }
 
@@ -303,9 +303,9 @@ bool resetExecutesStateLoop(Loop &recurrenceLoop, Loop &stateLoop,
         if (stateLoop.isInLoop(block) || block == recurrenceLoop.header)
             continue;
         auto *branch = dynamic_cast<BranchInst *>(block->get_terminator());
-        if (!branch || branch->num_ops_ == 1)
+        if (!branch || branch->num_ops() == 1)
             continue;
-        if (branch->num_ops_ != 3)
+        if (branch->num_ops() != 3)
             return false;
         auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
         auto *falseBlock = dynamic_cast<BasicBlock *>(branch->get_operand(2));
@@ -346,7 +346,7 @@ bool cloneableAtScan(Value *value, Value *induction, const Loop &loop,
                      dynamic_cast<LoadInst *>(instruction);
     if (!supported)
         return false;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i)
+    for (unsigned i = 0; i < instruction->num_ops(); ++i)
         if (!cloneableAtScan(instruction->get_operand(i), induction, loop,
                              visiting))
             return false;
@@ -497,7 +497,7 @@ Value *cloneAtScan(Value *value, Value *induction, Value *scanIndex,
         Value *base = cloneAtScan(gep->get_operand(0), induction, scanIndex,
                                   loop, block, clones);
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < gep->num_ops_; ++i)
+        for (unsigned i = 1; i < gep->num_ops(); ++i)
             indices.push_back(cloneAtScan(gep->get_operand(i), induction,
                                           scanIndex, loop, block, clones));
         clone = new GetElementPtrInst(base, indices, block);
@@ -533,7 +533,7 @@ bool applyTighten(const ResetCandidate &candidate, Module *module,
     BasicBlock *header = candidate.header;
     auto *oldBranch =
         dynamic_cast<BranchInst *>(preheader->get_terminator());
-    if (!oldBranch || oldBranch->num_ops_ != 1 ||
+    if (!oldBranch || oldBranch->num_ops() != 1 ||
         oldBranch->get_operand(0) != header)
         return false;
 

@@ -93,7 +93,7 @@ static bool resolvesTo(Value *val, Value *target, std::set<Value *> &visited) {
     if (!phi) return false;
 
     visited.insert(val);
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto subVisited = visited;
         if (!resolvesTo(phi->get_operand(i), target, subVisited))
             return false;
@@ -114,13 +114,13 @@ static Value *getEntryValue(Value *val, const std::set<BasicBlock *> &loopBlocks
     if (!phi) return nullptr;
     if (!visited.insert(val).second) return val;
 
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         Value *incoming = phi->get_operand(i);
         auto *inInst = dynamic_cast<Instruction *>(incoming);
         if (!inInst || !loopBlocks.count(inInst->parent_))
             return incoming;
     }
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         Value *result = getEntryValue(phi->get_operand(i), loopBlocks, visited);
         auto *rInst = dynamic_cast<Instruction *>(result);
         if (!rInst || !loopBlocks.count(rInst->parent_))
@@ -146,7 +146,7 @@ std::vector<IndVarStrengthReduce::BasicIV> IndVarStrengthReduce::findBasicIVs(Lo
         Value *outsideVal = nullptr;
         BasicBlock *insideBB = nullptr;
 
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (loop.blocks.count(pred)) {
                 if (insideVal) { insideVal = nullptr; break; }
@@ -212,7 +212,7 @@ BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Mo
 
     for (auto pred : externalPreds) {
         auto *term = pred->get_terminator();
-        for (unsigned i = 0; i < term->num_ops_; i++) {
+        for (unsigned i = 0; i < term->num_ops(); i++) {
             if (term->get_operand(i) == loop.header)
                 term->set_operand(i, preheader);
         }
@@ -222,7 +222,7 @@ BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Mo
         loop.header->remove_pre_basic_block(pred);
     }
 
-    auto *builder = new IRStmtBuilder(preheader, module);
+    auto *builder = new IRStmtBuilder(preheader);
     builder->create_br(loop.header);
     delete builder;
 
@@ -233,7 +233,7 @@ BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Mo
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         for (auto extPred : externalPreds) {
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i + 1) == extPred) {
                     Value *val = phi->get_operand(i);
                     phi->add_phi_pair_operand(val, preheader);
@@ -642,7 +642,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     if (ivs.empty()) return;
 
     BasicBlock *preheader = ensurePreheader(loop, func, module);
-    auto *builder = new IRStmtBuilder(preheader, module);
+    auto *builder = new IRStmtBuilder(preheader);
 
     for (auto &iv : ivs) {
         auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
@@ -707,9 +707,9 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                     if (flatExpr.valid && flatExpr.coeff != 0 && !flatExpr.coeffVal) {
                         bool ok = true;
                         std::vector<LinearIVExpr> indexExprs;
-                        indexExprs.reserve(gep->num_ops_ - 1);
+                        indexExprs.reserve(gep->num_ops() - 1);
 
-                        for (unsigned i = 1; i < gep->num_ops_; i++) {
+                        for (unsigned i = 1; i < gep->num_ops(); i++) {
                             Value *idx = gep->get_operand(i);
                             if (!isI32(idx)) {
                                 ok = false;
@@ -740,9 +740,9 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
                 int coeff = 0;
                 Value *coeffVal = nullptr;
                 std::vector<LinearIVExpr> indexExprs;
-                indexExprs.reserve(gep->num_ops_ - 1);
+                indexExprs.reserve(gep->num_ops() - 1);
 
-                for (unsigned i = 1; i < gep->num_ops_; i++) {
+                for (unsigned i = 1; i < gep->num_ops(); i++) {
                     Value *idx = gep->get_operand(i);
                     if (!isI32(idx)) {
                         ivDependentIndexes = 2;
@@ -848,7 +848,7 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
 
             std::vector<Value *> initIndices;
             bool failed = false;
-            for (unsigned i = 1; i < gep->num_ops_; i++) {
+            for (unsigned i = 1; i < gep->num_ops(); i++) {
                 LinearIVExpr expr = c.indexExprs[i - 1];
                 Value *ivStartVal = nullptr; // 非常量初值时的运行期 coeff*init
                 if (expr.coeffVal) {

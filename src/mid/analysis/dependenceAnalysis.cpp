@@ -197,7 +197,7 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
         return result;
     }
 
-    if (g1->num_ops_ != g2->num_ops_) {
+    if (g1->num_ops() != g2->num_ops()) {
         result.direction.assign(result.commonLoops.size(), DIR_ANY);
         return result;
     }
@@ -211,8 +211,8 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
     };
 
     std::vector<Dim> dims;
-    dims.reserve(g1->num_ops_ - 1);
-    for (unsigned index = 1; index < g1->num_ops_; ++index) {
+    dims.reserve(g1->num_ops() - 1);
+    for (unsigned index = 1; index < g1->num_ops(); ++index) {
         Dim dim;
         dim.o1 = g1->get_operand(index);
         dim.o2 = g2->get_operand(index);
@@ -372,7 +372,7 @@ DependenceAnalysis::getConstantDistance(
         return result;
     }
     if (relation != BaseRelation::MustAlias ||
-        sourceGEP->num_ops_ != sinkGEP->num_ops_)
+        sourceGEP->num_ops() != sinkGEP->num_ops())
         return result;
 
     struct Equation {
@@ -380,7 +380,7 @@ DependenceAnalysis::getConstantDistance(
         long long rhs = 0;
     };
     std::vector<Equation> equations;
-    for (unsigned index = 1; index < sourceGEP->num_ops_; ++index) {
+    for (unsigned index = 1; index < sourceGEP->num_ops(); ++index) {
         AffineExpr sourceExpr = AA_->analyze(sourceGEP->get_operand(index));
         AffineExpr sinkExpr = AA_->analyze(sinkGEP->get_operand(index));
         if (!sourceExpr.valid || !sinkExpr.valid) return result;

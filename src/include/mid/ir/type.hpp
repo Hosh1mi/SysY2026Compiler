@@ -2,6 +2,7 @@
 // IR 类型系统：定义编译器中间表示中的类型层次
 
 #include <string>
+#include <utility>
 #include <vector>
 
 // 基础类型，所有 IR 类型的基类
@@ -66,12 +67,8 @@ public:
 class FunctionType : public Type {
 public:
     FunctionType(Type* result, std::vector<Type*> params, bool variadic = false)
-        : Type(Type::FunctionTyID), is_variadic_(variadic) {
-        result_ = result;
-        for (Type* p : params) {
-            args_.push_back(p);
-        }
-    }
+        : Type(Type::FunctionTyID), result_(result), args_(std::move(params)),
+          is_variadic_(variadic) {}
     Type* result_;             // 返回类型
     std::vector<Type*> args_;  // 形参类型列表
     bool is_variadic_ = false;

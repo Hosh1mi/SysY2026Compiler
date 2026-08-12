@@ -27,7 +27,7 @@ bool reject(const Loop &loop, const char *reason) {
 }
 
 Value *incomingFor(PhiInst *phi, BasicBlock *predecessor) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2)
+    for (unsigned i = 0; i < phi->num_ops(); i += 2)
         if (phi->get_operand(i + 1) == predecessor)
             return phi->get_operand(i);
     return nullptr;
@@ -58,10 +58,10 @@ bool rewriteLoop(Loop &loop, Module *module,
 
     auto *headerBranch = header->get_terminator();
     if (!headerBranch || !headerBranch->is_br() ||
-        headerBranch->num_ops_ != 3)
+        headerBranch->num_ops() != 3)
         return reject(loop, "bad-header-branch");
     int exitOperand = -1;
-    for (unsigned i = 1; i < headerBranch->num_ops_; ++i)
+    for (unsigned i = 1; i < headerBranch->num_ops(); ++i)
         if (headerBranch->get_operand(i) == exit)
             exitOperand = static_cast<int>(i);
     if (exitOperand < 0)
@@ -111,7 +111,7 @@ bool rewriteLoop(Loop &loop, Module *module,
     // The old state may only participate in its private update chain or be
     // consumed after the unique loop exit.
     for (const auto &use : state->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !user->parent_)
             continue;
         if (loop.blocks.count(user->parent_) &&
@@ -181,7 +181,7 @@ bool rewriteLoop(Loop &loop, Module *module,
     for (auto *instruction : exit->instr_list_) {
         if (!instruction->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(instruction);
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) != header) continue;
             if (phi->get_operand(i) == state)
                 phi->set_operand(i, result);
@@ -190,10 +190,10 @@ bool rewriteLoop(Loop &loop, Module *module,
     }
     std::vector<std::pair<Instruction *, unsigned>> externalUses;
     for (const auto &use : state->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->parent_ && !loop.blocks.count(user->parent_) &&
             !(user->parent_ == exit && user->is_phi()))
-            externalUses.push_back({user, use.arg_no_});
+            externalUses.push_back({user, use.operand_index_});
     }
     for (auto [user, operand] : externalUses)
         user->set_operand(operand, result);

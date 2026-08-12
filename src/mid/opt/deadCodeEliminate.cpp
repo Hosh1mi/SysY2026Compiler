@@ -12,9 +12,9 @@ namespace {
 
 Function *calledFunction(Instruction *inst) {
     auto *call = dynamic_cast<CallInst *>(inst);
-    if (!call || call->num_ops_ == 0)
+    if (!call || call->num_ops() == 0)
         return nullptr;
-    return dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
 Function *findFunction(Module *module, const std::string &name) {
@@ -40,7 +40,7 @@ void markParallelBodiesForCall(Module *module, CallInst *call,
             worklist.push_back(func);
     };
 
-    if (call->num_ops_ >= 2) {
+    if (call->num_ops() >= 2) {
         if (auto *id = dynamic_cast<ConstantInt *>(call->get_operand(0))) {
             mark(findFunction(module, "__sysy_par_body_" +
                                       std::to_string(id->value_)));
@@ -128,7 +128,7 @@ bool DeadCodeEliminate::eliminateUnusedGlobals(Module *module) {
             continue;
         for (auto *bb : func->basic_blocks_) {
             for (auto *inst : bb->instr_list_) {
-                for (unsigned i = 0; i < inst->num_ops_; ++i) {
+                for (unsigned i = 0; i < inst->num_ops(); ++i) {
                     if (auto *global =
                             dynamic_cast<GlobalVariable *>(inst->get_operand(i)))
                         used.insert(global);
@@ -193,7 +193,7 @@ bool DeadCodeEliminate::eliminateDeadInstructions(
     while (!worklist.empty()) {
         Instruction *inst = worklist.back();
         worklist.pop_back();
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             auto *operand =
                 dynamic_cast<Instruction *>(inst->get_operand(i));
             if (operand && operand->parent_ && live.insert(operand).second)
@@ -236,14 +236,14 @@ bool DeadCodeEliminate::eliminateTrivialPhis(Function *func) {
 
         std::vector<PhiInst *> usersToRevisit;
         for (auto use : phi->use_list_) {
-            auto *user = dynamic_cast<PhiInst *>(use.val_);
+            auto *user = dynamic_cast<PhiInst *>(use.user_);
             if (user && user->parent_)
                 usersToRevisit.push_back(user);
         }
 
         Value *common = nullptr;
         bool nonTrivial = false;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             Value *incoming = phi->get_operand(i);
             if (incoming == phi)
                 continue;

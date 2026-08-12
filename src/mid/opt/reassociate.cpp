@@ -125,7 +125,7 @@ static int removableCost(BinaryInst *root, const LinearForm &form) {
 
         bool removable = true;
         for (auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<BinaryInst *>(use.val_);
+            auto *user = dynamic_cast<BinaryInst *>(use.user_);
             if (!user || !form.expanded.count(user) || !isRemovable(user)) {
                 removable = false;
                 break;
@@ -313,7 +313,7 @@ int Reassociate::getRank(Value *v) {
     if (!inst) return 0;
     int maxRank = bbRank_[inst->parent_];
     int r = 0;
-    for (unsigned i = 0; i < inst->num_ops_ && r != maxRank; i++)
+    for (unsigned i = 0; i < inst->num_ops() && r != maxRank; i++)
         r = std::max(r, getRank(inst->get_operand(i)));
     return valueRank_[inst] = r;
 }

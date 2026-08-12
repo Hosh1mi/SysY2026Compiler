@@ -72,7 +72,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *dest,
                              R(cmp->get_operand(1)), dest, true);
     } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < gep->num_ops_; ++i)
+        for (unsigned i = 1; i < gep->num_ops(); ++i)
             indices.push_back(R(gep->get_operand(i)));
         clone = new GetElementPtrInst(R(gep->get_operand(0)), indices,
                                       dest, true);
@@ -88,10 +88,10 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *dest,
         clone->parent_ = dest;
     } else if (auto *zext = dynamic_cast<ZextInst *>(orig)) {
         clone = new ZextInst(zext->op_id_, R(zext->get_operand(0)),
-                             zext->dest_ty_, dest, true);
+                             zext->type_, dest, true);
     } else if (auto *cast = dynamic_cast<Bitcast *>(orig)) {
         clone = new Bitcast(cast->op_id_, R(cast->get_operand(0)),
-                            cast->dest_ty_, dest, true);
+                            cast->type_, dest, true);
     }
 
     if (clone) clone->copySemFlagsFrom(orig);
@@ -100,7 +100,7 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *dest,
 
 void removeTerminatorEdges(BasicBlock *bb, BranchInst *term) {
     if (!bb || !term) return;
-    for (unsigned i = 0; i < term->num_ops_; ++i) {
+    for (unsigned i = 0; i < term->num_ops(); ++i) {
         auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
         if (!succ) continue;
         bb->remove_succ_basic_block(succ);
@@ -115,7 +115,7 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred,
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 1; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i) == oldPred)
                 phi->set_operand(i, newPred);
         }
@@ -185,20 +185,20 @@ bool isPrivateAlloca(AllocaInst *alloca) {
         Value *value = worklist.front();
         worklist.pop();
         for (const auto &use : value->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user) return false;
 
             if (auto *gep = dynamic_cast<GetElementPtrInst *>(user)) {
-                if (use.arg_no_ != 0) return false;
+                if (use.operand_index_ != 0) return false;
                 if (seen.insert(gep).second) worklist.push(gep);
                 continue;
             }
             if (dynamic_cast<LoadInst *>(user)) {
-                if (use.arg_no_ != 0) return false;
+                if (use.operand_index_ != 0) return false;
                 continue;
             }
             if (dynamic_cast<StoreInst *>(user)) {
-                if (use.arg_no_ != 1) return false;
+                if (use.operand_index_ != 1) return false;
                 continue;
             }
             return false;
@@ -235,7 +235,7 @@ PhiInst *findPhiFrom(BasicBlock *bb, BasicBlock *pred) {
     for (auto *inst : bb->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 1; i < phi->num_ops_; i += 2)
+        for (unsigned i = 1; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i) == pred) return phi;
     }
     return nullptr;
@@ -243,7 +243,7 @@ PhiInst *findPhiFrom(BasicBlock *bb, BasicBlock *pred) {
 
 bool findIncoming(PhiInst *phi, BasicBlock *pred, Value *&value) {
     if (!phi) return false;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred) {
             value = phi->get_operand(i);
             return true;
@@ -260,7 +260,7 @@ bool containsOuterValue(Value *value, Loop *loop,
 
 bool analyzeChain(Candidate &c) {
     auto *term = dynamic_cast<BranchInst *>(c.outerBody->get_terminator());
-    if (!term || term->num_ops_ != 3) return false;
+    if (!term || term->num_ops() != 3) return false;
 
     BasicBlock *first = nullptr;
     BasicBlock *continuation = nullptr;
@@ -294,8 +294,8 @@ bool analyzeChain(Candidate &c) {
 
         auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
         if (!br) return false;
-        unsigned firstSucc = br->num_ops_ == 1 ? 0 : 1;
-        unsigned lastSucc = br->num_ops_ == 1 ? 0 : 2;
+        unsigned firstSucc = br->num_ops() == 1 ? 0 : 1;
+        unsigned lastSucc = br->num_ops() == 1 ? 0 : 2;
         for (unsigned i : {firstSucc, lastSucc}) {
             auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(i));
             if (!succ) return false;
@@ -314,14 +314,14 @@ bool analyzeChain(Candidate &c) {
     for (auto *bb : c.chainBlocks) {
         for (auto *inst : bb->instr_list_) {
             if (inst->isTerminator()) continue;
-            unsigned limit = inst->is_call() ? inst->num_ops_ - 1 : inst->num_ops_;
+            unsigned limit = inst->is_call() ? inst->num_ops() - 1 : inst->num_ops();
             for (unsigned i = 0; i < limit; ++i) {
                 if (containsOuterValue(inst->get_operand(i), c.outer,
                                        regionInsts))
                     return false;
             }
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || regionInsts.count(user)) continue;
                 if (user->isTerminator()) continue;
                 if (user->parent_ == c.outer->header) continue;
@@ -335,7 +335,7 @@ bool analyzeChain(Candidate &c) {
     for (auto *bb : c.chainBlocks) {
         for (auto *inst : bb->instr_list_) {
             if (inst->isTerminator()) continue;
-            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            for (unsigned i = 0; i < inst->num_ops(); ++i) {
                 auto *operand = dynamic_cast<Instruction *>(inst->get_operand(i));
                 if (operand && regionInsts.count(operand) &&
                     !available.count(operand))
@@ -356,7 +356,7 @@ bool analyzeInner(Candidate &c) {
     c.innerExit = c.inner->singleExit();
 
     auto *headerBr = dynamic_cast<BranchInst *>(c.inner->header->get_terminator());
-    if (!headerBr || headerBr->num_ops_ != 3) return false;
+    if (!headerBr || headerBr->num_ops() != 3) return false;
     for (unsigned i = 1; i < 3; ++i) {
         auto *value = dynamic_cast<BasicBlock *>(headerBr->get_operand(i));
         if (!value) return false;
@@ -480,7 +480,7 @@ bool analyzeInner(Candidate &c) {
     availableInLatch[c.innerSum] = c.innerSum;
     for (auto *inst : latch->instr_list_) {
         if (inst->isTerminator()) continue;
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             auto *operand = dynamic_cast<Instruction *>(inst->get_operand(i));
             if (operand && c.inner->blocks.count(operand->parent_) &&
                 !availableInLatch.count(operand))
@@ -498,7 +498,7 @@ bool analyzeInner(Candidate &c) {
         return false;
 
     for (const auto &use : c.innerSum->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user) return false;
         if (c.inner->blocks.count(user->parent_)) continue;
         if (user->parent_ == c.innerExit &&
@@ -530,15 +530,15 @@ bool validateArrayUses(const Candidate &c) {
         auto *value = worklist.front();
         worklist.pop();
         for (const auto &use : value->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user) return false;
             if (auto *gep = dynamic_cast<GetElementPtrInst *>(user)) {
-                if (use.arg_no_ != 0) return false;
+                if (use.operand_index_ != 0) return false;
                 if (seen.insert(gep).second) worklist.push(gep);
                 continue;
             }
             if (auto *load = dynamic_cast<LoadInst *>(user)) {
-                if (use.arg_no_ != 0 ||
+                if (use.operand_index_ != 0 ||
                     (c.outer->blocks.count(load->parent_) &&
                      !c.inner->blocks.count(load->parent_)))
                     return false;
@@ -548,7 +548,7 @@ bool validateArrayUses(const Candidate &c) {
                 bool inChain = std::find(c.chainBlocks.begin(),
                                          c.chainBlocks.end(),
                                          store->parent_) != c.chainBlocks.end();
-                if (use.arg_no_ != 1 ||
+                if (use.operand_index_ != 1 ||
                     (!inChain && c.outer->blocks.count(store->parent_)) ||
                     (!inChain && afterOuter.count(store->parent_)))
                     return false;
@@ -570,7 +570,7 @@ bool findCandidate(Function *func, LoopInfo &LI, Candidate &c) {
         if (!inner->preheader || inner->preheader->pre_bbs_.empty()) continue;
 
         auto *outerBr = dynamic_cast<BranchInst *>(outer->header->get_terminator());
-        if (!outerBr || outerBr->num_ops_ != 3) continue;
+        if (!outerBr || outerBr->num_ops() != 3) continue;
         BasicBlock *outerBody = nullptr;
         for (unsigned i = 1; i < 3; ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(outerBr->get_operand(i));
@@ -579,7 +579,7 @@ bool findCandidate(Function *func, LoopInfo &LI, Candidate &c) {
         }
         if (!outerBody) continue;
         auto *bodyBr = dynamic_cast<BranchInst *>(outerBody->get_terminator());
-        if (!bodyBr || bodyBr->num_ops_ != 3) continue;
+        if (!bodyBr || bodyBr->num_ops() != 3) continue;
         bool reachesInnerPreheader = false;
         for (unsigned i = 1; i < 3; ++i)
             reachesInnerPreheader |=
@@ -706,7 +706,7 @@ bool applyCandidate(Candidate &c) {
         auto *oldBr = dynamic_cast<BranchInst *>(old->get_terminator());
         if (!oldBr) return false;
         auto *dest = blockMap[old];
-        if (oldBr->num_ops_ == 1) {
+        if (oldBr->num_ops() == 1) {
             auto *target = static_cast<BasicBlock *>(oldBr->get_operand(0));
             new BranchInst(target == c.innerPreheader ? rowJoin
                                                        : blockMap[target], dest);
@@ -747,10 +747,10 @@ bool applyCandidate(Candidate &c) {
                                  c.innerExit);
     newRem->copySemFlagsFrom(c.oldModulo);
     newIV->copySemFlagsFrom(c.oldOuterIVUpdate);
-    for (unsigned i = 0; i + 1 < c.outerSum->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < c.outerSum->num_ops(); i += 2)
         if (c.outerSum->get_operand(i + 1) == c.innerExit)
             c.outerSum->set_operand(i, newRem);
-    for (unsigned i = 0; i + 1 < c.outerIV->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < c.outerIV->num_ops(); i += 2)
         if (c.outerIV->get_operand(i + 1) == c.innerExit)
             c.outerIV->set_operand(i, newIV);
     new BranchInst(c.outer->header, c.innerExit);

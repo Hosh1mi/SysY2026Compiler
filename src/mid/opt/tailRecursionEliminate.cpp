@@ -1,5 +1,7 @@
 #include "../../include/mid/opt/tailRecursionEliminate.hpp"
 
+#include <set>
+
 #include <vector>
 
 static bool isFinalNonTerminator(CallInst *call, BasicBlock *block) {
@@ -45,7 +47,7 @@ static bool isPattern2TailCall(CallInst *call, Function *func,
 
     bool all_in_target = true;
     for (auto &use : call->use_list_) {
-        auto phi = dynamic_cast<PhiInst *>(use.val_);
+        auto phi = dynamic_cast<PhiInst *>(use.user_);
         if (!phi || phi->parent_ != target) {
             all_in_target = false;
             break;
@@ -53,11 +55,11 @@ static bool isPattern2TailCall(CallInst *call, Function *func,
     }
     if (!all_in_target) return false;
 
-    if (targetTerm->num_ops_ > 0) {
+    if (targetTerm->num_ops() > 0) {
         Value *retVal = targetTerm->get_operand(0);
         bool usedByRet = false;
         for (auto &use : call->use_list_) {
-            if (use.val_ == retVal) { usedByRet = true; break; }
+            if (use.user_ == retVal) { usedByRet = true; break; }
         }
         if (!usedByRet) return false;
     }
@@ -87,12 +89,12 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
         for (auto instr : bb->instr_list_) {
             auto call = dynamic_cast<CallInst *>(instr);
             if (!call) continue;
-            auto callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+            auto callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
             if (callee != func) continue;          // 不是自调用，跳过
 
             auto term = bb->get_terminator();
             // 模式 1：ret <call>
-            if (term && term->is_ret() && term->num_ops_ > 0 &&
+            if (term && term->is_ret() && term->num_ops() > 0 &&
                 term->get_operand(0) == call &&
                 isFinalNonTerminator(call, bb)) {
                 hasTailCall = true;
@@ -100,7 +102,7 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
             }
 
             // 模式 2：call 后无条件 br 到返回块，返回块中有 phi 使用 call，并最终由 ret 返回
-            if (term && term->is_br() && term->num_ops_ == 1) {
+            if (term && term->is_br() && term->num_ops() == 1) {
                 BasicBlock *target = static_cast<BasicBlock *>(term->get_operand(0));
                 if (isPattern2TailCall(call, func, target, bb)) {
                     hasTailCall = true;
@@ -125,7 +127,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
     auto entry_it = std::find(bbs.begin(), bbs.end(), entry_bb);
     bbs.insert(entry_it + 1, header);
 
-    auto *builder = new IRStmtBuilder(entry_bb, module);
+    auto *builder = new IRStmtBuilder(entry_bb);
 
     // 2. 为每个参数在 header 中创建 phi，初始值来自 entry_bb，并替换所有使用
     std::vector<PhiInst *> arg_phis;
@@ -160,7 +162,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         for (auto &inst : succ->instr_list_) {
             auto *phi = dynamic_cast<PhiInst *>(inst);
             if (!phi) break;  // phi 总是在块头部，遇非 phi 即停止
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i + 1) == entry_bb) {
                     phi->set_operand(i + 1, header);
                 }
@@ -208,21 +210,21 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         BasicBlock *target = nullptr;
         bool ret_form = false;
 
-        if (term->is_ret() && term->num_ops_ > 0) {
+        if (term->is_ret() && term->num_ops() > 0) {
             // 模式 1: ret <call>
             call = dynamic_cast<CallInst *>(term->get_operand(0));
             if (call && isFinalNonTerminator(call, bb))
                 ret_form = true;
             else
                 call = nullptr;
-        } else if (term->is_br() && term->num_ops_ == 1) {
+        } else if (term->is_br() && term->num_ops() == 1) {
             // 模式 2: call + br ret_bb, verify with isPattern2TailCall
             target = static_cast<BasicBlock *>(term->get_operand(0));
             for (auto rit = bb->instr_list_.rbegin(); rit != bb->instr_list_.rend(); ++rit) {
                 if (*rit == term) continue;
                 auto *c = dynamic_cast<CallInst *>(*rit);
                 if (c) {
-                    auto *callee = dynamic_cast<Function *>(c->get_operand(c->num_ops_ - 1));
+                    auto *callee = dynamic_cast<Function *>(c->get_operand(c->num_ops() - 1));
                     if (callee == func && isPattern2TailCall(c, func, target, bb)) {
                         call = c;
                         ret_form = false;
@@ -233,7 +235,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         }
 
         if (!call) continue;
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
         if (callee != func) continue;
 
         sites.push_back({bb, call, target, ret_form});
@@ -286,7 +288,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
         for (auto *phi : phis) {
             // 找出所有来自已转换尾调用块的前驱边
             std::vector<unsigned> indices_to_remove;  // 存放 value 索引（偶数）
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 BasicBlock *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
                 // 如果这个前驱已经改为跳转到 header（即前驱是 sites 中的某个 bb）
                 bool is_tailcall_pred = false;
@@ -308,7 +310,7 @@ void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *modu
             }
 
             // 如果 phi 只剩一个输入，用该值替换并删除 phi
-            if (phi->num_ops_ == 2) {
+            if (phi->num_ops() == 2) {
                 Value *replacement = phi->get_operand(0);
                 phi->replace_all_use_with(replacement);
                 ret_bb->delete_instr(phi);

@@ -127,7 +127,7 @@ bool isSourceNonNegative(Value *v, BasicBlock *ctx,
 
     assuming.push_back(v);
     bool ok = true;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (!isSourceNonNegative(phi->get_operand(i), predBB, assuming, depth + 1)) {
             ok = false;
@@ -222,7 +222,7 @@ Value *foldScaledCompareFromPred(ICmpInst *inst) {
     BasicBlock *bb = inst->parent_;
     for (auto *predBB : bb->pre_bbs_) {
         auto *br = dynamic_cast<BranchInst *>(predBB->get_terminator());
-        if (!br || br->num_ops_ != 3) continue;
+        if (!br || br->num_ops() != 3) continue;
 
         auto *prevCmp = dynamic_cast<ICmpInst *>(br->get_operand(0));
         if (!prevCmp || prevCmp->icmp_op_ != ICmpInst::ICMP_SLT) continue;
@@ -408,7 +408,7 @@ Value* visitICmp(ICmpInst *inst) {
     // Rewriting x < C-x into a scaled compare before visiting the select
     // obscures both the min/max identity and its range-derived simplification.
     for (const Use &use : inst->use_list_) {
-        auto *select = dynamic_cast<SelectInst *>(use.val_);
+        auto *select = dynamic_cast<SelectInst *>(use.user_);
         SignedMinMaxIntrinsic kind;
         Value *lhs = nullptr;
         Value *rhs = nullptr;

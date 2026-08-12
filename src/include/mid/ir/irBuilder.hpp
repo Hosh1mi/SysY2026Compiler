@@ -6,12 +6,9 @@
 class IRStmtBuilder {
 public:
     BasicBlock* BB_;  // 当前插入点
-    Module* m_;
 
-    IRStmtBuilder(BasicBlock* bb, Module* m) : BB_(bb), m_(m) {}
-    ~IRStmtBuilder() = default;
+    explicit IRStmtBuilder(BasicBlock* bb) : BB_(bb) {}
 
-    Module* get_module() { return m_; }
     BasicBlock* get_insert_block() { return this->BB_; }
     void set_insert_point(BasicBlock* bb) { this->BB_ = bb; }
 
@@ -45,7 +42,7 @@ public:
     FCmpInst* create_fcmp_le(Value* v1, Value* v2) { return new FCmpInst(FCmpInst::FCMP_ULE, v1, v2, this->BB_); }
 
     // 函数调用
-    CallInst* create_call(Value* func, std::vector<Value*> args) {
+    CallInst* create_call(Value* func, const std::vector<Value*>& args) {
 #ifdef DEBUG
         assert(dynamic_cast<Function*>(func) && "func must be Function * type");
 #endif
@@ -63,11 +60,10 @@ public:
     ReturnInst* create_void_ret() { return new ReturnInst(this->BB_); }
 
     // 地址计算
-    GetElementPtrInst* create_gep(Value* ptr, std::vector<Value*> idxs) { return new GetElementPtrInst(ptr, idxs, this->BB_); }
+    GetElementPtrInst* create_gep(Value* ptr, const std::vector<Value*>& idxs) { return new GetElementPtrInst(ptr, idxs, this->BB_); }
 
     // 内存操作
     StoreInst* create_store(Value* val, Value* ptr) { return new StoreInst(val, ptr, this->BB_); }
-    LoadInst* create_load(Type* ty, Value* ptr) { return new LoadInst(ptr, this->BB_); }
     LoadInst* create_load(Value* ptr) {
 #ifdef DEBUG
         assert(ptr->get_type()->is_pointer_type() && "ptr must be pointer type");

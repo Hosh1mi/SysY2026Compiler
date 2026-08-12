@@ -34,9 +34,9 @@ void ArgumentAliasAnalysis::analyze(Module *module) {
         for (auto *bb : func->basic_blocks_) {
             for (auto *inst : bb->instr_list_) {
                 auto *call = dynamic_cast<CallInst *>(inst);
-                if (!call || call->num_ops_ == 0) continue;
+                if (!call || call->num_ops() == 0) continue;
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (callee)
                     callSites_[callee].push_back(call);
             }
@@ -70,7 +70,7 @@ void ArgumentAliasAnalysis::resolveArg(Argument *a) {
     } else {
         for (auto *call : it->second) {
             // call 操作数：[args..., callee]；第 idx 个实参。
-            if (idx >= call->num_ops_ - 1) { isUnknown = true; break; }
+            if (idx >= call->num_ops() - 1) { isUnknown = true; break; }
             Value *root = underlyingObject(call->get_operand(idx));
             if (isIdentifiedObject(root)) {
                 rootSet.insert(root);
@@ -110,8 +110,8 @@ bool ArgumentAliasAnalysis::noAlias(Value *baseA, Value *baseB) const {
         if (it != callSites_.end() && !it->second.empty()) {
             bool allCallSitesDistinct = true;
             for (auto *call : it->second) {
-                if (argA->arg_no_ >= call->num_ops_ - 1 ||
-                    argB->arg_no_ >= call->num_ops_ - 1) {
+                if (argA->arg_no_ >= call->num_ops() - 1 ||
+                    argB->arg_no_ >= call->num_ops() - 1) {
                     allCallSitesDistinct = false;
                     break;
                 }

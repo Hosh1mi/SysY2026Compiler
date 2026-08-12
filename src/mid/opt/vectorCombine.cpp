@@ -36,7 +36,7 @@ bool onlyUsedBy(Value *value, Instruction *user) {
     if (value->use_list_.empty())
         return false;
     for (const Use &use : value->use_list_)
-        if (use.val_ != user)
+        if (use.user_ != user)
             return false;
     return true;
 }

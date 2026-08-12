@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <list>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -50,7 +49,4 @@ public:
     // CFG 信息
     std::vector<BasicBlock*> pre_bbs_;
     std::vector<BasicBlock*> succ_bbs_;
-    // 活跃变量分析
-    std::set<Value*> live_in;
-    std::set<Value*> live_out;
 };

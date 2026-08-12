@@ -19,7 +19,7 @@ struct PhiRepairEdit {
 bool hasTerminatorEdge(BasicBlock *from, BasicBlock *to) {
     auto *term = from ? from->get_terminator() : nullptr;
     if (!term) return false;
-    for (unsigned i = 0; i < term->num_ops_; ++i) {
+    for (unsigned i = 0; i < term->num_ops(); ++i) {
         if (term->get_operand(i) == to)
             return true;
     }
@@ -30,7 +30,7 @@ int countTerminatorEdges(BasicBlock *from, BasicBlock *to) {
     auto *term = from ? from->get_terminator() : nullptr;
     if (!term) return 0;
     int count = 0;
-    for (unsigned i = 0; i < term->num_ops_; ++i) {
+    for (unsigned i = 0; i < term->num_ops(); ++i) {
         if (term->get_operand(i) == to)
             ++count;
     }
@@ -72,7 +72,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (int i = static_cast<int>(phi->num_ops_) - 1; i >= 1; i -= 2) {
+        for (int i = static_cast<int>(phi->num_ops()) - 1; i >= 1; i -= 2) {
             if (phi->get_operand(i) == pred)
                 phi->remove_operands(i - 1, i);
         }
@@ -82,7 +82,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
 void collectEdgeFacts(BasicBlock *pred, BasicBlock *succ, BoolFactMap &boolFacts,
                       ICmpFactMap &cmpFacts) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
-    if (!br || br->num_ops_ != 3) return;
+    if (!br || br->num_ops() != 3) return;
     auto *trueDest = static_cast<BasicBlock *>(br->get_operand(1));
     auto *falseDest = static_cast<BasicBlock *>(br->get_operand(2));
     if (trueDest != succ && falseDest != succ) return;
@@ -105,7 +105,7 @@ Value *substitutePhiOnEdge(Value *value, BasicBlock *mid, BasicBlock *pred,
     auto *phi = dynamic_cast<PhiInst *>(value);
     if (!phi || phi->parent_ != mid) return value;
     if (!visiting.insert(phi).second) return nullptr;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) != pred) continue;
         Value *incoming = phi->get_operand(i);
         if (auto *incomingPhi = dynamic_cast<PhiInst *>(incoming)) {
@@ -163,7 +163,7 @@ std::optional<bool> evaluateBoolWithSubstitution(Value *value, BasicBlock *mid,
 bool isThreadableMidBlock(BasicBlock *bb, ICmpInst *&cmpOut) {
     cmpOut = nullptr;
     auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
-    if (!term || term->num_ops_ != 3) return false;
+    if (!term || term->num_ops() != 3) return false;
 
     for (auto *inst : bb->instr_list_) {
         if (inst->is_phi()) continue;
@@ -183,7 +183,7 @@ bool redirectPredEdge(BasicBlock *pred, BasicBlock *oldTarget,
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
     if (!br) return false;
 
-    if (br->num_ops_ == 1) {
+    if (br->num_ops() == 1) {
         if (br->get_operand(0) != oldTarget) return false;
         pred->remove_succ_basic_block(oldTarget);
         oldTarget->remove_pre_basic_block(pred);
@@ -193,7 +193,7 @@ bool redirectPredEdge(BasicBlock *pred, BasicBlock *oldTarget,
         return true;
     }
 
-    if (br->num_ops_ != 3) return false;
+    if (br->num_ops() != 3) return false;
     for (int i = 1; i <= 2; ++i) {
         if (br->get_operand(i) != oldTarget) continue;
         pred->remove_succ_basic_block(oldTarget);
@@ -215,7 +215,7 @@ bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
 
         int incomingIdx = -1;
         int existingPredIdx = -1;
-        for (int i = 1; i < static_cast<int>(phi->num_ops_); i += 2) {
+        for (int i = 1; i < static_cast<int>(phi->num_ops()); i += 2) {
             if (phi->get_operand(i) == mid) {
                 if (incomingIdx >= 0)
                     return false;
@@ -306,7 +306,7 @@ bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid,
         auto *phi = dynamic_cast<PhiInst *>(inst);
         if (!phi) break;
         for (const auto &use : phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user == optionalCmp)
                 continue;
             if (user && user->is_phi() && user->parent_ == chosenSucc)

@@ -17,9 +17,9 @@
 namespace {
 
 Function *calledFunction(CallInst *call) {
-    if (!call || call->num_ops_ == 0)
+    if (!call || call->num_ops() == 0)
         return nullptr;
-    return dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
 bool isI32(Value *value) {
@@ -32,7 +32,7 @@ bool isI32(Value *value) {
 int incomingIndex(PhiInst *phi, BasicBlock *source) {
     if (!phi || !source)
         return -1;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == source)
             return static_cast<int>(i);
     }
@@ -40,13 +40,13 @@ int incomingIndex(PhiInst *phi, BasicBlock *source) {
 }
 
 bool isInsideUse(const Use &use, const Loop &loop) {
-    auto *user = dynamic_cast<Instruction *>(use.val_);
+    auto *user = use.user_;
     return user && user->parent_ && loop.isInLoop(user->parent_);
 }
 
 bool hasEscapingUse(Value *value, const Loop &loop) {
     for (const Use &use : value->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->parent_ && !loop.isInLoop(user->parent_))
             return true;
     }
@@ -185,7 +185,7 @@ bool LastIterationElimination::tryTransform(
             if (instruction->is_phi())
                 continue;
             for (const Use &use : instruction->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ &&
                     !loop.isInLoop(user->parent_))
                     return false;

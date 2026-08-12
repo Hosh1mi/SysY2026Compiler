@@ -163,7 +163,7 @@ static bool multiplyNoOverflow(long long a, long long b, long long &out) {
 
 SCEVGEPInfo ScalarEvolution::getLinearizedGEP(GetElementPtrInst *gep) {
     SCEVGEPInfo info;
-    if (!gep || gep->num_ops_ < 2)
+    if (!gep || gep->num_ops() < 2)
         return info;
 
     Value *base = gep->get_operand(0);
@@ -171,7 +171,7 @@ SCEVGEPInfo ScalarEvolution::getLinearizedGEP(GetElementPtrInst *gep) {
     if (!ptrTy)
         return info;
 
-    for (unsigned i = 1; i < gep->num_ops_; i++) {
+    for (unsigned i = 1; i < gep->num_ops(); i++) {
         auto *idxTy = dynamic_cast<IntegerType *>(gep->get_operand(i)->type_);
         if (!idxTy || idxTy->num_bits_ != 32)
             return info;
@@ -188,7 +188,7 @@ SCEVGEPInfo ScalarEvolution::getLinearizedGEP(GetElementPtrInst *gep) {
     std::vector<const SCEV *> terms;
 
     if (shape.empty()) {
-        if (gep->num_ops_ != 2)
+        if (gep->num_ops() != 2)
             return info;
         terms.push_back(getSCEV(gep->get_operand(1)));
     } else {
@@ -196,7 +196,7 @@ SCEVGEPInfo ScalarEvolution::getLinearizedGEP(GetElementPtrInst *gep) {
         if (!leading || leading->value_ != 0)
             return info;
 
-        unsigned dataIndexCount = gep->num_ops_ - 2;
+        unsigned dataIndexCount = gep->num_ops() - 2;
         if (dataIndexCount > shape.size())
             return info;
 
@@ -343,7 +343,7 @@ const SCEV *ScalarEvolution::tryCreateAddRec(PhiInst *phi) {
     Value *outsideVal = nullptr;
     Value *insideVal = nullptr;
 
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto *pred = dynamic_cast<BasicBlock*>(phi->get_operand(i + 1));
         if (!pred) return nullptr;
 

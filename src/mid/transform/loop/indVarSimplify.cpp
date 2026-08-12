@@ -103,7 +103,7 @@ bool continuationIsTrue(const Loop &loop, const InductionDescriptor &control,
     auto *branch = guard
                        ? dynamic_cast<BranchInst *>(guard->get_terminator())
                        : nullptr;
-    if (!branch || branch->num_ops_ != 3)
+    if (!branch || branch->num_ops() != 3)
         return false;
     auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
     auto *falseBlock = dynamic_cast<BasicBlock *>(branch->get_operand(2));
@@ -199,7 +199,7 @@ bool isLoopInvariantExpression(Value *value, const Loop &loop,
         return false;
     if (!visiting.insert(value).second)
         return false;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         if (!isLoopInvariantExpression(instruction->get_operand(i), loop,
                                        visiting)) {
             visiting.erase(value);
@@ -215,10 +215,10 @@ bool getIncomingValues(PhiInst *phi, const Loop &loop, Value *&start,
     start = nullptr;
     latchValue = nullptr;
     BasicBlock *latch = loop.singleLatch();
-    if (!phi || phi->num_ops_ != 4 || !loop.preheader || !latch)
+    if (!phi || phi->num_ops() != 4 || !loop.preheader || !latch)
         return false;
 
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         auto *source = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (source == loop.preheader)
             start = phi->get_operand(i);
@@ -259,7 +259,7 @@ bool onlyUsedBy(Value *value, Instruction *expectedUser) {
     if (!value || !expectedUser || value->use_list_.empty())
         return false;
     for (const Use &use : value->use_list_) {
-        if (use.val_ != expectedUser)
+        if (use.user_ != expectedUser)
             return false;
     }
     return true;
@@ -285,7 +285,7 @@ bool matchRecurrence(PhiInst *phi, const Loop &loop,
     std::vector<Use> insideUses;
     std::vector<Use> outsideUses;
     for (const Use &use : phi->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !user->parent_)
             return false;
         if (loop.blocks.count(user->parent_))
@@ -308,7 +308,7 @@ bool isDeadExceptForLiveOut(const Recurrence &recurrence) {
     if (!onlyUsedBy(recurrence.update, recurrence.phi))
         return false;
     for (const Use &use : recurrence.insideUses) {
-        if (use.val_ != recurrence.update)
+        if (use.user_ != recurrence.update)
             return false;
     }
     return true;
@@ -577,7 +577,7 @@ bool simplifyRangeUsers(Loop &loop, ScalarEvolution &scalarEvolution,
                               recurrence.phi->use_list_.end());
         std::set<Instruction *> visitedUsers;
         for (const Use &use : uses) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ ||
                 !loop.blocks.count(user->parent_) ||
                 user == recurrence.update ||
@@ -644,7 +644,7 @@ bool simplifyRangeUsers(Loop &loop, ScalarEvolution &scalarEvolution,
 Value *preheaderIncomingValue(PhiInst *phi, const Loop &loop) {
     if (!phi || !loop.preheader)
         return nullptr;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == loop.preheader)
             return phi->get_operand(i);
     }
@@ -656,7 +656,7 @@ bool rewriteFirstIterationExitValues(Loop &loop) {
         return false;
     auto *branch =
         dynamic_cast<BranchInst *>(loop.header->get_terminator());
-    if (!branch || branch->num_ops_ != 3)
+    if (!branch || branch->num_ops() != 3)
         return false;
 
     std::set<Value *> visiting;
@@ -681,7 +681,7 @@ bool rewriteFirstIterationExitValues(Loop &loop) {
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi()) break;
         auto *exitPhi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 0; i + 1 < exitPhi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < exitPhi->num_ops(); i += 2) {
             if (exitPhi->get_operand(i + 1) != loop.header)
                 continue;
             auto *headerPhi =
@@ -780,16 +780,16 @@ bool eliminateCongruentIVs(Loop &loop,
             std::vector<Use> phiUses(recurrence.phi->use_list_.begin(),
                                      recurrence.phi->use_list_.end());
             for (const Use &use : phiUses) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user != recurrence.update)
-                    user->set_operand(use.arg_no_, current);
+                    user->set_operand(use.operand_index_, current);
             }
             std::vector<Use> updateUses(recurrence.update->use_list_.begin(),
                                         recurrence.update->use_list_.end());
             for (const Use &use : updateUses) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user != recurrence.phi)
-                    user->set_operand(use.arg_no_, next);
+                    user->set_operand(use.operand_index_, next);
             }
             recurrence.phi->parent_->delete_instr(recurrence.phi);
             recurrence.update->parent_->delete_instr(recurrence.update);
@@ -807,11 +807,11 @@ bool eliminateCongruentIVs(Loop &loop,
         std::vector<Use> uses(recurrence.phi->use_list_.begin(),
                               recurrence.phi->use_list_.end());
         for (const Use &use : uses) {
-            if (use.val_ == recurrence.update)
+            if (use.user_ == recurrence.update)
                 continue;
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user)
-                user->set_operand(use.arg_no_, leader->phi);
+                user->set_operand(use.operand_index_, leader->phi);
         }
 
         if (!onlyUsedBy(recurrence.phi, recurrence.update))
@@ -854,9 +854,9 @@ bool rewriteConstantExitValues(Loop &loop, ScalarEvolution &scalarEvolution,
         if (!exitValue) continue;
 
         for (const Use &use : recurrence.outsideUses) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user)
-                user->set_operand(use.arg_no_, exitValue);
+                user->set_operand(use.operand_index_, exitValue);
         }
 
         if (onlyUsedBy(recurrence.phi, recurrence.update) &&

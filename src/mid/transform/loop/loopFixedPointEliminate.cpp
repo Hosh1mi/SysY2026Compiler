@@ -17,10 +17,10 @@ struct HeaderPhi {
 
 bool describeHeaderPhi(PhiInst *phi, BasicBlock *preheader,
                        BasicBlock *latch, HeaderPhi &result) {
-    if (!phi || phi->num_ops_ != 4)
+    if (!phi || phi->num_ops() != 4)
         return false;
     result.phi = phi;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         auto *source =
             dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (source == preheader)
@@ -34,7 +34,7 @@ bool describeHeaderPhi(PhiInst *phi, BasicBlock *preheader,
 }
 
 bool isInsideUse(const Use &use, const Loop &loop) {
-    auto *user = dynamic_cast<Instruction *>(use.val_);
+    auto *user = use.user_;
     return user && user->parent_ && loop.isInLoop(user->parent_);
 }
 
@@ -150,17 +150,17 @@ bool isFiniteControlPhi(const HeaderPhi &info, const Loop &loop,
 
     // The count itself must not influence the repeated computation.
     for (const Use &use : info.phi->use_list_) {
-        if (use.val_ != update && use.val_ != guard)
+        if (use.user_ != update && use.user_ != guard)
             return false;
     }
     for (const Use &use : update->use_list_) {
-        if (use.val_ != info.phi)
+        if (use.user_ != info.phi)
             return false;
     }
     for (const Use &use : guard->use_list_) {
-        auto *user = dynamic_cast<BranchInst *>(use.val_);
+        auto *user = dynamic_cast<BranchInst *>(use.user_);
         if (!user || user != guardBlock->get_terminator() ||
-            use.arg_no_ != 0)
+            use.operand_index_ != 0)
             return false;
     }
     return true;
@@ -175,11 +175,11 @@ bool isDeadSelfRecurrence(const HeaderPhi &info) {
     if (!update || !info.phi)
         return false;
     for (const Use &use : info.phi->use_list_) {
-        if (use.val_ != update)
+        if (use.user_ != update)
             return false;
     }
     for (const Use &use : update->use_list_) {
-        if (use.val_ != info.phi)
+        if (use.user_ != info.phi)
             return false;
     }
     return true;
@@ -235,7 +235,7 @@ bool addLatchIncomingToExitPhis(BasicBlock *exit, BasicBlock *header,
         if (!phi)
             break;
         Value *fromHeader = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == header) {
                 fromHeader = phi->get_operand(i);
                 break;
@@ -364,7 +364,7 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
     if (latchExiting) {
         latchBranch =
             dynamic_cast<BranchInst *>(latch->get_terminator());
-        if (!latchBranch || latchBranch->num_ops_ != 3 ||
+        if (!latchBranch || latchBranch->num_ops() != 3 ||
             latchBranch->get_operand(1) != loop.header ||
             latchBranch->get_operand(2) != exit)
             return false;
@@ -377,7 +377,7 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
         // unconditional backedge. Early exit is inserted on the latch.
         auto *headerBranch =
             dynamic_cast<BranchInst *>(loop.header->get_terminator());
-        if (!headerBranch || headerBranch->num_ops_ != 3)
+        if (!headerBranch || headerBranch->num_ops() != 3)
             return false;
         auto *trueSucc =
             dynamic_cast<BasicBlock *>(headerBranch->get_operand(1));
@@ -395,7 +395,7 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
 
         auto *latchTerm =
             dynamic_cast<BranchInst *>(latch->get_terminator());
-        if (!latchTerm || latchTerm->num_ops_ != 1 ||
+        if (!latchTerm || latchTerm->num_ops() != 1 ||
             latchTerm->get_operand(0) != loop.header)
             return false;
 
@@ -459,7 +459,7 @@ bool LoopFixedPointEliminate::tryTransform(Loop &loop, Function *func,
         for (auto *inst : bb->instr_list_) {
             for (const Use &use : inst->use_list_) {
                 if (!isInsideUse(use, loop)) {
-                    auto *user = dynamic_cast<Instruction *>(use.val_);
+                    auto *user = use.user_;
                     if (!user || user->parent_ != exit ||
                         !user->is_phi())
                         return false;

@@ -32,7 +32,7 @@ struct Pattern {
 Value *stripSingleIncomingPhi(Value *value) {
     for (int depth = 0; depth < 8; ++depth) {
         auto *phi = dynamic_cast<PhiInst *>(value);
-        if (!phi || phi->num_ops_ != 2) break;
+        if (!phi || phi->num_ops() != 2) break;
         value = phi->get_operand(0);
     }
     return value;
@@ -57,7 +57,7 @@ bool isTwoDimensionalI32Base(Value *base) {
 
 bool matchesGEP(GetElementPtrInst *gep, Value *base, Value *first,
                 Value *second) {
-    return gep && gep->num_ops_ == 3 && gep->get_operand(0) == base &&
+    return gep && gep->num_ops() == 3 && gep->get_operand(0) == base &&
            gep->get_operand(1) == first && gep->get_operand(2) == second;
 }
 
@@ -76,8 +76,8 @@ bool matchPattern(Loop *outer, Pattern &pattern) {
         outer->header->get_terminator());
     auto *innerBranch = dynamic_cast<BranchInst *>(
         inner->header->get_terminator());
-    if (!outerBranch || outerBranch->num_ops_ != 3 || !innerBranch ||
-        innerBranch->num_ops_ != 3)
+    if (!outerBranch || outerBranch->num_ops() != 3 || !innerBranch ||
+        innerBranch->num_ops() != 3)
         return false;
 
     PhiInst *sum = nullptr;
@@ -99,7 +99,7 @@ bool matchPattern(Loop *outer, Pattern &pattern) {
 
     Value *sumInit = nullptr;
     Value *sumUpdate = nullptr;
-    for (unsigned i = 0; i + 1 < sum->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < sum->num_ops(); i += 2) {
         auto *pred = dynamic_cast<BasicBlock *>(sum->get_operand(i + 1));
         if (!pred) return false;
         if (inner->blocks.count(pred)) {
@@ -139,7 +139,7 @@ bool matchPattern(Loop *outer, Pattern &pattern) {
         return matchesGEP(gep, base, row, k);
     };
     auto kByPreviousJ = [&](GetElementPtrInst *gep) {
-        return gep && gep->num_ops_ == 3 && gep->get_operand(0) == base &&
+        return gep && gep->num_ops() == 3 && gep->get_operand(0) == base &&
                gep->get_operand(1) == k &&
                isSubOne(gep->get_operand(2), j);
     };
@@ -183,7 +183,7 @@ void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
                   BasicBlock *newTarget) {
     auto *term = from ? from->get_terminator() : nullptr;
     if (!term || !term->is_br()) return;
-    for (unsigned i = 0; i < term->num_ops_; ++i)
+    for (unsigned i = 0; i < term->num_ops(); ++i)
         if (term->get_operand(i) == oldTarget)
             term->set_operand(i, newTarget);
     from->remove_succ_basic_block(oldTarget);
@@ -223,12 +223,12 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
     BasicBlock *preheader = outer->preheader;
     BasicBlock *originalHeader = outer->header;
     auto *preTerm = preheader ? preheader->get_terminator() : nullptr;
-    if (!preTerm || preTerm->num_ops_ != 1 ||
+    if (!preTerm || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != originalHeader)
         return false;
 
     int incomingIndex = -1;
-    for (unsigned i = 0; i + 1 < pattern.j->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < pattern.j->num_ops(); i += 2)
         if (pattern.j->get_operand(i + 1) == preheader)
             incomingIndex = static_cast<int>(i);
     if (incomingIndex < 0) return false;

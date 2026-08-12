@@ -35,7 +35,7 @@ void InlineExpand::execute(Module *module) {
         if (!call->parent_) continue;
 
         Function *caller = call->parent_->parent_;
-        Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops_ - 1));
+        Function *callee = dynamic_cast<Function*>(call->get_operand(call->num_ops() - 1));
         if (!isReachableFromEntry(caller, module))
             continue;
         if (!callee || !canInline(call, callee, caller, item.recursiveBudget))
@@ -63,7 +63,7 @@ void InlineExpand::execute(Module *module) {
         for (auto *nc : newCalls) {
             if (!nc->parent_)
                 continue;
-            Function *newCallee = dynamic_cast<Function*>(nc->get_operand(nc->num_ops_ - 1));
+            Function *newCallee = dynamic_cast<Function*>(nc->get_operand(nc->num_ops() - 1));
             if (newCallee == callee && recursive) {
                 if (selfCallBudget > 0)
                     worklist.push_back({nc, selfCallBudget});
@@ -120,7 +120,7 @@ int InlineExpand::weighInstruction(Instruction *inst) {
             // For calls to functions that will certainly be inlined,
             // use the callee's weight instead of the expensive call weight.
             auto *callee = dynamic_cast<Function*>(
-                inst->get_operand(inst->num_ops_ - 1));
+                inst->get_operand(inst->num_ops() - 1));
             if (callee && !callee->is_declaration() &&
                 countInstructions(callee) <= INLINE_ALWAYS_THRESHOLD) {
                 int w = 0;
@@ -151,7 +151,7 @@ bool InlineExpand::isSelfRecursive(Function *func) {
     for (auto bb : func->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
             if (auto *call = dynamic_cast<CallInst*>(inst)) {
-                if (call->get_operand(call->num_ops_ - 1) == func)
+                if (call->get_operand(call->num_ops() - 1) == func)
                     return true;
             }
         }
@@ -163,7 +163,7 @@ bool InlineExpand::hasNonSelfCalls(Function *func) {
     for (auto bb : func->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
             if (auto *call = dynamic_cast<CallInst*>(inst)) {
-                if (call->get_operand(call->num_ops_ - 1) != func)
+                if (call->get_operand(call->num_ops() - 1) != func)
                     return true;
             }
         }
@@ -175,7 +175,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
     // Phase A: seed known-constant set from constant actual arguments
     std::unordered_set<Value*> knownConst;
     unsigned numArgs = std::min((unsigned)callee->arguments_.size(),
-                                call->num_ops_ - 1);
+                                call->num_ops() - 1);
     for (unsigned i = 0; i < numArgs; i++) {
         Value *actual = call->get_operand(i);
         if (dynamic_cast<ConstantInt*>(actual) ||
@@ -200,7 +200,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
         for (auto *inst : bb->instr_list_) {
             // Check all operands are known-constant
             auto allConst = [&](Instruction *i) {
-                for (unsigned k = 0; k < i->num_ops_; k++) {
+                for (unsigned k = 0; k < i->num_ops(); k++) {
                     Value *op = i->get_operand(k);
                     // Skip basic block operands (phi incoming blocks, branch targets)
                     if (dynamic_cast<BasicBlock*>(op)) continue;
@@ -211,14 +211,14 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
 
             if (auto *phi = dynamic_cast<PhiInst*>(inst)) {
                 bool allIncomingConst = true;
-                for (unsigned k = 0; k < phi->num_ops_; k += 2) {
+                for (unsigned k = 0; k < phi->num_ops(); k += 2) {
                     Value *incVal = phi->get_operand(k);
                     if (!isKnownConstant(incVal)) {
                         allIncomingConst = false;
                         break;
                     }
                 }
-                if (allIncomingConst && phi->num_ops_ >= 2)
+                if (allIncomingConst && phi->num_ops() >= 2)
                     knownConst.insert(phi);
             } else if (auto *bin = dynamic_cast<BinaryInst*>(inst)) {
                 if (allConst(bin)) {
@@ -256,7 +256,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
                     foldBenefit += weighInstruction(bc);
                 }
             } else if (auto *br = dynamic_cast<BranchInst*>(inst)) {
-                if (br->num_ops_ == 3 && knownConst.count(br->get_operand(0))) {
+                if (br->num_ops() == 3 && knownConst.count(br->get_operand(0))) {
                     foldBenefit += weighInstruction(br);
                     Value *condVal = br->get_operand(0);
                     BasicBlock *takenBB = static_cast<BasicBlock*>(br->get_operand(1));
@@ -272,7 +272,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
                             if (cur == exclude) continue;
                             auto *term = cur->get_terminator();
                             if (!term) continue;
-                            for (unsigned k = 0; k < term->num_ops_; k++) {
+                            for (unsigned k = 0; k < term->num_ops(); k++) {
                                 if (auto *succ = dynamic_cast<BasicBlock*>(term->get_operand(k)))
                                     if (!visited.count(succ) && succ != exclude)
                                         stack.push_back(succ);
@@ -354,7 +354,7 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
         savedOverhead *= LOOP_MULTIPLIER;
     int foldBenefit = estimateConstantFoldBenefit(call, callee);
     bool hasConstantArgument = false;
-    for (unsigned i = 0; i + 1 < call->num_ops_; ++i) {
+    for (unsigned i = 0; i + 1 < call->num_ops(); ++i) {
         Value *actual = call->get_operand(i);
         if (dynamic_cast<ConstantInt *>(actual) ||
             dynamic_cast<ConstantFloat *>(actual) ||
@@ -411,7 +411,7 @@ unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
         for (auto bb : func->basic_blocks_) {
             for (auto inst : bb->instr_list_) {
                 if (auto *call = dynamic_cast<CallInst*>(inst)) {
-                    if (call->get_operand(call->num_ops_ - 1) == callee)
+                    if (call->get_operand(call->num_ops() - 1) == callee)
                         ++count;
                 }
             }
@@ -448,7 +448,7 @@ bool InlineExpand::reaches(Function *from, Function *target,
             if (!call)
                 continue;
             auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             if (callee && !callee->is_declaration() &&
                 reaches(callee, target, visited))
                 return true;
@@ -508,7 +508,7 @@ vector<BasicBlock*> InlineExpand::getRPO(Function *func) {
 vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     BasicBlock *callBB = callInst->parent_;
     Function *caller = callBB->parent_;
-    Function *callee = dynamic_cast<Function*>(callInst->get_operand(callInst->num_ops_ - 1));
+    Function *callee = dynamic_cast<Function*>(callInst->get_operand(callInst->num_ops() - 1));
     vector<CallInst*> newCalls;
 
     // 1. 分裂基本块，获得 cont 块
@@ -516,7 +516,7 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
 
     // 2. 收集实参
     vector<Value*> args;
-    for (unsigned i = 0; i < callInst->num_ops_ - 1; ++i)
+    for (unsigned i = 0; i < callInst->num_ops() - 1; ++i)
         args.push_back(callInst->get_operand(i));
 
     // 3. 复制 callee 函数体
@@ -560,7 +560,7 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
         Instruction *term = newBB->get_terminator();
         if (auto *retInst = dynamic_cast<ReturnInst*>(term)) {
             if (hasRetVal) {
-                assert(retInst->num_ops_ > 0 && "return value expected but none given");
+                assert(retInst->num_ops() > 0 && "return value expected but none given");
                 retPhi->addIncoming(retInst->get_operand(0), newBB);
             }
             newBB->delete_instr(retInst);
@@ -576,7 +576,7 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     // 7. 移除 call 指令，并建立 callBB 到 callee 入口的跳转
     callBB->delete_instr(callInst);
     BasicBlock *calleeEntry = bbMap[callee->basic_blocks_[0]];
-    IRStmtBuilder builder(callBB, caller->parent_);
+    IRStmtBuilder builder(callBB);
     builder.create_br(calleeEntry);
 
     // 8. 重新设置指令名称，避免冲突
@@ -611,7 +611,7 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
         succ->remove_pre_basic_block(callBB);
     callBB->succ_bbs_.clear();
 
-    // 从 callBB 移除这些指令（remove_instr 会清空 pos_in_bb，使 add_instruction 可以重新插入）
+    // 从 callBB 移除这些指令（remove_instr 会清空 pos_in_bb_，使 add_instruction 可以重新插入）
     for (auto *inst : toMove)
         callBB->remove_instr(inst);
 
@@ -629,7 +629,7 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
             auto *phi = dynamic_cast<PhiInst*>(inst);
             if (!phi) break;   // PHI 指令必须位于块头部，遇到非 PHI 即可提前退出
             // PHI 操作数布局：[val0, bb0, val1, bb1, ...]，奇数下标为来源基本块
-            for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 1; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i) == callBB) {
                     // 使用 set_operand 自动处理 use_list 的增删
                     phi->set_operand(i, contBB);
@@ -684,12 +684,12 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 valMap[oldPhi] = newPhi;
                 phiFixups.push_back({newPhi, oldPhi});
             } else if (auto *oldBr = dynamic_cast<BranchInst*>(oldInst)) {
-                Value *cond = oldBr->num_ops_ == 3
+                Value *cond = oldBr->num_ops() == 3
                               ? mapValue(oldBr->get_operand(0), valMap, bbMap)
                               : nullptr;
                 BasicBlock *trueBB = dynamic_cast<BasicBlock*>(
-                    mapValue(oldBr->get_operand(oldBr->num_ops_ == 3 ? 1 : 0), valMap, bbMap));
-                BasicBlock *falseBB = oldBr->num_ops_ == 3
+                    mapValue(oldBr->get_operand(oldBr->num_ops() == 3 ? 1 : 0), valMap, bbMap));
+                BasicBlock *falseBB = oldBr->num_ops() == 3
                                       ? dynamic_cast<BasicBlock*>(mapValue(oldBr->get_operand(2), valMap, bbMap))
                                       : nullptr;
                 if (cond)
@@ -697,12 +697,12 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 else
                     new BranchInst(trueBB, newBB);
             } else if (auto *oldRet = dynamic_cast<ReturnInst*>(oldInst)) {
-                if (oldRet->num_ops_ > 0)
+                if (oldRet->num_ops() > 0)
                     new ReturnInst(mapValue(oldRet->get_operand(0), valMap, bbMap), newBB);
                 else
                     new ReturnInst(newBB);
             } else if (auto *oldAlloca = dynamic_cast<AllocaInst*>(oldInst)) {
-                auto *newAlloca = new AllocaInst(oldAlloca->alloca_ty_, newBB);
+                auto *newAlloca = new AllocaInst(oldAlloca->allocated_type(), newBB);
                 valMap[oldAlloca] = newAlloca;
             } else if (auto *oldLoad = dynamic_cast<LoadInst*>(oldInst)) {
                 new LoadInst(mapValue(oldLoad->get_operand(0), valMap, bbMap), newBB);
@@ -715,7 +715,7 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 newBB->instr_list_.back()->copySemFlagsFrom(oldStore);
             } else if (auto *oldGEP = dynamic_cast<GetElementPtrInst*>(oldInst)) {
                 vector<Value*> idxs;
-                for (unsigned i = 1; i < oldGEP->num_ops_; ++i)
+                for (unsigned i = 1; i < oldGEP->num_ops(); ++i)
                     idxs.push_back(mapValue(oldGEP->get_operand(i), valMap, bbMap));
                 new GetElementPtrInst(mapValue(oldGEP->get_operand(0), valMap, bbMap), idxs, newBB);
                 auto *newInst = newBB->instr_list_.back();
@@ -723,10 +723,10 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                 valMap[oldGEP] = newInst;
             } else if (auto *oldCall = dynamic_cast<CallInst*>(oldInst)) {
                 vector<Value*> newArgs;
-                for (unsigned i = 0; i < oldCall->num_ops_ - 1; ++i)
+                for (unsigned i = 0; i < oldCall->num_ops() - 1; ++i)
                     newArgs.push_back(mapValue(oldCall->get_operand(i), valMap, bbMap));
                 auto *calleeFunc = dynamic_cast<Function*>(
-                    mapValue(oldCall->get_operand(oldCall->num_ops_ - 1), valMap, bbMap));
+                    mapValue(oldCall->get_operand(oldCall->num_ops() - 1), valMap, bbMap));
                 new CallInst(calleeFunc, newArgs, newBB);
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldCall);
@@ -756,28 +756,28 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
             } else if (auto *oldZExt = dynamic_cast<ZextInst*>(oldInst)) {
                 new ZextInst(oldZExt->op_id_,
                              mapValue(oldZExt->get_operand(0), valMap, bbMap),
-                             oldZExt->dest_ty_, newBB);
+                             oldZExt->type_, newBB);
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldZExt);
                 valMap[oldZExt] = newInst;
             } else if (auto *oldFpToSi = dynamic_cast<FpToSiInst*>(oldInst)) {
                 new FpToSiInst(oldFpToSi->op_id_,
                                mapValue(oldFpToSi->get_operand(0), valMap, bbMap),
-                               oldFpToSi->dest_ty_, newBB);
+                               oldFpToSi->type_, newBB);
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldFpToSi);
                 valMap[oldFpToSi] = newInst;
             } else if (auto *oldSiToFp = dynamic_cast<SiToFpInst*>(oldInst)) {
                 new SiToFpInst(oldSiToFp->op_id_,
                                mapValue(oldSiToFp->get_operand(0), valMap, bbMap),
-                               oldSiToFp->dest_ty_, newBB);
+                               oldSiToFp->type_, newBB);
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldSiToFp);
                 valMap[oldSiToFp] = newInst;
             } else if (auto *oldBitCast = dynamic_cast<Bitcast*>(oldInst)) {
                 new Bitcast(oldBitCast->op_id_,
                             mapValue(oldBitCast->get_operand(0), valMap, bbMap),
-                            oldBitCast->dest_ty_, newBB);
+                            oldBitCast->type_, newBB);
                 auto *newInst = newBB->instr_list_.back();
                 newInst->copySemFlagsFrom(oldBitCast);
                 valMap[oldBitCast] = newInst;
@@ -826,7 +826,7 @@ void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
 
     // 填充 phi 指令的操作数（延迟处理以支持跨块的前向引用）
     for (auto &fix : phiFixups) {
-        for (unsigned i = 0; i < fix.oldPhi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < fix.oldPhi->num_ops(); i += 2) {
             Value    *v  = mapValue(fix.oldPhi->get_operand(i),   valMap, bbMap);
             BasicBlock *bb = dynamic_cast<BasicBlock*>(
                 mapValue(fix.oldPhi->get_operand(i + 1), valMap, bbMap));

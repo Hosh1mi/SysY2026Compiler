@@ -52,7 +52,7 @@ Value* visitCast(Instruction *inst) {
 
 Value* visitPhi(PhiInst *inst) {
     Value *common = nullptr;
-    for (unsigned i = 0; i < inst->num_ops_; i += 2) {
+    for (unsigned i = 0; i < inst->num_ops(); i += 2) {
         Value *v = inst->get_operand(i);
         if (v == inst) continue;
         if (!common) common = v;

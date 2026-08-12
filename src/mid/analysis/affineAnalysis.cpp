@@ -13,7 +13,7 @@ static bool ivIndepImpl(Value *v, PhiInst *iv, std::set<Value *> &seen) {
     if (!seen.insert(v).second)       return true;
     auto *inst = dynamic_cast<Instruction *>(v);
     if (!inst)                        return true;
-    for (unsigned i = 0; i < inst->num_ops_; i++) {
+    for (unsigned i = 0; i < inst->num_ops(); i++) {
         Value *op = inst->get_operand(i);
         if (dynamic_cast<BasicBlock *>(op)) continue;
         if (!ivIndepImpl(op, iv, seen)) return false;

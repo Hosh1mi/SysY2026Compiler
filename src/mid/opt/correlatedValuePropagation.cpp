@@ -14,7 +14,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (int i = static_cast<int>(phi->num_ops_) - 1; i >= 1; i -= 2) {
+        for (int i = static_cast<int>(phi->num_ops()) - 1; i >= 1; i -= 2) {
             if (phi->get_operand(i) == pred)
                 phi->remove_operands(i - 1, i);
         }
@@ -23,7 +23,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
 
 void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
     auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
-    if (!br || br->num_ops_ != 3) return;
+    if (!br || br->num_ops() != 3) return;
 
     auto *trueDest = static_cast<BasicBlock *>(br->get_operand(1));
     auto *falseDest = static_cast<BasicBlock *>(br->get_operand(2));
@@ -91,7 +91,7 @@ bool isSafePhiReplacement(Value *value, PhiInst *phi,
 
 bool simplifyTrivialPhi(PhiInst *phi) {
     Value *common = nullptr;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         Value *incoming = phi->get_operand(i);
         if (incoming == phi) continue;
         if (!common) {
@@ -115,7 +115,7 @@ bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI,
         if (!inst->parent_ || !inst->is_phi()) continue;
         auto *phi = static_cast<PhiInst *>(inst);
 
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!pred) continue;
 
@@ -136,7 +136,7 @@ bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI,
 
         Value *candidate = nullptr;
         bool failed = false;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             Value *incoming = phi->get_operand(i);
             if (dynamic_cast<Constant *>(incoming)) continue;
             if (incoming == phi) {
@@ -157,7 +157,7 @@ bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI,
             continue;
 
         bool canReplace = true;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             Value *incoming = phi->get_operand(i);
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (incoming == candidate) continue;
@@ -190,13 +190,13 @@ bool foldSelectPerUse(SelectInst *select, LazyValueInfo &LVI) {
     bool changed = false;
     std::vector<Use> uses(select->use_list_.begin(), select->use_list_.end());
     for (const auto &use : uses) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !user->parent_) continue;
 
         Value *replacement = nullptr;
         if (auto *phi = dynamic_cast<PhiInst *>(user)) {
-            if (use.arg_no_ + 1 >= phi->num_ops_) continue;
-            auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(use.arg_no_ + 1));
+            if (use.operand_index_ + 1 >= phi->num_ops()) continue;
+            auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(use.operand_index_ + 1));
             if (!pred) continue;
             replacement = getValueOnEdge(select, pred, phi->parent_, phi, LVI);
         } else {
@@ -210,7 +210,7 @@ bool foldSelectPerUse(SelectInst *select, LazyValueInfo &LVI) {
         if (!replacement || replacement == select)
             continue;
 
-        user->set_operand(use.arg_no_, replacement);
+        user->set_operand(use.operand_index_, replacement);
         changed = true;
     }
 
@@ -259,7 +259,7 @@ bool foldInstructionsInBlock(BasicBlock *bb, LazyValueInfo &LVI) {
     }
 
     auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
-    if (br && br->num_ops_ == 3) {
+    if (br && br->num_ops() == 3) {
         auto *condValue = getConstantAt(br->get_operand(0), br, LVI);
         int cond = 0;
         if (condValue && getIntegerConstantValue(condValue, cond)) {

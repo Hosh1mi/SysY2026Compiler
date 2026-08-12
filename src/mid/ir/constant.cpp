@@ -3,6 +3,7 @@
 #include "../../include/mid/ir/constant.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <string>
 
@@ -37,12 +38,12 @@ std::string ConstantInt::print() {
 
 // float 常量，以十六进制双精度表示
 std::string ConstantFloat::print() {
-    std::stringstream fp_ir_ss;
-    std::string fp_ir;
     double val = this->value_;
-    fp_ir_ss << "0x" << std::hex << *reinterpret_cast<std::uint64_t*>(&val) << std::endl;
-    fp_ir_ss >> fp_ir;
-    return fp_ir;
+    std::uint64_t bits;
+    std::memcpy(&bits, &val, sizeof(bits));
+    std::ostringstream out;
+    out << "0x" << std::hex << bits;
+    return out.str();
 }
 
 // 数组常量，如 [2 x i32] [i32 1, i32 2]

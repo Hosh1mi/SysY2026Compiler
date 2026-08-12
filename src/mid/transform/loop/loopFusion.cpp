@@ -78,7 +78,7 @@ bool definedInLoop(Loop *L, Value *v) {
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
-        for (unsigned i = 1; i < inst->num_ops_; i += 2)
+        for (unsigned i = 1; i < inst->num_ops(); i += 2)
             if (inst->get_operand(i) == oldPred)
                 inst->set_operand(i, newPred);
     }
@@ -216,13 +216,13 @@ LoopFusion::Shape LoopFusion::analyzeShape(Loop *L) const {
     BasicBlock *E = L->singleExit();
 
     auto *preTerm = dynamic_cast<BranchInst *>(P->get_terminator());
-    if (!preTerm || preTerm->num_ops_ != 1 || preTerm->get_operand(0) != H)
+    if (!preTerm || preTerm->num_ops() != 1 || preTerm->get_operand(0) != H)
         return s;
     auto *latTerm = dynamic_cast<BranchInst *>(Lat->get_terminator());
-    if (!latTerm || latTerm->num_ops_ != 1 || latTerm->get_operand(0) != H)
+    if (!latTerm || latTerm->num_ops() != 1 || latTerm->get_operand(0) != H)
         return s;
     auto *hTerm = dynamic_cast<BranchInst *>(H->get_terminator());
-    if (!hTerm || hTerm->num_ops_ != 3) return s;
+    if (!hTerm || hTerm->num_ops() != 3) return s;
     auto *cmp = dynamic_cast<ICmpInst *>(hTerm->get_operand(0));
     if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return s;
     if (cmp->get_operand(0) != L->canonicalIV ||
@@ -231,7 +231,7 @@ LoopFusion::Shape LoopFusion::analyzeShape(Loop *L) const {
     // guard 结果只允许驱动本 header 的分支：L2.header 将被删除，
     // 其值若被循环其它位置引用会留下悬垂 use。
     for (const auto &use : cmp->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || user->parent_ != H) return s;
     }
 
@@ -247,7 +247,7 @@ LoopFusion::Shape LoopFusion::analyzeShape(Loop *L) const {
 
     Value *backedge = nullptr;
     PhiInst *iv = L->canonicalIV;
-    for (unsigned i = 1; i < iv->num_ops_; i += 2)
+    for (unsigned i = 1; i < iv->num_ops(); i += 2)
         if (iv->get_operand(i) == Lat)
             backedge = iv->get_operand(i - 1);
     if (!backedge) return s;
@@ -289,7 +289,7 @@ Loop *LoopFusion::walkToSibling(const Shape &s1, Loop *L1, LoopInfo &LI,
             return B;
         }
         auto *term = dynamic_cast<BranchInst *>(X->get_terminator());
-        if (!term || term->num_ops_ != 1) return nullptr;
+        if (!term || term->num_ops() != 1) return nullptr;
         X = dynamic_cast<BasicBlock *>(term->get_operand(0));
     }
     return nullptr;
@@ -331,7 +331,7 @@ bool LoopFusion::planChainMotion(
                 // Every block on the bridge has one predecessor.  Its phi is
                 // therefore only an LCSSA/edge forwarding node and can be
                 // replaced by the sole incoming value before the bridge dies.
-                if (phi->num_ops_ != 2 ||
+                if (phi->num_ops() != 2 ||
                     phi->get_operand(1) != X->pre_bbs_.front())
                     return false;
                 Value *incoming = resolveAlias(phi->get_operand(0));
@@ -345,7 +345,7 @@ bool LoopFusion::planChainMotion(
             if (!isHoistableInst(inst))
                 return false;
             bool dependent = false;
-            for (unsigned i = 0; i < inst->num_ops_; i++) {
+            for (unsigned i = 0; i < inst->num_ops(); i++) {
                 Value *v = resolveAlias(inst->get_operand(i));
                 if (dynamic_cast<BasicBlock *>(v)) continue;
                 if (dynamic_cast<Constant *>(v) ||
@@ -373,7 +373,7 @@ bool LoopFusion::planChainMotion(
     // E2 and therefore do not dominate E2's incoming edges.
     auto invalidDependentUse = [&](Value *value) {
         for (const auto &use : value->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ || chainSet.count(user->parent_))
                 continue;
             if (L2->blocks.count(user->parent_))
@@ -395,7 +395,7 @@ bool LoopFusion::planChainMotion(
     // assertion-like check defensive against malformed, non-dominating SSA.
     std::set<Instruction *> sunkSet(sink.begin(), sink.end());
     for (auto *inst : hoist) {
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             auto *def = dynamic_cast<Instruction *>(
                 resolveAlias(inst->get_operand(i)));
             if (def && sunkSet.count(def))
@@ -412,7 +412,7 @@ bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
                 auto *call = dynamic_cast<CallInst *>(inst);
                 if (!call) continue;
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (!callee || !basicAA_ || !basicAA_->isPure(callee))
                     return false;
             }
@@ -422,7 +422,7 @@ bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
 bool LoopFusion::noScalarCrossUse(Loop *L1, Loop *L2) const {
     for (auto *bb : L2->blocksOrdered)
         for (auto *inst : bb->instr_list_)
-            for (unsigned i = 0; i < inst->num_ops_; i++)
+            for (unsigned i = 0; i < inst->num_ops(); i++)
                 if (definedInLoop(L1, inst->get_operand(i)))
                     return false;
     return true;
@@ -454,7 +454,7 @@ bool LoopFusion::phiInitsAvailable(Loop *L1, const Shape &s1, Loop *L2,
         if (!inst->is_phi()) break;
         if (inst == s2.iv) continue;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 1; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i) != s2.preheader) continue;
             Value *v = phi->get_operand(i - 1);
             if (dynamic_cast<Constant *>(v) || dynamic_cast<Argument *>(v) ||
@@ -483,7 +483,7 @@ bool LoopFusion::exitUsesAvailable(Loop *L1, const Shape &s1, Loop *L2,
     auto checkBlock = [&](BasicBlock *bb) {
         for (auto *inst : bb->instr_list_) {
             if (!inst->is_phi()) break;
-            for (unsigned i = 1; i < inst->num_ops_; i += 2) {
+            for (unsigned i = 1; i < inst->num_ops(); i += 2) {
                 if (inst->get_operand(i) != s2.header) continue;
                 Value *v = inst->get_operand(i - 1);
                 if (dynamic_cast<Constant *>(v) || dynamic_cast<Argument *>(v) ||
@@ -533,9 +533,9 @@ bool LoopFusion::memoryLegal(Loop *L1, Loop *L2, AffineAnalysis &AA) const {
             if (rel == BaseRelation::MayAlias) return false;
             // MustAlias：需要某一维下标等式强制 i1 <= i2，或证明某维恒不等。
             if (!x.gep || !y.gep) return false;   // 同址标量：迭代关系任意
-            if (x.gep->num_ops_ != y.gep->num_ops_) return false;
+            if (x.gep->num_ops() != y.gep->num_ops()) return false;
             bool independent = false, safe = false;
-            for (unsigned d = 1; d < x.gep->num_ops_; d++) {
+            for (unsigned d = 1; d < x.gep->num_ops(); d++) {
                 AffineExpr e1 = AA.analyze(x.gep->get_operand(d));
                 AffineExpr e2 = AA.analyze(y.gep->get_operand(d));
                 if (!e1.valid || !e2.valid) continue;   // 该维不提供保证
@@ -631,7 +631,7 @@ void LoopFusion::applyFusion(
     for (auto *phi : moved) {
         H2->remove_instr(phi);
         H1->add_instruction_before_inst(phi, firstNonPhi);
-        for (unsigned i = 1; i < phi->num_ops_; i += 2)
+        for (unsigned i = 1; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i) == P2)
                 phi->set_operand(i, P1);
     }
@@ -640,7 +640,7 @@ void LoopFusion::applyFusion(
     //    原值支配 L1.latch，而 L1.latch 融合后支配 L2.latch）。
     for (auto *inst : H1->instr_list_) {
         if (!inst->is_phi()) break;
-        for (unsigned i = 1; i < inst->num_ops_; i += 2)
+        for (unsigned i = 1; i < inst->num_ops(); i += 2)
             if (inst->get_operand(i) == Lat1)
                 inst->set_operand(i, Lat2);
     }
@@ -700,7 +700,7 @@ void LoopFusion::applyFusion(
 
     // 7. L1.header 的 exit 边 E1→E2；E2 中 phi 的 H2 入边改 H1。
     auto *h1Term = dynamic_cast<BranchInst *>(H1->get_terminator());
-    for (unsigned i = 1; i < h1Term->num_ops_; i++)
+    for (unsigned i = 1; i < h1Term->num_ops(); i++)
         if (h1Term->get_operand(i) == E1)
             h1Term->set_operand(i, E2);
     H1->remove_succ_basic_block(E1);

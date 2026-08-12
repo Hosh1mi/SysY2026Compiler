@@ -28,7 +28,7 @@ bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
     init = nullptr;
     latchValue = nullptr;
     latchBlock = nullptr;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (!pred) return false;
         if (loop.blocks.count(pred)) {
@@ -100,7 +100,7 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep, unsigned varyingIn
     int scalarBytes = typeSize(scalarType);
     if (scalarBytes <= 0) return false;
 
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int indexBytes = typeSize(current);
         if (i == varyingIndex)
             return indexBytes == scalarBytes;
@@ -117,7 +117,7 @@ bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     Value *cursor = pointer;
     while (cursor != phi) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(cursor);
-        if (!gep || gep->num_ops_ != 2) return false;
+        if (!gep || gep->num_ops() != 2) return false;
         auto *constant = dynamic_cast<ConstantInt *>(gep->get_operand(1));
         if (!constant) return false;
         offset += constant->value_;
@@ -213,7 +213,7 @@ bool preheaderHasPositiveGuard(BasicBlock *preheader, Value *bound) {
     if (!preheader || preheader->pre_bbs_.size() != 1) return false;
     auto *pred = preheader->pre_bbs_.front();
     auto *term = pred->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (!term || !term->is_br() || term->num_ops() != 3) return false;
     if (term->get_operand(1) != preheader) return false;
     return isPositiveGuard(dynamic_cast<ICmpInst *>(term->get_operand(0)), bound);
 }
@@ -240,7 +240,7 @@ bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
         if (!getLoopPhiIncoming(loop, phi, init, latchValue, latchBlock))
             return false;
         auto *update = dynamic_cast<GetElementPtrInst *>(latchValue);
-        if (!update || update->num_ops_ != 2 || update->get_operand(0) != phi)
+        if (!update || update->num_ops() != 2 || update->get_operand(0) != phi)
             return false;
         auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
         if (!step || step->value_ != 1) return false;
@@ -256,7 +256,7 @@ bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
     unsigned varying = 0;
     int ivOffset = 0;
     int varyingCount = 0;
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int offset = 0;
         if (matchIVPlusConstant(gep->get_operand(i), ivPhi, offset)) {
             varying = i;
@@ -288,7 +288,7 @@ bool classifyStoreAddressAlloca(const Loop &loop, AllocaInst *ivAlloca,
 
     unsigned varying = 0;
     int varyingCount = 0;
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         auto *load = dynamic_cast<LoadInst *>(gep->get_operand(i));
         if (load && load->get_operand(0) == ivAlloca) {
             varying = i;
@@ -355,7 +355,7 @@ bool findCountingIV(Loop &loop, BasicBlock *latch, ICmpInst *compare, IVDesc &iv
     auto *load = dynamic_cast<LoadInst *>(compare->get_operand(0));
     if (!load) return false;
     auto *alloca = dynamic_cast<AllocaInst *>(load->get_operand(0));
-    if (!alloca || alloca->alloca_ty_->tid_ != Type::IntegerTyID) return false;
+    if (!alloca || alloca->allocated_type()->tid_ != Type::IntegerTyID) return false;
 
     bool initZero = false;
     for (auto *inst : loop.preheader->instr_list_) {
@@ -442,7 +442,7 @@ bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
     unsigned innerVarying = 0;
     int outerCount = 0;
     int innerCount = 0;
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int offset = 0;
         if (ivOperandMatches(gep->get_operand(i), outerIV, offset)) {
             if (offset != 0) return false;
@@ -491,7 +491,7 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
         if (!getLoopPhiIncoming(loop, phi, init, latchValue, latchBlock))
             return false;
         auto *update = dynamic_cast<GetElementPtrInst *>(latchValue);
-        if (!update || update->num_ops_ != 2 || update->get_operand(0) != phi)
+        if (!update || update->num_ops() != 2 || update->get_operand(0) != phi)
             return false;
         auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
         if (!step || step->value_ != 1) return false;
@@ -510,7 +510,7 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
     unsigned varying = 0;
     int ivOffset = 0;
     int varyingCount = 0;
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int offset = 0;
         if (matchIVPlusConstant(gep->get_operand(i), ivPhi, offset)) {
             varying = i;
@@ -569,7 +569,7 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
         unsigned srcVarying = 0;
         int destCount = 0;
         int srcCount = 0;
-        for (unsigned i = 1; i < destGep->num_ops_; ++i) {
+        for (unsigned i = 1; i < destGep->num_ops(); ++i) {
             auto *l = dynamic_cast<LoadInst *>(destGep->get_operand(i));
             if (l && l->get_operand(0) == iv.alloca) {
                 destVarying = i;
@@ -578,7 +578,7 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
                 return false;
             }
         }
-        for (unsigned i = 1; i < srcGep->num_ops_; ++i) {
+        for (unsigned i = 1; i < srcGep->num_ops(); ++i) {
             auto *l = dynamic_cast<LoadInst *>(srcGep->get_operand(i));
             if (l && l->get_operand(0) == iv.alloca) {
                 srcVarying = i;
@@ -656,7 +656,7 @@ bool constantByteOffset(Value *value, long long &offset) {
     Type *current =
         static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
     long long total = baseOffset;
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         auto *idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
         if (!idx) return false;
         int elemBytes = typeSize(current);
@@ -683,13 +683,13 @@ bool constantCopyBytes(const MemcpyMatch &match, long long &bytes) {
 
 bool sameVaryingGEPShape(const MemcpyMatch &match) {
     if (!match.destGeep || !match.srcGeep) return false;
-    if (match.destGeep->num_ops_ != match.srcGeep->num_ops_)
+    if (match.destGeep->num_ops() != match.srcGeep->num_ops())
         return false;
     if (match.destIndex != match.srcIndex)
         return false;
     if (underlyingObject(match.destGeep) != underlyingObject(match.srcGeep))
         return false;
-    for (unsigned i = 0; i < match.destGeep->num_ops_; ++i) {
+    for (unsigned i = 0; i < match.destGeep->num_ops(); ++i) {
         if (i == match.destIndex) continue;
         if (match.destGeep->get_operand(i) != match.srcGeep->get_operand(i))
             return false;
@@ -750,10 +750,10 @@ bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
         auto *preTerm = loop.preheader->get_terminator();
         auto *headerTerm = loop.header->get_terminator();
         auto *exit = loop.singleExit();
-        if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+        if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
             preTerm->get_operand(0) != loop.header)
             return false;
-        if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3)
+        if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops() != 3)
             return false;
         bool trueBackedge = headerTerm->get_operand(1) == loop.header &&
                             headerTerm->get_operand(2) == exit;
@@ -771,13 +771,13 @@ bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
     auto *latch = loop.singleLatch();
     auto *latchTerm = latch->get_terminator();
     auto *exit = loop.singleExit();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != loop.header)
         return false;
-    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3 ||
+    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops() != 3 ||
         headerTerm->get_operand(2) != exit)
         return false;
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops() != 1 ||
         latchTerm->get_operand(0) != loop.header)
         return false;
 
@@ -786,7 +786,7 @@ bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
     if (bodyEntry != latch) {
         if (loop.blocks.size() != 3) return false;
         auto *bodyTerm = bodyEntry->get_terminator();
-        if (!bodyTerm || !bodyTerm->is_br() || bodyTerm->num_ops_ != 1 ||
+        if (!bodyTerm || !bodyTerm->is_br() || bodyTerm->num_ops() != 1 ||
             bodyTerm->get_operand(0) != latch)
             return false;
     }
@@ -805,13 +805,13 @@ bool validateOuterLoopShape(Loop &outer, Loop &inner, ICmpInst *&compare) {
     auto *latch = outer.singleLatch();
     auto *latchTerm = latch->get_terminator();
     auto *exit = outer.singleExit();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != outer.header)
         return false;
-    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3 ||
+    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops() != 3 ||
         headerTerm->get_operand(2) != exit)
         return false;
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops() != 1 ||
         latchTerm->get_operand(0) != outer.header)
         return false;
 
@@ -898,7 +898,7 @@ bool tryMatchNestedMemset2D(Loop &outer, Loop &inner, MemsetMatch &match) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() && inst->parent_ == outer.header) continue;
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !outer.blocks.count(user->parent_))
                     return false;
             }
@@ -976,7 +976,7 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() && inst->parent_ == loop.header) continue;
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.blocks.count(user->parent_))
                     return false;
             }
@@ -1038,7 +1038,7 @@ bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() && inst->parent_ == loop.header) continue;
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.blocks.count(user->parent_))
                     return false;
             }
@@ -1062,7 +1062,7 @@ Value *buildMemBase(Value *base, GetElementPtrInst *geep,
                     int inductionOffset = 0) {
     if (!base && geep) {
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < geep->num_ops_; ++i) {
+        for (unsigned i = 1; i < geep->num_ops(); ++i) {
             if (i == inductionIndex)
                 idxs.push_back(new ConstantInt(module->int32_ty_,
                                                inductionOffset));
@@ -1096,7 +1096,7 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
     auto *preTerm = preheader->get_terminator();
     if (!preTerm || !preTerm->is_br()) return false;
     int headerOperand = -1;
-    for (unsigned i = 0; i < preTerm->num_ops_; i++) {
+    for (unsigned i = 0; i < preTerm->num_ops(); i++) {
         if (preTerm->get_operand(i) == loop.header) {
             headerOperand = static_cast<int>(i);
             break;
@@ -1144,7 +1144,7 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
         auto *phi = static_cast<PhiInst *>(inst);
         std::vector<unsigned> loopIncoming;
         Value *fromLoop = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred && loop.blocks.count(pred)) {
                 loopIncoming.push_back(i);
@@ -1181,7 +1181,7 @@ bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
     auto *preTerm = preheader->get_terminator();
     if (!preTerm || !preTerm->is_br()) return false;
     int headerOperand = -1;
-    for (unsigned i = 0; i < preTerm->num_ops_; i++) {
+    for (unsigned i = 0; i < preTerm->num_ops(); i++) {
         if (preTerm->get_operand(i) == loop.header) {
             headerOperand = static_cast<int>(i);
             break;
@@ -1264,7 +1264,7 @@ bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
         auto *phi = static_cast<PhiInst *>(inst);
         std::vector<unsigned> loopIncoming;
         Value *fromLoop = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred && loop.blocks.count(pred)) {
                 loopIncoming.push_back(i);

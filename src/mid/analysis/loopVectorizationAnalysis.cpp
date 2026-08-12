@@ -13,7 +13,7 @@ bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
     init = nullptr;
     latchValue = nullptr;
     latchBlock = nullptr;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (!pred) return false;
         if (loop.blocks.count(pred)) {
@@ -85,7 +85,7 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
     int scalarBytes = typeSize(scalarType);
     if (scalarBytes <= 0) return false;
 
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int indexBytes = typeSize(current);
         if (i == varyingIndex)
             return indexBytes == scalarBytes;
@@ -102,7 +102,7 @@ bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     Value *cursor = pointer;
     while (cursor != phi) {
         auto *gep = dynamic_cast<GetElementPtrInst *>(cursor);
-        if (!gep || gep->num_ops_ != 2) return false;
+        if (!gep || gep->num_ops() != 2) return false;
         auto *constant = dynamic_cast<ConstantInt *>(gep->get_operand(1));
         if (!constant) return false;
         offset += constant->value_;
@@ -124,10 +124,10 @@ bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
         return a.pointerPhi == b.pointerPhi &&
                a.pointerOffset == b.pointerOffset;
 
-    if (!a.gep || !b.gep || a.gep->num_ops_ != b.gep->num_ops_ ||
+    if (!a.gep || !b.gep || a.gep->num_ops() != b.gep->num_ops() ||
         a.varyingIndex != b.varyingIndex || a.ivOffset != b.ivOffset)
         return false;
-    for (unsigned i = 0; i < a.gep->num_ops_; ++i) {
+    for (unsigned i = 0; i < a.gep->num_ops(); ++i) {
         if (i == a.varyingIndex) continue;
         if (a.gep->get_operand(i) != b.gep->get_operand(i)) return false;
     }
@@ -154,7 +154,7 @@ bool LoopVectorizationAnalysis::isLoopInvariant(Value *value,
 bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
                                               std::string *reason) const {
     auto *headerTerm = loop.header->get_terminator();
-    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3)
+    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops() != 3)
         return reject(reason, "header is not a conditional branch");
     auto *compare = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
     if (!compare || compare->icmp_op_ != ICmpInst::ICMP_SLT)
@@ -208,7 +208,7 @@ bool LoopVectorizationAnalysis::findPointerRecurrences(
             return reject(reason, "non-induction scalar recurrence is unsupported");
 
         auto *update = dynamic_cast<GetElementPtrInst *>(latchValue);
-        if (!update || update->num_ops_ != 2 || update->get_operand(0) != phi)
+        if (!update || update->num_ops() != 2 || update->get_operand(0) != phi)
             return reject(reason, "pointer recurrence is not a constant-step GEP");
         auto *step = dynamic_cast<ConstantInt *>(update->get_operand(1));
         if (!step || step->value_ != 1)
@@ -287,7 +287,7 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
             unsigned varying = 0;
             int ivOffset = 0;
             int varyingCount = 0;
-            for (unsigned i = 1; i < gep->num_ops_; ++i) {
+            for (unsigned i = 1; i < gep->num_ops(); ++i) {
                 int offset = 0;
                 if (matchIVPlusConstant(gep->get_operand(i),
                                         plan.induction.phi, offset)) {
@@ -359,10 +359,10 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         }
         auto *call = dynamic_cast<CallInst *>(inst);
         auto *callee = call ? dynamic_cast<Function *>(
-                                  call->get_operand(call->num_ops_ - 1))
+                                  call->get_operand(call->num_ops() - 1))
                             : nullptr;
         if (call && isSignedMinMaxIntrinsic(callee)) {
-            if (call->num_ops_ != 3 ||
+            if (call->num_ops() != 3 ||
                 call->get_operand(0)->type_ != call->type_ ||
                 call->get_operand(1)->type_ != call->type_ ||
                 !isSupportedSignedMinMaxType(call->type_))
@@ -406,7 +406,7 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() && inst->parent_ == plan.header) continue;
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !plan.loop->blocks.count(user->parent_))
                     return reject(reason, "non-phi loop value is live outside the loop");
             }
@@ -489,7 +489,7 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
         auto *binary = dynamic_cast<BinaryInst *>(inst);
         auto *call = dynamic_cast<CallInst *>(inst);
         if (!binary && !call) continue;
-        unsigned valueOperands = call ? call->num_ops_ - 1 : inst->num_ops_;
+        unsigned valueOperands = call ? call->num_ops() - 1 : inst->num_ops();
         for (unsigned i = 0; i < valueOperands; ++i) {
             Value *operand = inst->get_operand(i);
             if (isLoopInvariant(operand, *plan.loop))
@@ -559,10 +559,10 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     auto *preTerm = plan.preheader->get_terminator();
     auto *headerTerm = plan.header->get_terminator();
     auto *latchTerm = plan.latch->get_terminator();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != plan.header)
         return reject(reason, "preheader is not dedicated");
-    if (!headerTerm || headerTerm->num_ops_ != 3 ||
+    if (!headerTerm || headerTerm->num_ops() != 3 ||
         headerTerm->get_operand(2) != plan.exit)
         return reject(reason, "header branch is not canonical body/exit form");
     auto *bodyEntry = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
@@ -576,7 +576,7 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
         return reject(reason, "rotated single-block loop is not a proved scalar-expansion compute loop");
     plan.rotatedSingleBlock = rotatedSingleBlock;
     if (!rotatedSingleBlock &&
-        (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+        (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops() != 1 ||
          latchTerm->get_operand(0) != plan.header))
         return reject(reason, "latch is not an unconditional backedge");
     if (rotatedSingleBlock) {
@@ -584,7 +584,7 @@ bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
     } else if (bodyEntry != plan.latch) {
         auto *bodyTerm = bodyEntry->get_terminator();
         if (loop.blocks.size() != 3 || !bodyTerm || !bodyTerm->is_br() ||
-            bodyTerm->num_ops_ != 1 || bodyTerm->get_operand(0) != plan.latch)
+            bodyTerm->num_ops() != 1 || bodyTerm->get_operand(0) != plan.latch)
             return reject(reason, "loop body is not a straight-line canonical body");
     } else if (loop.blocks.size() != 2) {
         return reject(reason, "loop contains an unexpected extra block");

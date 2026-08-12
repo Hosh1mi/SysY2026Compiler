@@ -34,9 +34,9 @@ LoopAccessInfo LoopAccessAnalysis::collect(Loop *loop) const {
 
 bool LoopAccessAnalysis::isAffineOverAncestorIVs(
     GetElementPtrInst *gep, Loop *inner) const {
-    if (!gep || !inner || gep->num_ops_ < 2) return false;
+    if (!gep || !inner || gep->num_ops() < 2) return false;
 
-    for (unsigned i = 1; i < gep->num_ops_; i++) {
+    for (unsigned i = 1; i < gep->num_ops(); i++) {
         AffineExpr expr = AA_->analyze(gep->get_operand(i));
         if (!expr.valid) return false;
         for (auto &term : expr.coeffs) {

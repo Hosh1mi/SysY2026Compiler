@@ -28,7 +28,7 @@ static Value *remapValue(Value *value, const std::map<Value *, Value *> &valueMa
 }
 
 static Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return phi->get_operand(i);
     }
@@ -104,7 +104,7 @@ static bool hasTightenableDomainGuard(const Loop &loop) {
     if (!latch || !header)
         return false;
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!headerTerm || headerTerm->num_ops_ != 3)
+    if (!headerTerm || headerTerm->num_ops() != 3)
         return false;
     auto *body = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
     auto *exit = dynamic_cast<BasicBlock *>(headerTerm->get_operand(2));
@@ -112,7 +112,7 @@ static bool hasTightenableDomainGuard(const Loop &loop) {
         return false;
 
     auto *guardTerm = dynamic_cast<BranchInst *>(body->get_terminator());
-    if (!guardTerm || guardTerm->num_ops_ != 3)
+    if (!guardTerm || guardTerm->num_ops() != 3)
         return false;
     auto *guardCmp = dynamic_cast<ICmpInst *>(guardTerm->get_operand(0));
     if (!guardCmp)
@@ -142,7 +142,7 @@ static bool hasTightenableDomainGuard(const Loop &loop) {
         if (!path || !loop.isInLoop(path))
             return -1;
         auto *term = dynamic_cast<BranchInst *>(path->get_terminator());
-        if (!term || term->num_ops_ != 1 || term->get_operand(0) != latch)
+        if (!term || term->num_ops() != 1 || term->get_operand(0) != latch)
             return -1;
         bool hasWork = false;
         for (auto *inst : path->instr_list_) {
@@ -165,9 +165,9 @@ bool LoopRotate::runOnFunction(Function *func) {
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *call = dynamic_cast<CallInst *>(inst);
-            if (!call || call->num_ops_ == 0)
+            if (!call || call->num_ops() == 0)
                 continue;
-            if (call->get_operand(call->num_ops_ - 1) == func)
+            if (call->get_operand(call->num_ops() - 1) == func)
                 return false;
         }
     }
@@ -253,10 +253,10 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     auto *preTerm = preheader->get_terminator();
     auto *latchTerm = latch->get_terminator();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != header)
         return false;
-    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops_ != 1 ||
+    if (!latchTerm || !latchTerm->is_br() || latchTerm->num_ops() != 1 ||
         latchTerm->get_operand(0) != header)
         return false;
     bool hasHeaderPhi = !header->instr_list_.empty() &&
@@ -265,7 +265,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
         return false;
 
     auto *headerTerm = header->get_terminator();
-    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops_ != 3)
+    if (!headerTerm || !headerTerm->is_br() || headerTerm->num_ops() != 3)
         return false;
 
     auto *trueSucc = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
@@ -311,7 +311,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     std::set<PhiInst *> phisNeedingExitPhi;
     for (auto *phi : headerPhis) {
         for (auto &use : phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user) continue;
             if (user->parent_ == exitSucc && user->is_phi())
                 continue;
@@ -328,14 +328,14 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     }
     for (auto *def : headerInsts) {
         for (auto &use : def->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user) continue;
             if (!isHeaderLocalUse(def, user, header, exitSucc))
                 return false;
             if (user->parent_ == exitSucc && user->is_phi()) {
                 auto *exitPhi = static_cast<PhiInst *>(user);
-                unsigned valueIndex = use.arg_no_;
-                if (valueIndex + 1 >= exitPhi->num_ops_ ||
+                unsigned valueIndex = use.operand_index_;
+                if (valueIndex + 1 >= exitPhi->num_ops() ||
                     exitPhi->get_operand(valueIndex + 1) != header)
                     return false;
             }
@@ -387,7 +387,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     for (auto *inst : exitSucc->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+        for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
             if (phi->get_operand(i + 1) != header)
                 continue;
             Value *oldVal = phi->get_operand(i);
@@ -409,10 +409,10 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
         exitSucc->add_instruction_front(exitPhi);
         std::vector<std::pair<Instruction *, unsigned>> redirects;
         for (auto &use : phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || user->is_phi()) continue;
             if (loop->isInLoop(user->parent_)) continue;
-            redirects.emplace_back(user, use.arg_no_);
+            redirects.emplace_back(user, use.operand_index_);
         }
         for (auto &[user, idx] : redirects)
             user->set_operand(idx, exitPhi);
@@ -432,7 +432,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
             if (!inst->is_phi()) break;
             auto *phi = static_cast<PhiInst *>(inst);
             int idxPre = -1, idxLatch = -1;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i + 1) == preExit)   idxPre = (int)i;
                 if (phi->get_operand(i + 1) == latchExit) idxLatch = (int)i;
             }
@@ -468,7 +468,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
     for (auto *inst : continueSucc->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+        for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
             if (phi->get_operand(i + 1) != header)
                 continue;
             Value *oldVal = phi->get_operand(i);
@@ -483,7 +483,7 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     for (auto it = headerPhis.rbegin(); it != headerPhis.rend(); ++it) {
         auto *phi = *it;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == preheader)
                 phi->set_operand(i + 1, rotatedPreheader);
         }

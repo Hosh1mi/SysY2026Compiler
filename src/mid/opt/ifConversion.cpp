@@ -46,12 +46,12 @@ static bool isSafeToSpeculate(Instruction *inst) {
 // value is strictly below a signed i32 bound.
 static bool isNonNegativeUnitInduction(Value *value, BasicBlock *body) {
     auto *phi = dynamic_cast<PhiInst *>(value);
-    if (!phi || phi->num_ops_ != 4 || !phi->parent_ || !body)
+    if (!phi || phi->num_ops() != 4 || !phi->parent_ || !body)
         return false;
 
     bool hasNonNegativeInit = false;
     bool hasUnitUpdate = false;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         Value *incoming = phi->get_operand(i);
         if (auto *init = dynamic_cast<ConstantInt *>(incoming)) {
             if (init->value_ >= 0) hasNonNegativeInit = true;
@@ -66,7 +66,7 @@ static bool isNonNegativeUnitInduction(Value *value, BasicBlock *body) {
     if (!hasNonNegativeInit || !hasUnitUpdate) return false;
 
     auto *headerTerm = dynamic_cast<BranchInst *>(phi->parent_->get_terminator());
-    if (!headerTerm || headerTerm->num_ops_ != 3 ||
+    if (!headerTerm || headerTerm->num_ops() != 3 ||
         headerTerm->get_operand(1) != body)
         return false;
     auto *compare = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
@@ -148,7 +148,7 @@ static Value *tryCreateMaskedConditionalAdd(Value *condition, Value *trueValue,
 static bool tryConvertStoreDiamond(Function *func) {
     for (auto *B : func->basic_blocks_) {
         auto *br = dynamic_cast<BranchInst *>(B->get_terminator());
-        if (!br || br->num_ops_ != 3) continue;
+        if (!br || br->num_ops() != 3) continue;
 
         auto *T = static_cast<BasicBlock *>(br->get_operand(1));
         auto *F = static_cast<BasicBlock *>(br->get_operand(2));
@@ -157,7 +157,7 @@ static bool tryConvertStoreDiamond(Function *func) {
 
         auto *tBr = dynamic_cast<BranchInst *>(T->get_terminator());
         auto *fBr = dynamic_cast<BranchInst *>(F->get_terminator());
-        if (!tBr || !fBr || tBr->num_ops_ != 1 || fBr->num_ops_ != 1)
+        if (!tBr || !fBr || tBr->num_ops() != 1 || fBr->num_ops() != 1)
             continue;
         auto *M = static_cast<BasicBlock *>(tBr->get_operand(0));
         if (M != fBr->get_operand(0) || M == B || M == T || M == F)
@@ -230,7 +230,7 @@ static bool tryConvertStoreDiamond(Function *func) {
         auto *tGep = dynamic_cast<GetElementPtrInst *>(tStore->get_operand(1));
         auto *fGep = dynamic_cast<GetElementPtrInst *>(fStore->get_operand(1));
         if (tGep && fGep && tGep->get_operand(0) == fGep->get_operand(0) &&
-            tGep->num_ops_ == fGep->num_ops_) {
+            tGep->num_ops() == fGep->num_ops()) {
             auto sameIndex = [](Value *lhs, Value *rhs) {
                 if (lhs == rhs) return true;
                 auto *lhsConst = dynamic_cast<ConstantInt *>(lhs);
@@ -239,7 +239,7 @@ static bool tryConvertStoreDiamond(Function *func) {
                        lhsConst->value_ == rhsConst->value_;
             };
             unsigned differingIndex = 0;
-            for (unsigned i = 1; i < tGep->num_ops_; ++i) {
+            for (unsigned i = 1; i < tGep->num_ops(); ++i) {
                 if (sameIndex(tGep->get_operand(i), fGep->get_operand(i))) continue;
                 if (differingIndex != 0) {
                     differingIndex = 0;
@@ -309,7 +309,7 @@ static bool tryConvertStoreDiamond(Function *func) {
                     selectedIndex = indexSelect;
                 }
                 std::vector<Value *> indices;
-                for (unsigned i = 1; i < tGep->num_ops_; ++i)
+                for (unsigned i = 1; i < tGep->num_ops(); ++i)
                     indices.push_back(i == differingIndex ? selectedIndex
                                                           : tGep->get_operand(i));
                 auto *mergedGep = new GetElementPtrInst(tGep->get_operand(0),
@@ -360,7 +360,7 @@ static bool tryConvert(Loop &loop, Function *func) {
 
     // H 必须有条件分支（到循环体或出口）
     auto *H_br = dynamic_cast<BranchInst *>(H->get_terminator());
-    if (!H_br || H_br->num_ops_ != 3) return false;
+    if (!H_br || H_br->num_ops() != 3) return false;
 
     // 从 H 的分支找到 B（在循环内的那个后继）
     BasicBlock *B = nullptr;
@@ -376,7 +376,7 @@ static bool tryConvert(Loop &loop, Function *func) {
 
     // B 必须有条件分支，两个目标分别为 T（if-body）和 L（latch）
     auto *B_br = dynamic_cast<BranchInst *>(B->get_terminator());
-    if (!B_br || B_br->num_ops_ != 3) return false;
+    if (!B_br || B_br->num_ops() != 3) return false;
 
     BasicBlock *T = nullptr;
     bool true_is_T = false; // B_cond==true 时跳到 T？
@@ -392,12 +392,12 @@ static bool tryConvert(Loop &loop, Function *func) {
 
     // T 必须无条件跳到 L
     auto *T_br = dynamic_cast<BranchInst *>(T->get_terminator());
-    if (!T_br || T_br->num_ops_ != 1) return false;
+    if (!T_br || T_br->num_ops() != 1) return false;
     if (static_cast<BasicBlock *>(T_br->get_operand(0)) != L) return false;
 
     // L 必须无条件跳回 H
     auto *L_br = dynamic_cast<BranchInst *>(L->get_terminator());
-    if (!L_br || L_br->num_ops_ != 1) return false;
+    if (!L_br || L_br->num_ops() != 1) return false;
     if (static_cast<BasicBlock *>(L_br->get_operand(0)) != H) return false;
 
     // 安全检查：T 的所有非终止指令必须可投机执行
@@ -418,7 +418,7 @@ static bool tryConvert(Loop &loop, Function *func) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         bool hasB = false, hasT = false;
-        for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 1; i < phi->num_ops(); i += 2) {
             auto *src = static_cast<BasicBlock *>(phi->get_operand(i));
             if (src == B) hasB = true;
             if (src == T) hasT = true;
@@ -440,7 +440,7 @@ static bool tryConvert(Loop &loop, Function *func) {
     std::vector<Instruction *> maybeDead;
     for (auto *phi : latch_phis) {
         Value *val_B = nullptr, *val_T = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == B) val_B = phi->get_operand(i);
             if (src == T) val_T = phi->get_operand(i);

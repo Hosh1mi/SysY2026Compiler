@@ -107,7 +107,7 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
     auto *term = pred->get_terminator();
     if (!term || !term->is_br())
         return;
-    for (unsigned i = 0; i < term->num_ops_; ++i) {
+    for (unsigned i = 0; i < term->num_ops(); ++i) {
         if (term->get_operand(i) == oldTarget)
             term->set_operand(i, newTarget);
     }

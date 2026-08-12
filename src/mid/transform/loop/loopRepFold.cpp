@@ -129,7 +129,7 @@ bool matchExitModuloReconstruction(
     for (Instruction *instruction : exit->instr_list_) {
         if (!instruction->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(instruction);
-        if (phi->num_ops_ == 2 && phi->get_operand(0) == base) {
+        if (phi->num_ops() == 2 && phi->get_operand(0) == base) {
             exitBase = phi;
             break;
         }
@@ -169,12 +169,12 @@ bool matchExitModuloReconstruction(
             chain.insert(instruction);
         chain.insert(remainder);
         for (const auto &use : dividend->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ == exit && user != remainder)
                 return reject("exact-dividend-extra-use");
         }
         for (const auto &use : exitBase->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ == exit && user != dividend)
                 return reject("exact-base-extra-use");
         }
@@ -227,13 +227,13 @@ bool matchExitModuloReconstruction(
     for (Instruction *instruction : chain) {
         if (instruction == lowSelect) continue;
         for (const auto &use : instruction->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !chain.count(user))
                 return reject("correction-chain-extra-use");
         }
     }
     for (const auto &use : exitBase->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->parent_ == exit && !chain.count(user))
             return reject("base-extra-use");
     }
@@ -292,7 +292,7 @@ bool analyzeSummableModularRecurrence(
         match.state->type_->tid_ != Type::IntegerTyID)
         return reject("state-type");
     Value *back = nullptr;
-    for (unsigned index = 0; index < match.state->num_ops_; index += 2) {
+    for (unsigned index = 0; index < match.state->num_ops(); index += 2) {
         auto *block = static_cast<BasicBlock *>(
             match.state->get_operand(index + 1));
         if (block == loop.preheader)
@@ -372,10 +372,10 @@ bool LoopRepFold::isLoopInvariant(Value *val, const std::set<BasicBlock *> &bloc
 bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop, BasicBlock *latch,
                                long long *init, long long *stride) {
     if (phi->type_->tid_ != Type::IntegerTyID) return false;
-    if (phi->num_ops_ != 4) return false; // 恰好 2 对 (val, BB)
+    if (phi->num_ops() != 4) return false; // 恰好 2 对 (val, BB)
 
     Value *pre_val = nullptr, *latch_val = nullptr;
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto *bb = static_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (bb == loop.preheader) pre_val  = phi->get_operand(i);
         else if (bb == latch) latch_val = phi->get_operand(i);
@@ -459,7 +459,7 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
         return debugReject("cannot identify accumulator step");
 
     for (auto &use : totalPhi->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !loop.blocks.count(user->parent_)) continue;
         if (!accumulatorChain.count(user))
             return debugReject("total phi has extra in-loop use");
@@ -473,7 +473,7 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     auto *preheaderBr = loop.preheader->get_terminator();
     if (!preheaderBr || !preheaderBr->is_br()) return debugReject("bad preheader terminator");
     int headerOperand = -1;
-    for (unsigned i = 0; i < preheaderBr->num_ops_; i++) {
+    for (unsigned i = 0; i < preheaderBr->num_ops(); i++) {
         if (preheaderBr->get_operand(i) == loop.header) {
             headerOperand = static_cast<int>(i);
             break;
@@ -489,9 +489,9 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
     auto *folded = new ConstantInt(module->int32_ty_, static_cast<int>(result));
     std::vector<std::pair<Instruction *, unsigned>> exitUses;
     for (auto &use : totalPhi->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->parent_ == loopExit)
-            exitUses.push_back({user, use.arg_no_});
+            exitUses.push_back({user, use.operand_index_});
     }
     if (exitUses.empty()) return debugReject("total phi has no exit use");
     for (auto &[user, argNo] : exitUses)
@@ -557,7 +557,7 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
 
     // total_phi 在循环内只能被那个 add 使用 → 递推确为 (total+c)%m。
     for (auto &use : totalPhi->use_list_) {
-        auto *u = dynamic_cast<Instruction *>(use.val_);
+        auto *u = use.user_;
         if (!u || !u->parent_ || !loop.blocks.count(u->parent_)) continue;
         if (u != add) return reject("state-has-extra-loop-use");
     }
@@ -568,7 +568,7 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
         for (auto *inst : bb->instr_list_) {
             if (inst == totalPhi) continue;
             for (auto &use : inst->use_list_) {
-                auto *u = dynamic_cast<Instruction *>(use.val_);
+                auto *u = use.user_;
                 if (u && u->parent_ && !loop.blocks.count(u->parent_))
                     return reject("loop-value-escapes");
             }
@@ -592,7 +592,7 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
         auto *phi = static_cast<PhiInst *>(inst);
         Value *incoming = nullptr;
         int headerIncomingCount = 0;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) != loop.header)
                 return reject("exit-phi-has-non-header-incoming");
             incoming = phi->get_operand(i);
@@ -618,7 +618,7 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     // preheader 必须以无条件 br 跳向 header。
     BasicBlock *PH = loop.preheader;
     auto *phTerm = PH->get_terminator();
-    if (!phTerm || !phTerm->is_br() || phTerm->num_ops_ != 1)
+    if (!phTerm || !phTerm->is_br() || phTerm->num_ops() != 1)
         return reject("invalid-preheader-terminator");
     if (phTerm->get_operand(0) != loop.header)
         return reject("preheader-does-not-target-header");
@@ -696,10 +696,10 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
 
     std::vector<std::pair<Instruction *, unsigned>> toReplace;
     for (auto &use : totalPhi->use_list_) {
-        auto *u = dynamic_cast<Instruction *>(use.val_);
+        auto *u = use.user_;
         if (u && u != exitPhi && u->parent_ && !loop.blocks.count(u->parent_) &&
             !(u->parent_ == loopExit && u->is_phi()))
-            toReplace.push_back({u, use.arg_no_});
+            toReplace.push_back({u, use.operand_index_});
     }
     for (auto &[u, argNo] : toReplace) u->set_operand(argNo, exitPhi);
 
@@ -756,12 +756,12 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
         if (!instruction || !loop.blocks.count(instruction->parent_) ||
             !updateExpression.insert(instruction).second)
             return;
-        for (unsigned index = 0; index < instruction->num_ops_; ++index)
+        for (unsigned index = 0; index < instruction->num_ops(); ++index)
             collectExpression(instruction->get_operand(index));
     };
     collectExpression(match.stateRemainder);
     for (const auto &use : match.state->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !user->parent_) continue;
         if (loop.blocks.count(user->parent_)) {
             if (!updateExpression.count(user))
@@ -775,7 +775,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     bool remainderBaseEscapes = false;
     if (match.remainderBase) {
         for (const auto &use : match.remainderBase->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
                 remainderBaseEscapes = true;
                 break;
@@ -793,14 +793,14 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     for (auto *instruction : loop.header->instr_list_) {
         if (instruction == match.state) continue;
         for (const auto &use : instruction->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ &&
                 !loop.blocks.count(user->parent_)) {
                 auto *exitPhi = dynamic_cast<PhiInst *>(user);
                 bool exportedFinalState =
                     instruction == match.stateRemainder &&
                     user->parent_ == exit && exitPhi &&
-                    exitPhi->num_ops_ == 2 &&
+                    exitPhi->num_ops() == 2 &&
                     exitPhi->get_operand(0) == match.stateRemainder &&
                     exitPhi->get_operand(1) == loop.header;
                 if (exportedFinalState)
@@ -830,7 +830,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     for (auto *instruction : exit->instr_list_) {
         if (!instruction->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(instruction);
-        if (phi->num_ops_ != 2 || phi->get_operand(1) != loop.header)
+        if (phi->num_ops() != 2 || phi->get_operand(1) != loop.header)
             return reject("unsupported-exit-phi");
         Value *incoming = phi->get_operand(0);
         if (incoming == match.stateRemainder) {
@@ -849,7 +849,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
 
     BasicBlock *preheader = loop.preheader;
     auto *oldBranch = preheader->get_terminator();
-    if (!oldBranch || !oldBranch->is_br() || oldBranch->num_ops_ != 1 ||
+    if (!oldBranch || !oldBranch->is_br() || oldBranch->num_ops() != 1 ||
         oldBranch->get_operand(0) != loop.header)
         return reject("invalid-preheader-branch");
 
@@ -1003,7 +1003,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     new BranchInst(guard, fast, slowJoin, preheader);
 
     for (auto *phi : {match.induction, match.state})
-        for (unsigned index = 0; index < phi->num_ops_; index += 2)
+        for (unsigned index = 0; index < phi->num_ops(); index += 2)
             if (phi->get_operand(index + 1) == preheader) {
                 phi->set_operand(index + 1, slowJoin);
                 break;
@@ -1020,7 +1020,7 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     if (match.remainderBase && !remainderBaseExitPhi) {
         bool hasExternalUse = false;
         for (const auto &use : match.remainderBase->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
                 hasExternalUse = true;
                 break;
@@ -1039,10 +1039,10 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
     if (remainderBaseExitPhi) {
         std::vector<std::pair<Instruction *, unsigned>> baseExternalUses;
         for (const auto &use : match.remainderBase->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user != remainderBaseExitPhi && user->parent_ &&
                 !loop.blocks.count(user->parent_))
-                baseExternalUses.push_back({user, use.arg_no_});
+                baseExternalUses.push_back({user, use.operand_index_});
         }
         for (auto &[user, operand] : baseExternalUses)
             user->set_operand(operand, remainderBaseExitPhi);
@@ -1109,11 +1109,11 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         return debugReject("cannot find counting IV");
     }
     if (total_phi->type_->tid_ != Type::IntegerTyID) return debugReject("total phi is not integer");
-    if (total_phi->num_ops_ != 4) return debugReject("total phi does not have two incomings");
+    if (total_phi->num_ops() != 4) return debugReject("total phi does not have two incomings");
 
     // 3. 找循环条件和出口块
     auto *term = loop.header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return debugReject("bad loop header terminator");
+    if (!term || !term->is_br() || term->num_ops() != 3) return debugReject("bad loop header terminator");
 
     auto *cond_inst = dynamic_cast<ICmpInst *>(term->get_operand(0));
     if (!cond_inst || cond_inst->icmp_op_ != ICmpInst::ICMP_SLT) return debugReject("loop condition is not slt");
@@ -1137,7 +1137,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
     // 5. 获取 total_init（preheader 入值）和 total_latch（latch 入值）
     Value *total_init = nullptr, *total_latch = nullptr;
-    for (unsigned i = 0; i < total_phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < total_phi->num_ops(); i += 2) {
         auto *bb = static_cast<BasicBlock *>(total_phi->get_operand(i + 1));
         if (bb == loop.preheader) total_init  = total_phi->get_operand(i);
         else if (bb == latch) total_latch = total_phi->get_operand(i);
@@ -1165,7 +1165,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     // phi rejects the canonical `next = total + invariant` form.
     int bodyUses = 0;
     for (auto &use : total_phi->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user) continue;
         if (!loop.blocks.count(user->parent_)) continue;
         ++bodyUses;
@@ -1191,7 +1191,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
             if (!inst) return true;
             if (!loop.blocks.count(inst->parent_)) return true;
             if (!indepVisited.insert(v).second) return true;
-            for (unsigned i = 0; i < inst->num_ops_; i++)
+            for (unsigned i = 0; i < inst->num_ops(); i++)
                 if (!indepOfIV(inst->get_operand(i))) return false;
             return true;
         };
@@ -1204,7 +1204,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
             if (!accVisited.insert(v).second) return true; // 环上节点正在验证
             if (inst->is_phi()) {
                 auto *phi = static_cast<PhiInst *>(inst);
-                for (unsigned i = 0; i < phi->num_ops_; i += 2)
+                for (unsigned i = 0; i < phi->num_ops(); i += 2)
                     if (!isAcc(phi->get_operand(i))) return false;
                 return true;
             }
@@ -1225,7 +1225,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         // the latch.  A second in-loop use of the accumulator could affect
         // control or another live value and must not be summarized away.
         for (const Use &use : total_phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && loop.blocks.count(user->parent_) &&
                 !accVisited.count(user))
                 return false;
@@ -1234,7 +1234,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         for (auto *bb : loop.blocks) {
             if (bb == loop.header) continue;
             auto *t = bb->get_terminator();
-            if (t && t->is_br() && t->num_ops_ == 3 &&
+            if (t && t->is_br() && t->num_ops() == 3 &&
                 !indepOfIV(t->get_operand(0)))
                 return false;
         }
@@ -1247,7 +1247,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         for (auto *inst : bb->instr_list_) {
             if (inst == total_phi) continue;
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.blocks.count(user->parent_))
                     return false;
             }
@@ -1259,7 +1259,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     for (auto *inst : loop_exit->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred != loop.header) continue;
             Value *incoming = phi->get_operand(i);
@@ -1316,7 +1316,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         bool hasLatchIncoming = false;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred == latch) {
                 hasLatchIncoming = true;
@@ -1325,7 +1325,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         }
         if (hasLatchIncoming) continue;
 
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred != loop.header) continue;
             Value *incoming = phi->get_operand(i);
@@ -1337,7 +1337,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
     // 7c. 删除 header 各 phi 中来自 latch 的 incoming
     auto removeIncoming = [](PhiInst *phi, BasicBlock *pred) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == pred) {
                 phi->remove_operands(i, i + 1);
                 return;
@@ -1356,7 +1356,7 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     {
         bool used_outside = false;
         for (auto &use : total_phi->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
                 used_outside = true;
                 break;
@@ -1372,11 +1372,11 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
             std::vector<std::pair<Instruction *, unsigned>> to_replace;
             for (auto &use : total_phi->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && user != exit_phi &&
                     !(user->parent_ == loop_exit && user->is_phi()) &&
                     !loop.blocks.count(user->parent_))
-                    to_replace.push_back({user, use.arg_no_});
+                    to_replace.push_back({user, use.operand_index_});
             }
             for (auto &[user, arg_no] : to_replace)
                 user->set_operand(arg_no, exit_phi);

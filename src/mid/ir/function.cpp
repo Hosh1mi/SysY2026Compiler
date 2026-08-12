@@ -5,12 +5,8 @@
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <algorithm>
-#include <map>
 #include <set>
 #include <string>
-#include <functional>
-
-Function::~Function() {}
 
 void Function::add_basic_block(BasicBlock *bb) {
     basic_blocks_.push_back(bb);
@@ -112,7 +108,8 @@ void Function::remove_bb(BasicBlock* bb) {
 // 获取函数的唯一 return 基本块
 BasicBlock* Function::getRetBB() {
     for (auto bb : basic_blocks_) {
-        if (bb->get_terminator()->is_ret()) {
+        auto *terminator = bb->get_terminator();
+        if (terminator && terminator->is_ret()) {
             return bb;
         }
     }

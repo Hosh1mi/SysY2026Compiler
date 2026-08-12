@@ -84,7 +84,7 @@ bool isSupportedValueType(ValueType type) {
 bool callArgsFitInRegisters(Instruction *call) {
     unsigned integerArgs = 0;
     unsigned floatArgs = 0;
-    for (unsigned i = 0; i + 1 < call->num_ops_; ++i) {
+    for (unsigned i = 0; i + 1 < call->num_ops(); ++i) {
         ValueType type = SelectionDAGBuilder::valueType(
             call->get_operand(i)->type_);
         bool vectorBank = type == ValueType::F32 ||
@@ -364,8 +364,8 @@ SelectionDAGBuilder::build(Function *function) const {
                 SDNode &node =
                     dag.createNode(SDOpcode::FrameIndex, {ValueType::Ptr});
                 node.index = nextFrameIndex++;
-                node.memorySize = typeSize(alloca->alloca_ty_);
-                node.alignment = naturalAlignment(alloca->alloca_ty_);
+                node.memorySize = typeSize(alloca->allocated_type());
+                node.alignment = naturalAlignment(alloca->allocated_type());
                 node.origin = alloca;
                 result->values.emplace(alloca, SDValue{&node, 0});
             }
@@ -380,8 +380,8 @@ SelectionDAGBuilder::build(Function *function) const {
             if (!phi)
                 break;
             auto &operands = deferredPhiOperands[phi];
-            operands.resize(phi->num_ops_ / 2);
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            operands.resize(phi->num_ops() / 2);
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 Value *value = phi->get_operand(i);
                 if (dynamic_cast<Constant *>(value) ||
                     dynamic_cast<GlobalVariable *>(value))
@@ -450,7 +450,7 @@ SelectionDAGBuilder::build(Function *function) const {
                     Type *current =
                         static_cast<PointerType *>(
                             instruction->get_operand(0)->type_)->contained_;
-                    for (unsigned i = 1; i < instruction->num_ops_; ++i) {
+                    for (unsigned i = 1; i < instruction->num_ops(); ++i) {
                         created->operands().push_back(operand(i));
                         if (i > 1 && current &&
                             current->tid_ == Type::ArrayTyID)
@@ -550,10 +550,10 @@ SelectionDAGBuilder::build(Function *function) const {
                 }
                 case Instruction::Call: {
                     auto *callee = dynamic_cast<Function *>(
-                        instruction->get_operand(instruction->num_ops_ - 1));
+                        instruction->get_operand(instruction->num_ops() - 1));
                     SignedMinMaxIntrinsic minMaxKind;
                     if (isSignedMinMaxIntrinsic(callee, &minMaxKind)) {
-                        if (instruction->num_ops_ != 3)
+                        if (instruction->num_ops() != 3)
                             throw std::logic_error(
                                 "signed min/max intrinsic must have two operands");
                         created = &dag.createNode(
@@ -565,7 +565,7 @@ SelectionDAGBuilder::build(Function *function) const {
                         break;
                     }
                     if (isMulModIntrinsic(callee)) {
-                        if (instruction->num_ops_ != 4)
+                        if (instruction->num_ops() != 4)
                             throw std::logic_error(
                                 "mulmod intrinsic must have three operands");
                         created = &dag.createNode(
@@ -579,11 +579,11 @@ SelectionDAGBuilder::build(Function *function) const {
                     bool emitTail =
                         callInst->is_tail() && callArgsFitInRegisters(callInst) &&
                         term && term->is_ret() &&
-                        ((callInst->is_void() && term->num_ops_ == 0) ||
-                         (term->num_ops_ > 0 &&
+                        ((callInst->is_void() && term->num_ops() == 0) ||
+                         (term->num_ops() > 0 &&
                           term->get_operand(0) == callInst));
                     std::vector<SDValue> operands = {chain};
-                    for (unsigned i = 0; i + 1 < instruction->num_ops_; ++i)
+                    for (unsigned i = 0; i + 1 < instruction->num_ops(); ++i)
                         operands.push_back(operand(i));
                     if (emitTail) {
                         // Terminator: reuse the frame / LR of the caller.
@@ -610,7 +610,7 @@ SelectionDAGBuilder::build(Function *function) const {
                     break;
                 }
                 case Instruction::Br: {
-                    if (instruction->num_ops_ == 1) {
+                    if (instruction->num_ops() == 1) {
                         created = &dag.createNode(SDOpcode::Branch,
                                                   {ValueType::Invalid},
                                                   {chain});
@@ -633,7 +633,7 @@ SelectionDAGBuilder::build(Function *function) const {
                 }
                 case Instruction::Ret: {
                     std::vector<SDValue> operands = {chain};
-                    if (instruction->num_ops_)
+                    if (instruction->num_ops())
                         operands.push_back(operand(0));
                     created = &dag.createNode(SDOpcode::Return,
                                               {ValueType::Invalid},
@@ -669,7 +669,7 @@ SelectionDAGBuilder::build(Function *function) const {
             if (!phi)
                 break;
             SDNode *node = result->values.at(phi).node;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 SDValue incoming =
                     deferredPhiOperands[phi][i / 2];
                 if (!incoming)

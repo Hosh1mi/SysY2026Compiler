@@ -644,13 +644,13 @@ static Value *coerceToReturnType(IRStmtBuilder *builder, Value *val, Type *retTy
 static void eraseDeadRetvalSlot(Value *&slot) {
     if (!slot) return;
     for (auto &use : slot->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->is_load())
             return;
     }
     std::vector<Instruction *> deadStores;
     for (auto &use : slot->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user->is_store())
             deadStores.push_back(user);
     }
@@ -703,7 +703,7 @@ static void tryMergeTrivialRetBlock(Function *func, BasicBlock *retBlock,
     BasicBlock *pred = retBlock->pre_bbs_[0];
     auto *term = pred->get_terminator();
     auto *br = dynamic_cast<BranchInst *>(term);
-    if (!br || br->num_ops_ != 1 || br->get_operand(0) != retBlock)
+    if (!br || br->num_ops() != 1 || br->get_operand(0) != retBlock)
         return;
 
     pred->delete_instr(br);
@@ -1479,7 +1479,7 @@ void GenIR::visit(IfStmtAST &ast) {
     auto branchesTo = [](BasicBlock *bb, BasicBlock *target) -> bool {
         auto *term = bb->get_terminator();
         if (!term) return false;
-        for (unsigned i = 0; i < term->num_ops_; i++)
+        for (unsigned i = 0; i < term->num_ops(); i++)
             if (term->get_operand(i) == target) return true;
         return false;
     };
@@ -2362,9 +2362,6 @@ void GenIR::visit(CallExprAST &ast) {
         std::cerr << "Error: undefined function '" << ast.callee << "'\n";
         exit(1);
     }
-    //引用函数返回值
-    if (fun->basic_blocks_.size() && !is_single_exp)
-        fun->use_ret_cnt ++ ;
     is_single_exp = false;
     vector<Value *> args;
     auto infoIt = scalarizedFunctionInfo.find(fun);

@@ -18,7 +18,7 @@ void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
     for (auto *instr : succ->instr_list_) {
         if (!instr->is_phi()) continue;
         auto *phi = static_cast<PhiInst *>(instr);
-        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+        for (int i = phi->num_ops() - 1; i >= 0; i -= 2) {
             if (phi->get_operand(i) == deadBlock)
                 phi->remove_operands(i - 1, i);
         }
@@ -42,7 +42,7 @@ void removeUnreachableBlocks(Function *func) {
         worklist.pop();
         auto *term = bb->get_terminator();
         if (!term) continue;
-        for (unsigned i = 0; i < term->num_ops_; ++i) {
+        for (unsigned i = 0; i < term->num_ops(); ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
             if (succ && reachable.insert(succ).second)
                 worklist.push(succ);
@@ -59,7 +59,7 @@ void removeUnreachableBlocks(Function *func) {
     for (auto *bb : dead) {
         auto *term = bb->get_terminator();
         if (term) {
-            for (unsigned i = 0; i < term->num_ops_; ++i) {
+            for (unsigned i = 0; i < term->num_ops(); ++i) {
                 auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
                 if (succ && reachable.count(succ)) {
                     removeBBFromPhi(bb, succ);

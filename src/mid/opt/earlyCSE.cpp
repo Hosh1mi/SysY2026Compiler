@@ -309,7 +309,7 @@ static bool early_cse_dfs(BasicBlock *bb,
             {
                 auto *call = static_cast<CallInst*>(inst);
                 auto *callee = dynamic_cast<Function*>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (callee && BAA.isPure(callee)) {
                     ExprSignature sig = compute_signature(inst, empty_vn_map);
                     auto exist = expr_map.find(sig);

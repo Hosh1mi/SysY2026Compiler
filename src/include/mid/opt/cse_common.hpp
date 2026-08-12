@@ -111,8 +111,8 @@ inline ExprSignature compute_signature(Instruction *inst,
     sig.extra_op = 0;
 
     std::vector<Value*> ops;
-    ops.reserve(inst->num_ops_);
-    for (unsigned i = 0; i < inst->num_ops_; i++) {
+    ops.reserve(inst->num_ops());
+    for (unsigned i = 0; i < inst->num_ops(); i++) {
         Value *op = inst->get_operand(i);
         auto it = vn_map.find(op);
         Value *rep = (it != vn_map.end()) ? it->second : op;

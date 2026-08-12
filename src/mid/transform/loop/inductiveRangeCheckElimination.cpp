@@ -79,7 +79,7 @@ bool getConstInt(Value *value, int &out) {
 }
 
 int phiIncomingIndex(PhiInst *phi, BasicBlock *pred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return static_cast<int>(i);
     }
@@ -95,7 +95,7 @@ bool setPhiIncomingValue(PhiInst *phi, BasicBlock *pred, Value *val) {
 }
 
 Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return phi->get_operand(i);
     }
@@ -115,7 +115,7 @@ bool isOnlyIVUpdateAndLatchCmp(BasicBlock *latch, Instruction *ivNext,
 
 bool isPureSkipBlock(BasicBlock *block, BasicBlock *latch) {
     auto *term = dynamic_cast<BranchInst *>(block->get_terminator());
-    if (!term || term->num_ops_ != 1 || term->get_operand(0) != latch)
+    if (!term || term->num_ops() != 1 || term->get_operand(0) != latch)
         return false;
 
     for (auto *inst : block->instr_list_) {
@@ -125,7 +125,7 @@ bool isPureSkipBlock(BasicBlock *block, BasicBlock *latch) {
             inst->is_alloca())
             return false;
         for (auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ != block)
                 return false;
         }
@@ -137,12 +137,12 @@ bool isWorkBlock(BasicBlock *block, BasicBlock *latch, const Loop &loop) {
     if (!block || block == latch || !loop.isInLoop(block))
         return false;
     auto *term = dynamic_cast<BranchInst *>(block->get_terminator());
-    return term && term->num_ops_ == 1 && term->get_operand(0) == latch;
+    return term && term->num_ops() == 1 && term->get_operand(0) == latch;
 }
 
 bool isUnconditionalTo(BasicBlock *block, BasicBlock *target) {
     auto *term = dynamic_cast<BranchInst *>(block->get_terminator());
-    return term && term->num_ops_ == 1 && term->get_operand(0) == target;
+    return term && term->num_ops() == 1 && term->get_operand(0) == target;
 }
 
 bool isSkipSuccessor(BasicBlock *block, BasicBlock *latch, const Loop &loop) {
@@ -363,7 +363,7 @@ Value *materializeAffine(const AffineExpr &expr, int64_t extraDelta, Type *ty,
 bool matchCanonicalIV(BasicBlock *header, BasicBlock *preheader, BasicBlock *latch,
                       const Loop &loop, CanonicalIV &out) {
     auto *latchTerm = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!latchTerm || latchTerm->num_ops_ != 3)
+    if (!latchTerm || latchTerm->num_ops() != 3)
         return false;
 
     auto *latchTrue = dynamic_cast<BasicBlock *>(latchTerm->get_operand(1));
@@ -375,7 +375,7 @@ bool matchCanonicalIV(BasicBlock *header, BasicBlock *preheader, BasicBlock *lat
         if (!inst->is_phi())
             break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops_ != 4)
+        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops() != 4)
             continue;
 
         Value *fromPre = incomingFrom(phi, preheader);
@@ -438,7 +438,7 @@ bool matchCanonicalIV(BasicBlock *header, BasicBlock *preheader, BasicBlock *lat
 bool matchBranchShape(BasicBlock *header, BasicBlock *latch, const Loop &loop,
                       BranchShape &out) {
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!headerTerm || headerTerm->num_ops_ != 3)
+    if (!headerTerm || headerTerm->num_ops() != 3)
         return false;
 
     auto *trueSucc = dynamic_cast<BasicBlock *>(headerTerm->get_operand(1));
@@ -548,7 +548,7 @@ bool matchRotatedIV(Loop &loop, RotatedIV &out) {
         return false;
 
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!headerTerm || headerTerm->num_ops_ != 3)
+    if (!headerTerm || headerTerm->num_ops() != 3)
         return false;
 
     auto *headerCmp = dynamic_cast<ICmpInst *>(headerTerm->get_operand(0));
@@ -564,7 +564,7 @@ bool matchRotatedIV(Loop &loop, RotatedIV &out) {
         if (!inst->is_phi())
             break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops_ != 4)
+        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops() != 4)
             continue;
 
         Value *fromPre = incomingFrom(phi, preheader);
@@ -573,7 +573,7 @@ bool matchRotatedIV(Loop &loop, RotatedIV &out) {
 
         BasicBlock *latch = nullptr;
         Value *fromLatch = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred && pred != preheader && loop.isInLoop(pred)) {
                 latch = pred;
@@ -585,7 +585,7 @@ bool matchRotatedIV(Loop &loop, RotatedIV &out) {
             continue;
 
         auto *latchTerm = dynamic_cast<BranchInst *>(latch->get_terminator());
-        if (!latchTerm || latchTerm->num_ops_ != 1 || latchTerm->get_operand(0) != header)
+        if (!latchTerm || latchTerm->num_ops() != 1 || latchTerm->get_operand(0) != header)
             continue;
 
         auto *update = dynamic_cast<BinaryInst *>(fromLatch);
@@ -637,9 +637,9 @@ bool matchGuardChain(BasicBlock *entry, BasicBlock *latch, const Loop &loop,
         auto *term = dynamic_cast<BranchInst *>(cursor->get_terminator());
         if (!term)
             return false;
-        if (term->num_ops_ == 1)
+        if (term->num_ops() == 1)
             return term->get_operand(0) == latch;
-        if (term->num_ops_ != 3)
+        if (term->num_ops() != 3)
             return false;
 
         auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
@@ -704,7 +704,7 @@ bool isTrivialRotatedLatch(const RotatedIV &shape) {
 
         if (auto *gep = dynamic_cast<GetElementPtrInst *>(inst)) {
             int step = 0;
-            if (gep->num_ops_ != 2 || !isHeaderPhi(shape, gep->get_operand(0)) ||
+            if (gep->num_ops() != 2 || !isHeaderPhi(shape, gep->get_operand(0)) ||
                 !getConstInt(gep->get_operand(1), step) || step == 0)
                 return false;
             continue;
@@ -849,7 +849,7 @@ bool rebaseCompanionPhis(const RotatedIV &loopShape, Value *delta,
                     return false;
             }
         } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(fromLatch)) {
-            if (gep->get_operand(0) != phi || gep->num_ops_ != 2)
+            if (gep->get_operand(0) != phi || gep->num_ops() != 2)
                 continue;
             int step = 0;
             if (!getConstInt(gep->get_operand(1), step) || step <= 0)
@@ -1013,7 +1013,7 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
 
     auto *preTerm = dynamic_cast<BranchInst *>(preheader->get_terminator());
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!preTerm || !headerTerm || headerTerm->num_ops_ != 3)
+    if (!preTerm || !headerTerm || headerTerm->num_ops() != 3)
         return reject("non-conditional-entry-or-header");
 
     // LoopRotate preserves a dedicated preheader and leaves the zero-trip
@@ -1022,7 +1022,7 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
     BasicBlock *guardBlock = preheader;
     BranchInst *guardTerm = preTerm;
     BasicBlock *guardContinue = header;
-    if (preTerm->num_ops_ == 1 && preTerm->get_operand(0) == header) {
+    if (preTerm->num_ops() == 1 && preTerm->get_operand(0) == header) {
         if (preheader->pre_bbs_.size() != 1)
             return reject("entry-guard-predecessor");
         guardBlock = preheader->pre_bbs_[0];
@@ -1031,7 +1031,7 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
         guardTerm = dynamic_cast<BranchInst *>(guardBlock->get_terminator());
         guardContinue = preheader;
     }
-    if (!guardTerm || guardTerm->num_ops_ != 3)
+    if (!guardTerm || guardTerm->num_ops() != 3)
         return reject("entry-guard-terminator");
 
     auto *guardTrue = dynamic_cast<BasicBlock *>(guardTerm->get_operand(1));

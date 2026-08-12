@@ -67,7 +67,7 @@ std::string preheaderDiagnostic(Loop *loop) {
     if (!term || !term->is_br())
         return "outside predecessor '" + pred->name_ +
                "' has no branch terminator";
-    if (term->num_ops_ != 1 || term->get_operand(0) != loop->header)
+    if (term->num_ops() != 1 || term->get_operand(0) != loop->header)
         return "outside predecessor '" + pred->name_ +
                "' does not unconditionally branch to header";
 
@@ -97,7 +97,7 @@ std::string latchDiagnostic(Loop *loop) {
         return "latch '" + latch->name_ + "' has no branch terminator";
 
     bool branchesToHeader = false;
-    for (unsigned i = 0; i < term->num_ops_; ++i)
+    for (unsigned i = 0; i < term->num_ops(); ++i)
         if (term->get_operand(i) == loop->header)
             branchesToHeader = true;
     if (!branchesToHeader)
@@ -155,10 +155,10 @@ LoopVerifyResult verifyLoopForms(Module *m, int level,
                 for (auto *bb : loop->blocks) {
                     for (auto *inst : bb->instr_list_) {
                         for (const auto &use : inst->use_list_) {
-                            auto *user = dynamic_cast<Instruction *>(use.val_);
+                            auto *user = use.user_;
                             if (!user || !user->parent_) continue;
                             BasicBlock *useBlock =
-                                getSemanticUseBlock(user, use.arg_no_);
+                                getSemanticUseBlock(user, use.operand_index_);
                             if (useBlock && loop->blocks.count(useBlock))
                                 continue;
                             bool isLcssaPhi = false;

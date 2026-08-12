@@ -10,6 +10,7 @@
 #include <cassert>
 #include <list>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,21 +33,26 @@ public:
     };
 
     // 创建并自动插入基本块
-    Instruction(Type* ty, OpID id, unsigned num_ops, BasicBlock* parent) : Value(ty, ""), op_id_(id), num_ops_(num_ops), parent_(parent) {
-        operands_.resize(num_ops_, nullptr);
-        use_pos_.resize(num_ops_);
+    Instruction(Type* ty, OpID id, unsigned num_ops, BasicBlock* parent)
+        : Value(ty, ""), parent_(parent), op_id_(id) {
+        operands_.resize(num_ops, nullptr);
+        use_pos_.resize(num_ops);
         parent_->add_instruction(this);
     }
     // 仅创建，不插入基本块
-    Instruction(Type* ty, OpID id, unsigned num_ops) : Value(ty, ""), op_id_(id), num_ops_(num_ops), parent_(nullptr) {
-        operands_.resize(num_ops_, nullptr);
-        use_pos_.resize(num_ops_);
+    Instruction(Type* ty, OpID id, unsigned num_ops)
+        : Value(ty, ""), parent_(nullptr), op_id_(id) {
+        operands_.resize(num_ops, nullptr);
+        use_pos_.resize(num_ops);
     }
+    unsigned num_ops() const { return operands_.size(); }
     Value* get_operand(unsigned i) const { return operands_[i]; }
     virtual ~Instruction() = default;
 
     // 设置第 i 个操作数，自动维护 use-def 链
     void set_operand(unsigned i, Value* v) {
+        if (operands_[i] == v)
+            return;
         if (operands_[i]) {
             operands_[i]->remove_use(use_pos_[i]);
         }
@@ -55,9 +61,9 @@ public:
     }
     // 添加操作数（用于 phi 指令动态增加入边）
     void add_operand(Value* v) {
+        unsigned operand_index = num_ops();
         operands_.push_back(v);
-        use_pos_.emplace_back(v->add_use(this, num_ops_));
-        num_ops_++;
+        use_pos_.emplace_back(v->add_use(this, operand_index));
     }
     // 清除所有操作数的 use 关系
     void remove_use_of_ops() {
@@ -71,15 +77,14 @@ public:
             operands_[i]->remove_use(use_pos_[i]);
         }
         for (int i = index2 + 1; i < operands_.size(); i++) {
-            use_pos_[i]->arg_no_ -= index2 - index1 + 1;
+            use_pos_[i]->operand_index_ -= index2 - index1 + 1;
         }
         operands_.erase(operands_.begin() + index1, operands_.begin() + index2 + 1);
         use_pos_.erase(use_pos_.begin() + index1, use_pos_.begin() + index2 + 1);
-        num_ops_ = operands_.size();
     }
 
     // 快速类型判断
-    bool is_void() { return ((op_id_ == Ret) || (op_id_ == Br) || (op_id_ == Store) || (op_id_ == Call && this->type_->tid_ == Type::VoidTyID)); }
+    bool is_void() const { return type_->tid_ == Type::VoidTyID; }
     bool is_phi() { return op_id_ == PHI; }
     bool is_store() { return op_id_ == Store; }
     bool is_alloca() { return op_id_ == Alloca; }
@@ -104,18 +109,17 @@ public:
     bool is_trunc() { return op_id_ == Trunc; }
     bool is_fptosi() { return op_id_ == FPtoSI; }
     bool is_sitofp() { return op_id_ == SItoFP; }
-    bool is_int_binary() { return (is_add() || is_sub() || is_mul() || is_div() || is_rem()) && (num_ops_ == 2); }
-    bool is_float_binary() { return (is_fadd() || is_fsub() || is_fmul() || is_fdiv()) && (num_ops_ == 2); }
+    bool is_int_binary() { return is_add() || is_sub() || is_mul() || is_div() || is_rem(); }
+    bool is_float_binary() { return is_fadd() || is_fsub() || is_fmul() || is_fdiv(); }
     bool is_binary() { return is_int_binary() || is_float_binary(); }
     bool isTerminator() { return is_br() || is_ret(); }
 
     virtual std::string print() = 0;
     BasicBlock* parent_;
     OpID op_id_;
-    unsigned num_ops_;
     std::vector<Value*> operands_;                         // 操作数列表
     std::vector<std::list<Use>::iterator> use_pos_;        // 对应操作数的 use_list 中与本指令相关的 use 迭代器
-    std::vector<std::list<Instruction*>::iterator> pos_in_bb; // 在所属 BB 指令链表中的位置
+    std::optional<std::list<Instruction*>::iterator> pos_in_bb_; // 在所属 BB 指令链表中的位置
 };
 
 // 二元运算：add, sub, mul, sdiv, srem, fadd, fsub, fmul, fdiv, shl, ashr, and, or, xor
@@ -227,7 +231,7 @@ public:
 // 函数调用
 class CallInst : public Instruction {
 public:
-    CallInst(Function* func, std::vector<Value*> args, BasicBlock* bb)
+    CallInst(Function* func, const std::vector<Value*>& args, BasicBlock* bb)
         : Instruction(static_cast<FunctionType*>(func->type_)->result_, Instruction::Call, args.size() + 1, bb) {
         int num_ops = args.size() + 1;
         for (int i = 0; i < num_ops - 1; i++) {
@@ -235,7 +239,7 @@ public:
         }
         set_operand(num_ops - 1, func);  // 最后一个操作数为被调用函数
     }
-    CallInst(Function* func, std::vector<Value*> args, BasicBlock* bb, bool no_insert)
+    CallInst(Function* func, const std::vector<Value*>& args, BasicBlock* bb, bool no_insert)
         : Instruction(static_cast<FunctionType*>(func->type_)->result_, Instruction::Call, args.size() + 1) {
         int num_ops = args.size() + 1;
         for (int i = 0; i < num_ops - 1; i++) {
@@ -340,12 +344,12 @@ private:
     }
 
 public:
-    GetElementPtrInst(Value* ptr, std::vector<Value*> idxs, BasicBlock* bb)
+    GetElementPtrInst(Value* ptr, const std::vector<Value*>& idxs, BasicBlock* bb)
         : GetElementPtrInst(infer_GEP_return_type(ptr, idxs.size()), ptr, idxs, bb, false) {}
 
     // 仅创建，不自动插入到 BB；调用方应使用 add_instruction_before_inst /
     // add_instruction_before_terminator / add_instruction 等 API 安全挂接。
-    GetElementPtrInst(Value* ptr, std::vector<Value*> idxs, BasicBlock* bb, bool no_insert)
+    GetElementPtrInst(Value* ptr, const std::vector<Value*>& idxs, BasicBlock* bb, bool no_insert)
         : GetElementPtrInst(infer_GEP_return_type(ptr, idxs.size()), ptr, idxs, bb, no_insert) {}
 
     static GetElementPtrInst* create_split_suffix_gep(Value* ptr,
@@ -396,10 +400,18 @@ public:
         LoopExpansionScratch,
     };
 
-    AllocaInst(Type* ty, BasicBlock* bb) : Instruction(bb->parent_->parent_->get_pointer_type(ty), Instruction::Alloca, 0, bb), alloca_ty_(ty) {}
-    AllocaInst(Type* ty, BasicBlock* bb, bool) : Instruction(bb->parent_->parent_->get_pointer_type(ty), Instruction::Alloca, 0), alloca_ty_(ty) { this->parent_ = bb; }
+    AllocaInst(Type* ty, BasicBlock* bb)
+        : Instruction(bb->parent_->parent_->get_pointer_type(ty),
+                      Instruction::Alloca, 0, bb) {}
+    AllocaInst(Type* ty, BasicBlock* bb, bool)
+        : Instruction(bb->parent_->parent_->get_pointer_type(ty),
+                      Instruction::Alloca, 0) {
+        this->parent_ = bb;
+    }
     virtual std::string print() override;
-    Type* alloca_ty_;  // 分配的原始类型
+    Type* allocated_type() const {
+        return static_cast<PointerType*>(type_)->contained_;
+    }
     Purpose purpose_ = Purpose::Generic;
 
     bool isLoopExpansionScratch() const {
@@ -413,42 +425,43 @@ public:
 // i1 → i32 零扩展
 class ZextInst : public Instruction {
 public:
-    ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
-    ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb, bool) : Instruction(ty, op, 1), dest_ty_(ty) {
+    ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb)
+        : Instruction(ty, op, 1, bb) { set_operand(0, val); }
+    ZextInst(OpID op, Value* val, Type* ty, BasicBlock* bb, bool)
+        : Instruction(ty, op, 1) {
         set_operand(0, val);
         this->parent_ = bb;
     }
     virtual std::string print() override;
-    Type* dest_ty_;
 };
 
 // float → i32
 class FpToSiInst : public Instruction {
 public:
-    FpToSiInst(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
+    FpToSiInst(OpID op, Value* val, Type* ty, BasicBlock* bb)
+        : Instruction(ty, op, 1, bb) { set_operand(0, val); }
     virtual std::string print() override;
-    Type* dest_ty_;
 };
 
 // i32 → float
 class SiToFpInst : public Instruction {
 public:
-    SiToFpInst(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
+    SiToFpInst(OpID op, Value* val, Type* ty, BasicBlock* bb)
+        : Instruction(ty, op, 1, bb) { set_operand(0, val); }
     virtual std::string print() override;
-    Type* dest_ty_;
 };
 
 // 位级重解释：bitcast [4 x [2 x i32]]* %2 to i32*
 class Bitcast : public Instruction {
 public:
-    Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb) : Instruction(ty, op, 1, bb), dest_ty_(ty) { set_operand(0, val); }
+    Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb)
+        : Instruction(ty, op, 1, bb) { set_operand(0, val); }
     Bitcast(OpID op, Value* val, Type* ty, BasicBlock* bb, bool)
-        : Instruction(ty, op, 1), dest_ty_(ty) {
+        : Instruction(ty, op, 1) {
         set_operand(0, val);
         parent_ = bb;
     }
     virtual std::string print() override;
-    Type* dest_ty_;
 };
 
 // insertelement <4 x i32> %vec, i32 %val, i32 %idx
@@ -539,7 +552,8 @@ private:
 // phi 节点：%4 = phi i32 [ 1, %bb1 ], [ %6, %bb2 ]
 class PhiInst : public Instruction {
 public:
-    PhiInst(OpID op, std::vector<Value*> vals, std::vector<BasicBlock*> val_bbs, Type* ty, BasicBlock* bb)
+    PhiInst(OpID op, const std::vector<Value*>& vals,
+            const std::vector<BasicBlock*>& val_bbs, Type* ty, BasicBlock* bb)
         : Instruction(ty, op, 2 * vals.size()) {
         for (int i = 0; i < vals.size(); i++) {
             set_operand(2 * i, vals[i]);         // 偶数位：值
@@ -551,5 +565,4 @@ public:
     void add_phi_pair_operand(Value* val, Value* pre_bb);
     void addIncoming(Value* val, BasicBlock* bb) { this->add_phi_pair_operand(val, bb); }
     virtual std::string print() override;
-    Value* l_val_;  // mem2reg 用：记录被替换的 alloca
 };

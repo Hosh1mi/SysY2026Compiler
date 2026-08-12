@@ -37,7 +37,7 @@ bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
     if (!bodyGEP || !storeGEP || !inner || !parent || !AA ||
         !inner->tripCount || !parent->inductionInit ||
         inner->tripCount != parent->inductionInit ||
-        bodyGEP->num_ops_ != storeGEP->num_ops_)
+        bodyGEP->num_ops() != storeGEP->num_ops())
         return false;
 
     PhiInst *innerIV = inner->getInductionIV();
@@ -52,7 +52,7 @@ bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
         return a.valid && b.valid && a.constant == b.constant &&
                a.coeffs == b.coeffs;
     };
-    for (unsigned i = 1; i < bodyGEP->num_ops_; ++i) {
+    for (unsigned i = 1; i < bodyGEP->num_ops(); ++i) {
         AffineExpr body = AA->analyze(bodyGEP->get_operand(i));
         AffineExpr store = AA->analyze(storeGEP->get_operand(i));
         if (!body.valid || !store.valid) return false;
@@ -100,13 +100,13 @@ bool ReductionAnalysis::detectScalarExpandableNest(
         if (phi->type_->tid_ != Type::IntegerTyID) {
             return false;
         }
-        if (phi->num_ops_ != 4) {
+        if (phi->num_ops() != 4) {
             return false;
         }
 
         ScalarReductionInfo reduction{};
         reduction.sum_phi = phi;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == inner->preheader) {
                 reduction.sum_init = phi->get_operand(i);
@@ -167,7 +167,7 @@ bool ReductionAnalysis::detectScalarExpandableNest(
         reduction.store_inst = store;
 
         auto *storeGEP = dynamic_cast<GetElementPtrInst *>(store->get_operand(1));
-        if (!storeGEP || storeGEP->num_ops_ < 2) return false;
+        if (!storeGEP || storeGEP->num_ops() < 2) return false;
 
         AffineExpr firstIndex = AA_->analyze(storeGEP->get_operand(1));
         // A global array GEP has a leading zero, while a pointer-to-row
@@ -178,7 +178,7 @@ bool ReductionAnalysis::detectScalarExpandableNest(
             firstIndex.coeffOf(innerIV) != 0)
             return false;
 
-        unsigned last = storeGEP->num_ops_ - 1;
+        unsigned last = storeGEP->num_ops() - 1;
         AffineExpr lastIndex = AA_->analyze(storeGEP->get_operand(last));
         AffineExpr parentExpr = AA_->analyze(parentIV);
         if (!lastIndex.valid || !parentExpr.valid ||
@@ -247,7 +247,7 @@ bool ReductionAnalysis::isScalarExpansionMemoryLegal(
         if (!reduction.gep_store || !reduction.base_store) {
             return false;
         }
-        unsigned storeLast = reduction.gep_store->num_ops_ - 1;
+        unsigned storeLast = reduction.gep_store->num_ops() - 1;
         if (!exactParentCoordinate(
                 reduction.gep_store->get_operand(storeLast))) {
             return false;
@@ -271,7 +271,7 @@ bool ReductionAnalysis::isScalarExpansionMemoryLegal(
             // parent iterations then address disjoint slices, while loads and
             // the delayed store within one iteration retain read-before-write.
             bool sameParentSlice = false;
-            for (unsigned i = 1; i < bodyGEP->num_ops_; ++i) {
+            for (unsigned i = 1; i < bodyGEP->num_ops(); ++i) {
                 if (exactParentCoordinate(bodyGEP->get_operand(i))) {
                     sameParentSlice = true;
                     break;

@@ -151,7 +151,7 @@ expressInState(Value *v, const System &sys, const std::set<BasicBlock *> &blocks
 
     // LCSSA / single-incoming phi of a state value.
     if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
-        if (phi->num_ops_ != 2)
+        if (phi->num_ops() != 2)
             return std::nullopt;
         auto inner =
             expressInState(phi->get_operand(0), sys, blocks, memo);
@@ -212,7 +212,7 @@ bool buildMatrix(System &sys, Loop &loop, BasicBlock *latch) {
         PhiInst *phi = sys.state[i];
         Value *latchVal = nullptr;
         Value *preVal = nullptr;
-        for (unsigned oi = 0; oi < phi->num_ops_; oi += 2) {
+        for (unsigned oi = 0; oi < phi->num_ops(); oi += 2) {
             auto *bb = static_cast<BasicBlock *>(phi->get_operand(oi + 1));
             if (bb == loop.preheader)
                 preVal = phi->get_operand(oi);
@@ -554,7 +554,7 @@ bool collectLiveOut(System &sys, Loop &loop) {
     // Seed: outside users of state PHIs.
     for (int i = 0; i < sys.dim; ++i) {
         for (auto &use : sys.state[i]->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_)
                 continue;
             if (loop.blocks.count(user->parent_))
@@ -575,7 +575,7 @@ bool collectLiveOut(System &sys, Loop &loop) {
         std::vector<Instruction *> snap(linearInsts.begin(), linearInsts.end());
         for (auto *inst : snap) {
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || !user->parent_ || loop.blocks.count(user->parent_))
                     continue;
                 if (linearInsts.count(user))
@@ -594,7 +594,7 @@ bool collectLiveOut(System &sys, Loop &loop) {
     for (auto *inst : linearInsts) {
         bool escapes = false;
         for (auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user)
                 continue;
             if (linearInsts.count(user))
@@ -629,7 +629,7 @@ bool collectLiveOut(System &sys, Loop &loop) {
             if (isState)
                 continue;
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && user->parent_ && !loop.blocks.count(user->parent_)) {
                     // Allowed if this inst is part of the linear tree feeding
                     // liveRoot (expressible and in linearInsts — but inst is
@@ -654,7 +654,7 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     auto *preheaderBr = PH->get_terminator();
     if (!preheaderBr || !preheaderBr->is_br())
         return reject("bad preheader terminator");
-    if (preheaderBr->num_ops_ != 1)
+    if (preheaderBr->num_ops() != 1)
         return reject("preheader not unconditional");
     if (preheaderBr->get_operand(0) != loop.header)
         return reject("preheader does not target header");
@@ -662,9 +662,9 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     // Replace all uses of liveRoot with folded, then drop the dead sum tree.
     std::vector<std::pair<Instruction *, unsigned>> uses;
     for (auto &use : liveRoot->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user)
-            uses.push_back({user, use.arg_no_});
+            uses.push_back({user, use.operand_index_});
     }
     for (auto &[user, arg] : uses)
         user->set_operand(arg, folded);
@@ -710,7 +710,7 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     }
     for (auto *inst : exitPhis) {
         auto *phi = static_cast<PhiInst *>(inst);
-        for (unsigned i = 0; i < phi->num_ops_;) {
+        for (unsigned i = 0; i < phi->num_ops();) {
             auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (pred == loop.header || loop.blocks.count(pred)) {
                 phi->remove_operands(i, i + 1);
@@ -719,7 +719,7 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
             i += 2;
         }
         bool hasArrive = false;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == arrive)
                 hasArrive = true;
         }
@@ -752,13 +752,13 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
         return reject("guarded matpow needs liveRoot in exit");
 
     auto *preheaderBr = PH->get_terminator();
-    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1)
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops() != 1)
         return reject("bad preheader terminator");
     if (preheaderBr->get_operand(0) != loop.header)
         return reject("preheader does not target header");
 
     auto *afterBr = mp.after->get_terminator();
-    if (!afterBr || !afterBr->is_br() || afterBr->num_ops_ != 1)
+    if (!afterBr || !afterBr->is_br() || afterBr->num_ops() != 1)
         return reject("bad matpow after terminator");
     if (afterBr->get_operand(0) != exit)
         return reject("matpow after does not target exit");
@@ -793,7 +793,7 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
     // now has predecessor `join` instead of `exit`. Retarget PHI incomings.
     auto *movedTerm = join->get_terminator();
     if (movedTerm && movedTerm->is_br()) {
-        for (unsigned oi = 0; oi < movedTerm->num_ops_; ++oi) {
+        for (unsigned oi = 0; oi < movedTerm->num_ops(); ++oi) {
             auto *succ = dynamic_cast<BasicBlock *>(movedTerm->get_operand(oi));
             if (!succ || succ == exit)
                 continue;
@@ -801,7 +801,7 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
                 if (!inst->is_phi())
                     break;
                 auto *phi = static_cast<PhiInst *>(inst);
-                for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                     if (phi->get_operand(i + 1) == exit)
                         phi->set_operand(i + 1, join);
                 }
@@ -832,9 +832,9 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
 
     std::vector<std::pair<Instruction *, unsigned>> uses;
     for (auto &use : liveRoot->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user && user != merge)
-            uses.push_back({user, use.arg_no_});
+            uses.push_back({user, use.operand_index_});
     }
     for (auto &[user, arg] : uses)
         user->set_operand(arg, merge);
@@ -880,7 +880,7 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
 
     // Header: IV + state phis, then icmp slt + br.
     auto *term = loop.header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3)
+    if (!term || !term->is_br() || term->num_ops() != 3)
         return reject("bad header terminator");
     auto *cond = dynamic_cast<ICmpInst *>(term->get_operand(0));
     if (!cond || cond->icmp_op_ != ICmpInst::ICMP_SLT)
@@ -901,10 +901,10 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
     for (auto *phi : phis) {
         if (phi->type_->tid_ != Type::IntegerTyID)
             continue;
-        if (phi->num_ops_ != 4)
+        if (phi->num_ops() != 4)
             continue;
         Value *pre = nullptr, *lat = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *bb = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (bb == loop.preheader)
                 pre = phi->get_operand(i);
@@ -942,7 +942,7 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
     for (auto *phi : phis) {
         if (phi == iv)
             continue;
-        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops_ != 4)
+        if (phi->type_->tid_ != Type::IntegerTyID || phi->num_ops() != 4)
             return reject("bad state phi");
         sys.state.push_back(phi);
     }

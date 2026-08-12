@@ -34,7 +34,7 @@ void removeIncomingFromPhis(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        for (int i = (int)phi->num_ops_ - 1; i >= 1; i -= 2) {
+        for (int i = (int)phi->num_ops() - 1; i >= 1; i -= 2) {
             if (phi->get_operand(i) == pred)
                 phi->remove_operands(i - 1, i);
         }
@@ -120,7 +120,7 @@ Instruction *SimpleLoopUnswitch::cloneInst(
                             mv(fcmp->get_operand(1)), newBB);
     if (auto *gep = dynamic_cast<GetElementPtrInst *>(oldInst)) {
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < gep->num_ops_; ++i)
+        for (unsigned i = 1; i < gep->num_ops(); ++i)
             idxs.push_back(mv(gep->get_operand(i)));
         return new GetElementPtrInst(mv(gep->get_operand(0)), idxs, newBB);
     }
@@ -131,24 +131,24 @@ Instruction *SimpleLoopUnswitch::cloneInst(
                              newBB);
     if (auto *call = dynamic_cast<CallInst *>(oldInst)) {
         std::vector<Value *> args;
-        for (unsigned i = 0; i < call->num_ops_ - 1; ++i)
+        for (unsigned i = 0; i < call->num_ops() - 1; ++i)
             args.push_back(mv(call->get_operand(i)));
         auto *callee =
-            dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+            dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
         if (!callee) return nullptr;
         return new CallInst(callee, args, newBB);
     }
     if (auto *z = dynamic_cast<ZextInst *>(oldInst))
-        return new ZextInst(z->op_id_, mv(z->get_operand(0)), z->dest_ty_,
+        return new ZextInst(z->op_id_, mv(z->get_operand(0)), z->type_,
                             newBB);
     if (auto *f = dynamic_cast<FpToSiInst *>(oldInst))
-        return new FpToSiInst(f->op_id_, mv(f->get_operand(0)), f->dest_ty_,
+        return new FpToSiInst(f->op_id_, mv(f->get_operand(0)), f->type_,
                               newBB);
     if (auto *s = dynamic_cast<SiToFpInst *>(oldInst))
-        return new SiToFpInst(s->op_id_, mv(s->get_operand(0)), s->dest_ty_,
+        return new SiToFpInst(s->op_id_, mv(s->get_operand(0)), s->type_,
                               newBB);
     if (auto *bc = dynamic_cast<Bitcast *>(oldInst))
-        return new Bitcast(bc->op_id_, mv(bc->get_operand(0)), bc->dest_ty_,
+        return new Bitcast(bc->op_id_, mv(bc->get_operand(0)), bc->type_,
                            newBB);
     if (auto *sel = dynamic_cast<SelectInst *>(oldInst))
         return new SelectInst(mv(sel->get_operand(0)), mv(sel->get_operand(1)),
@@ -167,7 +167,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
     BasicBlock *preheader = loop.preheader;
     if (!preheader) return false;
     auto *preTerm = preheader->get_terminator();
-    if (!preTerm || !preTerm->is_br() || preTerm->num_ops_ != 1 ||
+    if (!preTerm || !preTerm->is_br() || preTerm->num_ops() != 1 ||
         preTerm->get_operand(0) != loop.header)
         return false;
 
@@ -177,7 +177,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
     ICmpInst *hoistCmp = nullptr; // 形态 (b) 时指向循环内的原比较
     for (auto *bb : loop.blocksOrdered) {
         auto *term = bb->get_terminator();
-        if (!term || !term->is_br() || term->num_ops_ != 3) continue;
+        if (!term || !term->is_br() || term->num_ops() != 3) continue;
         auto *t = dynamic_cast<BasicBlock *>(term->get_operand(1));
         auto *f = dynamic_cast<BasicBlock *>(term->get_operand(2));
         if (!t || !f || t == f) continue;
@@ -190,7 +190,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
                 auto *cmp = dynamic_cast<ICmpInst *>(ci);
                 if (!cmp) continue;
                 bool opsInvariant = true;
-                for (unsigned i = 0; i < cmp->num_ops_; i++) {
+                for (unsigned i = 0; i < cmp->num_ops(); i++) {
                     auto *oi = dynamic_cast<Instruction *>(cmp->get_operand(i));
                     if (oi && loop.isInLoop(oi->parent_)) {
                         opsInvariant = false;
@@ -219,7 +219,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
         for (auto *inst : bb->instr_list_) {
             if (inst->is_ret()) return false;
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || !user->parent_) continue;
                 if (loop.isInLoop(user->parent_)) continue;
                 bool isExitPhi =
@@ -252,7 +252,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
                 valMap[phi] = np;
                 fixups.push_back({np, phi});
             } else if (auto *br = dynamic_cast<BranchInst *>(inst)) {
-                if (br->num_ops_ == 3) {
+                if (br->num_ops() == 3) {
                     auto *t = static_cast<BasicBlock *>(
                         mapValue(br->get_operand(1), valMap));
                     auto *f = static_cast<BasicBlock *>(
@@ -281,7 +281,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
         }
     }
     for (auto &fix : fixups) {
-        for (unsigned i = 0; i < fix.oldPhi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < fix.oldPhi->num_ops(); i += 2) {
             Value *v = mapValue(fix.oldPhi->get_operand(i), valMap);
             auto *bb = static_cast<BasicBlock *>(
                 mapValue(fix.oldPhi->get_operand(i + 1), valMap));
@@ -301,7 +301,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
             if (!inst->is_phi()) break;
             auto *phi = static_cast<PhiInst *>(inst);
             std::vector<std::pair<Value *, BasicBlock *>> adds;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
                 if (!pred || !loop.isInLoop(pred)) continue;
                 adds.emplace_back(mapValue(phi->get_operand(i), valMap),
@@ -352,7 +352,7 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
         for (auto *inst : header->instr_list_) {
             if (!inst->is_phi()) break;
             auto *phi = static_cast<PhiInst *>(inst);
-            for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 1; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i) == oldPred)
                     phi->set_operand(i, newPred);
             }

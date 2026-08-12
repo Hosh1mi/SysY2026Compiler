@@ -61,7 +61,7 @@ static bool isExistingPreheader(BasicBlock *bb, BasicBlock *header) {
     if (bb->succ_bbs_.size() != 1 || bb->succ_bbs_[0] != header)
         return false;
     auto *term = bb->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 1)
+    if (!term || !term->is_br() || term->num_ops() != 1)
         return false;
     if (term->get_operand(0) != header)
         return false;
@@ -100,7 +100,7 @@ static void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
     if (!term || !term->is_br())
         return;
 
-    for (unsigned i = 0; i < term->num_ops_; i++) {
+    for (unsigned i = 0; i < term->num_ops(); i++) {
         if (term->get_operand(i) == oldTarget)
             term->set_operand(i, newTarget);
     }
@@ -169,7 +169,7 @@ bool insertPreheader(Loop *loop, Function *func) {
         std::vector<Value *>    outsideVals;
         std::vector<BasicBlock *> outsideBBs; // for dedup check
 
-        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+        for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
             // Check if this BB operand is one of our outside predecessors
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!predBB) continue;
@@ -236,7 +236,7 @@ bool insertBackedgeBlock(Loop *loop, Function *func) {
 
         std::vector<Value *> latchVals;
         std::vector<BasicBlock *> latchBBs;
-        for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+        for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!predBB) continue;
             if (std::find(latches.begin(), latches.end(), predBB) == latches.end())
@@ -299,7 +299,7 @@ bool insertDedicatedExits(Loop *loop, Function *func) {
 
             std::vector<Value *> vals;
             std::vector<BasicBlock *> bbs;
-            for (int i = (int)phi->num_ops_ - 2; i >= 0; i -= 2) {
+            for (int i = (int)phi->num_ops() - 2; i >= 0; i -= 2) {
                 auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
                 if (!predBB) continue;
                 if (std::find(inPreds.begin(), inPreds.end(), predBB) ==

@@ -63,7 +63,7 @@ struct Verifier {
             auto *term = bb->get_terminator();
             if (!term) continue;
             std::set<BasicBlock *> seen;
-            for (unsigned i = 0; i < term->num_ops_; ++i) {
+            for (unsigned i = 0; i < term->num_ops(); ++i) {
                 auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(i));
                 if (!succ) continue;
                 if (!inFunc.count(succ)) {
@@ -219,12 +219,12 @@ struct Verifier {
     }
 
     void verifyPhi(Function *func, BasicBlock *bb, PhiInst *phi) {
-        if (phi->num_ops_ % 2 != 0) {
+        if (phi->num_ops() % 2 != 0) {
             report(func, "phi in '" + bb->name_ + "' has odd operand count");
             return;
         }
         std::set<BasicBlock *> incoming;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             Value *val = phi->get_operand(i);
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!pred) {
@@ -297,7 +297,7 @@ struct Verifier {
             }
         }
         if (inst->op_id_ == Instruction::InsertElement) {
-            if (inst->num_ops_ != 3) {
+            if (inst->num_ops() != 3) {
                 report(func, "insertelement in '" + bb->name_ +
                                  "' has wrong operand count");
             } else {
@@ -321,7 +321,7 @@ struct Verifier {
             }
         }
         if (inst->op_id_ == Instruction::ExtractElement) {
-            if (inst->num_ops_ != 2) {
+            if (inst->num_ops() != 2) {
                 report(func, "extractelement in '" + bb->name_ +
                        "' has wrong operand count");
             } else {
@@ -346,7 +346,7 @@ struct Verifier {
         if (inst->op_id_ == Instruction::ShuffleVector) {
             auto *shuffle = static_cast<ShuffleVectorInst *>(inst);
             auto *vectorTy = dynamic_cast<VectorType *>(inst->type_);
-            if (!vectorTy || inst->num_ops_ != 3) {
+            if (!vectorTy || inst->num_ops() != 3) {
                 report(func, "shufflevector in '" + bb->name_ +
                                  "' is malformed");
             } else {
@@ -365,7 +365,7 @@ struct Verifier {
                                          "' has an out-of-range mask lane");
             }
         }
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             Value *op = inst->get_operand(i);
             if (!op) {
                 report(func, "null operand in '" + bb->name_ + "'");
@@ -404,12 +404,12 @@ struct Verifier {
 
     void verifyUseDef(Function *func, Instruction *inst) {
         // operand → use_list_ 方向
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             Value *op = inst->get_operand(i);
             if (!op) continue;
             bool found = false;
             for (auto &use : op->use_list_) {
-                if (use.val_ == inst && use.arg_no_ == i) { found = true; break; }
+                if (use.user_ == inst && use.operand_index_ == i) { found = true; break; }
             }
             if (!found)
                 report(func, "use-def broken: operand " + std::to_string(i) +
@@ -418,7 +418,7 @@ struct Verifier {
         }
         // use_list_ → operand 方向
         for (auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user) {
                 report(func, "use_list_ of value in '" + inst->parent_->name_ +
                        "' contains non-instruction user");
@@ -427,8 +427,8 @@ struct Verifier {
             if (!user->parent_)
                 continue;  // 已删除的 user 残留 use 记录——由删除路径负责清理，
                            // 这里不视为违例（delete_instr 会清掉，但 RAUW 路径未必）
-            if (use.arg_no_ >= user->num_ops_ ||
-                user->get_operand(use.arg_no_) != inst)
+            if (use.operand_index_ >= user->num_ops() ||
+                user->get_operand(use.operand_index_) != inst)
                 report(func, "use_list_ of value in '" + inst->parent_->name_ +
                        "' has stale entry (user operand mismatch)");
         }

@@ -39,35 +39,34 @@ public:
 
     // 获取指针类型（缓存避免重复创建）
     PointerType* get_pointer_type(Type* contained) {
-        if (!pointer_map_.count(contained)) {
-            pointer_map_[contained] = new PointerType(contained);
-        }
-        return pointer_map_[contained];
+        auto &type = pointer_map_[contained];
+        if (!type)
+            type = new PointerType(contained);
+        return type;
     }
 
     // 获取数组类型（缓存避免重复创建）
     ArrayType* get_array_type(Type* contained, unsigned num_elements) {
-        if (!array_map_.count({contained, num_elements})) {
-            array_map_[{contained, num_elements}] = new ArrayType(contained, num_elements);
-        }
-        return array_map_[{contained, num_elements}];
+        auto &type = array_map_[{contained, num_elements}];
+        if (!type)
+            type = new ArrayType(contained, num_elements);
+        return type;
     }
 
     // 获取向量类型（缓存避免重复创建）
     VectorType* get_vector_type(Type* contained, unsigned num_elements) {
-        if (!vector_map_.count({contained, num_elements})) {
-            vector_map_[{contained, num_elements}] = new VectorType(contained, num_elements);
-        }
-        return vector_map_[{contained, num_elements}];
+        auto &type = vector_map_[{contained, num_elements}];
+        if (!type)
+            type = new VectorType(contained, num_elements);
+        return type;
     }
 
     ScalarizedVectorType* get_scalarized_vector_type(Type* contained,
                                                      unsigned num_elements) {
-        if (!scalarized_vector_map_.count({contained, num_elements})) {
-            scalarized_vector_map_[{contained, num_elements}] =
-                new ScalarizedVectorType(contained, num_elements);
-        }
-        return scalarized_vector_map_[{contained, num_elements}];
+        auto &type = scalarized_vector_map_[{contained, num_elements}];
+        if (!type)
+            type = new ScalarizedVectorType(contained, num_elements);
+        return type;
     }
 
     Function* getMainFunc();
@@ -86,8 +85,8 @@ public:
 
 private:
     std::map<Type*, PointerType*> pointer_map_;
-    std::map<std::pair<Type*, int>, ArrayType*> array_map_;
-    std::map<std::pair<Type*, int>, VectorType*> vector_map_;
-    std::map<std::pair<Type*, int>, ScalarizedVectorType*>
+    std::map<std::pair<Type*, unsigned>, ArrayType*> array_map_;
+    std::map<std::pair<Type*, unsigned>, VectorType*> vector_map_;
+    std::map<std::pair<Type*, unsigned>, ScalarizedVectorType*>
         scalarized_vector_map_;
 };

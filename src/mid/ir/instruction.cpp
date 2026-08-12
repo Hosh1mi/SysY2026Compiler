@@ -286,7 +286,7 @@ std::string CallInst::print() {
         instr_ir += "tail ";
     instr_ir += instr_id2string_[this->op_id_];
     instr_ir += " ";
-    unsigned int numops = this->num_ops_;
+    unsigned int numops = this->num_ops();
     instr_ir += static_cast<FunctionType*>(this->get_operand(numops - 1)->type_)->result_->print();
 
     instr_ir += " ";
@@ -311,7 +311,7 @@ std::string BranchInst::print() {
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), true);
 
-    if (this->num_ops_ == 3) {
+    if (this->num_ops() == 3) {
         instr_ir += ", ";
         instr_ir += print_as_op(this->get_operand(1), true);
         instr_ir += ", ";
@@ -325,7 +325,7 @@ std::string ReturnInst::print() {
     std::string instr_ir;
     instr_ir += instr_id2string_[this->op_id_];
     instr_ir += " ";
-    if (this->num_ops_ != 0) {
+    if (this->num_ops() != 0) {
         instr_ir += this->get_operand(0)->type_->print();
         instr_ir += " ";
         instr_ir += print_as_op(this->get_operand(0), false);
@@ -346,7 +346,7 @@ std::string GetElementPtrInst::print() {
     assert(this->get_operand(0)->type_->tid_ == Type::PointerTyID);
     instr_ir += static_cast<PointerType*>(this->get_operand(0)->type_)->contained_->print();
     instr_ir += ", ";
-    for (unsigned int i = 0; i < this->num_ops_; i++) {
+    for (unsigned int i = 0; i < this->num_ops(); i++) {
         if (i > 0) instr_ir += ", ";
         instr_ir += this->get_operand(i)->type_->print();
         instr_ir += " ";
@@ -394,7 +394,7 @@ std::string AllocaInst::print() {
     instr_ir += " = ";
     instr_ir += instr_id2string_[this->op_id_];
     instr_ir += " ";
-    instr_ir += alloca_ty_->print();
+    instr_ir += allocated_type()->print();
     if (this->hasSemFlag(SemFlag::ImmutableObject)) {
         instr_ir += "  ; immutable";
         if (this->hasSemFlag(SemFlag::SrcConstArray))
@@ -414,7 +414,7 @@ std::string ZextInst::print() {
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), false);
     instr_ir += " to ";
-    instr_ir += this->dest_ty_->print();
+    instr_ir += this->type_->print();
     return instr_ir;
 }
 
@@ -429,7 +429,7 @@ std::string FpToSiInst::print() {
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), false);
     instr_ir += " to ";
-    instr_ir += this->dest_ty_->print();
+    instr_ir += this->type_->print();
     return instr_ir;
 }
 
@@ -444,7 +444,7 @@ std::string SiToFpInst::print() {
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), false);
     instr_ir += " to ";
-    instr_ir += this->dest_ty_->print();
+    instr_ir += this->type_->print();
     return instr_ir;
 }
 
@@ -459,7 +459,7 @@ std::string Bitcast::print() {
     instr_ir += " ";
     instr_ir += print_as_op(this->get_operand(0), false);
     instr_ir += " to ";
-    instr_ir += this->dest_ty_->print();
+    instr_ir += this->type_->print();
     return instr_ir;
 }
 
@@ -523,7 +523,7 @@ std::string PhiInst::print() {
     instr_ir += " ";
     instr_ir += this->get_operand(0)->type_->print();
     instr_ir += " ";
-    for (int i = 0; i < this->num_ops_ / 2; i++) {
+    for (int i = 0; i < this->num_ops() / 2; i++) {
         if (i > 0) instr_ir += ", ";
         instr_ir += "[ ";
         instr_ir += print_as_op(this->get_operand(2 * i), false);
@@ -531,7 +531,7 @@ std::string PhiInst::print() {
         instr_ir += print_as_op(this->get_operand(2 * i + 1), false);
         instr_ir += " ]";
     }
-    if (this->num_ops_ / 2 < this->parent_->pre_bbs_.size()) {
+    if (this->num_ops() / 2 < this->parent_->pre_bbs_.size()) {
         for (auto pre_bb : this->parent_->pre_bbs_) {
             if (std::find(this->operands_.begin(), this->operands_.end(), static_cast<Value*>(pre_bb)) == this->operands_.end()) {
                 instr_ir += ", [ undef, " + print_as_op(pre_bb, false) + " ]";

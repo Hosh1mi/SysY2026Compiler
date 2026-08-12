@@ -32,16 +32,16 @@ static bool isPattern2TailCall(CallInst *call, BasicBlock *target,
         return false;
 
     for (auto &use : call->use_list_) {
-        auto *phi = dynamic_cast<PhiInst *>(use.val_);
+        auto *phi = dynamic_cast<PhiInst *>(use.user_);
         if (!phi || phi->parent_ != target)
             return false;
     }
 
-    if (targetTerm->num_ops_ > 0) {
+    if (targetTerm->num_ops() > 0) {
         Value *retVal = targetTerm->get_operand(0);
         bool usedByRet = false;
         for (auto &use : call->use_list_) {
-            if (use.val_ == retVal) {
+            if (use.user_ == retVal) {
                 usedByRet = true;
                 break;
             }
@@ -76,7 +76,7 @@ static void canonicalizePattern2(CallInst *call, BasicBlock *bb,
         if (!phi)
             break;
         bool removed = false;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == bb) {
                 phi->remove_operands(static_cast<int>(i),
                                      static_cast<int>(i + 1));
@@ -132,7 +132,7 @@ bool TailCallOpt::runOnFunction(Function *func) {
 
         if (term->is_ret()) {
             CallInst *call = nullptr;
-            if (term->num_ops_ > 0) {
+            if (term->num_ops() > 0) {
                 call = dynamic_cast<CallInst *>(term->get_operand(0));
                 if (!call || !isFinalNonTerminator(call, bb))
                     continue;
@@ -147,7 +147,7 @@ bool TailCallOpt::runOnFunction(Function *func) {
             continue;
         }
 
-        if (term->is_br() && term->num_ops_ == 1) {
+        if (term->is_br() && term->num_ops() == 1) {
             auto *target = static_cast<BasicBlock *>(term->get_operand(0));
             CallInst *call = findTrailingCall(bb);
             if (!call || !isPattern2TailCall(call, target, bb))

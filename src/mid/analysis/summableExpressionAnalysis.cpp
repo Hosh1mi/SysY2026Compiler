@@ -244,7 +244,7 @@ void collectValues(Value *value, std::set<Value *> &seen,
     values.push_back(value);
     auto *instruction = dynamic_cast<Instruction *>(value);
     if (!instruction) return;
-    for (unsigned index = 0; index < instruction->num_ops_; ++index) {
+    for (unsigned index = 0; index < instruction->num_ops(); ++index) {
         Value *operand = instruction->get_operand(index);
         if (dynamic_cast<BasicBlock *>(operand) ||
             dynamic_cast<Function *>(operand))

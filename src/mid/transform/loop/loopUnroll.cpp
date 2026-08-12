@@ -381,7 +381,7 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
 
     if (auto *gi = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < gi->num_ops_; i++)
+        for (unsigned i = 1; i < gi->num_ops(); i++)
             idxs.push_back(remap(gi->get_operand(i)));
         auto *inst = new GetElementPtrInst(remap(gi->get_operand(0)), idxs, destBB);
         inst->copySemFlagsFrom(gi);
@@ -406,7 +406,7 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     if (auto *zi = dynamic_cast<ZextInst *>(orig))
         {
             auto *inst = new ZextInst(zi->op_id_, remap(zi->get_operand(0)),
-                                      zi->dest_ty_, destBB);
+                                      zi->type_, destBB);
             inst->copySemFlagsFrom(zi);
             return inst;
         }
@@ -414,7 +414,7 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     if (auto *fp = dynamic_cast<FpToSiInst *>(orig))
         {
             auto *inst = new FpToSiInst(fp->op_id_, remap(fp->get_operand(0)),
-                                        fp->dest_ty_, destBB);
+                                        fp->type_, destBB);
             inst->copySemFlagsFrom(fp);
             return inst;
         }
@@ -422,7 +422,7 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     if (auto *sf = dynamic_cast<SiToFpInst *>(orig))
         {
             auto *inst = new SiToFpInst(sf->op_id_, remap(sf->get_operand(0)),
-                                        sf->dest_ty_, destBB);
+                                        sf->type_, destBB);
             inst->copySemFlagsFrom(sf);
             return inst;
         }
@@ -430,7 +430,7 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     if (auto *bc = dynamic_cast<Bitcast *>(orig))
         {
             auto *inst = new Bitcast(bc->op_id_, remap(bc->get_operand(0)),
-                                     bc->dest_ty_, destBB);
+                                     bc->type_, destBB);
             inst->copySemFlagsFrom(bc);
             return inst;
         }
@@ -484,7 +484,7 @@ static bool dependsOnAlloca(Value *value, std::set<Value *> &visited) {
     auto *inst = dynamic_cast<Instruction *>(value);
     if (!inst)
         return false;
-    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+    for (unsigned i = 0; i < inst->num_ops(); ++i) {
         if (dynamic_cast<BasicBlock *>(inst->get_operand(i)))
             continue;
         if (dependsOnAlloca(inst->get_operand(i), visited))
@@ -502,12 +502,12 @@ static bool hasEntryLowerBoundGuard(BasicBlock *preheader, BasicBlock *header,
                                     Value *bound, ConstantInt *init) {
     auto *br = dynamic_cast<BranchInst *>(preheader ? preheader->get_terminator() : nullptr);
     if (!br || !init) return false;
-    if (br->num_ops_ == 1 && br->get_operand(0) == header &&
+    if (br->num_ops() == 1 && br->get_operand(0) == header &&
         preheader->pre_bbs_.size() == 1) {
         return hasEntryLowerBoundGuard(preheader->pre_bbs_[0], preheader,
                                        bound, init);
     }
-    if (br->num_ops_ != 3) return false;
+    if (br->num_ops() != 3) return false;
     auto *cmp = dynamic_cast<ICmpInst *>(br->get_operand(0));
     if (!cmp) return false;
 
@@ -546,7 +546,7 @@ static bool hasNestedLoopBackedge(const Loop &loop) {
     for (auto *bb : loop.blocksOrdered) {
         auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
         if (!br) continue;
-        for (unsigned i = 0; i < br->num_ops_; ++i) {
+        for (unsigned i = 0; i < br->num_ops(); ++i) {
             auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(i));
             if (!succ || succ == loop.header) continue;
             if (loop.blocks.count(succ))
@@ -607,7 +607,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     if (!latchBr || !latchBr->is_br())
         return false;
     // Unconditional br has a single target operand.
-    if (latchBr->num_ops_ != 1 || latchBr->get_operand(0) != header)
+    if (latchBr->num_ops() != 1 || latchBr->get_operand(0) != header)
         return false;
     if (latch->succ_bbs_.size() != 1 || latch->succ_bbs_[0] != header)
         return false;
@@ -662,7 +662,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
 
             // Verify this instruction feeds back into the phi
             bool feedsBack = false;
-            for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i) == inst) { feedsBack = true; break; }
             }
             if (!feedsBack) continue;
@@ -702,7 +702,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
 
     // Determine which branch successor is the body vs exit
     auto *headerBr = header->get_terminator();
-    if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3) return false;
+    if (!headerBr || !headerBr->is_br() || headerBr->num_ops() != 3) return false;
     // The compare selected above must be the loop's actual continue
     // condition.  A header may contain auxiliary range/overflow compares
     // combined by an `and`; adjusting one of those as if it were the branch
@@ -726,7 +726,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             ++unrollCost.memoryOperations;
         if (inst->type_->tid_ == Type::VectorTyID)
             unrollCost.hasVectorOperations = true;
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID) {
                 unrollCost.hasVectorOperations = true;
                 break;
@@ -780,7 +780,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
 
     // Helper: get the preheader-incoming value of a phi
     auto getInitVal = [&](PhiInst *phi) -> Value * {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == preheader)
                 return phi->get_operand(i);
         return nullptr;
@@ -790,7 +790,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // block exactly — "any in-loop predecessor" is the wrong query once a
     // header grows additional loop-internal edges.
     auto getLatchVal = [&](PhiInst *phi) -> Value * {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *incomingBlock =
                 static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (incomingBlock == latch)
@@ -1002,27 +1002,20 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // 7. Update original header phis: change preheader-incoming →
     // [mainPhiVal, remEntry]
     for (auto phi : headerPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) != preheader) continue;
-            // Remove old uses
-            phi->get_operand(i)->remove_use(phi->use_pos_[i]);
-            phi->get_operand(i + 1)->remove_use(phi->use_pos_[i + 1]);
             // Set new incoming: value = mainPhi, block = headerMain
-            phi->operands_[i]     = phiToMain[phi];
-            phi->use_pos_[i]      = phiToMain[phi]->add_use(phi, i);
-            phi->operands_[i + 1] = remEntry;
-            phi->use_pos_[i + 1]  = remEntry->add_use(phi, i + 1);
+            phi->set_operand(i, phiToMain[phi]);
+            phi->set_operand(i + 1, remEntry);
             break;
         }
     }
 
     // 8. Redirect preheader → headerMain (was → header)
     auto *preheaderBr = preheader->get_terminator();
-    for (unsigned i = 0; i < preheaderBr->num_ops_; i++) {
+    for (unsigned i = 0; i < preheaderBr->num_ops(); i++) {
         if (preheaderBr->get_operand(i) != header) continue;
-        preheaderBr->get_operand(i)->remove_use(preheaderBr->use_pos_[i]);
-        preheaderBr->operands_[i] = headerMain;
-        preheaderBr->use_pos_[i]  = headerMain->add_use(preheaderBr, i);
+        preheaderBr->set_operand(i, headerMain);
         break;
     }
     preheader->remove_succ_basic_block(header);
@@ -1049,7 +1042,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         return debugStructuredReject(func, loop, "multiple-exiting-blocks");
 
     auto *latchTerm = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!latchTerm || latchTerm->num_ops_ != 3)
+    if (!latchTerm || latchTerm->num_ops() != 3)
         return debugStructuredReject(func, loop, "latch-not-cond-branch");
     auto *continueSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(1));
     auto *exitSucc = dynamic_cast<BasicBlock *>(latchTerm->get_operand(2));
@@ -1066,11 +1059,11 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     for (auto *inst : header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ != 4)
+        if (phi->num_ops() != 4)
             return debugStructuredReject(func, loop, "non-canonical-header-phi");
         Value *init = nullptr;
         Value *back = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == preheader)
                 init = phi->get_operand(i);
@@ -1172,7 +1165,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
             ++bodyInstCount;
         }
         auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
-        if (term && term->num_ops_ == 3 && bb != latch)
+        if (term && term->num_ops() == 3 && bb != latch)
             ++condBranchBlocks;
     }
     if (bodyInstCount > MAX_STRUCTURED_LOOP_INSTS)
@@ -1351,7 +1344,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
                             new BranchInst(headerMain, newBB);
                         continue;
                     }
-                    if (oldBr->num_ops_ == 1) {
+                    if (oldBr->num_ops() == 1) {
                         auto *dest = dynamic_cast<BasicBlock *>(
                             mapLoopValue(oldBr->get_operand(0), valueMap, bbMap));
                         if (!dest) return false;
@@ -1396,7 +1389,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     new BranchInst(cmpRem, header, exitBB, remCheck);
 
     auto *preBr = preheader->get_terminator();
-    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+    for (unsigned i = 0; i < preBr->num_ops(); ++i) {
         if (preBr->get_operand(i) == header)
             preBr->set_operand(i, headerMain);
     }
@@ -1406,7 +1399,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     headerMain->add_pre_basic_block(preheader);
 
     for (auto *phi : headerPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == preheader) {
                 phi->set_operand(i, mainPhis[phi]);
                 phi->set_operand(i + 1, remCheck);
@@ -1424,7 +1417,7 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromLatch = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == latch) {
                 fromLatch = phi->get_operand(i);
                 break;
@@ -1460,7 +1453,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
         return debugCFGRegionReject(func, loop, "stateful-non-header-exit");
 
     auto *headerBr = dynamic_cast<BranchInst *>(header->get_terminator());
-    if (!headerBr || headerBr->num_ops_ != 3)
+    if (!headerBr || headerBr->num_ops() != 3)
         return debugCFGRegionReject(func, loop, "stateful-header-not-cond-branch");
     auto *bodyEntry = dynamic_cast<BasicBlock *>(headerBr->get_operand(1));
     auto *headerExit = dynamic_cast<BasicBlock *>(headerBr->get_operand(2));
@@ -1469,7 +1462,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
         return debugCFGRegionReject(func, loop, "stateful-header-successors");
 
     auto *latchBr = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!latchBr || latchBr->num_ops_ != 1 || latchBr->get_operand(0) != header)
+    if (!latchBr || latchBr->num_ops() != 1 || latchBr->get_operand(0) != header)
         return debugCFGRegionReject(func, loop, "stateful-latch-not-backedge");
 
     std::vector<PhiInst *> headerPhis;
@@ -1478,11 +1471,11 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
     for (auto *inst : header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ != 4)
+        if (phi->num_ops() != 4)
             return debugCFGRegionReject(func, loop, "stateful-non-canonical-header-phi");
         Value *init = nullptr;
         Value *back = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == preheader)
                 init = phi->get_operand(i);
@@ -1552,7 +1545,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                 auto *br = dynamic_cast<BranchInst *>(inst);
                 if (!br)
                     return debugCFGRegionReject(func, loop, "stateful-non-branch-terminator");
-                for (unsigned i = br->num_ops_ == 3 ? 1 : 0; i < br->num_ops_; ++i) {
+                for (unsigned i = br->num_ops() == 3 ? 1 : 0; i < br->num_ops(); ++i) {
                     auto *succ = dynamic_cast<BasicBlock *>(br->get_operand(i));
                     if (!succ)
                         return debugCFGRegionReject(func, loop, "stateful-bad-branch-target");
@@ -1561,7 +1554,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                     if (!loop.blocks.count(succ))
                         return debugCFGRegionReject(func, loop, "stateful-branch-exits-region");
                 }
-                if (br->num_ops_ == 3)
+                if (br->num_ops() == 3)
                     ++condBranchBlocks;
                 continue;
             }
@@ -1575,7 +1568,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                 ++memoryOps;
             if (inst->type_->tid_ == Type::VectorTyID)
                 ++vectorOps;
-            for (unsigned i = 0; i < inst->num_ops_; ++i)
+            for (unsigned i = 0; i < inst->num_ops(); ++i)
                 if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID)
                     ++vectorOps;
             ++bodyInstCount;
@@ -1591,12 +1584,12 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
     std::map<Value *, std::vector<OutsideUse>> liveOuts;
     auto collectLiveOut = [&](Instruction *inst) {
         for (const auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ || loop.blocks.count(user->parent_))
                 continue;
             if (user->parent_ == exitBB && user->is_phi())
                 continue;
-            liveOuts[inst].push_back({user, use.arg_no_});
+            liveOuts[inst].push_back({user, use.operand_index_});
         }
     };
     for (auto *phi : headerPhis)
@@ -1795,7 +1788,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                             new BranchInst(headerMain, newBB);
                         continue;
                     }
-                    if (oldBr->num_ops_ == 1) {
+                    if (oldBr->num_ops() == 1) {
                         auto *dest = dynamic_cast<BasicBlock *>(
                             mapLoopValue(oldBr->get_operand(0), valueMap, bbMap));
                         if (!dest) return false;
@@ -1830,7 +1823,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
             for (auto *oldInst : oldBB->instr_list_) {
                 if (!oldInst->is_phi()) break;
                 auto *newPhi = static_cast<PhiInst *>(valueMap[oldInst]);
-                for (unsigned i = 0; i < oldInst->num_ops_; i += 2) {
+                for (unsigned i = 0; i < oldInst->num_ops(); i += 2) {
                     auto *oldPred = dynamic_cast<BasicBlock *>(oldInst->get_operand(i + 1));
                     if (!oldPred || !loop.blocks.count(oldPred))
                         return debugCFGRegionReject(func, loop, "stateful-internal-phi-outside-pred");
@@ -1862,7 +1855,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
 
     auto *preBr = preheader->get_terminator();
     bool redirected = false;
-    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+    for (unsigned i = 0; i < preBr->num_ops(); ++i) {
         if (preBr->get_operand(i) == header) {
             preBr->set_operand(i, headerMain);
             redirected = true;
@@ -1876,7 +1869,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
     headerMain->add_pre_basic_block(preheader);
 
     for (auto *phi : headerPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == preheader) {
                 phi->set_operand(i, mainPhis[phi]);
                 phi->set_operand(i + 1, remCheck);
@@ -1901,7 +1894,7 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromHeader = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == header) {
                 fromHeader = phi->get_operand(i);
                 break;
@@ -1940,7 +1933,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         return debugCFGRegionReject(func, loop, "non-latch-exit");
 
     auto *latchBr = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!latchBr || latchBr->num_ops_ != 3)
+    if (!latchBr || latchBr->num_ops() != 3)
         return debugCFGRegionReject(func, loop, "latch-not-cond-branch");
     auto *latchTrue = dynamic_cast<BasicBlock *>(latchBr->get_operand(1));
     auto *latchFalse = dynamic_cast<BasicBlock *>(latchBr->get_operand(2));
@@ -1953,11 +1946,11 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
     for (auto *inst : header->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ != 4)
+        if (phi->num_ops() != 4)
             return debugCFGRegionReject(func, loop, "non-canonical-header-phi");
         Value *init = nullptr;
         Value *back = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == preheader)
                 init = phi->get_operand(i);
@@ -2030,13 +2023,13 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
                 ++memoryOps;
             if (inst->type_->tid_ == Type::VectorTyID)
                 ++vectorOps;
-            for (unsigned i = 0; i < inst->num_ops_; ++i)
+            for (unsigned i = 0; i < inst->num_ops(); ++i)
                 if (inst->get_operand(i)->type_->tid_ == Type::VectorTyID)
                     ++vectorOps;
             ++bodyInstCount;
         }
         auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
-        if (term && term->num_ops_ == 3)
+        if (term && term->num_ops() == 3)
             ++condBranchBlocks;
     }
     if (bodyInstCount > 48 || loop.blocksOrdered.size() > 16)
@@ -2051,19 +2044,19 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         for (auto *inst : bb->instr_list_) {
             if (inst->isTerminator()) continue;
             for (const auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || !user->parent_ || loop.blocks.count(user->parent_))
                     continue;
                 if (user->parent_ == exitBB && user->is_phi())
                     continue;
-                liveOuts[inst].push_back({user, use.arg_no_});
+                liveOuts[inst].push_back({user, use.operand_index_});
             }
         }
     }
 
     ICmpInst *firstIterCmp = nullptr;
     if (auto *headerBr = dynamic_cast<BranchInst *>(header->get_terminator())) {
-        if (headerBr->num_ops_ == 3) {
+        if (headerBr->num_ops() == 3) {
             auto *cmp = dynamic_cast<ICmpInst *>(headerBr->get_operand(0));
             if (cmp && cmp->icmp_op_ == ICmpInst::ICMP_EQ) {
                 auto *c0 = dynamic_cast<ConstantInt *>(cmp->get_operand(0));
@@ -2248,7 +2241,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
                             new BranchInst(headerMain, newBB);
                         continue;
                     }
-                    if (oldBr->num_ops_ == 1) {
+                    if (oldBr->num_ops() == 1) {
                         auto *dest = dynamic_cast<BasicBlock *>(
                             mapLoopValue(oldBr->get_operand(0), valueMap, bbMap));
                         if (!dest) return false;
@@ -2285,7 +2278,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
             for (auto *oldInst : oldBB->instr_list_) {
                 if (!oldInst->is_phi()) break;
                 auto *newPhi = static_cast<PhiInst *>(valueMap[oldInst]);
-                for (unsigned i = 0; i < oldInst->num_ops_; i += 2) {
+                for (unsigned i = 0; i < oldInst->num_ops(); i += 2) {
                     auto *oldPred = dynamic_cast<BasicBlock *>(oldInst->get_operand(i + 1));
                     if (!oldPred || !loop.blocks.count(oldPred))
                         return debugCFGRegionReject(func, loop, "internal-phi-outside-pred");
@@ -2319,7 +2312,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
 
     auto *preBr = preheader->get_terminator();
     bool redirected = false;
-    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+    for (unsigned i = 0; i < preBr->num_ops(); ++i) {
         if (preBr->get_operand(i) == header) {
             preBr->set_operand(i, headerMain);
             redirected = true;
@@ -2333,7 +2326,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
     headerMain->add_pre_basic_block(preheader);
 
     for (auto *phi : headerPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == preheader) {
                 phi->set_operand(i, mainPhis[phi]);
                 phi->set_operand(i + 1, remCheck);
@@ -2359,7 +2352,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         auto phiFeedsOnlySameSRem = [&](ConstantInt *mod) {
             bool sawUse = false;
             for (const auto &use : exitPhi->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || user->parent_ != exitBB || !user->is_rem())
                     return false;
                 auto *userMod = dynamic_cast<ConstantInt *>(user->get_operand(1));
@@ -2388,7 +2381,7 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromLatch = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == latch)
                 fromLatch = phi->get_operand(i);
         if (fromLatch) {
@@ -2435,7 +2428,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     if (!preheader) return false;
 
     auto *term = header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (!term || !term->is_br() || term->num_ops() != 3) return false;
     auto *trueSucc  = dynamic_cast<BasicBlock *>(term->get_operand(1));
     auto *falseSucc = dynamic_cast<BasicBlock *>(term->get_operand(2));
     if (trueSucc != header || !falseSucc || falseSucc == header) return false;
@@ -2454,19 +2447,19 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     if (headerPhis.empty()) return false;
 
     auto getInitVal = [&](PhiInst *phi) -> Value * {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == preheader)
                 return phi->get_operand(i);
         return nullptr;
     };
     auto getBackVal = [&](PhiInst *phi) -> Value * {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == header)
                 return phi->get_operand(i);
         return nullptr;
     };
     for (auto phi : headerPhis)
-        if (phi->num_ops_ != 4 || !getInitVal(phi) || !getBackVal(phi))
+        if (phi->num_ops() != 4 || !getInitVal(phi) || !getBackVal(phi))
             return false;
 
     // ── 识别 IV：backedge 入值 = add/sub(phi, 常量)，或
@@ -2566,7 +2559,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
             ++unrollCost.memoryOperations;
         if (inst->type_->tid_ == Type::VectorTyID)
             unrollCost.hasVectorOperations = true;
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             if (inst->get_operand(i)->type_->tid_ ==
                 Type::VectorTyID) {
                 unrollCost.hasVectorOperations = true;
@@ -2582,10 +2575,10 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     for (auto inst : header->instr_list_) {
         if (inst == cmpInst || inst->isTerminator()) continue;
         for (const auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_ || user->parent_ == header) continue;
             if (user->parent_ == exitBB && user->is_phi()) continue; // (a)
-            liveOuts[inst].push_back({user, use.arg_no_});           // (b)
+            liveOuts[inst].push_back({user, use.operand_index_});           // (b)
         }
     }
 
@@ -2749,7 +2742,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
             if (inst->is_phi() || inst == cmpInst || inst->isTerminator())
                 continue;
             bool dependsOnState = false;
-            for (unsigned i = 0; i < inst->num_ops_; ++i) {
+            for (unsigned i = 0; i < inst->num_ops(); ++i) {
                 Value *operand = inst->get_operand(i);
                 auto *phi = dynamic_cast<PhiInst *>(operand);
                 auto *operandInst = dynamic_cast<Instruction *>(operand);
@@ -2991,7 +2984,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
     // 6. preheader → checkBlock（替换原指向 header 的边）
     auto *preBr = preheader->get_terminator();
-    for (unsigned i = 0; i < preBr->num_ops_; i++) {
+    for (unsigned i = 0; i < preBr->num_ops(); i++) {
         if (preBr->get_operand(i) == header)
             preBr->set_operand(i, checkBlock);
     }
@@ -3002,7 +2995,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
     // 7. 原循环 phi：preheader 入边 → checkBlock；新增 remCheck 入边
     for (auto phi : headerPhis) {
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == preheader) {
                 phi->set_operand(i + 1, checkBlock);
                 break;
@@ -3016,7 +3009,7 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
         Value *fromHeader = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2)
+        for (unsigned i = 0; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i + 1) == header)
                 fromHeader = phi->get_operand(i);
         if (!fromHeader) return false; // 不应发生：唯一前驱是 header

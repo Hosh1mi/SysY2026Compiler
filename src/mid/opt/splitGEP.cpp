@@ -37,7 +37,7 @@ bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI,
         for (auto *inst : insts) {
             if (!inst->is_gep()) continue;
             auto *gep = static_cast<GetElementPtrInst *>(inst);
-            unsigned numIndices = gep->num_ops_ - 1;
+            unsigned numIndices = gep->num_ops() - 1;
             if (numIndices < 2) continue;
 
             // Longest prefix of indices that are invariant in this loop.

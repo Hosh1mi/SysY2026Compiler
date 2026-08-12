@@ -57,7 +57,7 @@ bool dependsOnImpl(Value *value, Value *target,
         visiting.erase(value);
         return false;
     }
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         Value *operand = instruction->get_operand(i);
         if (dynamic_cast<BasicBlock *>(operand) ||
             dynamic_cast<Function *>(operand))
@@ -93,10 +93,10 @@ bool inferBoundsImpl(Value *value, long long &lower, long long &upper,
         return finish(false);
 
     if (auto *phi = dynamic_cast<PhiInst *>(instruction)) {
-        if (phi->num_ops_ == 0 || phi->num_ops_ % 2 != 0)
+        if (phi->num_ops() == 0 || phi->num_ops() % 2 != 0)
             return finish(false);
         bool firstIncoming = true;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             long long incomingLower = 0, incomingUpper = 0;
             if (!inferBoundsImpl(phi->get_operand(i), incomingLower,
                                  incomingUpper, visiting, depth + 1))
@@ -295,7 +295,7 @@ bool hasPrivateUpdateChain(const Recurrence &recurrence,
                            bool allowExternalUses) {
     for (Instruction *chainInstruction : recurrence.updateChain) {
         for (const auto &use : chainInstruction->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (recurrence.updateChain.count(user))
                 continue;
             if (chainInstruction == recurrence.remainder &&

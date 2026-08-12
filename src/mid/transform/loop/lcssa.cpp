@@ -67,12 +67,12 @@ bool LCSSA::runOnLoop(Loop *loop, const DominatorTreeAnalysis &DT) {
         // 1. 收集循环外的 use
         std::vector<std::pair<Instruction *, unsigned>> outsideUses;
         for (const auto &use : inst->use_list_) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (!user || !user->parent_)
                 continue;
-            BasicBlock *useBlock = getSemanticUseBlock(user, use.arg_no_);
+            BasicBlock *useBlock = getSemanticUseBlock(user, use.operand_index_);
             if (!loop->isInLoop(useBlock))
-                outsideUses.emplace_back(user, use.arg_no_);
+                outsideUses.emplace_back(user, use.operand_index_);
         }
         if (outsideUses.empty())
             continue;

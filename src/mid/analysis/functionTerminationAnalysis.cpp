@@ -10,9 +10,9 @@
 namespace {
 
 Function *calledFunction(CallInst *call) {
-    if (!call || call->num_ops_ == 0)
+    if (!call || call->num_ops() == 0)
         return nullptr;
-    return dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
 bool isUnitStep(const InductionDescriptor &control, long long expected) {

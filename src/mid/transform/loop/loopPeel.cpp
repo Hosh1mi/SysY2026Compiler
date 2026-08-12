@@ -27,9 +27,7 @@ void replaceTerminatorTarget(Instruction *term, unsigned opIdx,
                              BasicBlock *oldTarget, BasicBlock *newTarget) {
     if (term->get_operand(opIdx) != oldTarget)
         return;
-    term->get_operand(opIdx)->remove_use(term->use_pos_[opIdx]);
-    term->operands_[opIdx] = newTarget;
-    term->use_pos_[opIdx] = newTarget->add_use(term, opIdx);
+    term->set_operand(opIdx, newTarget);
 }
 
 bool isSupportedCloneInst(Instruction *inst) {
@@ -62,7 +60,7 @@ bool hasOnlyLCSSAOutsideUses(Loop &loop) {
     for (auto *bb : loop.blocks) {
         for (auto *inst : bb->instr_list_) {
             for (auto &use : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || !user->parent_)
                     continue;
                 if (loop.isInLoop(user->parent_))
@@ -119,7 +117,7 @@ bool preflightClone(Loop &loop, BasicBlock *header, BasicBlock *latch,
         for (auto *inst : bb->instr_list_) {
             if (inst->is_phi() || inst->isTerminator())
                 continue;
-            for (unsigned i = 0; i < inst->num_ops_; ++i)
+            for (unsigned i = 0; i < inst->num_ops(); ++i)
                 if (!canRemap(inst->get_operand(i), valueMap, loopBlocks))
                     return false;
             // Model the value produced by each instruction so later operands
@@ -158,9 +156,9 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
 
     auto *headerBr = dynamic_cast<BranchInst *>(header->get_terminator());
     auto *latchBr = dynamic_cast<BranchInst *>(latch->get_terminator());
-    if (!headerBr || headerBr->num_ops_ != 3)
+    if (!headerBr || headerBr->num_ops() != 3)
         return false;
-    if (!latchBr || latchBr->num_ops_ != 3)
+    if (!latchBr || latchBr->num_ops() != 3)
         return false;
 
     auto *headerTrue = dynamic_cast<BasicBlock *>(headerBr->get_operand(1));
@@ -197,7 +195,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
         if (!incomingFrom(phi, preheader) || !incomingFrom(phi, latch))
             return false;
         // Exactly those two incomings.
-        if (phi->num_ops_ != 4)
+        if (phi->num_ops() != 4)
             return false;
         headerPhis.push_back(phi);
     }
@@ -323,7 +321,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
     auto *preBr = preheader->get_terminator();
     if (!preBr || !preBr->is_br())
         return false;
-    for (unsigned i = 0; i < preBr->num_ops_; ++i) {
+    for (unsigned i = 0; i < preBr->num_ops(); ++i) {
         if (preBr->get_operand(i) == header) {
             replaceTerminatorTarget(preBr, i, header, peeledHeader);
             preheader->remove_succ_basic_block(header);

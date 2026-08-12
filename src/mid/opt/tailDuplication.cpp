@@ -54,22 +54,22 @@ static Instruction *cloneInst(Instruction *orig, BasicBlock *destBB,
 
     if (auto *gi = dynamic_cast<GetElementPtrInst *>(orig)) {
         std::vector<Value *> idxs;
-        for (unsigned i = 1; i < gi->num_ops_; i++)
+        for (unsigned i = 1; i < gi->num_ops(); i++)
             idxs.push_back(remap(gi->get_operand(i)));
         return new GetElementPtrInst(remap(gi->get_operand(0)), idxs, destBB);
     }
 
     if (auto *zi = dynamic_cast<ZextInst *>(orig))
-        return new ZextInst(zi->op_id_, remap(zi->get_operand(0)), zi->dest_ty_, destBB);
+        return new ZextInst(zi->op_id_, remap(zi->get_operand(0)), zi->type_, destBB);
 
     if (auto *fp = dynamic_cast<FpToSiInst *>(orig))
-        return new FpToSiInst(fp->op_id_, remap(fp->get_operand(0)), fp->dest_ty_, destBB);
+        return new FpToSiInst(fp->op_id_, remap(fp->get_operand(0)), fp->type_, destBB);
 
     if (auto *sf = dynamic_cast<SiToFpInst *>(orig))
-        return new SiToFpInst(sf->op_id_, remap(sf->get_operand(0)), sf->dest_ty_, destBB);
+        return new SiToFpInst(sf->op_id_, remap(sf->get_operand(0)), sf->type_, destBB);
 
     if (auto *bc = dynamic_cast<Bitcast *>(orig))
-        return new Bitcast(bc->op_id_, remap(bc->get_operand(0)), bc->dest_ty_, destBB);
+        return new Bitcast(bc->op_id_, remap(bc->get_operand(0)), bc->type_, destBB);
 
     if (auto *sel = dynamic_cast<SelectInst *>(orig))
         return new SelectInst(remap(sel->get_operand(0)),
@@ -115,7 +115,7 @@ bool TailDuplication::runOnFunction(Function *func) {
         auto *term = BB->get_terminator();
         if (!term->is_br() && !term->is_ret()) continue;
         auto *br = dynamic_cast<BranchInst *>(term);
-        if (br && br->num_ops_ != 1) continue; // only uncond branches
+        if (br && br->num_ops() != 1) continue; // only uncond branches
 
         auto instrs = getClonableInstructions(BB);
         if ((int)instrs.size() > MAX_DUP_INSTS) continue;
@@ -131,7 +131,7 @@ bool TailDuplication::runOnFunction(Function *func) {
         for (auto *inst : BB->instr_list_) {
             if (!inst->is_phi()) break;
             auto *phi = static_cast<PhiInst *>(inst);
-            for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
                 auto *pred = static_cast<BasicBlock *>(phi->get_operand(i + 1));
                 phiRemap[pred][phi] = phi->get_operand(i);
             }
@@ -141,7 +141,7 @@ bool TailDuplication::runOnFunction(Function *func) {
         bool allUncond = true;
         for (auto *P : BB->pre_bbs_) {
             auto *pBr = dynamic_cast<BranchInst *>(P->get_terminator());
-            if (pBr && pBr->num_ops_ == 3) { allUncond = false; break; }
+            if (pBr && pBr->num_ops() == 3) { allUncond = false; break; }
         }
         if (!allUncond) continue;
 
@@ -174,7 +174,7 @@ bool TailDuplication::runOnFunction(Function *func) {
 
             // Compute the return value (remapped if it was a phi or cloned inst).
             Value *retVal = nullptr;
-            if (term->is_ret() && term->num_ops_ > 0) {
+            if (term->is_ret() && term->num_ops() > 0) {
                 retVal = term->get_operand(0);
                 auto mapIt = vmap.find(retVal);
                 if (mapIt != vmap.end())
@@ -210,7 +210,7 @@ bool TailDuplication::runOnFunction(Function *func) {
 
             // Collect block indices to remove (must do this before modifying).
             std::vector<int> toRemove;
-            for (unsigned idx = 0; idx + 1 < phi->num_ops_; idx += 2) {
+            for (unsigned idx = 0; idx + 1 < phi->num_ops(); idx += 2) {
                 auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(idx + 1));
                 if (!pred) continue;
                 bool predStillConnected = false;

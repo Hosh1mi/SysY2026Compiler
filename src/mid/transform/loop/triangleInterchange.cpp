@@ -121,7 +121,7 @@ bool isDescendantOf(Loop *candidate, Loop *ancestor) {
 
 Value *incomingValue(PhiInst *phi, BasicBlock *predecessor) {
     if (!phi || !predecessor) return nullptr;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
         if (phi->get_operand(i + 1) == predecessor)
             return phi->get_operand(i);
     return nullptr;
@@ -139,7 +139,7 @@ bool preheaderProvesPositiveBound(const TriangleSchedulePlan &plan) {
         return false;
     BasicBlock *guardBlock = plan.outerPreheader->pre_bbs_.front();
     auto *branch = dynamic_cast<BranchInst *>(guardBlock->get_terminator());
-    if (!branch || branch->num_ops_ != 3 ||
+    if (!branch || branch->num_ops() != 3 ||
         branch->get_operand(1) != plan.outerPreheader)
         return false;
     auto *compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
@@ -176,7 +176,7 @@ bool matchDescendingOuter(const TriangleSchedulePlan &plan,
     }
 
     auto *branch = dynamic_cast<BranchInst *>(latch->get_terminator());
-    auto *compare = branch && branch->num_ops_ == 3
+    auto *compare = branch && branch->num_ops() == 3
                         ? dynamic_cast<ICmpInst *>(branch->get_operand(0))
                         : nullptr;
     auto *lowerGuard = compare
@@ -341,7 +341,7 @@ bool proveWavefrontDependences(const TriangleSchedulePlan &plan,
             if (!instruction->is_store()) continue;
             sawStore = true;
             auto *gep = dynamic_cast<GetElementPtrInst *>(instruction->get_operand(1));
-            if (!gep || gep->num_ops_ < 3) {
+            if (!gep || gep->num_ops() < 3) {
                 reason = "cell store is not a two-dimensional GEP";
                 return false;
             }
@@ -351,8 +351,8 @@ bool proveWavefrontDependences(const TriangleSchedulePlan &plan,
                 reason = "multiple writable roots in triangular cell";
                 return false;
             }
-            AffineExpr row = affine.analyze(gep->get_operand(gep->num_ops_ - 2));
-            AffineExpr column = affine.analyze(gep->get_operand(gep->num_ops_ - 1));
+            AffineExpr row = affine.analyze(gep->get_operand(gep->num_ops() - 2));
+            AffineExpr column = affine.analyze(gep->get_operand(gep->num_ops() - 1));
             if (!sameAffine(row, outer) || !sameAffine(column, bodyIndex)) {
                 reason = "store is not injective in the current cell coordinate";
                 return false;
@@ -378,13 +378,13 @@ bool proveWavefrontDependences(const TriangleSchedulePlan &plan,
             }
             continue;
         }
-        if (gep->num_ops_ < 3) {
+        if (gep->num_ops() < 3) {
             reason = "DP load is not a two-dimensional GEP";
             return false;
         }
 
-        AffineExpr row = affine.analyze(gep->get_operand(gep->num_ops_ - 2));
-        AffineExpr column = affine.analyze(gep->get_operand(gep->num_ops_ - 1));
+        AffineExpr row = affine.analyze(gep->get_operand(gep->num_ops() - 2));
+        AffineExpr column = affine.analyze(gep->get_operand(gep->num_ops() - 1));
         if (!row.valid || !column.valid) {
             reason = "DP load address is not affine";
             return false;
@@ -444,7 +444,7 @@ Instruction *cloneInstruction(Instruction *original, BasicBlock *destination,
                              R(compare->get_operand(1)), destination);
     } else if (auto *gep = dynamic_cast<GetElementPtrInst *>(original)) {
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < gep->num_ops_; ++i)
+        for (unsigned i = 1; i < gep->num_ops(); ++i)
             indices.push_back(R(gep->get_operand(i)));
         clone = new GetElementPtrInst(R(gep->get_operand(0)), indices,
                                       destination);
@@ -455,16 +455,16 @@ Instruction *cloneInstruction(Instruction *original, BasicBlock *destination,
                               R(store->get_operand(1)), destination);
     } else if (auto *zext = dynamic_cast<ZextInst *>(original)) {
         clone = new ZextInst(zext->op_id_, R(zext->get_operand(0)),
-                             zext->dest_ty_, destination);
+                             zext->type_, destination);
     } else if (auto *cast = dynamic_cast<FpToSiInst *>(original)) {
         clone = new FpToSiInst(cast->op_id_, R(cast->get_operand(0)),
-                               cast->dest_ty_, destination);
+                               cast->type_, destination);
     } else if (auto *cast = dynamic_cast<SiToFpInst *>(original)) {
         clone = new SiToFpInst(cast->op_id_, R(cast->get_operand(0)),
-                               cast->dest_ty_, destination);
+                               cast->type_, destination);
     } else if (auto *cast = dynamic_cast<Bitcast *>(original)) {
         clone = new Bitcast(cast->op_id_, R(cast->get_operand(0)),
-                            cast->dest_ty_, destination);
+                            cast->type_, destination);
     } else if (auto *select = dynamic_cast<SelectInst *>(original)) {
         clone = new SelectInst(R(select->get_operand(0)),
                                R(select->get_operand(1)),
@@ -490,7 +490,7 @@ bool validateCloneRegion(const TriangleSchedulePlan &plan,
                 return false;
             }
         }
-        for (unsigned i = 0; i < branch->num_ops_; ++i) {
+        for (unsigned i = 0; i < branch->num_ops(); ++i) {
             auto *successor = dynamic_cast<BasicBlock *>(branch->get_operand(i));
             if (!successor) continue;
             if (!cellBlocks.count(successor) && successor != plan.innerLatch) {
@@ -502,7 +502,7 @@ bool validateCloneRegion(const TriangleSchedulePlan &plan,
 
     for (auto *instruction : plan.outerExit->instr_list_) {
         if (!instruction->is_phi()) break;
-        for (unsigned i = 0; i + 1 < instruction->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < instruction->num_ops(); i += 2) {
             auto *predecessor = dynamic_cast<BasicBlock *>(
                 instruction->get_operand(i + 1));
             if (predecessor && plan.outer->blocks.count(predecessor)) {
@@ -532,7 +532,7 @@ bool validateExternalValue(Value *value, const TriangleSchedulePlan &plan,
         instruction->is_call() || !isCloneableInstruction(instruction) ||
         !visiting.insert(value).second)
         return false;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i)
+    for (unsigned i = 0; i < instruction->num_ops(); ++i)
         if (!validateExternalValue(instruction->get_operand(i), plan,
                                    cellBlocks, visiting))
             return false;
@@ -550,7 +550,7 @@ Value *materializeExternal(Value *value, BasicBlock *destination,
     if (!instruction || cellBlocks.count(instruction->parent_) ||
         !plan.outer->blocks.count(instruction->parent_))
         return value;
-    for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+    for (unsigned i = 0; i < instruction->num_ops(); ++i) {
         Value *operand = instruction->get_operand(i);
         if (dynamic_cast<BasicBlock *>(operand)) continue;
         Value *mapped = materializeExternal(operand, destination, plan,
@@ -576,7 +576,7 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
     }
     for (auto *block : cellBlocks) {
         for (auto *instruction : block->instr_list_) {
-            for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+            for (unsigned i = 0; i < instruction->num_ops(); ++i) {
                 Value *operand = instruction->get_operand(i);
                 if (dynamic_cast<BasicBlock *>(operand)) continue;
                 std::set<Value *> visiting;
@@ -639,7 +639,7 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
 
     for (auto *oldBlock : cellBlocks) {
         for (auto *instruction : oldBlock->instr_list_) {
-            for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+            for (unsigned i = 0; i < instruction->num_ops(); ++i) {
                 Value *operand = instruction->get_operand(i);
                 if (dynamic_cast<BasicBlock *>(operand)) continue;
                 materializeExternal(operand, cellSetup, plan, cellBlocks,
@@ -686,7 +686,7 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
             if (!instruction->is_phi() || instruction == plan.distanceIV)
                 continue;
             auto *newPhi = static_cast<PhiInst *>(valueMap[instruction]);
-            for (unsigned i = 0; i + 1 < instruction->num_ops_; i += 2) {
+            for (unsigned i = 0; i + 1 < instruction->num_ops(); i += 2) {
                 auto *oldPred = dynamic_cast<BasicBlock *>(
                     instruction->get_operand(i + 1));
                 BasicBlock *newPred = nullptr;
@@ -703,7 +703,7 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
         }
 
         auto *oldBranch = static_cast<BranchInst *>(oldBlock->get_terminator());
-        if (oldBranch->num_ops_ == 1) {
+        if (oldBranch->num_ops() == 1) {
             auto *oldTarget = static_cast<BasicBlock *>(oldBranch->get_operand(0));
             BasicBlock *newTarget = oldTarget == plan.innerLatch
                                         ? laneLatch
@@ -732,7 +732,7 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
     new BranchInst(waveHeader, waveLatch);
 
     auto *preTerm = plan.outerPreheader->get_terminator();
-    for (unsigned i = 0; i < preTerm->num_ops_; ++i)
+    for (unsigned i = 0; i < preTerm->num_ops(); ++i)
         if (preTerm->get_operand(i) == plan.outer->header)
             preTerm->set_operand(i, waveHeader);
     plan.outerPreheader->remove_succ_basic_block(plan.outer->header);

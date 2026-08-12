@@ -28,7 +28,7 @@ bool isConstant(Value *value, int expected) {
 
 bool isBinary(Instruction *inst, Instruction::OpID op,
               Value *lhs, Value *rhs, bool commutative = false) {
-    if (!inst || inst->op_id_ != op || inst->num_ops_ != 2) return false;
+    if (!inst || inst->op_id_ != op || inst->num_ops() != 2) return false;
     if (inst->get_operand(0) == lhs && inst->get_operand(1) == rhs) return true;
     return commutative && inst->get_operand(0) == rhs && inst->get_operand(1) == lhs;
 }
@@ -37,7 +37,7 @@ BinaryInst *findBinaryUser(Value *value, Instruction::OpID op,
                            Value *other = nullptr, bool commutative = false) {
     BinaryInst *result = nullptr;
     for (auto &use : value->use_list_) {
-        auto *inst = dynamic_cast<BinaryInst *>(use.val_);
+        auto *inst = dynamic_cast<BinaryInst *>(use.user_);
         if (!inst || inst->op_id_ != op) continue;
         if (other && !isBinary(inst, op, value, other, commutative)) continue;
         if (result && result != inst) return nullptr;
@@ -49,7 +49,7 @@ BinaryInst *findBinaryUser(Value *value, Instruction::OpID op,
 BinaryInst *findRemainderUser(Value *value, int modulus) {
     BinaryInst *result = nullptr;
     for (auto &use : value->use_list_) {
-        auto *inst = dynamic_cast<BinaryInst *>(use.val_);
+        auto *inst = dynamic_cast<BinaryInst *>(use.user_);
         if (!inst || inst->op_id_ != Instruction::SRem ||
             inst->get_operand(0) != value ||
             !isConstant(inst->get_operand(1), modulus))
@@ -71,7 +71,7 @@ bool matchCondBranch(BasicBlock *block, Value *lhs, int rhs,
                      BasicBlock *trueTarget, BasicBlock *falseTarget) {
     if (!block) return false;
     auto *branch = dynamic_cast<BranchInst *>(block->get_terminator());
-    return branch && branch->num_ops_ == 3 &&
+    return branch && branch->num_ops() == 3 &&
            matchEq(branch->get_operand(0), lhs, rhs) &&
            branch->get_operand(1) == trueTarget &&
            branch->get_operand(2) == falseTarget;
@@ -80,12 +80,12 @@ bool matchCondBranch(BasicBlock *block, Value *lhs, int rhs,
 bool isUnconditionalTo(BasicBlock *block, BasicBlock *target) {
     if (!block) return false;
     auto *branch = dynamic_cast<BranchInst *>(block->get_terminator());
-    return branch && branch->num_ops_ == 1 && branch->get_operand(0) == target;
+    return branch && branch->num_ops() == 1 && branch->get_operand(0) == target;
 }
 
 BasicBlock *incomingBlock(PhiInst *phi, Value *value) {
     BasicBlock *result = nullptr;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         if (phi->get_operand(i) != value) continue;
         auto *block = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (!block || result) return nullptr;
@@ -100,7 +100,7 @@ bool hasOnlyPureScalarInstructions(Function *function, CallInst *selfCall) {
         for (auto *inst : block->instr_list_) {
             if (auto *call = dynamic_cast<CallInst *>(inst)) {
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (call != selfCall || callee != function) return false;
                 ++selfCalls;
                 continue;
@@ -143,7 +143,7 @@ bool matchFunction(Function *function, Match &match) {
         for (auto *inst : block->instr_list_) {
             if (auto *call = dynamic_cast<CallInst *>(inst)) {
                 auto *callee = dynamic_cast<Function *>(
-                    call->get_operand(call->num_ops_ - 1));
+                    call->get_operand(call->num_ops() - 1));
                 if (callee == function) {
                     if (selfCall) return false;
                     selfCall = call;
@@ -155,7 +155,7 @@ bool matchFunction(Function *function, Match &match) {
             }
         }
     }
-    if (!selfCall || !ret || selfCall->num_ops_ != 3)
+    if (!selfCall || !ret || selfCall->num_ops() != 3)
         return false;
 
     Argument *addend = nullptr;
@@ -186,7 +186,7 @@ bool matchFunction(Function *function, Match &match) {
     BinaryInst *evenRem = nullptr;
     int modulus = 0;
     for (auto &use : doubled->use_list_) {
-        auto *candidate = dynamic_cast<BinaryInst *>(use.val_);
+        auto *candidate = dynamic_cast<BinaryInst *>(use.user_);
         if (!candidate || candidate->op_id_ != Instruction::SRem ||
             candidate->get_operand(0) != doubled)
             continue;
@@ -215,13 +215,13 @@ bool matchFunction(Function *function, Match &match) {
                 parityRem = binary;
         }
     }
-    if (!baseRem || !parityRem || ret->num_ops_ != 1) return false;
+    if (!baseRem || !parityRem || ret->num_ops() != 1) return false;
 
     auto *resultPhi = dynamic_cast<PhiInst *>(ret->get_operand(0));
-    if (!resultPhi || resultPhi->num_ops_ != 8) return false;
+    if (!resultPhi || resultPhi->num_ops() != 8) return false;
 
     Value *zeroValue = nullptr;
-    for (unsigned i = 0; i < resultPhi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < resultPhi->num_ops(); i += 2) {
         if (isConstant(resultPhi->get_operand(i), 0)) {
             if (zeroValue) return false;
             zeroValue = resultPhi->get_operand(i);
@@ -243,7 +243,7 @@ bool matchFunction(Function *function, Match &match) {
 
     BasicBlock *entry = function->basic_blocks_.front();
     auto *entryBranch = dynamic_cast<BranchInst *>(entry->get_terminator());
-    if (!entryBranch || entryBranch->num_ops_ != 3 ||
+    if (!entryBranch || entryBranch->num_ops() != 3 ||
         !matchEq(entryBranch->get_operand(0), digits, 0) ||
         entryBranch->get_operand(1) != zeroBlock)
         return false;
@@ -251,7 +251,7 @@ bool matchFunction(Function *function, Match &match) {
     auto *oneCheck = dynamic_cast<BasicBlock *>(entryBranch->get_operand(2));
     auto *oneBranch = oneCheck
         ? dynamic_cast<BranchInst *>(oneCheck->get_terminator()) : nullptr;
-    if (!oneBranch || oneBranch->num_ops_ != 3 ||
+    if (!oneBranch || oneBranch->num_ops() != 3 ||
         !matchEq(oneBranch->get_operand(0), digits, 1) ||
         oneBranch->get_operand(1) != baseBlock)
         return false;

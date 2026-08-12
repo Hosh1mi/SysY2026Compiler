@@ -80,7 +80,7 @@ public:
 
     GenIR(){
         module = std::unique_ptr<Module>(new Module());
-        builder = new IRStmtBuilder(nullptr, module.get());
+        builder = new IRStmtBuilder(nullptr);
         auto TyVoid = module->void_ty_;
         auto TyInt32 = module->int32_ty_;
         auto TyInt32Ptr = module->get_pointer_type(module->int32_ty_);

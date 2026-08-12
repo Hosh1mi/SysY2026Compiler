@@ -121,12 +121,12 @@ bool parseElementAccess(Value *pointer, ElementAccess &access) {
     access.gep = gep;
     access.base = gep->get_operand(0);
     if (pointerType->contained_->tid_ == Type::ArrayTyID) {
-        if (gep->num_ops_ != 3 || !isConstant(gep->get_operand(1), 0))
+        if (gep->num_ops() != 3 || !isConstant(gep->get_operand(1), 0))
             return false;
         access.index = gep->get_operand(2);
         access.flat = false;
     } else {
-        if (gep->num_ops_ != 2)
+        if (gep->num_ops() != 2)
             return false;
         access.index = gep->get_operand(1);
         access.flat = true;
@@ -177,7 +177,7 @@ void retargetPhiPredecessor(BasicBlock *block, BasicBlock *oldPredecessor,
         auto *phi = dynamic_cast<PhiInst *>(instruction);
         if (!phi)
             break;
-        for (unsigned index = 1; index < phi->num_ops_; index += 2) {
+        for (unsigned index = 1; index < phi->num_ops(); index += 2) {
             if (phi->get_operand(index) == oldPredecessor)
                 phi->set_operand(index, newPredecessor);
         }
@@ -191,7 +191,7 @@ void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
                        : nullptr;
     if (!branch)
         return;
-    for (unsigned index = 0; index < branch->num_ops_; ++index) {
+    for (unsigned index = 0; index < branch->num_ops(); ++index) {
         if (branch->get_operand(index) == oldTarget)
             branch->set_operand(index, newTarget);
     }
@@ -318,7 +318,7 @@ bool hasLiveOutValue(Loop *loop) {
     for (auto *block : loop->blocksOrdered) {
         for (auto *instruction : block->instr_list_) {
             for (const Use &use : instruction->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (user && !loop->isInLoop(user))
                     return true;
             }
@@ -369,7 +369,7 @@ bool simpleConsumerPreheader(Loop *consumer) {
     if (!preheader || hasPhi(preheader) || preheader->instr_list_.size() != 1)
         return false;
     auto *branch = dynamic_cast<BranchInst *>(preheader->get_terminator());
-    return branch && branch->num_ops_ == 1 &&
+    return branch && branch->num_ops() == 1 &&
            branch->get_operand(0) == consumer->header;
 }
 
@@ -378,13 +378,13 @@ bool callMayAccessMatrix(CallInst *call, Value *matrixRoot,
     if (!call)
         return true;
     auto *callee = dynamic_cast<Function *>(
-        call->get_operand(call->num_ops_ - 1));
+        call->get_operand(call->num_ops() - 1));
     if (!callee)
         return true;
     if (!callee->is_declaration())
         return BAA.getCallModRef(call, matrixRoot) != ModRefInfo::NoModRef;
 
-    for (unsigned index = 0; index + 1 < call->num_ops_; ++index) {
+    for (unsigned index = 0; index + 1 < call->num_ops(); ++index) {
         Value *argument = call->get_operand(index);
         if (!dynamic_cast<PointerType *>(argument->type_))
             continue;
@@ -438,7 +438,7 @@ bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
         return false;
 
     auto *branch = dynamic_cast<BranchInst *>(loop->header->get_terminator());
-    auto *compare = branch && branch->num_ops_ == 3
+    auto *compare = branch && branch->num_ops() == 3
                         ? dynamic_cast<ICmpInst *>(branch->get_operand(0))
                         : nullptr;
     if (!compare || compare->icmp_op_ != ICmpInst::ICMP_SLT ||
@@ -480,7 +480,7 @@ bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
         if (!phi)
             break;
         Value *initial = nullptr;
-        for (unsigned index = 0; index + 1 < phi->num_ops_; index += 2) {
+        for (unsigned index = 0; index + 1 < phi->num_ops(); index += 2) {
             if (phi->get_operand(index + 1) == loop->preheader) {
                 initial = phi->get_operand(index);
                 break;
@@ -846,7 +846,7 @@ void versionConsumer(Pattern &pattern, GuardBlocks guard,
 bool applyTransform(Function *function, Pattern &pattern) {
     auto *preheaderBranch = dynamic_cast<BranchInst *>(
         pattern.sequence->preheader->get_terminator());
-    if (!preheaderBranch || preheaderBranch->num_ops_ != 1 ||
+    if (!preheaderBranch || preheaderBranch->num_ops() != 1 ||
         preheaderBranch->get_operand(0) != pattern.sequence->header)
         return false;
 

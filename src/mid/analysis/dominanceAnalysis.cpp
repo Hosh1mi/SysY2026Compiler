@@ -169,16 +169,16 @@ bool DominatorTreeAnalysis::dominates(Instruction *def,
 }
 
 bool DominatorTreeAnalysis::dominates(Value *def, const Use &use) const {
-    auto *user = dynamic_cast<Instruction *>(use.val_);
+    auto *user = use.user_;
     if (!def || !user || !user->parent_) return false;
 
     auto *defInst = dynamic_cast<Instruction *>(def);
     if (!defInst) return true;
     auto *phi = dynamic_cast<PhiInst *>(user);
     if (!phi) return dominates(defInst, user);
-    if ((use.arg_no_ % 2) != 0 || use.arg_no_ + 1 >= phi->num_ops_)
+    if ((use.operand_index_ % 2) != 0 || use.operand_index_ + 1 >= phi->num_ops())
         return false;
-    auto *incoming = dynamic_cast<BasicBlock *>(phi->get_operand(use.arg_no_ + 1));
+    auto *incoming = dynamic_cast<BasicBlock *>(phi->get_operand(use.operand_index_ + 1));
     if (!incoming || !defInst->parent_) return false;
     if (defInst->parent_ == incoming)
         return defInst != incoming->get_terminator();

@@ -93,13 +93,13 @@ bool edgeProvesAtLeast(BasicBlock *source, BasicBlock *target,
     BasicBlock *guard = source;
     BasicBlock *edgeTarget = target;
     auto *branch = dynamic_cast<BranchInst *>(guard->get_terminator());
-    if (branch && branch->num_ops_ == 1 && branch->get_operand(0) == target &&
+    if (branch && branch->num_ops() == 1 && branch->get_operand(0) == target &&
         source->pre_bbs_.size() == 1) {
         edgeTarget = source;
         guard = source->pre_bbs_.front();
         branch = dynamic_cast<BranchInst *>(guard->get_terminator());
     }
-    if (!branch || branch->num_ops_ != 3)
+    if (!branch || branch->num_ops() != 3)
         return false;
 
     auto *compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
@@ -148,9 +148,9 @@ bool incomingIsNonNegative(Value *value, BasicBlock *source,
 }
 
 bool phiIsNonNegative(PhiInst *phi) {
-    if (!phi || !phi->parent_ || phi->num_ops_ == 0)
+    if (!phi || !phi->parent_ || phi->num_ops() == 0)
         return false;
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         auto *source = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         if (!source ||
             !incomingIsNonNegative(phi->get_operand(i), source, phi->parent_))
@@ -170,7 +170,7 @@ bool preheaderProvesNonEmpty(const LoopSkewPlan &plan) {
         return false;
     BasicBlock *guardBlock = plan.preheader->pre_bbs_.front();
     auto *branch = dynamic_cast<BranchInst *>(guardBlock->get_terminator());
-    if (!branch || branch->num_ops_ != 3 ||
+    if (!branch || branch->num_ops() != 3 ||
         branch->get_operand(1) != plan.preheader)
         return false;
     auto *compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
@@ -181,14 +181,14 @@ bool preheaderProvesNonEmpty(const LoopSkewPlan &plan) {
 
 bool hasUnsupportedUses(const LoopSkewPlan &plan) {
     for (const Use &use : plan.innerIV->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || !user->parent_ ||
             (!plan.inner->blocks.count(user->parent_) &&
              user != plan.innerUpdate))
             return true;
     }
     for (const Use &use : plan.innerUpdate->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (user != plan.innerIV && user != plan.innerCompare)
             return true;
     }
@@ -229,7 +229,7 @@ std::optional<LoopSkewPlan> analyzeLoopSkew(Loop &inner,
     }
     auto *latchBranch = dynamic_cast<BranchInst *>(
         inner.singleLatch()->get_terminator());
-    if (!latchBranch || latchBranch->num_ops_ != 3 ||
+    if (!latchBranch || latchBranch->num_ops() != 3 ||
         latchBranch->get_operand(0) != control->compare ||
         !inner.blocks.count(
             dynamic_cast<BasicBlock *>(latchBranch->get_operand(1))) ||
@@ -319,9 +319,9 @@ bool applyLoopSkew(const LoopSkewPlan &plan, Module *module) {
     std::vector<Use> ivUses(plan.innerIV->use_list_.begin(),
                             plan.innerIV->use_list_.end());
     for (const Use &use : ivUses) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || user == plan.innerUpdate) continue;
-        user->set_operand(use.arg_no_, bodyIndex);
+        user->set_operand(use.operand_index_, bodyIndex);
     }
 
     plan.innerCompare->set_operand(0, nextDistance);
@@ -480,7 +480,7 @@ std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
         if (instruction->is_call()) {
             auto *call = static_cast<CallInst *>(instruction);
             auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             if (!callee || !basicAA.isPure(callee)) {
                 reason = "cell contains an impure call";
                 return std::nullopt;
@@ -641,7 +641,7 @@ Value *rematerialize(Value *value, BasicBlock *block,
                                     nestBlocks);
         if (!base) return nullptr;
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < gep->num_ops_; ++i) {
+        for (unsigned i = 1; i < gep->num_ops(); ++i) {
             Value *index = rematerialize(gep->get_operand(i), block, map,
                                          nestBlocks);
             if (!index) return nullptr;
@@ -694,7 +694,7 @@ Value *materializeFinalValue(
             auto *instruction = dynamic_cast<Instruction *>(candidate);
             if (!instruction || !seen.insert(candidate).second)
                 return false;
-            for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+            for (unsigned i = 0; i < instruction->num_ops(); ++i) {
                 if (dynamic_cast<BasicBlock *>(instruction->get_operand(i)))
                     continue;
                 if (self(self, instruction->get_operand(i), seen))
@@ -706,7 +706,7 @@ Value *materializeFinalValue(
         // The fast path is entered only for a non-empty common domain. For
         // an LCSSA merge between an empty-loop value and a completed-loop
         // value, select the latter before recursively materializing it.
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             std::set<Value *> seen;
             if (!dependsOnCompletedIteration(
                     dependsOnCompletedIteration, phi->get_operand(i), seen))
@@ -718,7 +718,7 @@ Value *materializeFinalValue(
                 return cache[value] = mapped;
             }
         }
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             for (const InductionDescriptor *control : plan.controls) {
                 if (phi->get_operand(i) != control->update) continue;
                 Value *mapped = materializeFinalValue(
@@ -731,7 +731,7 @@ Value *materializeFinalValue(
         }
         for (auto loopIt = plan.nest.rbegin(); loopIt != plan.nest.rend();
              ++loopIt) {
-            for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+            for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
                 auto *pred =
                     dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
                 if (!pred || !(*loopIt)->blocks.count(pred)) continue;
@@ -762,7 +762,7 @@ Value *materializeFinalValue(
 }
 
 Value *phiIncomingFrom(PhiInst *phi, BasicBlock *predecessor) {
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
         if (phi->get_operand(i + 1) == predecessor)
             return phi->get_operand(i);
     return nullptr;
@@ -773,7 +773,7 @@ bool isUnitPointerRecurrence(PhiInst *phi, BasicBlock *preheader,
     initial = phiIncomingFrom(phi, preheader);
     Value *back = phiIncomingFrom(phi, phi->parent_);
     auto *gep = dynamic_cast<GetElementPtrInst *>(back);
-    auto *one = gep && gep->num_ops_ == 2
+    auto *one = gep && gep->num_ops() == 2
                     ? dynamic_cast<ConstantInt *>(gep->get_operand(1))
                     : nullptr;
     return initial && gep && gep->get_operand(0) == phi && one &&
@@ -815,7 +815,7 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
     auto *oldPreTerm = oldPreheader->get_terminator();
     if (!oldPreTerm) return fail("preheader has no terminator");
     bool hasOuterEdge = false;
-    for (unsigned i = 0; i < oldPreTerm->num_ops_; ++i)
+    for (unsigned i = 0; i < oldPreTerm->num_ops(); ++i)
         hasOuterEdge |= oldPreTerm->get_operand(i) == outer->header;
     if (!hasOuterEdge) return fail("preheader has no edge to outer header");
 
@@ -836,7 +836,7 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
     for (BasicBlock *block : outer->blocks) {
         for (Instruction *instruction : block->instr_list_) {
             for (const Use &use : instruction->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user || !user->parent_ ||
                     outer->blocks.count(user->parent_))
                     continue;
@@ -1014,7 +1014,7 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
             instruction == plan.controls.back()->compare ||
             pointerUpdates.count(instruction))
             continue;
-        for (unsigned i = 0; i < instruction->num_ops_; ++i) {
+        for (unsigned i = 0; i < instruction->num_ops(); ++i) {
             Value *operand = instruction->get_operand(i);
             if (dynamic_cast<BasicBlock *>(operand) || valueMap.count(operand))
                 continue;
@@ -1047,7 +1047,7 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
         auto *phi = dynamic_cast<PhiInst *>(instruction);
         if (!phi) break;
         Value *incoming = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *pred = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!pred || !outer->blocks.count(pred)) continue;
             if (incoming && incoming != phi->get_operand(i))
@@ -1064,12 +1064,12 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
     for (Instruction *liveOut : liveOuts) {
         bool exportedByLCSSA = false;
         for (const Use &use : liveOut->use_list_) {
-            auto *phi = dynamic_cast<PhiInst *>(use.val_);
-            if (!phi || phi->parent_ != plan.exit || use.arg_no_ + 1 >=
-                                                       phi->num_ops_)
+            auto *phi = dynamic_cast<PhiInst *>(use.user_);
+            if (!phi || phi->parent_ != plan.exit || use.operand_index_ + 1 >=
+                                                       phi->num_ops())
                 continue;
             auto *pred = dynamic_cast<BasicBlock *>(
-                phi->get_operand(use.arg_no_ + 1));
+                phi->get_operand(use.operand_index_ + 1));
             if (pred && outer->blocks.count(pred)) {
                 exportedByLCSSA = true;
                 break;
@@ -1094,10 +1094,10 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
         exportPhi->add_phi_pair_operand(mapped, done);
         plan.exit->add_instruction_front(exportPhi);
         for (const Use &use : uses) {
-            auto *user = dynamic_cast<Instruction *>(use.val_);
+            auto *user = use.user_;
             if (user && user->parent_ &&
                 !outer->blocks.count(user->parent_))
-                user->set_operand(use.arg_no_, exportPhi);
+                user->set_operand(use.operand_index_, exportPhi);
         }
     }
     new BranchInst(plan.exit, done);
@@ -1105,11 +1105,11 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
     for (Instruction *instruction : outer->header->instr_list_) {
         auto *phi = dynamic_cast<PhiInst *>(instruction);
         if (!phi) break;
-        for (unsigned i = 1; i < phi->num_ops_; i += 2)
+        for (unsigned i = 1; i < phi->num_ops(); i += 2)
             if (phi->get_operand(i) == oldPreheader)
                 phi->set_operand(i, fallbackEntry);
     }
-    for (unsigned i = 0; i < oldPreTerm->num_ops_; ++i)
+    for (unsigned i = 0; i < oldPreTerm->num_ops(); ++i)
         if (oldPreTerm->get_operand(i) == outer->header)
             oldPreTerm->set_operand(i, guard);
     oldPreheader->remove_succ_basic_block(outer->header);

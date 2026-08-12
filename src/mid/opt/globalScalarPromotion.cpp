@@ -26,10 +26,10 @@ static bool isScalarIntGlobal(GlobalVariable *gv) {
 // redirect the direct accesses while an escaped pointer keeps the stale global.
 static bool scalarGlobalAddressEscapes(GlobalVariable *gv) {
     for (auto &use : gv->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user) return true;
-        if (user->is_load() && use.arg_no_ == 0) continue;
-        if (user->is_store() && use.arg_no_ == 1) continue;
+        if (user->is_load() && use.operand_index_ == 0) continue;
+        if (user->is_store() && use.operand_index_ == 1) continue;
         return true;
     }
     return false;
@@ -38,7 +38,7 @@ static bool scalarGlobalAddressEscapes(GlobalVariable *gv) {
 static bool callMayTouchGlobal(CallInst *call, GlobalVariable *gv,
                                BasicAliasAnalysis &BAA) {
     auto *callee = dynamic_cast<Function *>(
-        call->get_operand(call->num_ops_ - 1));
+        call->get_operand(call->num_ops() - 1));
     // Indirect call: unknown target, conservatively block.
     if (!callee)
         return true;

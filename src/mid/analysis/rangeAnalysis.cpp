@@ -153,7 +153,7 @@ void RangeAnalysis::buildControlDependence(Function *func) {
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
         auto *br = dynamic_cast<BranchInst *>(term);
-        if (!br || br->num_ops_ != 3) continue;
+        if (!br || br->num_ops() != 3) continue;
 
         std::vector<std::set<BasicBlock *>> reachable(2);
         for (unsigned succIdx = 0; succIdx < 2; ++succIdx) {
@@ -405,7 +405,7 @@ RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *
 RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx) {
     if (!phi) return IntRange::top();
     IntRange result = IntRange::bottom();
-    for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
         auto *incoming = phi->get_operand(i);
         auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
         auto incomingRange = getRange(incoming, predBB);
@@ -418,7 +418,7 @@ RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx
 
 RangeAnalysis::IntRange RangeAnalysis::getCallRange(CallInst *call, BasicBlock *ctx) {
     if (!call || !AM_) return IntRange::top();
-    auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
     if (!callee || callee->is_declaration()) return IntRange::top();
     if (callee == func_) {
         auto selfSummary = getNormalizedReturnRangeForCall(call, ctx);
@@ -442,7 +442,7 @@ RangeAnalysis::IntRange RangeAnalysis::getCallRange(CallInst *call, BasicBlock *
         for (auto *inst : bb->instr_list_) {
             if (!inst->is_ret()) continue;
             auto *ret = static_cast<ReturnInst *>(inst);
-            if (ret->num_ops_ == 0) continue;
+            if (ret->num_ops() == 0) continue;
             auto r = calleeRA.getRange(ret->get_operand(0), ret->parent_);
             if (!found) {
                 result = r;
@@ -469,10 +469,10 @@ RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBloc
     // list is the precise, mutation-safe call-site index.  This avoids a
     // complete module walk for every formal argument.
     for (const Use &use : func->use_list_) {
-        auto *call = dynamic_cast<CallInst *>(use.val_);
-        if (!call || call->num_ops_ == 0 ||
-            call->get_operand(call->num_ops_ - 1) != func ||
-            arg->arg_no_ >= call->num_ops_ - 1)
+        auto *call = dynamic_cast<CallInst *>(use.user_);
+        if (!call || call->num_ops() == 0 ||
+            call->get_operand(call->num_ops() - 1) != func ||
+            arg->arg_no_ >= call->num_ops() - 1)
             continue;
         auto *caller =
             call->parent_ ? call->parent_->parent_ : nullptr;
@@ -570,13 +570,13 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(Value *v, BasicBlock *ctx) {
 }
 
 RangeAnalysis::IntRange RangeAnalysis::getGEPOffsetRange(GetElementPtrInst *gep, BasicBlock *ctx) {
-    if (!gep || gep->num_ops_ < 2) return IntRange::top();
+    if (!gep || gep->num_ops() < 2) return IntRange::top();
 
     Value *base = gep->get_operand(0);
     auto *ptrTy = dynamic_cast<PointerType *>(base->type_);
     if (!ptrTy) return IntRange::top();
 
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         auto *idxTy = dynamic_cast<IntegerType *>(gep->get_operand(i)->type_);
         if (!idxTy || idxTy->num_bits_ != 32) return IntRange::top();
     }
@@ -601,7 +601,7 @@ RangeAnalysis::IntRange RangeAnalysis::getGEPOffsetRange(GetElementPtrInst *gep,
     auto *leading = dynamic_cast<ConstantInt *>(gep->get_operand(1));
     if (!leading || leading->value_ != 0) return IntRange::top();
 
-    for (unsigned idxNo = 0; idxNo < gep->num_ops_ - 2; ++idxNo) {
+    for (unsigned idxNo = 0; idxNo < gep->num_ops() - 2; ++idxNo) {
         auto *idxVal = gep->get_operand(idxNo + 2);
         auto idxRange = getRange(idxVal, gep->parent_);
         if (!idxRange.valid || idxRange.isBottom || !idxRange.knownNonNegative())
@@ -872,7 +872,7 @@ bool RangeAnalysis::decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey
     }
 
     auto *gep = static_cast<GetElementPtrInst *>(inst);
-    if (gep->num_ops_ < 2) return false;
+    if (gep->num_ops() < 2) return false;
 
     Value *basePtr = gep->get_operand(0);
     auto *basePtrTy = dynamic_cast<PointerType *>(basePtr->type_);
@@ -883,7 +883,7 @@ bool RangeAnalysis::decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey
     Type *curTy = basePtrTy->contained_;
     bool pointerToArray = dynamic_cast<ArrayType *>(curTy) != nullptr;
 
-    for (unsigned idxNo = 1; idxNo < gep->num_ops_; ++idxNo) {
+    for (unsigned idxNo = 1; idxNo < gep->num_ops(); ++idxNo) {
         Value *idx = gep->get_operand(idxNo);
 
         if (pointerToArray && idxNo == 1) {
@@ -1222,7 +1222,7 @@ bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
     if (dynamic_cast<ConstantInt *>(v)) return true;
 
     if (auto *call = dynamic_cast<CallInst *>(v)) {
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
         if (callee == func_ && returnSummary_.pendingModulus > 0) {
             if (mod == 0 || mod == returnSummary_.pendingModulus) {
                 mod = returnSummary_.pendingModulus;
@@ -1247,7 +1247,7 @@ bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
     }
 
     if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             if (!inferNormalizedModulus(phi->get_operand(i), mod, visiting))
                 return false;
         }
@@ -1300,7 +1300,7 @@ bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx,
     }
 
     if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             auto subVisited = visiting;
             if (!isKnownNonNegativeForSummary(phi->get_operand(i), predBB, subVisited))
@@ -1361,7 +1361,7 @@ bool RangeAnalysis::proveOrRequireNonNegative(Value *v, BasicBlock *ctx) {
 
 bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx) {
     if (!call) return false;
-    auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
     if (!callee || callee->is_declaration()) return false;
 
     const std::vector<unsigned> *requirements = nullptr;
@@ -1385,7 +1385,7 @@ bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *
     if (modulus <= 0 || !requirements) return false;
 
     for (unsigned argNo : *requirements) {
-        if (argNo >= call->num_ops_ - 1) return false;
+        if (argNo >= call->num_ops() - 1) return false;
         Value *actual = call->get_operand(argNo);
         if (callee == func_) {
             auto *actualArg = dynamic_cast<Argument *>(actual);
@@ -1419,7 +1419,7 @@ bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
             for (auto *inst : bb->instr_list_) {
                 auto *call = dynamic_cast<CallInst *>(inst);
                 if (!call) continue;
-                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
                 if (callee != func_) continue;
                 if (!callSatisfiesReturnRequirements(call, call->parent_))
                     return false;
@@ -1437,7 +1437,7 @@ bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long lo
     }
 
     if (auto *phi = dynamic_cast<PhiInst *>(v)) {
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (!valueMatchesNormalizedMod(phi->get_operand(i), predBB, mod))
                 return false;
@@ -1451,7 +1451,7 @@ bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long lo
     }
 
     if (auto *call = dynamic_cast<CallInst *>(v)) {
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
         if (callee == func_ && returnSummary_.computing && returnSummary_.pendingModulus == mod) {
             return callSatisfiesReturnRequirements(call, ctx);
         }
@@ -1494,7 +1494,7 @@ void RangeAnalysis::computeNormalizedReturnSummary() {
     for (auto *bb : func_->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
             auto *ret = dynamic_cast<ReturnInst *>(inst);
-            if (!ret || ret->num_ops_ == 0) continue;
+            if (!ret || ret->num_ops() == 0) continue;
             sawReturn = true;
             if (!inferNormalizedModulus(ret->get_operand(0), candidateMod, visitedValues)) {
                 ok = false;
@@ -1512,7 +1512,7 @@ void RangeAnalysis::computeNormalizedReturnSummary() {
             for (auto *bb : func_->basic_blocks_) {
                 for (auto *inst : bb->instr_list_) {
                     auto *ret = dynamic_cast<ReturnInst *>(inst);
-                    if (!ret || ret->num_ops_ == 0) continue;
+                    if (!ret || ret->num_ops() == 0) continue;
                     if (!valueMatchesNormalizedMod(ret->get_operand(0), ret->parent_, candidateMod)) {
                         ok = false;
                         break;

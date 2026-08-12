@@ -32,8 +32,8 @@ public:
 // 数组常量，如 [3 x i32] [i32 42, i32 11, i32 74]
 class ConstantArray : public Constant {
 public:
-    ConstantArray(ArrayType* ty, const std::vector<Constant*>& val) : Constant(ty, "") { this->const_array.assign(val.begin(), val.end()); }
-    ~ConstantArray() = default;
+    ConstantArray(ArrayType* ty, const std::vector<Constant*>& val)
+        : Constant(ty, ""), const_array(val) {}
     virtual std::string print() override;
     std::vector<Constant*> const_array;  // 数组元素列表
 };

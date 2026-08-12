@@ -82,7 +82,7 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper,
     if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
         bool haveIncoming = false;
         long long joinedLower = 0, joinedUpper = 0;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             long long incomingLower = 0, incomingUpper = 0;
             if (!inferSignedBounds(phi->get_operand(i), incomingLower,
                                    incomingUpper, visiting, depth + 1))
@@ -116,12 +116,12 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
 // run can still lower the remaining remainder to bounded corrections.
 bool isLoopCarriedRemainder(BinaryInst *remainder) {
     for (const auto &use : remainder->use_list_) {
-        auto *phi = dynamic_cast<PhiInst *>(use.val_);
-        if (!phi || use.arg_no_ % 2 != 0 ||
-            use.arg_no_ + 1 >= phi->num_ops_ || phi->num_ops_ != 4)
+        auto *phi = dynamic_cast<PhiInst *>(use.user_);
+        if (!phi || use.operand_index_ % 2 != 0 ||
+            use.operand_index_ + 1 >= phi->num_ops() || phi->num_ops() != 4)
             continue;
         auto *backedge = dynamic_cast<BasicBlock *>(
-            phi->get_operand(use.arg_no_ + 1));
+            phi->get_operand(use.operand_index_ + 1));
         BasicBlock *header = phi->parent_;
         Function *function = header ? header->parent_ : nullptr;
         if (!function || !backedge || !remainder->parent_ ||
@@ -148,7 +148,7 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
             continue;
 
         Value *init = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) != backedge) {
                 init = phi->get_operand(i);
                 break;
@@ -262,7 +262,7 @@ Value* visitMul(BinaryInst *inst) {
 
     if (isPowerOfTwo(cy->value_) && cy->value_ > 1 &&
         inst->use_list_.size() == 1) {
-        auto *user = dynamic_cast<Instruction*>((*inst->use_list_.begin()).val_);
+        auto *user = (*inst->use_list_.begin()).user_;
         if (user) {
             if (user->op_id_ == Instruction::Add) {
                 Value *op0 = user->get_operand(0);
@@ -561,7 +561,7 @@ Value* visitSRem(BinaryInst *inst) {
 
     if (cy && cy->value_ > 1 && isPowerOfTwo(cy->value_)) {
         if (inst->use_list_.size() == 1) {
-            auto *cmp = dynamic_cast<ICmpInst*>((*inst->use_list_.begin()).val_);
+            auto *cmp = dynamic_cast<ICmpInst*>((*inst->use_list_.begin()).user_);
             if (cmp && cmp->op_id_ == Instruction::ICmp &&
                 (cmp->icmp_op_ == ICmpInst::ICMP_EQ ||
                  cmp->icmp_op_ == ICmpInst::ICMP_NE)) {

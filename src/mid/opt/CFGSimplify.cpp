@@ -19,7 +19,7 @@ static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
         if (!instr->is_phi()) continue;
         auto *phi = static_cast<PhiInst *>(instr);
         // 从后向前扫描，避免索引偏移
-        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+        for (int i = phi->num_ops() - 1; i >= 0; i -= 2) {
             if (phi->get_operand(i) == deadBlock) {
                 phi->remove_operands(i - 1, i);
             }
@@ -30,7 +30,7 @@ static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
 // 将基本块的结尾从条件分支替换为无条件跳转到 target
 static void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
     auto *oldBr = dynamic_cast<BranchInst *>(bb->get_terminator());
-    if (!oldBr || oldBr->num_ops_ != 3) return;
+    if (!oldBr || oldBr->num_ops() != 3) return;
 
     auto *trueDest  = dynamic_cast<BasicBlock *>(oldBr->get_operand(1));
     auto *falseDest = dynamic_cast<BasicBlock *>(oldBr->get_operand(2));
@@ -56,7 +56,7 @@ static void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
 // 将一个无条件跳转的目标从 oldTarget 改为 newTarget，并维护 CFG 和 phi
 static void redirectUncondBr(BasicBlock *pred, BasicBlock *oldTarget, BasicBlock *newTarget) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
-    if (!br || br->num_ops_ != 1) return;
+    if (!br || br->num_ops() != 1) return;
 
     // 更新 CFG
     pred->remove_succ_basic_block(oldTarget);
@@ -69,7 +69,7 @@ static void redirectUncondBr(BasicBlock *pred, BasicBlock *oldTarget, BasicBlock
 // 将一个条件分支的某个目标从 oldTarget 改为 newTarget
 static void redirectCondBr(BasicBlock *pred, int idx, BasicBlock *oldTarget, BasicBlock *newTarget) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
-    if (!br || br->num_ops_ != 3) return;
+    if (!br || br->num_ops() != 3) return;
 
     pred->remove_succ_basic_block(oldTarget);
     oldTarget->remove_pre_basic_block(pred);
@@ -88,7 +88,7 @@ static void updatePhis(BasicBlock *target, BasicBlock *deadBlock,
         // 收集 deadBlock 对应的值
         std::vector<Value *> vals;
         // 从后向前扫描，避免索引偏移问题
-        for (int i = phi->num_ops_ - 1; i >= 0; i -= 2) {
+        for (int i = phi->num_ops() - 1; i >= 0; i -= 2) {
             if (phi->get_operand(i) == deadBlock) {   // i 是基本块操作数
                 vals.push_back(phi->get_operand(i - 1)); // 对应的值
                 // 删除这一对操作数
@@ -103,7 +103,7 @@ static void updatePhis(BasicBlock *target, BasicBlock *deadBlock,
         for (auto *pred : preds) {
             // 检查 pred 是否已经有一个 phi 条目
             bool alreadyHasEntry = false;
-            for (int i = 0; i < phi->num_ops_; i += 2) {
+            for (int i = 0; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i + 1) == pred) {
                     alreadyHasEntry = true;
                     break;
@@ -131,7 +131,7 @@ static bool mergeLinearSuccessor(BasicBlock *bb) {
         return false;
 
     auto *term = bb->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 1)
+    if (!term || !term->is_br() || term->num_ops() != 1)
         return false;
 
     auto *succ = dynamic_cast<BasicBlock *>(term->get_operand(0));
@@ -148,7 +148,7 @@ static bool mergeLinearSuccessor(BasicBlock *bb) {
             if (!inst->is_phi())
                 break;
             auto *phi = static_cast<PhiInst *>(inst);
-            for (unsigned i = 1; i < phi->num_ops_; i += 2) {
+            for (unsigned i = 1; i < phi->num_ops(); i += 2) {
                 if (phi->get_operand(i) == succ)
                     phi->set_operand(i, bb);
             }
@@ -183,7 +183,7 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
     if (bb->instr_list_.size() != 1) return false;
 
     auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
-    if (!br || br->num_ops_ != 1) return false;
+    if (!br || br->num_ops() != 1) return false;
 
     auto *target = dynamic_cast<BasicBlock *>(br->get_operand(0));
     if (target == bb) return false; // 自环
@@ -205,7 +205,7 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
             for (auto *instr : target->instr_list_) {
                 if (!instr->is_phi()) break;
                 auto *phi = static_cast<PhiInst *>(instr);
-                for (int i = 0; i < phi->num_ops_; i += 2) {
+                for (int i = 0; i < phi->num_ops(); i += 2) {
                     if (phi->get_operand(i + 1) == bb)
                         return false; // phi 引用此无前驱块，不能合并
                 }
@@ -228,9 +228,9 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
     for (auto *pred : preds) {
         auto *predTerm = pred->get_terminator();
         if (auto *predBr = dynamic_cast<BranchInst *>(predTerm)) {
-            if (predBr->num_ops_ == 1) {
+            if (predBr->num_ops() == 1) {
                 redirectUncondBr(pred, bb, target);
-            } else if (predBr->num_ops_ == 3) {
+            } else if (predBr->num_ops() == 3) {
                 for (int i = 1; i <= 2; ++i) {
                     if (predBr->get_operand(i) == bb) {
                         redirectCondBr(pred, i, bb, target);
@@ -258,7 +258,7 @@ static bool foldConstantBranches(Function *func) {
     bool changed = false;
     for (auto *bb : func->basic_blocks_) {
         auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
-        if (!br || br->num_ops_ != 3) continue;
+        if (!br || br->num_ops() != 3) continue;
 
         auto *cond = br->get_operand(0);
         if (auto *ci = dynamic_cast<ConstantInt *>(cond)) {
@@ -276,7 +276,7 @@ static bool foldConstantBranches(Function *func) {
 }
 
 static Value *getPhiIncomingValue(PhiInst *phi, BasicBlock *pred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
             return phi->get_operand(i);
     }
@@ -301,7 +301,7 @@ static void replacePhiPred(BasicBlock *target, BasicBlock *oldPred,
     for (auto *instr : target->instr_list_) {
         if (!instr->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(instr);
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == oldPred)
                 phi->set_operand(i + 1, newPred);
         }
@@ -323,8 +323,8 @@ static bool blockHasOnlyOptionalCmpAndTerminator(BasicBlock *bb,
 static bool branchTargetsBlock(BasicBlock *pred, BasicBlock *target) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
     if (!br) return false;
-    if (br->num_ops_ == 1) return br->get_operand(0) == target;
-    if (br->num_ops_ == 3)
+    if (br->num_ops() == 1) return br->get_operand(0) == target;
+    if (br->num_ops() == 3)
         return br->get_operand(1) == target || br->get_operand(2) == target;
     return false;
 }
@@ -333,11 +333,11 @@ static void redirectBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
                                  BasicBlock *newTarget) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
     if (!br) return;
-    if (br->num_ops_ == 1) {
+    if (br->num_ops() == 1) {
         redirectUncondBr(pred, oldTarget, newTarget);
         return;
     }
-    if (br->num_ops_ != 3) return;
+    if (br->num_ops() != 3) return;
     for (int i = 1; i <= 2; i++) {
         if (br->get_operand(i) == oldTarget) {
             redirectCondBr(pred, i, oldTarget, newTarget);
@@ -387,10 +387,10 @@ bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
         if (!P || P->parent_ != func) continue;
 
         auto *bTerm = dynamic_cast<BranchInst *>(B->get_terminator());
-        if (!bTerm || bTerm->num_ops_ != 3) continue;
+        if (!bTerm || bTerm->num_ops() != 3) continue;
 
         auto *pTerm = dynamic_cast<BranchInst *>(P->get_terminator());
-        if (!pTerm || pTerm->num_ops_ != 3) continue;
+        if (!pTerm || pTerm->num_ops() != 3) continue;
 
         auto *pT = dynamic_cast<BasicBlock *>(pTerm->get_operand(1));
         auto *pF = dynamic_cast<BasicBlock *>(pTerm->get_operand(2));
@@ -428,7 +428,7 @@ bool CFGSimplify::hoistLoopInvariantBranch(Function *func) {
         if (!blockHasOnlyOptionalCmpAndTerminator(B, cmpInst, false)) continue;
 
         bool allInvariant = true;
-        for (unsigned i = 0; i < cmpInst->num_ops_; i++) {
+        for (unsigned i = 0; i < cmpInst->num_ops(); i++) {
             if (!valueDominatesBlock(cmpInst->get_operand(i), P, DT)) {
                 allInvariant = false;
                 break;
@@ -536,7 +536,7 @@ static bool canCloneBlock(const std::vector<Instruction *> &instrs) {
     for (auto *inst : instrs) {
         if (!isSafeToSpeculate(inst) || !isCloneableForSelect(inst))
             return false;
-        for (unsigned i = 0; i < inst->num_ops_; ++i) {
+        for (unsigned i = 0; i < inst->num_ops(); ++i) {
             auto *def = dynamic_cast<Instruction *>(inst->get_operand(i));
             if (def && def->parent_ == inst->parent_ &&
                 !available.count(def))
@@ -673,7 +673,7 @@ static bool tryCloneBlock(
 {
     for (auto *inst : instrs) {
         if (!isSafeToSpeculate(inst)) return false;
-        for (unsigned i = 0; i < inst->num_ops_; i++) {
+        for (unsigned i = 0; i < inst->num_ops(); i++) {
             auto *def = dynamic_cast<Instruction*>(inst->get_operand(i));
             if (!def) continue;
             // Operand defined in same block must already have been cloned.
@@ -703,7 +703,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
 
     for (auto *bb : func->basic_blocks_) {
         auto *term = bb->get_terminator();
-        if (!term || !term->is_br() || term->num_ops_ != 3) continue;
+        if (!term || !term->is_br() || term->num_ops() != 3) continue;
 
         auto *cmp = dynamic_cast<Instruction*>(term->get_operand(0));
         if (!cmp || !isCmpForSelect(cmp) || cmp->parent_ != bb) continue;
@@ -718,8 +718,8 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         // ── Determine structure ──
         auto *trueTerm  = trueBB->get_terminator();
         auto *falseTerm = falseBB->get_terminator();
-        bool trueBr  = trueTerm  && trueTerm->is_br()  && trueTerm->num_ops_  == 1;
-        bool falseBr = falseTerm && falseTerm->is_br() && falseTerm->num_ops_ == 1;
+        bool trueBr  = trueTerm  && trueTerm->is_br()  && trueTerm->num_ops()  == 1;
+        bool falseBr = falseTerm && falseTerm->is_br() && falseTerm->num_ops() == 1;
 
         enum { PAT_A, PAT_B, PAT_C } pattern;
         BasicBlock *mergeBB      = nullptr;
@@ -768,7 +768,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
             if (!i->is_phi()) break;
             auto *p = static_cast<PhiInst*>(i);
             Value *vT = nullptr, *vF = nullptr;
-            for (unsigned k = 0; k < p->num_ops_; k += 2) {
+            for (unsigned k = 0; k < p->num_ops(); k += 2) {
                 auto *pred = static_cast<BasicBlock*>(p->get_operand(k + 1));
                 Value *val = p->get_operand(k);
                 if (interTrueBB  && pred == interTrueBB)  vT = val;
@@ -776,7 +776,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
                 if (pattern == PAT_B && pred == bb) vF = val;
                 if (pattern == PAT_C && pred == bb) vT = val;
             }
-            if (!vT || !vF || p->num_ops_ < 4) { allConvertible = false; break; }
+            if (!vT || !vF || p->num_ops() < 4) { allConvertible = false; break; }
             phis.push_back(p); trueVals.push_back(vT); falseVals.push_back(vF);
         }
         if (!allConvertible || phis.empty()) continue;
@@ -816,7 +816,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         for (size_t pi = 0; pi < phis.size(); ++pi) {
             PhiInst *phi = phis[pi];
             SelectInst *sel = sels[pi];
-            if (phi->num_ops_ == 4) {
+            if (phi->num_ops() == 4) {
                 // 2-pred diamond: phi can be fully replaced by the select.
                 // 替换后立即删除，避免留下入边集合与前驱不一致的僵尸 phi。
                 phi->replace_all_use_with(sel);
@@ -825,13 +825,13 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
                 // Multi-pred phi (&&/|| pattern): update in place.
                 for (auto *ib : {interTrueBB, interFalseBB}) {
                     if (!ib) continue;
-                    for (int k = (int)phi->num_ops_ - 1; k >= 0; k -= 2) {
+                    for (int k = (int)phi->num_ops() - 1; k >= 0; k -= 2) {
                         if (phi->get_operand(k) == ib)
                             phi->remove_operands(k - 1, k);
                     }
                 }
                 if (pattern == PAT_B || pattern == PAT_C) {
-                    for (int k = 1; k < (int)phi->num_ops_; k += 2) {
+                    for (int k = 1; k < (int)phi->num_ops(); k += 2) {
                         if (phi->get_operand(k) == bb) { phi->set_operand(k - 1, sel); break; }
                     }
                 } else {
@@ -853,7 +853,7 @@ bool CFGSimplify::convertDiamondsToSelect(Function *func) {
         // 因此用 ret 的实际操作数重建，而不是假定某个特定 select。
         auto *mt = mergeBB->get_terminator();
         bool sinkMerge = false;
-        if (mt && mt->is_ret() && mt->num_ops_ == 1 &&
+        if (mt && mt->is_ret() && mt->num_ops() == 1 &&
             mergeBB != getEntryBlock(func) && mergeBB->pre_bbs_.empty()) {
             bool allPhisDead = true;
             for (auto *instr : mergeBB->instr_list_) {

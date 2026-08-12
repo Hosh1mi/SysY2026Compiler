@@ -105,10 +105,10 @@ void AArch64Backend::generate() {
 void AArch64Backend::emitParallelRuntime() {
     auto calledFunction = [](Instruction *instruction) -> Function * {
         auto *call = dynamic_cast<CallInst *>(instruction);
-        if (!call || call->num_ops_ == 0)
+        if (!call || call->num_ops() == 0)
             return nullptr;
         return dynamic_cast<Function *>(
-            call->get_operand(call->num_ops_ - 1));
+            call->get_operand(call->num_ops() - 1));
     };
 
     bool hasParallelFor = false;

@@ -63,7 +63,7 @@ inline KnownBits computeKnownBitsImpl(Value *v, int depth) {
         return known;
     }
 
-    if (inst->num_ops_ < 2)
+    if (inst->num_ops() < 2)
         return {};
     KnownBits lhs = computeKnownBitsImpl(inst->get_operand(0), depth + 1);
     KnownBits rhs = computeKnownBitsImpl(inst->get_operand(1), depth + 1);
@@ -178,7 +178,7 @@ inline bool nonNegativeBranchImpl(Value *v, BasicBlock *ctx) {
 
     for (auto *pred : ctx->pre_bbs_) {
         auto *term = dynamic_cast<BranchInst *>(pred->get_terminator());
-        if (!term || term->num_ops_ != 3)
+        if (!term || term->num_ops() != 3)
             continue;
 
         auto *cond = dynamic_cast<ICmpInst *>(term->get_operand(0));
@@ -313,7 +313,7 @@ inline bool isNonNegativeRecurrenceImpl(
                       recurse(inst->get_operand(1)));
 
     if (inst->is_phi()) {
-        for (unsigned i = 0; i + 1 < inst->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < inst->num_ops(); i += 2) {
             if (!recurse(inst->get_operand(i)))
                 return finish(false);
         }
@@ -342,10 +342,10 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth,
         // the whole module for each formal argument makes a function with N
         // arguments and O(N) IR cost O(N^2), even when it has one call site.
         for (const Use &use : func->use_list_) {
-            auto *call = dynamic_cast<CallInst *>(use.val_);
-            if (!call || call->num_ops_ == 0 ||
-                call->get_operand(call->num_ops_ - 1) != func ||
-                arg->arg_no_ >= call->num_ops_ - 1)
+            auto *call = dynamic_cast<CallInst *>(use.user_);
+            if (!call || call->num_ops() == 0 ||
+                call->get_operand(call->num_ops() - 1) != func ||
+                arg->arg_no_ >= call->num_ops() - 1)
                 continue;
             auto *caller =
                 call->parent_ ? call->parent_->parent_ : nullptr;
@@ -434,13 +434,13 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth,
     // loop's taken edge dominates its backedge and the constant upper bound
     // leaves enough room for the update.  The explicit bound check is what
     // makes this independent of signed-overflow assumptions.
-    if (inst->is_phi() && inst->parent_ && inst->num_ops_ == 4) {
+    if (inst->is_phi() && inst->parent_ && inst->num_ops() == 4) {
         auto *phi = static_cast<PhiInst *>(inst);
         Value *init = nullptr;
         BinaryInst *update = nullptr;
         BasicBlock *backedge = nullptr;
         int64_t step = 0;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *candidate = dynamic_cast<BinaryInst *>(phi->get_operand(i));
             auto *incomingBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             ConstantInt *stepConst = nullptr;
@@ -462,7 +462,7 @@ inline bool isKnownNonNegativeImpl(Value *v, BasicBlock *ctx, int depth,
         }
 
         auto *term = dynamic_cast<BranchInst *>(inst->parent_->get_terminator());
-        auto *cmp = term && term->num_ops_ == 3
+        auto *cmp = term && term->num_ops() == 3
                         ? dynamic_cast<ICmpInst *>(term->get_operand(0))
                         : nullptr;
         if (init && update && cmp &&
@@ -514,7 +514,7 @@ inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {
     if (!ctx || ctx->pre_bbs_.size() != 1 || k <= 0 || k >= 32)
         return false;
     auto *br = ctx->pre_bbs_.front()->get_terminator();
-    if (!br || br->op_id_ != Instruction::Br || br->num_ops_ != 3 ||
+    if (!br || br->op_id_ != Instruction::Br || br->num_ops() != 3 ||
         br->get_operand(1) != ctx)
         return false;
     auto *cond = dynamic_cast<ICmpInst *>(br->get_operand(0));

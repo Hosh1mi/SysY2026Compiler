@@ -35,7 +35,7 @@ bool AutoMemoization::moduleHasAnyCandidate(Module *m) {
         for (auto bb : func->basic_blocks_) {
             for (auto inst : bb->instr_list_) {
                 if (inst->op_id_ != Instruction::Call) continue;
-                Value *calleeV = inst->get_operand(inst->num_ops_ - 1);
+                Value *calleeV = inst->get_operand(inst->num_ops() - 1);
                 if (calleeV == static_cast<Value *>(func)) {
                     selfCalls++;
                     if (selfCalls >= MIN_SELF_CALLS) return true;
@@ -135,7 +135,7 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
             auto call = dynamic_cast<CallInst *>(inst);
             if (!call) continue;
             auto callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             if (!callee) return false;
             if (callee == f) { selfCallCount++; continue; }
             if (baa.mayHaveSideEffect(callee)) return false;
@@ -144,7 +144,7 @@ bool AutoMemoization::isCandidate(Function *f, BasicAliasAnalysis &baa,
 
     externalCallCount = 0;
     for (auto &use : f->use_list_) {
-        auto user = dynamic_cast<Instruction *>(use.val_);
+        auto user = use.user_;
         if (!user) return false;
         if (user->parent_ && user->parent_->parent_ != f) externalCallCount++;
     }
@@ -194,7 +194,7 @@ bool AutoMemoization::readsUnfrozenGlobal(Function *f, AnalysisManager &AM) {
 
     std::vector<Instruction *> callSites;
     for (auto &use : f->use_list_) {
-        auto user = dynamic_cast<Instruction *>(use.val_);
+        auto user = use.user_;
         if (!user || !user->parent_) continue;
         if (user->parent_->parent_ != f)
             callSites.push_back(user);
@@ -241,7 +241,7 @@ unsigned AutoMemoization::deriveArgBound(Function *f, Argument *arg) {
                 if (derived.count(inst)) continue;
                 if (auto phi = dynamic_cast<PhiInst *>(inst)) {
                     bool any = false;
-                    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+                    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
                         if (derived.count(phi->get_operand(i))) { any = true; break; }
                     }
                     if (any) { derived.insert(phi); changed = true; }
@@ -271,7 +271,7 @@ unsigned AutoMemoization::deriveArgBound(Function *f, Argument *arg) {
             // operand 1（idx0）只是 “选指针指向的对象”，不消耗维度；
             // 真正的下标从 operand 2 起。
             Type *cur = ptrTy->contained_;
-            for (unsigned i = 2; i < gep->num_ops_; ++i) {
+            for (unsigned i = 2; i < gep->num_ops(); ++i) {
                 if (cur->tid_ != Type::ArrayTyID) break;
                 auto arrTy = static_cast<ArrayType *>(cur);
                 unsigned dim = arrTy->num_elements_;
@@ -360,7 +360,7 @@ void AutoMemoization::transform(Function *f,
         auto *fEntry = new BasicBlock(m, "entry", fillFn);
         auto *fStore = new BasicBlock(m, "memo_store", fillFn);
         auto *fRet = new BasicBlock(m, "memo_ret", fillFn);
-        auto *fb = new IRStmtBuilder(fEntry, m);
+        auto *fb = new IRStmtBuilder(fEntry);
         std::vector<Value *> args(fillFn->arguments_.begin(),
                                   fillFn->arguments_.end());
         auto *result = fb->create_call(bodyFn, args);
@@ -386,7 +386,7 @@ void AutoMemoization::transform(Function *f,
         auto *checkBB = new BasicBlock(m, "memo_check", f);
         auto *hitBB = new BasicBlock(m, "memo_hit", f);
         auto *missBB = new BasicBlock(m, "memo_miss", f);
-        auto *builder = new IRStmtBuilder(entry, m);
+        auto *builder = new IRStmtBuilder(entry);
 
         Value *inBounds = emitInBounds(f, entry);
         builder->create_cond_br(inBounds, checkBB, missBB);
@@ -436,7 +436,7 @@ void AutoMemoization::transform(Function *f,
     auto *checkKey = new BasicBlock(m, "memo_check_key", f);
     auto *hitBB = new BasicBlock(m, "memo_hit", f);
     auto *missBB = new BasicBlock(m, "memo_miss", f);
-    auto *builder = new IRStmtBuilder(entry, m);
+    auto *builder = new IRStmtBuilder(entry);
 
     auto computeBase = [&](BasicBlock *bb) -> Value * {
         Value *hashVal = nullptr;

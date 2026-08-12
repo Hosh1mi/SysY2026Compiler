@@ -202,7 +202,7 @@ SLPVectorize::PackSet SLPVectorize::extendPackSet(
             if (pack.instrs.empty()) continue;
             if (!dynamic_cast<BinaryInst*>(pack.instrs[0])) continue;
 
-            for (unsigned opIdx = 0; opIdx < pack.instrs[0]->num_ops_; ++opIdx) {
+            for (unsigned opIdx = 0; opIdx < pack.instrs[0]->num_ops(); ++opIdx) {
                 std::vector<Instruction*> loads;
                 bool allLoads = true;
                 for (auto *inst : pack.instrs) {
@@ -243,19 +243,19 @@ SLPVectorize::PackSet SLPVectorize::extendPackSet(
             if (!isVectorizable(p0)) continue;
 
             for (auto &use : p0->use_list_) {
-                auto *user0 = dynamic_cast<Instruction*>(use.val_);
+                auto *user0 = use.user_;
                 if (!user0 || user0->parent_ != bb) continue;
                 if (!isVectorizable(user0)) continue;
                 if (P.contains(user0)) continue;
 
-                unsigned argNo = use.arg_no_;
+                unsigned argNo = use.operand_index_;
                 std::vector<Instruction*> users;
                 bool allMatch = true;
                 for (size_t k = 0; k < pack.instrs.size(); ++k) {
                     Instruction *matching = nullptr;
                     for (auto &u : pack.instrs[k]->use_list_) {
-                        if (u.arg_no_ != argNo) continue;
-                        auto *cand = dynamic_cast<Instruction*>(u.val_);
+                        if (u.operand_index_ != argNo) continue;
+                        auto *cand = u.user_;
                         if (!cand || cand->parent_ != bb) continue;
                         if (!isVectorizable(cand)) continue;
                         if (k == 0 || isIsomorphic(users[0], cand)) {
@@ -424,7 +424,7 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
         if (!gep) return;
 
         Value *gepBase = gep->get_operand(0);
-        unsigned last = gep->num_ops_ - 1;
+        unsigned last = gep->num_ops() - 1;
         auto *ci = dynamic_cast<ConstantInt*>(gep->get_operand(last));
         if (!ci) return;
 
@@ -456,7 +456,7 @@ void SLPVectorize::emitVectorLoad(BasicBlock *bb, Pack &pack, Module *module)
     auto *firstGep = dynamic_cast<GetElementPtrInst*>(
         pack.instrs[0]->get_operand(0));
     std::vector<Value*> idxs;
-    for (unsigned k = 1; k < firstGep->num_ops_; ++k)
+    for (unsigned k = 1; k < firstGep->num_ops(); ++k)
         idxs.push_back(firstGep->get_operand(k));
     idxs.back() = new ConstantInt(module->int32_ty_, baseOffset);
 
@@ -527,7 +527,7 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
         if (!gep) return;
 
         Value *gepBase = gep->get_operand(0);
-        unsigned last = gep->num_ops_ - 1;
+        unsigned last = gep->num_ops() - 1;
         auto *ci = dynamic_cast<ConstantInt*>(gep->get_operand(last));
         if (!ci) return;
 
@@ -576,7 +576,7 @@ void SLPVectorize::emitVectorStore(BasicBlock *bb, Pack &pack, Module *module)
     auto *firstGep = dynamic_cast<GetElementPtrInst*>(
         pack.instrs[0]->get_operand(1));
     std::vector<Value*> idxs;
-    for (unsigned k = 1; k < firstGep->num_ops_; ++k)
+    for (unsigned k = 1; k < firstGep->num_ops(); ++k)
         idxs.push_back(firstGep->get_operand(k));
     idxs.back() = new ConstantInt(module->int32_ty_, baseOffset);
 
@@ -624,7 +624,7 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
         auto laneIt = order.find(lane);
         if (laneIt == order.end() || laneIt->second < firstIt->second)
             return;
-        for (unsigned op = 0; op < lane->num_ops_; ++op) {
+        for (unsigned op = 0; op < lane->num_ops(); ++op) {
             auto *def = dynamic_cast<Instruction *>(lane->get_operand(op));
             if (!def || def->parent_ != bb || laneSet.count(def))
                 continue;
@@ -635,7 +635,7 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
     }
 
     // Gather operands per lane
-    int numOps = firstBin->num_ops_;
+    int numOps = firstBin->num_ops();
     Type *scalarTy = firstBin->type_;
     auto *integerTy = dynamic_cast<IntegerType *>(scalarTy);
     if (scalarTy->tid_ != Type::FloatTyID &&
@@ -749,7 +749,7 @@ void SLPVectorize::emitVectorBinary(BasicBlock *bb, Pack &pack,
 
 bool SLPVectorize::isIsomorphic(Instruction *a, Instruction *b) {
     if (a->op_id_ != b->op_id_) return false;
-    if (a->num_ops_ != b->num_ops_) return false;
+    if (a->num_ops() != b->num_ops()) return false;
     if (a->type_ != b->type_) return false;
 
     if (a->is_store()) {
@@ -765,12 +765,12 @@ bool SLPVectorize::isIsomorphic(Instruction *a, Instruction *b) {
 
 bool SLPVectorize::isIndependent(Instruction *a, Instruction *b) {
     for (auto &use : a->use_list_)
-        if (use.val_ == b) return false;
+        if (use.user_ == b) return false;
     for (auto &use : b->use_list_)
-        if (use.val_ == a) return false;
-    for (unsigned i = 0; i < a->num_ops_; ++i)
+        if (use.user_ == a) return false;
+    for (unsigned i = 0; i < a->num_ops(); ++i)
         if (a->get_operand(i) == b) return false;
-    for (unsigned i = 0; i < b->num_ops_; ++i)
+    for (unsigned i = 0; i < b->num_ops(); ++i)
         if (b->get_operand(i) == a) return false;
     return true;
 }
@@ -870,7 +870,7 @@ bool SLPVectorize::isProfitable(const PackSet &P) const {
 
         auto *binary = dynamic_cast<BinaryInst *>(first);
         if (binary) {
-            for (unsigned operand = 0; operand < binary->num_ops_; ++operand) {
+            for (unsigned operand = 0; operand < binary->num_ops(); ++operand) {
                 bool same = true;
                 Value *laneZero = pack.instrs.front()->get_operand(operand);
                 for (unsigned lane = 1; lane < VF; ++lane)
@@ -899,7 +899,7 @@ bool SLPVectorize::isProfitable(const PackSet &P) const {
         if (!first->is_store()) {
             for (Instruction *lane : pack.instrs)
                 for (const Use &use : lane->use_list_) {
-                    auto *user = dynamic_cast<Instruction *>(use.val_);
+                    auto *user = use.user_;
                     if (!user || !packed.count(user)) ++vectorCost;
                 }
         }
@@ -915,10 +915,10 @@ bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,
     auto *gepA = dynamic_cast<GetElementPtrInst*>(ptrA);
     auto *gepB = dynamic_cast<GetElementPtrInst*>(ptrB);
     if (!gepA || !gepB) return false;
-    if (gepA->num_ops_ != gepB->num_ops_) return false;
+    if (gepA->num_ops() != gepB->num_ops()) return false;
     if (gepA->get_operand(0) != gepB->get_operand(0)) return false;
 
-    for (unsigned i = 1; i < gepA->num_ops_ - 1; ++i) {
+    for (unsigned i = 1; i < gepA->num_ops() - 1; ++i) {
         Value *aOp = gepA->get_operand(i);
         Value *bOp = gepB->get_operand(i);
         if (aOp != bOp) {
@@ -929,8 +929,8 @@ bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,
         }
     }
 
-    unsigned lastA = gepA->num_ops_ - 1;
-    unsigned lastB = gepB->num_ops_ - 1;
+    unsigned lastA = gepA->num_ops() - 1;
+    unsigned lastB = gepB->num_ops() - 1;
     auto *ciA = dynamic_cast<ConstantInt*>(gepA->get_operand(lastA));
     auto *ciB = dynamic_cast<ConstantInt*>(gepB->get_operand(lastB));
     if (!ciA || !ciB) return false;
@@ -945,10 +945,10 @@ bool SLPVectorize::isAdjacentLoad(Instruction *a, Instruction *b,
     auto *gepA = dynamic_cast<GetElementPtrInst*>(ptrA);
     auto *gepB = dynamic_cast<GetElementPtrInst*>(ptrB);
     if (!gepA || !gepB) return false;
-    if (gepA->num_ops_ != gepB->num_ops_) return false;
+    if (gepA->num_ops() != gepB->num_ops()) return false;
     if (gepA->get_operand(0) != gepB->get_operand(0)) return false;
 
-    for (unsigned i = 1; i < gepA->num_ops_ - 1; ++i) {
+    for (unsigned i = 1; i < gepA->num_ops() - 1; ++i) {
         Value *aOp = gepA->get_operand(i);
         Value *bOp = gepB->get_operand(i);
         if (aOp != bOp) {
@@ -959,8 +959,8 @@ bool SLPVectorize::isAdjacentLoad(Instruction *a, Instruction *b,
         }
     }
 
-    unsigned lastA = gepA->num_ops_ - 1;
-    unsigned lastB = gepB->num_ops_ - 1;
+    unsigned lastA = gepA->num_ops() - 1;
+    unsigned lastB = gepB->num_ops() - 1;
     auto *ciA = dynamic_cast<ConstantInt*>(gepA->get_operand(lastA));
     auto *ciB = dynamic_cast<ConstantInt*>(gepB->get_operand(lastB));
     if (!ciA || !ciB) return false;

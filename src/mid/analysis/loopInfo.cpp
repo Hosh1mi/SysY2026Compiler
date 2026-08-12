@@ -17,7 +17,7 @@ bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
         return false;
 
     auto *term = bb->get_terminator();
-    return term && term->is_br() && term->num_ops_ == 1 &&
+    return term && term->is_br() && term->num_ops() == 1 &&
            term->get_operand(0) == header;
 }
 
@@ -138,7 +138,7 @@ bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
     auto *branch = guardBlock
                        ? dynamic_cast<BranchInst *>(guardBlock->get_terminator())
                        : nullptr;
-    if (!branch || branch->num_ops_ != 3)
+    if (!branch || branch->num_ops() != 3)
         return false;
     compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
     if (!compare || compare->parent_ != guardBlock)
@@ -169,7 +169,7 @@ bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
 
 bool continuationSense(BranchInst *branch, const Loop *loop,
                        bool &continuesWhenTrue) {
-    if (!branch || branch->num_ops_ != 3 || !loop) return false;
+    if (!branch || branch->num_ops() != 3 || !loop) return false;
     auto *trueBlock = dynamic_cast<BasicBlock *>(branch->get_operand(1));
     auto *falseBlock = dynamic_cast<BasicBlock *>(branch->get_operand(2));
     if (!trueBlock || !falseBlock) return false;
@@ -186,7 +186,7 @@ bool matchGuard(BasicBlock *guardBlock, Value *inductionValue,
     auto *branch = guardBlock
                        ? dynamic_cast<BranchInst *>(guardBlock->get_terminator())
                        : nullptr;
-    if (!branch || branch->num_ops_ != 3) return false;
+    if (!branch || branch->num_ops() != 3) return false;
     compare = dynamic_cast<ICmpInst *>(branch->get_operand(0));
     if (!compare || compare->parent_ != guardBlock ||
         !normalizeCompare(compare, inductionValue, bound, predicate) ||
@@ -255,10 +255,10 @@ bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
     if (isAddOneOf(value, phi)) return true;
 
     auto *merge = dynamic_cast<PhiInst *>(value);
-    if (!merge || merge->parent_ != latch || merge->num_ops_ == 0)
+    if (!merge || merge->parent_ != latch || merge->num_ops() == 0)
         return false;
 
-    for (unsigned i = 0; i + 1 < merge->num_ops_; i += 2)
+    for (unsigned i = 0; i + 1 < merge->num_ops(); i += 2)
         if (!isAddOneOf(merge->get_operand(i), phi))
             return false;
     return true;
@@ -266,7 +266,7 @@ bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
 
 bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
     auto *term = loop->header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (!term || !term->is_br() || term->num_ops() != 3) return false;
     auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
     if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return false;
     if (cmp->get_operand(0) != iv) return false;
@@ -278,7 +278,7 @@ bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
     BasicBlock *latch = loop->singleLatch();
     if (!latch || !stepValue) return false;
     auto *term = latch->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (!term || !term->is_br() || term->num_ops() != 3) return false;
     auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
     if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return false;
     if (cmp->get_operand(0) != stepValue) return false;
@@ -298,13 +298,13 @@ bool describeEqualityControlInduction(const Loop &loop,
         auto *phi = dynamic_cast<PhiInst *>(instruction);
         if (!phi)
             break;
-        if (phi->num_ops_ != 4 ||
+        if (phi->num_ops() != 4 ||
             phi->type_->tid_ != Type::IntegerTyID)
             continue;
 
         Value *start = nullptr;
         Value *latchValue = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *source =
                 dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (source == loop.preheader)
@@ -566,11 +566,11 @@ void LoopInfo::analyzeIV(Loop *loop) {
         if (inst->type_->tid_ != Type::IntegerTyID) continue;
 
         auto *phi = static_cast<PhiInst *>(inst);
-        if (phi->num_ops_ != 4) continue;
+        if (phi->num_ops() != 4) continue;
 
         Value *start = nullptr;
         Value *latchValue = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *source =
                 dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (source == loop->preheader)
@@ -600,10 +600,10 @@ void LoopInfo::analyzeIV(Loop *loop) {
 
         auto *phi = static_cast<PhiInst *>(inst);
         // 期望 2 对 (val, BB)：一对来自 preheader 一对来自 latch
-        if (phi->num_ops_ != 4) continue;
+        if (phi->num_ops() != 4) continue;
 
         Value *pre_val = nullptr, *latch_val = nullptr;
-        for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i < phi->num_ops(); i += 2) {
             auto *src = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             if (src == loop->preheader)
                 pre_val = phi->get_operand(i);

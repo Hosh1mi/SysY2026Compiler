@@ -486,7 +486,7 @@ private:
             if (state.count(phi)) return true;
             failReason = "phi: no prev"; return false;
         }
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             if (phi->get_operand(i + 1) == prev) {
                 ValueState s;
                 if (!resolve(phi->get_operand(i), s, state)) { failReason = "phi: unres val"; return false; }
@@ -660,7 +660,7 @@ private:
             }
             if (dynamic_cast<BranchInst *>(inst)) return 'B';
             if (auto *ret = dynamic_cast<ReturnInst *>(inst)) {
-                if (ret->num_ops_ == 0) { failReason = "void ret"; return 'X'; }
+                if (ret->num_ops() == 0) { failReason = "void ret"; return 'X'; }
                 ValueState r;
                 if (!resolve(ret->get_operand(0), r, state)) { failReason = "ret: unres val"; return 'X'; }
                 returnBvOut = r.bv;
@@ -718,7 +718,7 @@ private:
             if (fIt != sF.end()) { valF = fIt->second; foundF = true; }
 
             // Slow path: classify each incoming by which arm produced it.
-            for (unsigned i = 0; (i + 1 < phi->num_ops_) && (!foundT || !foundF); i += 2) {
+            for (unsigned i = 0; (i + 1 < phi->num_ops()) && (!foundT || !foundF); i += 2) {
                 auto *pb  = static_cast<BasicBlock *>(phi->get_operand(i + 1));
                 auto *inc = phi->get_operand(i);
                 bool onT = (tDirect && pb == branchBB) || tInt.count(pb);
@@ -786,7 +786,7 @@ private:
             auto *br = dynamic_cast<BranchInst *>(cur->get_terminator());
             if (!br) { failReason = "no branch terminator"; return false; }
 
-            if (br->num_ops_ == 1) {
+            if (br->num_ops() == 1) {
                 prev = cur;
                 cur  = static_cast<BasicBlock *>(br->get_operand(0));
                 continue;
@@ -1237,7 +1237,7 @@ static Argument *findCountdownParam(Function *f) {
         auto *phi = dynamic_cast<PhiInst *>(inst);
         if (!phi) break;
         Value *preIn = nullptr, *latchIn = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops_; i += 2) {
+        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *pb  = static_cast<BasicBlock *>(phi->get_operand(i + 1));
             auto *val = phi->get_operand(i);
             if (pb == latch)         latchIn = val;
@@ -1260,7 +1260,7 @@ static Argument *findCountdownParam(Function *f) {
     // Approximation: all uses of paramArg must be inside L->header's phi list
     // (== the IV phi).  Any other use disqualifies the substitution.
     for (auto &use : paramArg->use_list_) {
-        auto *inst = dynamic_cast<Instruction *>(use.val_);
+        auto *inst = use.user_;
         if (!inst || inst->parent_ != L->header) return nullptr;
         if (!dynamic_cast<PhiInst *>(inst)) return nullptr;
     }
@@ -1424,7 +1424,7 @@ static void lowerXorCall(CallInst *call, const FuncEquiv &eq) {
 
     Value    *a      = call->get_operand(eq.inputIdxA);
     Value    *b      = call->get_operand(eq.inputIdxB);
-    auto     *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+    auto     *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 
     // Snapshot the successors `bb`'s terminator branches to; after the split
     // they become predecessors of `merge` instead of `bb`.
@@ -1448,7 +1448,7 @@ static void lowerXorCall(CallInst *call, const FuncEquiv &eq) {
         bb->remove_succ_basic_block(S);
         for (auto *inst : S->instr_list_) {
             if (!inst->is_phi()) continue;
-            for (unsigned i = 1; i < inst->num_ops_; i += 2)
+            for (unsigned i = 1; i < inst->num_ops(); i += 2)
                 if (inst->get_operand(i) == bb) inst->set_operand(i, merge);
         }
     }
@@ -1462,7 +1462,7 @@ static void lowerXorCall(CallInst *call, const FuncEquiv &eq) {
     // slow: re-call the original function (exact source semantics).
     BasicBlock *slow = new BasicBlock(mod, bb->name_ + ".xor.slow", func);
     std::vector<Value *> args;
-    for (int i = 0; i < (int)call->num_ops_ - 1; i++) args.push_back(call->get_operand(i));
+    for (int i = 0; i < (int)call->num_ops() - 1; i++) args.push_back(call->get_operand(i));
     auto *slowCall = new CallInst(callee, args, slow);   // auto-appended to slow
     new BranchInst(merge, slow);
 
@@ -1497,12 +1497,12 @@ static void rewriteCallSites(Module *module,
             for (auto *inst : bb->instr_list_) {
                 auto *call = dynamic_cast<CallInst *>(inst);
                 if (!call) continue;
-                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
                 if (!callee || !equiv.count(callee)) continue;
                 toRewrite.push_back(call);
             }
             for (auto *call : toRewrite) {
-                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+                auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
                 const FuncEquiv &eq = equiv.at(callee);
 
                 if (eq.kind == ClosedForm::XOR_OP) {
@@ -1692,7 +1692,7 @@ static void rewriteCallSites(Module *module,
 
     // Lower deferred XOR calls (each splits its containing block).
     for (auto *call : xorCalls) {
-        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops_ - 1));
+        auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
         lowerXorCall(call, equiv.at(callee));
     }
 }

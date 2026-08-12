@@ -39,7 +39,7 @@ static bool isSinkableOp(Instruction::OpID op) {
 static void trySinkInstruction(Instruction *inst) {
     if (inst->use_list_.size() != 1) return;
 
-    auto *user = dynamic_cast<Instruction*>((*inst->use_list_.begin()).val_);
+    auto *user = (*inst->use_list_.begin()).user_;
     if (!user) return;
 
     BasicBlock *user_bb = user->parent_;
@@ -288,12 +288,12 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
             changed = true;
             std::vector<Instruction*> users;
             for (auto &use : inst->use_list_) {
-                if (auto *user_inst = dynamic_cast<Instruction*>(use.val_))
+                if (auto *user_inst = use.user_)
                     users.push_back(user_inst);
             }
 
             std::vector<Instruction*> operands;
-            for (unsigned i = 0; i < inst->num_ops_; i++) {
+            for (unsigned i = 0; i < inst->num_ops(); i++) {
                 if (auto *op = dynamic_cast<Instruction*>(inst->get_operand(i)))
                     operands.push_back(op);
             }

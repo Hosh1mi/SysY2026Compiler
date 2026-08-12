@@ -7,7 +7,7 @@ namespace {
 bool hasHeaderIVGuard(Loop *loop) {
     if (!loop || !loop->header || !loop->canonicalIV) return false;
     auto *term = loop->header->get_terminator();
-    if (!term || !term->is_br() || term->num_ops_ != 3) return false;
+    if (!term || !term->is_br() || term->num_ops() != 3) return false;
     auto *cmp = dynamic_cast<ICmpInst *>(term->get_operand(0));
     if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_SLT) return false;
     return cmp->get_operand(0) == loop->canonicalIV;

@@ -70,14 +70,14 @@ static bool valueDominatesBlock(Value *value,
 
 bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
                            const DominatorTreeAnalysis &DT) {
-    if (!phi || phi->num_ops_ < 2)
+    if (!phi || phi->num_ops() < 2)
         return false;
 
     for (auto &use : phi->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (auto *userPhi = dynamic_cast<PhiInst *>(user)) {
-            if (use.arg_no_ + 1 >= userPhi->num_ops_ ||
-                userPhi->get_operand(use.arg_no_ + 1) != phi->parent_)
+            if (use.operand_index_ + 1 >= userPhi->num_ops() ||
+                userPhi->get_operand(use.operand_index_ + 1) != phi->parent_)
                 return false;
         }
     }
@@ -96,7 +96,7 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
         !valueDominatesBlock(rhs, DT, phi->parent_))
         return false;
 
-    for (unsigned i = 2; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 2; i < phi->num_ops(); i += 2) {
         auto *inst = dynamic_cast<BinaryInst *>(phi->get_operand(i));
         if (!sameOperands(inst, op, lhs, rhs))
             return false;

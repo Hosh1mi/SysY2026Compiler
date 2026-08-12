@@ -41,17 +41,17 @@ bool isSinkableInstruction(Instruction *inst) {
 }
 
 BasicBlock *phiIncomingBlock(PhiInst *phi, unsigned argNo) {
-    if (!phi || (argNo % 2) != 0 || argNo + 1 >= phi->num_ops_)
+    if (!phi || (argNo % 2) != 0 || argNo + 1 >= phi->num_ops())
         return nullptr;
     return dynamic_cast<BasicBlock *>(phi->get_operand(argNo + 1));
 }
 
 BasicBlock *useBlock(const Use &use) {
-    auto *user = dynamic_cast<Instruction *>(use.val_);
+    auto *user = use.user_;
     if (!user)
         return nullptr;
     if (auto *phi = dynamic_cast<PhiInst *>(user))
-        return phiIncomingBlock(phi, use.arg_no_);
+        return phiIncomingBlock(phi, use.operand_index_);
     return user->parent_;
 }
 
@@ -62,7 +62,7 @@ int loopDepth(LoopInfo &LI, BasicBlock *bb) {
 
 bool operandsDominateTarget(Instruction *inst, const DominatorTreeAnalysis &DT,
                             BasicBlock *target) {
-    for (unsigned i = 0; i < inst->num_ops_; ++i) {
+    for (unsigned i = 0; i < inst->num_ops(); ++i) {
         auto *opInst = dynamic_cast<Instruction *>(inst->get_operand(i));
         if (!opInst)
             continue;
@@ -77,7 +77,7 @@ bool operandsDominateTarget(Instruction *inst, const DominatorTreeAnalysis &DT,
 bool userUsesValue(Instruction *user, Value *value) {
     if (!user)
         return false;
-    for (unsigned i = 0; i < user->num_ops_; ++i) {
+    for (unsigned i = 0; i < user->num_ops(); ++i) {
         if (user->get_operand(i) == value)
             return true;
     }

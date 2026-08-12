@@ -89,7 +89,7 @@ void Mem2Reg::collectPromotableAllocas() {
             bool promotable = true;
 
             for (auto &use : alloca->use_list_) {
-                auto *user = dynamic_cast<Instruction *>(use.val_);
+                auto *user = use.user_;
                 if (!user) {
                     promotable = false;
                     break;
@@ -243,7 +243,7 @@ void Mem2Reg::placePhiNodes(AllocaInfo &info) {
     }
 
     for (auto *bb : info.phiBlocks) {
-        auto *phi = PhiInst::create_phi(info.alloca->alloca_ty_, bb);
+        auto *phi = PhiInst::create_phi(info.alloca->allocated_type(), bb);
         bb->add_instruction_front(phi);
         phiOwners_[phi] = info.alloca;
     }
@@ -271,7 +271,7 @@ bool Mem2Reg::hasStoreBeforeFirstLoad(const BlockInfo &blockInfo,
 void Mem2Reg::renamePromotedAllocas() {
     std::map<AllocaInst *, std::stack<Value *>> valueStacks;
     for (auto &info : allocas_) {
-        if (Value *zero = zeroValueFor(info.alloca->alloca_ty_))
+        if (Value *zero = zeroValueFor(info.alloca->allocated_type()))
             valueStacks[info.alloca].push(zero);
     }
 
@@ -374,7 +374,7 @@ bool Mem2Reg::runScalarReplacement() {
             if (inst->op_id_ != Instruction::Alloca) continue;
 
             auto *alloca = static_cast<AllocaInst *>(inst);
-            if (alloca->alloca_ty_->tid_ != Type::ArrayTyID) continue;
+            if (alloca->allocated_type()->tid_ != Type::ArrayTyID) continue;
             if (isScalarReplacementCandidate(alloca))
                 candidates.push_back(alloca);
         }
@@ -387,7 +387,7 @@ bool Mem2Reg::runScalarReplacement() {
 
 bool Mem2Reg::isScalarReplacementCandidate(AllocaInst *alloca) {
     for (auto &use : alloca->use_list_) {
-        auto *user = dynamic_cast<Instruction *>(use.val_);
+        auto *user = use.user_;
         if (!user || user->op_id_ != Instruction::GetElementPtr)
             return false;
 
@@ -403,7 +403,7 @@ bool Mem2Reg::isScalarReplacementCandidate(AllocaInst *alloca) {
             return false;
 
         for (auto &gepUse : gep->use_list_) {
-            auto *gepUser = dynamic_cast<Instruction *>(gepUse.val_);
+            auto *gepUser = gepUse.user_;
             if (!gepUser) return false;
             if (gepUser->op_id_ != Instruction::Load &&
                 gepUser->op_id_ != Instruction::Store)
@@ -420,7 +420,7 @@ void Mem2Reg::rewriteAlloca(AllocaInst *alloca) {
 
     auto allocaUses = alloca->use_list_;
     for (auto &use : allocaUses) {
-        auto *gep = static_cast<GetElementPtrInst *>(use.val_);
+        auto *gep = static_cast<GetElementPtrInst *>(use.user_);
 
         std::vector<int> indices;
         bool ok = getConstantIndices(gep, indices);
@@ -438,8 +438,8 @@ void Mem2Reg::rewriteAlloca(AllocaInst *alloca) {
         AllocaInst *scalarAlloca = slot->second;
         auto gepUses = gep->use_list_;
         for (auto &gepUse : gepUses) {
-            auto *gepUser = dynamic_cast<Instruction *>(gepUse.val_);
-            gepUser->set_operand(gepUse.arg_no_, scalarAlloca);
+            auto *gepUser = gepUse.user_;
+            gepUser->set_operand(gepUse.operand_index_, scalarAlloca);
         }
         toDelete_.insert(gep);
     }
@@ -449,7 +449,7 @@ void Mem2Reg::rewriteAlloca(AllocaInst *alloca) {
 
 bool Mem2Reg::getConstantIndices(GetElementPtrInst *gep,
                                  std::vector<int> &indices) {
-    for (unsigned i = 2; i < gep->num_ops_; i += 2) {
+    for (unsigned i = 2; i < gep->num_ops(); i += 2) {
         auto *idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
         if (!idx) return false;
         indices.push_back(static_cast<int>(idx->value_));

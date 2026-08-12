@@ -21,7 +21,7 @@ bool UnifyExitNodes::runOnFunction(Function *func) {
     // Create unified return block
     auto newRetBB = new BasicBlock(func->parent_, "label_unified_ret", func);
     auto retType = func->get_return_type();
-    IRStmtBuilder builder(newRetBB, func->parent_);
+    IRStmtBuilder builder(newRetBB);
 
     PhiInst *phi = nullptr;
     if (retType->tid_ == Type::VoidTyID) {
@@ -36,7 +36,7 @@ bool UnifyExitNodes::runOnFunction(Function *func) {
     for (auto bb : returningBlocks) {
         auto term = bb->get_terminator();
         if (phi) {
-            Value *retVal = term->num_ops_ > 0 ? term->get_operand(0) : nullptr;
+            Value *retVal = term->num_ops() > 0 ? term->get_operand(0) : nullptr;
             if (retVal)
                 phi->add_phi_pair_operand(retVal, bb);
         }

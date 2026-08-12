@@ -50,7 +50,7 @@ static bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi,
     latchVal = nullptr;
     latchBB = nullptr;
 
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         auto *pred = static_cast<BasicBlock*>(phi->get_operand(i + 1));
         if (loop.blocks.count(pred)) {
             if (latchVal) return false;
@@ -70,7 +70,7 @@ static bool decomposePointerOffset(Value *ptr, PhiInst *basePhi, int &offset) {
     Value *cur = ptr;
     while (cur != basePhi) {
         auto *gep = dynamic_cast<GetElementPtrInst*>(cur);
-        if (!gep || gep->num_ops_ != 2) return false;
+        if (!gep || gep->num_ops() != 2) return false;
         auto *step = dynamic_cast<ConstantInt*>(gep->get_operand(1));
         if (!step) return false;
         offset += step->value_;
@@ -124,7 +124,7 @@ static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
     Type *curTy = static_cast<PointerType*>(gep->get_operand(0)->type_)->contained_;
     int scalarSize = scalarTypeSizeInBytes(scalarTy);
 
-    for (unsigned i = 1; i < gep->num_ops_; ++i) {
+    for (unsigned i = 1; i < gep->num_ops(); ++i) {
         int elemBytes = scalarTypeSizeInBytes(curTy);
         if (i == varyPos) {
             if (elemBytes % scalarSize != 0) return false;
@@ -144,14 +144,10 @@ static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
 
 static void rewritePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
                                Value *newVal, BasicBlock *newPred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) != oldPred) continue;
-        phi->get_operand(i)->remove_use(phi->use_pos_[i]);
-        phi->get_operand(i + 1)->remove_use(phi->use_pos_[i + 1]);
-        phi->operands_[i] = newVal;
-        phi->use_pos_[i] = newVal->add_use(phi, i);
-        phi->operands_[i + 1] = newPred;
-        phi->use_pos_[i + 1] = newPred->add_use(phi, i + 1);
+        phi->set_operand(i, newVal);
+        phi->set_operand(i + 1, newPred);
         return;
     }
 }
@@ -244,7 +240,7 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         return reject("bad-latch");
 
     auto *headerBr = loop.header->get_terminator();
-    if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3)
+    if (!headerBr || !headerBr->is_br() || headerBr->num_ops() != 3)
         return reject("bad-header-branch");
     auto *cmpInst = dynamic_cast<ICmpInst*>(headerBr->get_operand(0));
     if (!cmpInst)
@@ -315,10 +311,10 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         laneValue = nullptr;
         if (auto *call = dynamic_cast<CallInst *>(value)) {
             auto *callee = dynamic_cast<Function *>(
-                call->get_operand(call->num_ops_ - 1));
+                call->get_operand(call->num_ops() - 1));
             SignedMinMaxIntrinsic intrinsicKind;
             if (!isSignedMinMaxIntrinsic(callee, &intrinsicKind) ||
-                call->num_ops_ != 3)
+                call->num_ops() != 3)
                 return false;
             if (call->get_operand(0) == accPhi)
                 laneValue = call->get_operand(1);
@@ -437,7 +433,7 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
             int firstOffset = 0;
             bool foundVary = false;
 
-            for (unsigned idx = 1; idx < firstGep->num_ops_; ++idx) {
+            for (unsigned idx = 1; idx < firstGep->num_ops(); ++idx) {
                 int off = 0;
                 if (!matchIVPlusConstant(firstGep->get_operand(idx), iv.phi, off))
                     continue;
@@ -451,12 +447,12 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
                 bool sameShape = true;
                 for (size_t lane = 0; lane < ptrs.size(); ++lane) {
                     auto *gep = dynamic_cast<GetElementPtrInst*>(ptrs[lane]);
-                    if (!gep || gep->num_ops_ != firstGep->num_ops_ ||
+                    if (!gep || gep->num_ops() != firstGep->num_ops() ||
                         gep->get_operand(0) != firstGep->get_operand(0)) {
                         sameShape = false;
                         break;
                     }
-                    for (unsigned idx = 1; idx < gep->num_ops_; ++idx) {
+                    for (unsigned idx = 1; idx < gep->num_ops(); ++idx) {
                         if (idx == varyPos) {
                             int off = 0;
                             if (!matchIVPlusConstant(gep->get_operand(idx), iv.phi, off) ||
@@ -577,7 +573,7 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         for (auto *inst : bb->instr_list_) {
             if (isReductionExemptPhi(inst)) continue;
             for (const auto &u : inst->use_list_) {
-                auto *user = dynamic_cast<Instruction*>(u.val_);
+                auto *user = u.user_;
                 if (user && user->parent_ && !loop.blocks.count(user->parent_))
                     return reject("reduction-live-out");
             }
@@ -669,19 +665,19 @@ void LoopVectorize::emitReductionVectorizedLoop(
                   << origHeader->name_ << "\n";
     }
     auto *preheaderBr = preheader ? preheader->get_terminator() : nullptr;
-    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1 ||
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops() != 1 ||
         preheaderBr->get_operand(0) != origHeader) {
         if (debugReduction) {
             std::cerr << "[LoopVectorize:reduction] emit-bail-preheader header="
                       << origHeader->name_ << " ops="
-                      << (preheaderBr ? std::to_string(preheaderBr->num_ops_) : "null")
+                      << (preheaderBr ? std::to_string(preheaderBr->num_ops()) : "null")
                       << "\n";
         }
         return;
     }
 
     auto *headerBr = origHeader->get_terminator();
-    if (!headerBr || !headerBr->is_br() || headerBr->num_ops_ != 3) return;
+    if (!headerBr || !headerBr->is_br() || headerBr->num_ops() != 3) return;
     auto *cmpInst = dynamic_cast<ICmpInst*>(headerBr->get_operand(0));
     if (!cmpInst) return;
 
@@ -797,7 +793,7 @@ void LoopVectorize::emitReductionVectorizedLoop(
         if (!gep || gepPtrPhis.count(gep)) return;
         std::vector<Value*> initIndices;
         bool foundVary = false;
-        for (unsigned idx = 1; idx < gep->num_ops_; ++idx) {
+        for (unsigned idx = 1; idx < gep->num_ops(); ++idx) {
             int offset = 0;
             if (matchIVPlusConstant(gep->get_operand(idx), iv.phi, offset) &&
                 offset == 0) {
@@ -1181,14 +1177,10 @@ namespace {
 
 void replacePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
                         Value *newValue, BasicBlock *newPred) {
-    for (unsigned i = 0; i < phi->num_ops_; i += 2) {
+    for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) != oldPred) continue;
-        phi->get_operand(i)->remove_use(phi->use_pos_[i]);
-        phi->get_operand(i + 1)->remove_use(phi->use_pos_[i + 1]);
-        phi->operands_[i] = newValue;
-        phi->use_pos_[i] = newValue->add_use(phi, i);
-        phi->operands_[i + 1] = newPred;
-        phi->use_pos_[i + 1] = newPred->add_use(phi, i + 1);
+        phi->set_operand(i, newValue);
+        phi->set_operand(i + 1, newPred);
         return;
     }
 }
@@ -1203,7 +1195,7 @@ bool LoopVectorize::emitVectorizedLoop(
     BasicBlock *preheader = plan.preheader;
     BasicBlock *origHeader = plan.header;
     auto *preheaderBr = preheader->get_terminator();
-    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops_ != 1 ||
+    if (!preheaderBr || !preheaderBr->is_br() || preheaderBr->num_ops() != 1 ||
         preheaderBr->get_operand(0) != origHeader)
         return false;
 
@@ -1244,7 +1236,7 @@ bool LoopVectorize::emitVectorizedLoop(
             continue;
 
         std::vector<Value *> indices;
-        for (unsigned i = 1; i < access.gep->num_ops_; ++i) {
+        for (unsigned i = 1; i < access.gep->num_ops(); ++i) {
             if (i != access.varyingIndex) {
                 indices.push_back(access.gep->get_operand(i));
                 continue;
@@ -1527,7 +1519,7 @@ bool LoopVectorize::emitVectorizedLoop(
                     Value *pointer = inst->get_operand(0);
                     if (auto *gep = dynamic_cast<GetElementPtrInst *>(pointer)) {
                         std::vector<Value *> indices;
-                        for (unsigned i = 1; i < gep->num_ops_; ++i)
+                        for (unsigned i = 1; i < gep->num_ops(); ++i)
                             indices.push_back(gep->get_operand(i));
                         auto *clone = new GetElementPtrInst(
                             gep->get_operand(0), indices, preheader, true);
@@ -1643,11 +1635,11 @@ bool LoopVectorize::emitVectorizedLoop(
 
             auto *call = dynamic_cast<CallInst *>(inst);
             auto *callee = call ? dynamic_cast<Function *>(
-                                      call->get_operand(call->num_ops_ - 1))
+                                      call->get_operand(call->num_ops() - 1))
                                 : nullptr;
             SignedMinMaxIntrinsic intrinsicKind;
             if (!call || !isSignedMinMaxIntrinsic(callee, &intrinsicKind) ||
-                call->num_ops_ != 3)
+                call->num_ops() != 3)
                 return false;
             Value *lhs = getVectorOperand(call->get_operand(0));
             Value *rhs = getVectorOperand(call->get_operand(1));
