@@ -64,46 +64,41 @@ extern int yydebug;
     INT = 258,                     /* INT  */
     FLOAT = 259,                   /* FLOAT  */
     ID = 260,                      /* ID  */
-    GTE = 261,                     /* GTE  */
-    LTE = 262,                     /* LTE  */
-    GT = 263,                      /* GT  */
-    LT = 264,                      /* LT  */
-    EQ = 265,                      /* EQ  */
-    NEQ = 266,                     /* NEQ  */
-    INTTYPE = 267,                 /* INTTYPE  */
-    FLOATTYPE = 268,               /* FLOATTYPE  */
+    STRING_LITERAL = 261,          /* STRING_LITERAL  */
+    GTE = 262,                     /* GTE  */
+    LTE = 263,                     /* LTE  */
+    GT = 264,                      /* GT  */
+    LT = 265,                      /* LT  */
+    EQ = 266,                      /* EQ  */
+    NEQ = 267,                     /* NEQ  */
+    BASICTYPE = 268,               /* BASICTYPE  */
     VOID = 269,                    /* VOID  */
-    INTVECTYPE = 270,              /* INTVECTYPE  */
-    FLOATVECTYPE = 271,            /* FLOATVECTYPE  */
-    VECWIDTH = 272,                /* VECWIDTH  */
-    VECTOR = 273,                  /* VECTOR  */
-    DYNINTVECTYPE = 274,           /* DYNINTVECTYPE  */
-    DYNFLOATVECTYPE = 275,         /* DYNFLOATVECTYPE  */
-    CONST = 276,                   /* CONST  */
-    RETURN = 277,                  /* RETURN  */
-    IF = 278,                      /* IF  */
-    ELSE = 279,                    /* ELSE  */
-    WHILE = 280,                   /* WHILE  */
-    BREAK = 281,                   /* BREAK  */
-    CONTINUE = 282,                /* CONTINUE  */
-    LP = 283,                      /* LP  */
-    RP = 284,                      /* RP  */
-    LB = 285,                      /* LB  */
-    RB = 286,                      /* RB  */
-    LC = 287,                      /* LC  */
-    RC = 288,                      /* RC  */
-    COMMA = 289,                   /* COMMA  */
-    SEMICOLON = 290,               /* SEMICOLON  */
-    NOT = 291,                     /* NOT  */
-    ASSIGN = 292,                  /* ASSIGN  */
-    MINUS = 293,                   /* MINUS  */
-    ADD = 294,                     /* ADD  */
-    MUL = 295,                     /* MUL  */
-    DIV = 296,                     /* DIV  */
-    MOD = 297,                     /* MOD  */
-    AND = 298,                     /* AND  */
-    OR = 299,                      /* OR  */
-    LOWER_THEN_ELSE = 300          /* LOWER_THEN_ELSE  */
+    INVALID = 270,                 /* INVALID  */
+    CONST = 271,                   /* CONST  */
+    RETURN = 272,                  /* RETURN  */
+    IF = 273,                      /* IF  */
+    ELSE = 274,                    /* ELSE  */
+    WHILE = 275,                   /* WHILE  */
+    BREAK = 276,                   /* BREAK  */
+    CONTINUE = 277,                /* CONTINUE  */
+    LP = 278,                      /* LP  */
+    RP = 279,                      /* RP  */
+    LB = 280,                      /* LB  */
+    RB = 281,                      /* RB  */
+    LC = 282,                      /* LC  */
+    RC = 283,                      /* RC  */
+    COMMA = 284,                   /* COMMA  */
+    SEMICOLON = 285,               /* SEMICOLON  */
+    NOT = 286,                     /* NOT  */
+    ASSIGN = 287,                  /* ASSIGN  */
+    MINUS = 288,                   /* MINUS  */
+    ADD = 289,                     /* ADD  */
+    MUL = 290,                     /* MUL  */
+    DIV = 291,                     /* DIV  */
+    MOD = 292,                     /* MOD  */
+    AND = 293,                     /* AND  */
+    OR = 294,                      /* OR  */
+    LOWER_THEN_ELSE = 295          /* LOWER_THEN_ELSE  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -112,7 +107,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 35 "/workspace/src/frontend/parser.y"
+#line 162 "/workspace/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     DeclDefAST* declDef;
@@ -137,6 +132,7 @@ union YYSTYPE
     NumberAST* number;
     UnaryExpAST* unaryExp;
     CallAST* call;
+    CallArgAST* callArg;
     FuncCParamListAST* funcCParamList;
     MulExpAST* mulExp;
     AddExpAST* addExp;
@@ -150,7 +146,7 @@ union YYSTYPE
     int int_val;
     float float_val;
 
-#line 154 "/workspace/src/include/frontend/parser.hpp"
+#line 150 "/workspace/src/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;

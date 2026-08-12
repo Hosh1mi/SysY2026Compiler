@@ -74,6 +74,7 @@ public:
     IRStmtBuilder *builder;
     Scope scope;
     std::unique_ptr<Module> module;
+    unsigned stringLiteralCounter = 0;
 
     GenIR(){
         module = std::unique_ptr<Module>(new Module());
@@ -81,6 +82,7 @@ public:
         auto TyVoid = module->void_ty_;
         auto TyInt32 = module->int32_ty_;
         auto TyInt32Ptr = module->get_pointer_type(module->int32_ty_);
+        auto TyInt8Ptr = module->get_pointer_type(module->int8_ty_);
         auto TyFloat = module->float32_ty_;
         auto TyFloatPtr = module->get_pointer_type(module->float32_ty_);
 
@@ -131,6 +133,10 @@ public:
         output_params.push_back(TyFloatPtr);
         output_type = new FunctionType(TyVoid, output_params);
         auto put_float_array = new Function(output_type, "putfarray", module.get());
+
+        std::vector<Type *> format_params{TyInt8Ptr};
+        auto format_type = new FunctionType(TyVoid, format_params, true);
+        auto put_format = new Function(format_type, "putf", module.get());
 
         std::vector<Type *>().swap(output_params);
         // output_params.clear();
@@ -202,6 +208,7 @@ public:
         scope.push("putch", put_char);
         scope.push("putarray", put_int_array);
         scope.push("putfarray", put_float_array);
+        scope.push("putf", put_format);
         scope.push("_sysy_starttime", sysy_start_time);
         scope.push("_sysy_stoptime", sysy_stop_time);
 #ifdef ENABLE_PROFILING_HOOKS

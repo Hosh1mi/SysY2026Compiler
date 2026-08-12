@@ -65,7 +65,8 @@ public:
 // declare i32 @putarray(i32, i32*)
 class FunctionType : public Type {
 public:
-    FunctionType(Type* result, std::vector<Type*> params) : Type(Type::FunctionTyID) {
+    FunctionType(Type* result, std::vector<Type*> params, bool variadic = false)
+        : Type(Type::FunctionTyID), is_variadic_(variadic) {
         result_ = result;
         for (Type* p : params) {
             args_.push_back(p);
@@ -73,4 +74,5 @@ public:
     }
     Type* result_;             // 返回类型
     std::vector<Type*> args_;  // 形参类型列表
+    bool is_variadic_ = false;
 };

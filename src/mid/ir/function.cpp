@@ -63,6 +63,10 @@ std::string Function::print() {
             if (i) func_ir += ", ";
             func_ir += static_cast<FunctionType*>(this->type_)->args_[i]->print();
         }
+        if (static_cast<FunctionType*>(this->type_)->is_variadic_) {
+            if (!this->arguments_.empty()) func_ir += ", ";
+            func_ir += "...";
+        }
     } else {
         for (auto arg = this->arguments_.begin(); arg != arguments_.end(); arg++) {
             if (arg != this->arguments_.begin()) {

@@ -2342,6 +2342,28 @@ void GenIR::visit(NumberAST &ast) {
     else recentVal = CONST_FLOAT(ast.floatval);
 }
 
+static Value *lowerRuntimeString(GenIR *gen, const string &text) {
+    auto *byteType = gen->module->int8_ty_;
+    auto *arrayType = gen->module->get_array_type(byteType, text.size() + 1);
+    std::vector<Constant *> bytes;
+    bytes.reserve(text.size() + 1);
+    for (unsigned char byte : text)
+        bytes.push_back(new ConstantInt(byteType, byte));
+    bytes.push_back(new ConstantInt(byteType, 0));
+    auto *initializer = new ConstantArray(arrayType, bytes);
+    // '$' cannot occur in a SysY identifier, so a user global cannot collide
+    // with this compiler-owned symbol.
+    auto name = "__sysy_string$" +
+                std::to_string(gen->stringLiteralCounter++);
+    auto *global = new GlobalVariable(name, gen->module.get(), arrayType,
+                                      true, initializer);
+    std::vector<Value *> indices{
+        new ConstantInt(gen->module->int32_ty_, 0),
+        new ConstantInt(gen->module->int32_ty_, 0)};
+    return gen->builder->create_gep(
+        global, indices);
+}
+
 void GenIR::visit(CallAST &ast) {
     // 将 C 宏名映射到 SysY 运行时函数
     if (*ast.id == "starttime") *ast.id = "_sysy_starttime";
@@ -2367,7 +2389,22 @@ void GenIR::visit(CallAST &ast) {
         args.push_back(scalarizedResultSlot);
         argumentOffset = 1;
     }
+    auto *functionType = static_cast<FunctionType *>(fun->type_);
+    const unsigned fixedArgumentCount = functionType->args_.size();
     for (int i = 0; i < ast.funcCParamList.size(); i++) {
+        auto &argument = ast.funcCParamList[i];
+        const unsigned fixedIndex = static_cast<unsigned>(i) + argumentOffset;
+        if (argument->stringLiteral) {
+            if (fixedIndex >= fixedArgumentCount ||
+                functionType->args_[fixedIndex]->tid_ != Type::PointerTyID ||
+                static_cast<PointerType *>(functionType->args_[fixedIndex])->contained_ !=
+                    module->int8_ty_) {
+                std::cerr << "string literal is only valid for a string runtime parameter\n";
+                std::exit(1);
+            }
+            args.push_back(lowerRuntimeString(this, *argument->stringLiteral));
+            continue;
+        }
         VectorType *savedExpected = expectedVectorType;
         ScalarizedVectorType *savedScalarizedExpected =
             expectedScalarizedVectorType;
@@ -2375,9 +2412,12 @@ void GenIR::visit(CallAST &ast) {
             info && static_cast<unsigned>(i) < info->valueParameters.size()
                 ? info->valueParameters[i] : nullptr;
         expectedScalarizedVectorType = scalarizedParameter;
-        expectedVectorType = dynamic_cast<VectorType *>(
-            fun->arguments_[i + argumentOffset]->type_);
-        ast.funcCParamList[i]->accept(*this);
+        Type *fixedParameterType =
+            fixedIndex < fixedArgumentCount
+                ? functionType->args_[fixedIndex]
+                : nullptr;
+        expectedVectorType = dynamic_cast<VectorType *>(fixedParameterType);
+        argument->exp->accept(*this);
         expectedVectorType = savedExpected;
         expectedScalarizedVectorType = savedScalarizedExpected;
         if (scalarizedParameter) {
@@ -2388,11 +2428,11 @@ void GenIR::visit(CallAST &ast) {
             continue;
         }
         //检查函数形参与实参类型是否匹配
-        if (recentVal->type_ == INT32_T &&
-            fun->arguments_[i + argumentOffset]->type_ == FLOAT_T) {
+        if (fixedParameterType && recentVal->type_ == INT32_T &&
+            fixedParameterType == FLOAT_T) {
             recentVal = builder->create_sitofp(recentVal, FLOAT_T);
-        } else if (recentVal->type_ == FLOAT_T &&
-                   fun->arguments_[i + argumentOffset]->type_ == INT32_T) {
+        } else if (fixedParameterType && recentVal->type_ == FLOAT_T &&
+                   fixedParameterType == INT32_T) {
             recentVal = builder->create_fptosi(recentVal, INT32_T);
         }
         args.push_back(recentVal);

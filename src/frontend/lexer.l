@@ -1,5 +1,6 @@
 %option noyywrap
 %option yylineno
+%x BLOCK_COMMENT
 
 %{
 #include "../include/frontend/parser.hpp"
@@ -24,54 +25,36 @@ int yycolumn = 1;
 
 INT_LIT [1-9][0-9]*|0[xX][0-9A-Fa-f]+|0[0-7]*|0
 
-FLOAT_SUFFIX  [fFlL]
 DEC_EXP       [Ee][-+]?[0-9]+
-DEC_FLOAT_LIT (([0-9]*\.[0-9]+|[0-9]+\.){DEC_EXP}?|[0-9]+{DEC_EXP}){FLOAT_SUFFIX}?
+DEC_FLOAT_LIT (([0-9]*\.[0-9]+|[0-9]+\.){DEC_EXP}?|[0-9]+{DEC_EXP})
 HEX_EXP       [Pp][-+]?[0-9]+
-HEX_FLOAT_LIT (0[xX]([a-fA-F0-9]*\.[a-fA-F0-9]+|[a-fA-F0-9]+\.?){HEX_EXP}){FLOAT_SUFFIX}?
+HEX_FLOAT_LIT (0[xX]([a-fA-F0-9]*\.[a-fA-F0-9]+|[a-fA-F0-9]+\.?){HEX_EXP})
 FLOAT_LIT     {DEC_FLOAT_LIT}|{HEX_FLOAT_LIT}
 
 Identifier [A-Za-z_][A-Za-z0-9_]*
-FixedIntVector (int[0-9]+|vec[0-9]+i|ivec[0-9]+|vector[0-9]+i)
-FixedFloatVector (float[0-9]+|vec[0-9]+f|fvec[0-9]+|vector[0-9]+f)
-VectorWidth (vec|vector)[0-9]+
-
-MultilineComment "/*"([^*]|[*][^/])*"*/"
 SingleLineComment "//"[^\n]*
+StringLiteral \"([^\\\"\n]|\\.)*\"
 
 %%
 
-{MultilineComment} {}
 {SingleLineComment} {}
+"/*"             { BEGIN(BLOCK_COMMENT); }
+<BLOCK_COMMENT>"*/" { BEGIN(INITIAL); }
+<BLOCK_COMMENT>[^*\n]+ {}
+<BLOCK_COMMENT>"*" {}
+<BLOCK_COMMENT>\n { yycolumn = 1; }
+<BLOCK_COMMENT><<EOF>> {
+                    std::fprintf(stderr, "Lexical error: unterminated block comment at line %d\n", yylineno);
+                    BEGIN(INITIAL);
+                    return INVALID;
+                  }
 
 {INT_LIT}       { yylval.int_val = strtol(yytext, nullptr, 0); LEXER_DEBUG_TOKEN("INT"); return INT; }
 {FLOAT_LIT}     { yylval.float_val = strtof(yytext, nullptr); LEXER_DEBUG_TOKEN("FLOAT"); return FLOAT; }
+{StringLiteral} { yylval.token = new string(yytext); LEXER_DEBUG_TOKEN("STRING_LITERAL"); return STRING_LITERAL; }
 
-"i32x4"|"int32x4"|"v4i32" { yylval.int_val = 4; LEXER_DEBUG_TOKEN("INTVECTYPE"); return INTVECTYPE; }
-"f32x4"|"float32x4"|"v4f32" { yylval.int_val = 4; LEXER_DEBUG_TOKEN("FLOATVECTYPE"); return FLOATVECTYPE; }
-{FixedIntVector} {
-                    const char *p = yytext;
-                    while (*p && (*p < '0' || *p > '9')) ++p;
-                    yylval.int_val = strtol(p, nullptr, 10);
-                    LEXER_DEBUG_TOKEN("INTVECTYPE"); return INTVECTYPE;
-                  }
-{FixedFloatVector} {
-                    const char *p = yytext;
-                    while (*p && (*p < '0' || *p > '9')) ++p;
-                    yylval.int_val = strtol(p, nullptr, 10);
-                    LEXER_DEBUG_TOKEN("FLOATVECTYPE"); return FLOATVECTYPE;
-                  }
-{VectorWidth}   {
-                    const char *p = yytext;
-                    while (*p && (*p < '0' || *p > '9')) ++p;
-                    yylval.int_val = strtol(p, nullptr, 10);
-                    LEXER_DEBUG_TOKEN("VECWIDTH"); return VECWIDTH;
-                  }
-"intvec"|"ivec" { LEXER_DEBUG_TOKEN("DYNINTVECTYPE"); return DYNINTVECTYPE; }
-"floatvec"|"fvec" { LEXER_DEBUG_TOKEN("DYNFLOATVECTYPE"); return DYNFLOATVECTYPE; }
-"vector"|"vec" { LEXER_DEBUG_TOKEN("VECTOR"); return VECTOR; }
-"int"           { LEXER_DEBUG_TOKEN("INTTYPE"); return INTTYPE; }
-"float"         { LEXER_DEBUG_TOKEN("FLOATTYPE"); return FLOATTYPE; }
+"int"           { yylval.int_val = TYPE_INT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
+"float"         { yylval.int_val = TYPE_FLOAT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
 "void"          { LEXER_DEBUG_TOKEN("VOID"); return VOID; }
 "const"         { LEXER_DEBUG_TOKEN("CONST"); return CONST; }
 "return"        { LEXER_DEBUG_TOKEN("RETURN"); return RETURN; }
@@ -109,8 +92,13 @@ SingleLineComment "//"[^\n]*
 "&&"            { LEXER_DEBUG_TOKEN("AND"); return AND; }
 "||"            { LEXER_DEBUG_TOKEN("OR"); return OR; }
 
-[\n]            { yycolumn=1; }
-[ \r\t]         { /* Ignore useless whitespaces */ }
-.               { printf("Error : Mysterious character \"%s\"\n\t at Line %d\n", yytext, yylineno);}
+\n              { yycolumn = 1; }
+[ \r\t\f\v]+    { /* Ignore whitespace. */ }
+.               {
+                    std::fprintf(stderr,
+                                 "Lexical error: unexpected character \"%s\" at line %d, column %d\n",
+                                 yytext, yylineno, yylloc.first_column);
+                    return INVALID;
+                  }
 
 %%

@@ -27,6 +27,10 @@ std::string Type::print() {
                 if (i) type_ir += ", ";
                 type_ir += static_cast<FunctionType*>(this)->args_[i]->print();
             }
+            if (static_cast<FunctionType*>(this)->is_variadic_) {
+                if (!static_cast<FunctionType*>(this)->args_.empty()) type_ir += ", ";
+                type_ir += "...";
+            }
             type_ir += ")";
             break;
         case PointerTyID:

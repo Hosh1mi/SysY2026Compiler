@@ -209,7 +209,15 @@ void AArch64Backend::emitGlobal(GlobalVariable *global) {
                 output_ << "\t.zero " << globalTypeSize(type) << '\n';
             } else if (auto *integer =
                            dynamic_cast<ConstantInt *>(constant)) {
-                output_ << "\t.word " << integer->value_ << '\n';
+                auto *integerType = dynamic_cast<IntegerType *>(type);
+                if (!integerType)
+                    throw std::logic_error("integer constant has non-integer type");
+                if (integerType->num_bits_ == 8)
+                    output_ << "\t.byte " << integer->value_ << '\n';
+                else if (integerType->num_bits_ == 64)
+                    output_ << "\t.quad " << integer->value_ << '\n';
+                else
+                    output_ << "\t.word " << integer->value_ << '\n';
             } else if (auto *floating =
                            dynamic_cast<ConstantFloat *>(constant)) {
                 emitFloat(floating->value_);

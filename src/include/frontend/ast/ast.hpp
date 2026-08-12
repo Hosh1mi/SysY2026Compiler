@@ -91,6 +91,7 @@ class PrimaryExpAST;
 class NumberAST;
 class UnaryExpAST;
 class CallAST;
+class CallArgAST;
 class FuncCParamListAST;
 class MulExpAST;
 class AddExpAST;
@@ -300,14 +301,24 @@ public:
 class CallAST : public BaseAST {
 public:
   unique_ptr<string> id;
-  vector<unique_ptr<AddExpAST>> funcCParamList;
+  vector<unique_ptr<CallArgAST>> funcCParamList;
   int lineno = 0;
   void accept(Visitor &visitor) override;
 };
 
+// A runtime call argument is normally a SysY expression.  The language
+// definition additionally requires string arguments for selected runtime
+// functions, so strings are represented explicitly instead of pretending
+// that they are ordinary SysY expressions.
+class CallArgAST {
+public:
+  unique_ptr<AddExpAST> exp;
+  unique_ptr<string> stringLiteral;
+};
+
 class FuncCParamListAST {
 public:
-  vector<unique_ptr<AddExpAST>> list;
+  vector<unique_ptr<CallArgAST>> list;
 };
 
 class RelExpAST : public BaseAST {

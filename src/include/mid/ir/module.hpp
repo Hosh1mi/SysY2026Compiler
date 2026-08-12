@@ -17,6 +17,7 @@ public:
         void_ty_ = new Type(Type::VoidTyID);
         label_ty_ = new Type(Type::LabelTyID);
         int1_ty_ = new IntegerType(1);
+        int8_ty_ = new IntegerType(8);
         int32_ty_ = new IntegerType(32);
         int64_ty_ = new IntegerType(64);
         float32_ty_ = new Type(Type::FloatTyID);
@@ -25,6 +26,7 @@ public:
         delete void_ty_;
         delete label_ty_;
         delete int1_ty_;
+        delete int8_ty_;
         delete int32_ty_;
         delete int64_ty_;
         delete float32_ty_;
@@ -75,6 +77,7 @@ public:
 
     // 常用基本类型
     IntegerType* int1_ty_;
+    IntegerType* int8_ty_;
     IntegerType* int32_ty_;
     IntegerType* int64_ty_;
     Type* float32_ty_;

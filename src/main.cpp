@@ -1,5 +1,6 @@
 #include "include/frontend/ast/ast.hpp"
 #include "include/frontend/parser.hpp"
+#include "include/frontend/validation.hpp"
 
 #include "include/mid/ir/irGen.hpp"
 #include "include/mid/runtime/summableModSumRuntime.hpp"
@@ -240,6 +241,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
 extern unique_ptr<CompUnitAST> root;
 extern int yyparse();
 extern FILE *yyin;
+extern void initFileName(const char *name);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -257,8 +259,16 @@ int main(int argc, char **argv) {
         return -1;
     }
 
+    initFileName(options.input);
     if (yyparse() != 0 || !root) {
         std::cerr << "Parse failed.\n";
+        return -1;
+    }
+
+    std::string frontendError;
+    if (!validateFrontend(*root, frontendError)) {
+        std::cerr << options.input << ": semantic error: "
+                  << frontendError << '\n';
         return -1;
     }
 

@@ -10,7 +10,9 @@
 %{
     #include <cstdio>
     #include <cstdlib>
+    #include <cctype>
     #include <iostream>
+    #include <optional>
     #include <string>
     #include <utility>
     #include "../include/frontend/ast/ast.hpp"
@@ -29,6 +31,131 @@
     template <typename T, typename... Args>
     T *make_node(Args &&...args) {
       return new T(std::forward<Args>(args)...);
+    }
+
+    // ------------------------------------------------------------------
+    // Unpublished type-extension compatibility layer.
+    //
+    // The official VecType production is intentionally still unspecified.
+    // Keep every guessed spelling in these helpers and in the marked VecType
+    // grammar below.  The lexer returns all of these words as ordinary IDs,
+    // so extensions never reserve identifiers outside a type position.
+    // ------------------------------------------------------------------
+    static bool decimalSuffix(const string &text, size_t begin,
+                              unsigned &value) {
+      if (begin == text.size()) return false;
+      unsigned result = 0;
+      for (size_t i = begin; i < text.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(text[i]))) return false;
+        result = result * 10 + static_cast<unsigned>(text[i] - '0');
+      }
+      value = result;
+      return true;
+    }
+
+    static std::optional<TypeSpec> simpleVectorType(const string &name) {
+      if (name == "intvec" || name == "ivec")
+        return TypeSpec::dynamic(TYPE_INT);
+      if (name == "floatvec" || name == "fvec")
+        return TypeSpec::dynamic(TYPE_FLOAT);
+      if (name == "i32x4" || name == "int32x4" || name == "v4i32")
+        return TypeSpec::fixed(TYPE_INT, 4);
+      if (name == "f32x4" || name == "float32x4" || name == "v4f32")
+        return TypeSpec::fixed(TYPE_FLOAT, 4);
+
+      unsigned lanes = 0;
+      if (name.rfind("int", 0) == 0 && decimalSuffix(name, 3, lanes))
+        return TypeSpec::fixed(TYPE_INT, lanes);
+      if (name.rfind("float", 0) == 0 && decimalSuffix(name, 5, lanes))
+        return TypeSpec::fixed(TYPE_FLOAT, lanes);
+      if (name.rfind("ivec", 0) == 0 && decimalSuffix(name, 4, lanes))
+        return TypeSpec::fixed(TYPE_INT, lanes);
+      if (name.rfind("fvec", 0) == 0 && decimalSuffix(name, 4, lanes))
+        return TypeSpec::fixed(TYPE_FLOAT, lanes);
+
+      auto suffixed = [&](const string &prefix, char suffix,
+                          TYPE element) -> std::optional<TypeSpec> {
+        if (name.size() <= prefix.size() + 1 ||
+            name.rfind(prefix, 0) != 0 || name.back() != suffix)
+          return std::nullopt;
+        unsigned count = 0;
+        if (!decimalSuffix(name.substr(0, name.size() - 1), prefix.size(),
+                           count))
+          return std::nullopt;
+        return TypeSpec::fixed(element, count);
+      };
+      if (auto type = suffixed("vec", 'i', TYPE_INT)) return type;
+      if (auto type = suffixed("vec", 'f', TYPE_FLOAT)) return type;
+      if (auto type = suffixed("vector", 'i', TYPE_INT)) return type;
+      if (auto type = suffixed("vector", 'f', TYPE_FLOAT)) return type;
+      return std::nullopt;
+    }
+
+    static bool isVectorConstructor(const string &name) {
+      return name == "vector" || name == "vec";
+    }
+
+    static std::optional<unsigned> vectorWidthAlias(const string &name) {
+      unsigned lanes = 0;
+      if (name.rfind("vec", 0) == 0 && decimalSuffix(name, 3, lanes))
+        return lanes;
+      if (name.rfind("vector", 0) == 0 && decimalSuffix(name, 6, lanes))
+        return lanes;
+      return std::nullopt;
+    }
+
+    static bool decodeStringLiteral(const string &raw, string &decoded) {
+      auto hexValue = [](char ch) -> unsigned {
+        if (ch >= '0' && ch <= '9') return static_cast<unsigned>(ch - '0');
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        return static_cast<unsigned>(ch - 'a' + 10);
+      };
+      decoded.clear();
+      if (raw.size() < 2 || raw.front() != '"' || raw.back() != '"')
+        return false;
+      for (size_t i = 1; i + 1 < raw.size(); ++i) {
+        char ch = raw[i];
+        if (ch != '\\') {
+          decoded.push_back(ch);
+          continue;
+        }
+        if (++i + 1 >= raw.size()) return false;
+        char escaped = raw[i];
+        switch (escaped) {
+          case 'a': decoded.push_back('\a'); break;
+          case 'b': decoded.push_back('\b'); break;
+          case 'f': decoded.push_back('\f'); break;
+          case 'n': decoded.push_back('\n'); break;
+          case 'r': decoded.push_back('\r'); break;
+          case 't': decoded.push_back('\t'); break;
+          case 'v': decoded.push_back('\v'); break;
+          case '\\': decoded.push_back('\\'); break;
+          case '"': decoded.push_back('"'); break;
+          case '?': decoded.push_back('?'); break;
+          case 'x': {
+            if (i + 1 >= raw.size() - 1 ||
+                !std::isxdigit(static_cast<unsigned char>(raw[i + 1])))
+              return false;
+            unsigned value = 0;
+            while (i + 1 < raw.size() - 1 &&
+                   std::isxdigit(static_cast<unsigned char>(raw[i + 1])))
+              value = value * 16 + hexValue(raw[++i]);
+            decoded.push_back(static_cast<char>(value));
+            break;
+          }
+          default:
+            if (escaped < '0' || escaped > '7') return false;
+            unsigned value = static_cast<unsigned>(escaped - '0');
+            for (unsigned count = 1; count < 3 &&
+                                     i + 1 < raw.size() - 1 &&
+                                     raw[i + 1] >= '0' && raw[i + 1] <= '7';
+                 ++count)
+              value = value * 8 + static_cast<unsigned>(raw[++i] - '0');
+            decoded.push_back(static_cast<char>(value));
+            break;
+        }
+      }
+      return true;
     }
 %}
 
@@ -56,6 +183,7 @@
     NumberAST* number;
     UnaryExpAST* unaryExp;
     CallAST* call;
+    CallArgAST* callArg;
     FuncCParamListAST* funcCParamList;
     MulExpAST* mulExp;
     AddExpAST* addExp;
@@ -73,13 +201,13 @@
 %type <compUnit> CompUnit
 %type <declDef> DeclDef
 %type <decl> Decl
-%type <defList> DefList
-%type <def> Def
+%type <defList> ConstDefList VarDefList
+%type <def> ConstDef VarDef
 %type <arrays> Arrays
 %type <initValList> InitValList
-%type <initVal> InitVal BraceInitVal
+%type <initVal> ConstInitVal InitVal BraceInitVal
 %type <funcDef> FuncDef
-%type <FuncFParamList> FuncFParamList
+%type <FuncFParamList> FuncFParamList OptFuncFParamList
 %type <funcFParam> FuncFParam
 %type <block> Block
 %type <blockItemList> BlockItemList
@@ -93,9 +221,12 @@
 %type <number> Number
 %type <unaryExp> UnaryExp
 %type <call> Call
+%type <callArg> FuncCParam
 %type <funcCParamList> FuncCParamList
 %type <mulExp> MulExp
-%type <addExp> AddExp Exp
+%type <addExp> AddExp Exp NonBraceExp NonBraceAddExp
+%type <mulExp> NonBraceMulExp
+%type <unaryExp> NonBraceUnaryExp
 %type <relExp> RelExp
 %type <eqExp> EqExp
 %type <lAndExp> LAndExp
@@ -107,12 +238,10 @@
 // %token 定义终结符的语义值类型
 %token <int_val> INT           // 指定INT字面量的语义值是type_int，有词法分析得到的数值
 %token <float_val> FLOAT       // 指定FLOAT字面量的语义值是type_float，有词法分析得到的数值
-%token <token> ID              // 指定ID
+%token <token> ID STRING_LITERAL
 %token GTE LTE GT LT EQ NEQ    // 关系运算
-%token INTTYPE FLOATTYPE VOID  // 数据类型
-%token <int_val> INTVECTYPE FLOATVECTYPE VECWIDTH
-%token VECTOR
-%token DYNINTVECTYPE DYNFLOATVECTYPE
+%token <int_val> BASICTYPE
+%token VOID INVALID
 %token CONST RETURN IF ELSE WHILE BREAK CONTINUE
 %token LP RP LB RB LC RC COMMA SEMICOLON
 // 用bison对该文件编译时，带参数-d，生成的exp.tab.h中给这些单词进行编码，可在lex.l中包含parser.tab.h使用这些单词种类码
@@ -120,17 +249,20 @@
 // Unused tokens
 /* %token POS NEG */
 
-%left ASSIGN
-%left OR AND
-%left EQ NEQ
-%left GTE LTE GT LT
-%left ADD MINUS
-%left MOD MUL DIV
-%right NOT
+// Every pointer-valued semantic object is owned either by the AST action that
+// consumes it or by Bison while it is on the parse stack.  These destructors
+// make syntax-error paths leak-free.
+%destructor { delete $$; } <compUnit> <declDef> <decl> <defList> <def>
+%destructor { delete $$; } <arrays> <initValList> <initVal> <funcDef>
+%destructor { delete $$; } <FuncFParamList> <funcFParam> <block>
+%destructor { delete $$; } <blockItemList> <blockItem> <stmt> <returnStmt>
+%destructor { delete $$; } <selectStmt> <iterationStmt> <lVal> <primaryExp>
+%destructor { delete $$; } <number> <unaryExp> <call> <callArg>
+%destructor { delete $$; } <funcCParamList> <mulExp> <addExp> <relExp>
+%destructor { delete $$; } <eqExp> <lAndExp> <lOrExp> <type_spec> <token>
 
-
-%nonassoc LOWER_THEN_ELSE
-%nonassoc ELSE
+%precedence LOWER_THEN_ELSE
+%precedence ELSE
 
 %start Program
 
@@ -164,134 +296,127 @@ DeclDef:
 
 // 变量或常量声明
 Decl:
-    CONST BType DefList SEMICOLON {
+    CONST BType ConstDefList SEMICOLON {
         $$ = make_node<DeclAST>();
         $$->isConst = true;
         $$->bType = *$2;
         delete $2;
         $$->defList.swap($3->list);
+        delete $3;
     }|
-    BType DefList SEMICOLON {
+    BType VarDefList SEMICOLON {
         $$ = make_node<DeclAST>();
         $$->isConst = false;
         $$->bType = *$1;
         delete $1;
         $$->defList.swap($2->list);
+        delete $2;
     };
 
 // 基本类型
 BType:
-    INTTYPE {
-        $$ = new TypeSpec(TYPE_INT);
-    }|
-    FLOATTYPE {
-        $$ = new TypeSpec(TYPE_FLOAT);
+    BASICTYPE {
+        $$ = new TypeSpec(static_cast<TYPE>($1));
     }|
     VecType {
         $$ = $1;
     };
 
-// Compatibility grammar for the plausible contest spellings.  Every branch
-// produces exactly the same TypeSpec, so deleting aliases after publication is
-// a parser-only change.
+// === DECISION-DAY VecType EDIT AREA ====================================
+// Replace or extend only this block when the official VecType production is
+// published.  Word-like spellings arrive as ID and are checked here so none of
+// the guessed spellings become global lexer keywords.
 VecType:
-    INTVECTYPE {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $1));
+    ID {
+        auto type = simpleVectorType(*$1);
+        if (!type) {
+            yyerror(("unknown type spelling '" + *$1 + "'").c_str());
+            delete $1;
+            YYERROR;
+        }
+        $$ = new TypeSpec(*type);
+        delete $1;
     }|
-    FLOATVECTYPE {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
-    }|
-    VECTOR LT INTTYPE COMMA VecWidth GT {
-        $5->element = TYPE_INT;
+    ID LT BASICTYPE COMMA VecWidth GT {
+        if (!isVectorConstructor(*$1)) {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; delete $5; YYERROR;
+        }
+        $5->element = static_cast<TYPE>($3);
         $$ = $5;
+        delete $1;
     }|
-    VECTOR LT FLOATTYPE COMMA VecWidth GT {
-        $5->element = TYPE_FLOAT;
+    ID LT VecWidth COMMA BASICTYPE GT {
+        if (!isVectorConstructor(*$1)) {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; delete $3; YYERROR;
+        }
+        $3->element = static_cast<TYPE>($5);
+        $$ = $3;
+        delete $1;
+    }|
+    ID LP BASICTYPE COMMA VecWidth RP {
+        if (!isVectorConstructor(*$1)) {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; delete $5; YYERROR;
+        }
+        $5->element = static_cast<TYPE>($3);
         $$ = $5;
+        delete $1;
     }|
-    VECTOR LT VecWidth COMMA INTTYPE GT {
-        $3->element = TYPE_INT;
+    ID LB BASICTYPE COMMA VecWidth RB {
+        if (!isVectorConstructor(*$1)) {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; delete $5; YYERROR;
+        }
+        $5->element = static_cast<TYPE>($3);
+        $$ = $5;
+        delete $1;
+    }|
+    BASICTYPE LT VecWidth GT {
+        $3->element = static_cast<TYPE>($1);
         $$ = $3;
     }|
-    VECTOR LT VecWidth COMMA FLOATTYPE GT {
-        $3->element = TYPE_FLOAT;
+    BASICTYPE LB VecWidth RB {
+        $3->element = static_cast<TYPE>($1);
         $$ = $3;
     }|
-    VECTOR LP INTTYPE COMMA VecWidth RP {
-        $5->element = TYPE_INT;
-        $$ = $5;
+    ID LT BASICTYPE GT {
+        if (isVectorConstructor(*$1))
+            $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($3)));
+        else if (auto width = vectorWidthAlias(*$1))
+            $$ = new TypeSpec(TypeSpec::fixed(static_cast<TYPE>($3), *width));
+        else {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; YYERROR;
+        }
+        delete $1;
     }|
-    VECTOR LP FLOATTYPE COMMA VecWidth RP {
-        $5->element = TYPE_FLOAT;
-        $$ = $5;
+    ID LP BASICTYPE RP {
+        if (!isVectorConstructor(*$1)) {
+            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
+            delete $1; YYERROR;
+        }
+        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($3)));
+        delete $1;
     }|
-    VECTOR LB INTTYPE COMMA VecWidth RB {
-        $5->element = TYPE_INT;
-        $$ = $5;
+    BASICTYPE LT GT {
+        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($1)));
     }|
-    VECTOR LB FLOATTYPE COMMA VecWidth RB {
-        $5->element = TYPE_FLOAT;
-        $$ = $5;
-    }|
-    VECWIDTH LT INTTYPE GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_INT, $1));
-    }|
-    VECWIDTH LT FLOATTYPE GT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_FLOAT, $1));
-    }|
-    INTTYPE LT VecWidth GT {
-        $3->element = TYPE_INT;
-        $$ = $3;
-    }|
-    FLOATTYPE LT VecWidth GT {
-        $3->element = TYPE_FLOAT;
-        $$ = $3;
-    }|
-    INTTYPE LB VecWidth RB {
-        $3->element = TYPE_INT;
-        $$ = $3;
-    }|
-    FLOATTYPE LB VecWidth RB {
-        $3->element = TYPE_FLOAT;
-        $$ = $3;
-    }|
-    VECTOR LT INTTYPE GT {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
-    }|
-    VECTOR LT FLOATTYPE GT {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
-    }|
-    VECTOR LP INTTYPE RP {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
-    }|
-    VECTOR LP FLOATTYPE RP {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
-    }|
-    DYNINTVECTYPE {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
-    }|
-    DYNFLOATVECTYPE {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
-    }|
-    INTTYPE LT GT {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
-    }|
-    FLOATTYPE LT GT {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
-    }|
-    INTTYPE LB RB {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_INT));
-    }|
-    FLOATTYPE LB RB {
-        $$ = new TypeSpec(TypeSpec::dynamic(TYPE_FLOAT));
+    BASICTYPE LB RB {
+        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($1)));
     };
+// === END DECISION-DAY VecType EDIT AREA ================================
 
 VecWidth:
     INT {
         $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, $1));
     }|
     ID {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *$1));
+        if (auto width = vectorWidthAlias(*$1))
+            $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *width));
+        else
+            $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *$1));
         delete $1;
     };
 
@@ -302,25 +427,50 @@ VoidType:
     };
 
 // 定义列表
-DefList:
-    Def {
+ConstDefList:
+    ConstDef {
         $$ = make_node<DefListAST>();
         $$->list.push_back(unique_ptr<DefAST>($1));
     }|
-    DefList COMMA Def {
+    ConstDefList COMMA ConstDef {
         $$ = $1;
         $$->list.push_back(unique_ptr<DefAST>($3));
     };
 
-// 定义
-// Scalar initializers go through Exp so braced vector literals can participate
-// in larger expressions (e.g. int4 x = {1,2,3,4} + {5,6,7,8}).  Array
-// initializers keep aggregate InitVal nesting.
-Def:
+VarDefList:
+    VarDef {
+        $$ = make_node<DefListAST>();
+        $$->list.push_back(unique_ptr<DefAST>($1));
+    }|
+    VarDefList COMMA VarDef {
+        $$ = $1;
+        $$->list.push_back(unique_ptr<DefAST>($3));
+    };
+
+// Constants and variables deliberately have separate productions.  Besides
+// matching the official grammar, this makes an uninitialized const impossible
+// to represent in the AST.
+ConstDef:
+    ID Arrays ASSIGN ConstInitVal {
+        $$ = make_node<DefAST>();
+        $$->id = unique_ptr<string>($1);
+        $$->arrays.swap($2->list);
+        delete $2;
+        $$->initVal = unique_ptr<InitValAST>($4);
+    }|
+    ID ASSIGN Exp {
+        $$ = make_node<DefAST>();
+        $$->id = unique_ptr<string>($1);
+        $$->initVal = unique_ptr<InitValAST>(make_node<InitValAST>());
+        $$->initVal->exp = unique_ptr<AddExpAST>($3);
+    };
+
+VarDef:
     ID Arrays ASSIGN InitVal {
         $$ = make_node<DefAST>();
         $$->id = unique_ptr<string>($1);
         $$->arrays.swap($2->list);
+        delete $2;
         $$->initVal = unique_ptr<InitValAST>($4);
     }|
     ID ASSIGN Exp {
@@ -333,6 +483,7 @@ Def:
         $$ = make_node<DefAST>();
         $$->id = unique_ptr<string>($1);
         $$->arrays.swap($2->list);
+        delete $2;
     }|
     ID {
         $$ = make_node<DefAST>();
@@ -362,6 +513,7 @@ Block:
     LC BlockItemList RC {
         $$ = make_node<BlockAST>();
         $$->blockItemList.swap($2->list);
+        delete $2;
     };
 
 
@@ -375,8 +527,23 @@ InitVal:
     LC InitValList RC {
         $$ = make_node<InitValAST>();
         $$->initValList.swap($2->list);
+        delete $2;
     }|
-    Exp {
+    NonBraceExp {
+        $$ = make_node<InitValAST>();
+        $$->exp = unique_ptr<AddExpAST>($1);
+    };
+
+ConstInitVal:
+    LC RC {
+        $$ = make_node<InitValAST>();
+    }|
+    LC InitValList RC {
+        $$ = make_node<InitValAST>();
+        $$->initValList.swap($2->list);
+        delete $2;
+    }|
+    NonBraceExp {
         $$ = make_node<InitValAST>();
         $$->exp = unique_ptr<AddExpAST>($1);
     };
@@ -389,6 +556,7 @@ BraceInitVal:
     LC InitValList RC {
         $$ = make_node<InitValAST>();
         $$->initValList.swap($2->list);
+        delete $2;
     };
 
 // 变量列表
@@ -404,35 +572,31 @@ InitValList:
 
 // 函数定义
 FuncDef:
-    BType ID LP FuncFParamList RP Block {
+    BType ID LP OptFuncFParamList RP Block {
         $$ = make_node<FuncDefAST>();
         $$->funcType = *$1;
         delete $1;
         $$->id = unique_ptr<string>($2);
         $$->funcFParamList.swap($4->list);
+        delete $4;
         $$->block = unique_ptr<BlockAST>($6);
     }|
-    BType ID LP RP Block {
-        $$ = make_node<FuncDefAST>();
-        $$->funcType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->block = unique_ptr<BlockAST>($5);
-    }|
-    VoidType ID LP FuncFParamList RP Block {
+    VoidType ID LP OptFuncFParamList RP Block {
         $$ = make_node<FuncDefAST>();
         $$->funcType = *$1;
         delete $1;
         $$->id = unique_ptr<string>($2);
         $$->funcFParamList.swap($4->list);
+        delete $4;
         $$->block = unique_ptr<BlockAST>($6);
+    };
+
+OptFuncFParamList:
+    %empty {
+        $$ = make_node<FuncFParamListAST>();
     }|
-    VoidType ID LP RP Block {
-        $$ = make_node<FuncDefAST>();
-        $$->funcType = *$1;
-        delete $1;
-        $$->id = unique_ptr<string>($2);
-        $$->block = unique_ptr<BlockAST>($5);
+    FuncFParamList {
+        $$ = $1;
     };
 
 // 函数形参列表
@@ -469,6 +633,7 @@ FuncFParam:
         $$->id = unique_ptr<string>($2);
         $$->isArray = true;
         $$->arrays.swap($5->list);
+        delete $5;
     };
 
 // 语句块项列表
@@ -505,7 +670,7 @@ Stmt:
         $$->lVal = unique_ptr<LValAST>($1);
         $$->exp = unique_ptr<AddExpAST>($3);
     }|
-    Exp SEMICOLON {
+    NonBraceExp SEMICOLON {
         $$ = make_node<StmtAST>();
         $$->sType = EXP;
         $$->exp = unique_ptr<AddExpAST>($1);
@@ -577,6 +742,100 @@ Exp:
         $$ = $1;
     };
 
+// An expression statement cannot start with a raw brace literal: at statement
+// start that spelling is a block.  Other contexts still use Exp and retain all
+// existing vector-literal expressions.  This small split removes the genuine
+// Block-vs-literal ambiguity without duplicating the complete expression tree.
+NonBraceExp:
+    NonBraceAddExp { $$ = $1; };
+
+NonBraceAddExp:
+    NonBraceMulExp {
+        $$ = make_node<AddExpAST>();
+        $$->mulExp = unique_ptr<MulExpAST>($1);
+    }|
+    NonBraceAddExp ADD MulExp {
+        $$ = make_node<AddExpAST>();
+        $$->addExp = unique_ptr<AddExpAST>($1);
+        $$->op = AOP_ADD;
+        $$->mulExp = unique_ptr<MulExpAST>($3);
+    }|
+    NonBraceAddExp MINUS MulExp {
+        $$ = make_node<AddExpAST>();
+        $$->addExp = unique_ptr<AddExpAST>($1);
+        $$->op = AOP_MINUS;
+        $$->mulExp = unique_ptr<MulExpAST>($3);
+    };
+
+NonBraceMulExp:
+    NonBraceUnaryExp {
+        $$ = make_node<MulExpAST>();
+        $$->unaryExp = unique_ptr<UnaryExpAST>($1);
+    }|
+    NonBraceMulExp MUL UnaryExp {
+        $$ = make_node<MulExpAST>();
+        $$->mulExp = unique_ptr<MulExpAST>($1);
+        $$->op = MOP_MUL;
+        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+    }|
+    NonBraceMulExp DIV UnaryExp {
+        $$ = make_node<MulExpAST>();
+        $$->mulExp = unique_ptr<MulExpAST>($1);
+        $$->op = MOP_DIV;
+        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+    }|
+    NonBraceMulExp MOD UnaryExp {
+        $$ = make_node<MulExpAST>();
+        $$->mulExp = unique_ptr<MulExpAST>($1);
+        $$->op = MOP_MOD;
+        $$->unaryExp = unique_ptr<UnaryExpAST>($3);
+    };
+
+NonBraceUnaryExp:
+    LP Exp RP {
+        $$ = make_node<UnaryExpAST>();
+        auto *primary = make_node<PrimaryExpAST>();
+        primary->exp = unique_ptr<AddExpAST>($2);
+        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
+    }|
+    LVal {
+        $$ = make_node<UnaryExpAST>();
+        auto *primary = make_node<PrimaryExpAST>();
+        primary->lval = unique_ptr<LValAST>($1);
+        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
+    }|
+    Number {
+        $$ = make_node<UnaryExpAST>();
+        auto *primary = make_node<PrimaryExpAST>();
+        primary->number = unique_ptr<NumberAST>($1);
+        $$->primaryExp = unique_ptr<PrimaryExpAST>(primary);
+    }|
+    Call {
+        $$ = make_node<UnaryExpAST>();
+        $$->call = unique_ptr<CallAST>($1);
+    }|
+    Call LB Exp RB {
+        $$ = make_node<UnaryExpAST>();
+        auto *base = make_node<UnaryExpAST>();
+        base->call = unique_ptr<CallAST>($1);
+        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
+        $$->subscript = unique_ptr<AddExpAST>($3);
+    }|
+    LP Exp RP LB Exp RB {
+        $$ = make_node<UnaryExpAST>();
+        auto *primary = make_node<PrimaryExpAST>();
+        primary->exp = unique_ptr<AddExpAST>($2);
+        auto *base = make_node<UnaryExpAST>();
+        base->primaryExp = unique_ptr<PrimaryExpAST>(primary);
+        $$->unaryExp = unique_ptr<UnaryExpAST>(base);
+        $$->subscript = unique_ptr<AddExpAST>($5);
+    }|
+    UnaryOp UnaryExp {
+        $$ = make_node<UnaryExpAST>();
+        $$->op = $1;
+        $$->unaryExp = unique_ptr<UnaryExpAST>($2);
+    };
+
 // 条件表达式
 Cond:
     LOrExp {
@@ -593,6 +852,7 @@ LVal:
         $$ = make_node<LValAST>();
         $$->id = unique_ptr<string>($1);
         $$->arrays.swap($2->list);
+        delete $2;
     };
 
 // 基本表达式
@@ -672,6 +932,7 @@ Call:
         $$ = make_node<CallAST>();
         $$->id = unique_ptr<string>($1);
         $$->funcCParamList.swap($3->list);
+        delete $3;
         $$->lineno = @1.first_line;
     };
 
@@ -689,13 +950,30 @@ UnaryOp:
 
 // 函数实参表
 FuncCParamList:
-    Exp {
+    FuncCParam {
         $$ = make_node<FuncCParamListAST>();
-        $$->list.push_back(unique_ptr<AddExpAST>($1));
+        $$->list.push_back(unique_ptr<CallArgAST>($1));
     }|
-    FuncCParamList COMMA Exp {
-        $$ = (FuncCParamListAST*) $1;
-        $$->list.push_back(unique_ptr<AddExpAST>($3));
+    FuncCParamList COMMA FuncCParam {
+        $$ = $1;
+        $$->list.push_back(unique_ptr<CallArgAST>($3));
+    };
+
+FuncCParam:
+    Exp {
+        $$ = make_node<CallArgAST>();
+        $$->exp = unique_ptr<AddExpAST>($1);
+    }|
+    STRING_LITERAL {
+        string decoded;
+        if (!decodeStringLiteral(*$1, decoded)) {
+            yyerror("invalid escape sequence in string literal");
+            delete $1;
+            YYERROR;
+        }
+        $$ = make_node<CallArgAST>();
+        $$->stringLiteral = unique_ptr<string>(new string(std::move(decoded)));
+        delete $1;
     };
 
 //乘除模表达式
