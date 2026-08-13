@@ -13,6 +13,7 @@
 #include "autoMemoization.hpp"
 #include "mem2reg.hpp"
 #include "earlyCSE.hpp"
+#include "lateMemoryForwarding.hpp"
 #include "instCombine.hpp"
 #include "sccp.hpp"
 #include "inlineExpand.hpp"

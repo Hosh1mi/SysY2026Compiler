@@ -206,6 +206,18 @@ AliasResult BasicAliasAnalysis::alias(Value *a, Value *b) const {
     return alias(getMemoryLocation(a), getMemoryLocation(b));
 }
 
+bool BasicAliasAnalysis::getConstantOffsetFromObject(
+    Value *ptr, Value *&object, long long &offsetBytes) const {
+    PointerInfo info = getPointerInfo(ptr);
+    if (!info.base || !info.hasConstantOffset)
+        return false;
+    object = getUnderlyingObject(ptr);
+    if (!object)
+        return false;
+    offsetBytes = info.offsetBytes;
+    return true;
+}
+
 void BasicAliasAnalysis::addLocationEffect(FunctionSummary &summary,
                                            MemoryLocation loc,
                                            ModRefInfo effect) const {

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <optional>
 #include <set>
 
 namespace {
@@ -132,6 +133,151 @@ bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
         if (a.gep->get_operand(i) != b.gep->get_operand(i)) return false;
     }
     return true;
+}
+
+std::optional<long long> constantByteOffset(
+    const LoopVectorizationAnalysis::MemoryAccess &access,
+    const LoopVectorizationAnalysis::Plan &plan,
+    const BasicAliasAnalysis &BAA,
+    std::optional<long long> inductionValue) {
+    if (access.addressKind ==
+        LoopVectorizationAnalysis::AddressKind::PointerRecurrence) {
+        Value *object = nullptr;
+        long long offset = 0;
+        auto recurrence = std::find_if(
+            plan.pointerRecurrences.begin(), plan.pointerRecurrences.end(),
+            [&](const auto &candidate) {
+                return candidate.phi == access.pointerPhi;
+            });
+        if (recurrence == plan.pointerRecurrences.end() ||
+            !BAA.getConstantOffsetFromObject(recurrence->init, object,
+                                             offset) ||
+            object != access.underlyingObject)
+            return std::nullopt;
+        const int elementBytes = typeSize(access.scalarType);
+        long long displacement = 0;
+        if (elementBytes <= 0 || __builtin_mul_overflow(
+                static_cast<long long>(access.pointerOffset),
+                static_cast<long long>(elementBytes), &displacement) ||
+            __builtin_add_overflow(offset, displacement, &offset))
+            return std::nullopt;
+        return offset;
+    }
+
+    if (access.addressKind !=
+            LoopVectorizationAnalysis::AddressKind::InductionGEP ||
+        !access.gep)
+        return std::nullopt;
+
+    Value *object = nullptr;
+    long long offset = 0;
+    Value *base = access.gep->get_operand(0);
+    if (!BAA.getConstantOffsetFromObject(base, object, offset) ||
+        object != access.underlyingObject)
+        return std::nullopt;
+
+    auto *pointerType = dynamic_cast<PointerType *>(base->type_);
+    if (!pointerType)
+        return std::nullopt;
+    Type *current = pointerType->contained_;
+    for (unsigned i = 1; i < access.gep->num_ops(); ++i) {
+        long long index = 0;
+        if (i == access.varyingIndex) {
+            if (__builtin_add_overflow(
+                    inductionValue.value_or(0),
+                    static_cast<long long>(access.ivOffset), &index))
+                return std::nullopt;
+        } else {
+            auto *constant = dynamic_cast<ConstantInt *>(
+                access.gep->get_operand(i));
+            if (!constant)
+                return std::nullopt;
+            index = constant->value_;
+        }
+
+        const int stride = typeSize(current);
+        long long displacement = 0;
+        if (stride <= 0 || __builtin_mul_overflow(
+                index, static_cast<long long>(stride), &displacement) ||
+            __builtin_add_overflow(offset, displacement, &offset))
+            return std::nullopt;
+
+        if (current->tid_ == Type::ArrayTyID)
+            current = static_cast<ArrayType *>(current)->contained_;
+        else if (current->tid_ == Type::PointerTyID)
+            current = static_cast<PointerType *>(current)->contained_;
+    }
+    return offset;
+}
+
+std::optional<long long> constantInitialByteOffset(
+    const LoopVectorizationAnalysis::MemoryAccess &access,
+    const LoopVectorizationAnalysis::Plan &plan,
+    const BasicAliasAnalysis &BAA) {
+    auto *initial = dynamic_cast<ConstantInt *>(plan.induction.init);
+    if (!initial)
+        return std::nullopt;
+    return constantByteOffset(access, plan, BAA, initial->value_);
+}
+
+bool minimumVectorRangesOverlap(
+    const LoopVectorizationAnalysis::MemoryAccess &a,
+    const LoopVectorizationAnalysis::MemoryAccess &b,
+    const LoopVectorizationAnalysis::Plan &plan,
+    const BasicAliasAnalysis &BAA) {
+    if (!a.underlyingObject || a.underlyingObject != b.underlyingObject)
+        return false;
+    const std::optional<long long> aStart =
+        constantByteOffset(a, plan, BAA, std::nullopt);
+    const std::optional<long long> bStart =
+        constantByteOffset(b, plan, BAA, std::nullopt);
+    const int aBytes = typeSize(a.scalarType);
+    const int bBytes = typeSize(b.scalarType);
+    if (!aStart || !bStart || aBytes <= 0 || bBytes <= 0)
+        return false;
+
+    // Any execution of a vector body covers at least one full vector.  If
+    // the two symbolic unit-stride streams already overlap within that
+    // minimum span, no runtime range check can make the vector path legal.
+    const __int128 aEnd = static_cast<__int128>(*aStart) +
+                          static_cast<__int128>(plan.vectorWidth) * aBytes;
+    const __int128 bEnd = static_cast<__int128>(*bStart) +
+                          static_cast<__int128>(plan.vectorWidth) * bBytes;
+    return !(aEnd <= *bStart || bEnd <= *aStart);
+}
+
+std::optional<bool> constantIterationRangesOverlap(
+    const LoopVectorizationAnalysis::MemoryAccess &a,
+    const LoopVectorizationAnalysis::MemoryAccess &b,
+    const LoopVectorizationAnalysis::Plan &plan,
+    const BasicAliasAnalysis &BAA) {
+    if (plan.rotatedSingleBlock)
+        return std::nullopt;
+    if (!a.underlyingObject || a.underlyingObject != b.underlyingObject)
+        return std::nullopt;
+    auto *initial = dynamic_cast<ConstantInt *>(plan.induction.init);
+    auto *bound = dynamic_cast<ConstantInt *>(plan.induction.bound);
+    if (!initial || !bound)
+        return std::nullopt;
+    const long long trip = static_cast<long long>(bound->value_) -
+                           static_cast<long long>(initial->value_);
+    if (trip <= 0)
+        return false;
+
+    const std::optional<long long> aStart =
+        constantInitialByteOffset(a, plan, BAA);
+    const std::optional<long long> bStart =
+        constantInitialByteOffset(b, plan, BAA);
+    const int aBytes = typeSize(a.scalarType);
+    const int bBytes = typeSize(b.scalarType);
+    if (!aStart || !bStart || aBytes <= 0 || bBytes <= 0)
+        return std::nullopt;
+
+    const __int128 aEnd = static_cast<__int128>(*aStart) +
+                          static_cast<__int128>(trip) * aBytes;
+    const __int128 bEnd = static_cast<__int128>(*bStart) +
+                          static_cast<__int128>(trip) * bBytes;
+    return !(aEnd <= *bStart || bEnd <= *aStart);
 }
 
 } // namespace
@@ -444,6 +590,23 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
             if (a.underlyingObject == b.underlyingObject &&
                 sameAddressShape(a, b))
                 continue;
+
+            if (minimumVectorRangesOverlap(a, b, plan, BAA_))
+                return reject(reason,
+                              "known short-distance loop-carried dependence");
+
+            // When both streams are rooted in the same object and the loop
+            // has a constant trip count, compare the complete iteration
+            // ranges statically.  A known overlap is a real loop-carried
+            // dependence: runtime versioning could never enter its vector
+            // path.  A known separation needs no runtime check at all.
+            if (std::optional<bool> overlap =
+                    constantIterationRangesOverlap(a, b, plan, BAA_)) {
+                if (*overlap)
+                    return reject(reason,
+                                  "known overlapping iteration ranges");
+                continue;
+            }
 
             // Unit-stride non-uniform accesses describe contiguous ranges.
             // When static alias analysis cannot separate two such ranges, a

@@ -389,6 +389,64 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
         auto &instructions = blocks[i]->instructions();
         if (instructions.empty())
             continue;
+
+        auto targetOfConditional = [](const MachineInstr &instruction)
+            -> MachineBasicBlock * {
+            switch (instruction.opcode()) {
+            case Opcode::Bcc:
+                if (instruction.operands().size() >= 2 &&
+                    instruction.operands()[1].kind() ==
+                        MachineOperand::Kind::BasicBlock)
+                    return instruction.operands()[1].basicBlock();
+                break;
+            case Opcode::CBZ:
+            case Opcode::CBNZ:
+                if (instruction.operands().size() >= 2 &&
+                    instruction.operands()[1].kind() ==
+                        MachineOperand::Kind::BasicBlock)
+                    return instruction.operands()[1].basicBlock();
+                break;
+            case Opcode::TBZ:
+            case Opcode::TBNZ:
+                if (instruction.operands().size() >= 3 &&
+                    instruction.operands()[2].kind() ==
+                        MachineOperand::Kind::BasicBlock)
+                    return instruction.operands()[2].basicBlock();
+                break;
+            default:
+                break;
+            }
+            return nullptr;
+        };
+
+        // If both explicit branch arms name the same block, retain only the
+        // unconditional transfer.  This can appear after forwarding-block
+        // threading has made two formerly distinct edges equivalent.
+        if (instructions.size() >= 2 &&
+            instructions.back().opcode() == Opcode::B) {
+            auto unconditional = std::prev(instructions.end());
+            auto conditional = std::prev(unconditional);
+            MachineBasicBlock *fallback =
+                unconditional->operands().empty()
+                    ? nullptr
+                    : unconditional->operands()[0].basicBlock();
+            if (fallback && targetOfConditional(*conditional) == fallback) {
+                instructions.erase(conditional);
+                changed = true;
+            }
+        }
+
+        // A lone conditional branch to the physical successor has identical
+        // taken and fallthrough destinations and is therefore redundant.
+        if (!instructions.empty()) {
+            auto last = std::prev(instructions.end());
+            if (targetOfConditional(*last) == fallthrough) {
+                instructions.erase(last);
+                changed = true;
+                continue;
+            }
+        }
+
         auto unconditional = std::prev(instructions.end());
         if (unconditional->opcode() != Opcode::B ||
             unconditional->operands().empty())

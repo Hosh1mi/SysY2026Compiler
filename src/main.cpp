@@ -198,6 +198,10 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopInterchange>());
     pm.addPass(std::make_unique<LoopResetPointElimination>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
+    pm.addPass(std::make_unique<LoopSimplify>());
+    pm.addPass(std::make_unique<IndVarSimplify>());
+    pm.addPass(std::make_unique<LICM>());
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<LoopVectorize>());
@@ -214,6 +218,8 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopUnroll>());
     addScalarSimplifyClosure(pm);
+    pm.addPass(std::make_unique<LateMemoryForwarding>());
+    addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopVectorize>());
     pm.addPass(std::make_unique<SLPVectorize>());
@@ -221,6 +227,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<SplitGEP>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
+    pm.addPass(std::make_unique<LateMemoryForwarding>());
     addMemoryCleanup(pm);
 
     pm.addPass(std::make_unique<GVN>());

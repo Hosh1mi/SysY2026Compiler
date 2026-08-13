@@ -232,9 +232,27 @@ bool PostRAAddressingOptimizer::run(
     bool changed = false;
 
     // Spill code is inserted after the pre-RA load/store optimizer, and its
-    // frame offsets are not known until frame lowering.  Pair adjacent
-    // 128-bit accesses here once both the physical registers and final stack
-    // addresses are available.
+    // frame offsets are not known until frame lowering.  Pair adjacent scalar
+    // and vector stack accesses once physical registers and addresses are
+    // available.
+    struct StackPairKind {
+        bool load = false;
+        Opcode pairOpcode = Opcode::Invalid;
+        std::int64_t stride = 0;
+    };
+    auto stackPairKind = [](Opcode opcode) -> std::optional<StackPairKind> {
+        switch (opcode) {
+        case Opcode::LDRWui: return StackPairKind{true, Opcode::LDPWi, 4};
+        case Opcode::STRWui: return StackPairKind{false, Opcode::STPWi, 4};
+        case Opcode::LDRSui: return StackPairKind{true, Opcode::LDPSi, 4};
+        case Opcode::STRSui: return StackPairKind{false, Opcode::STPSi, 4};
+        case Opcode::LDRXui: return StackPairKind{true, Opcode::LDPXi, 8};
+        case Opcode::STRXui: return StackPairKind{false, Opcode::STPXi, 8};
+        case Opcode::LDRQui: return StackPairKind{true, Opcode::LDPQi, 16};
+        case Opcode::STRQui: return StackPairKind{false, Opcode::STPQi, 16};
+        default: return std::nullopt;
+        }
+    };
     for (auto &block : function.blocks()) {
         auto &instructions = block->instructions();
         bool paired = true;
@@ -242,9 +260,9 @@ bool PostRAAddressingOptimizer::run(
             paired = false;
             for (auto first = instructions.begin();
                  first != instructions.end() && !paired; ++first) {
-                const bool load = first->opcode() == Opcode::LDRQui;
-                const bool store = first->opcode() == Opcode::STRQui;
-                if ((!load && !store) || first->operands().size() != 3 ||
+                const std::optional<StackPairKind> kind =
+                    stackPairKind(first->opcode());
+                if (!kind || first->operands().size() != 3 ||
                     !first->operands()[0].isPhysicalRegister() ||
                     !first->operands()[1].isPhysicalRegister() ||
                     first->operands()[2].kind() !=
@@ -252,6 +270,8 @@ bool PostRAAddressingOptimizer::run(
                     first->memoryOperands().empty() ||
                     first->memoryOperands().front().isVolatile)
                     continue;
+
+                const bool load = kind->load;
 
                 const PhysReg base =
                     first->operands()[1].physicalRegister();
@@ -302,14 +322,19 @@ bool PostRAAddressingOptimizer::run(
                         second->operands()[0].physicalRegister();
                     const std::int64_t secondOffset =
                         second->operands()[2].immediate();
-                    if (std::llabs(firstOffset - secondOffset) != 16)
+                    std::int64_t difference = 0;
+                    if (__builtin_sub_overflow(firstOffset, secondOffset,
+                                               &difference) ||
+                        (difference != kind->stride &&
+                         difference != -kind->stride))
                         break;
                     const std::int64_t lowerOffset =
                         std::min(firstOffset, secondOffset);
-                    if (lowerOffset % 16 != 0 ||
-                        lowerOffset / 16 < -64 ||
-                        lowerOffset / 16 > 63 ||
-                        (load && firstData == secondData))
+                    if (lowerOffset % kind->stride != 0 ||
+                        lowerOffset / kind->stride < -64 ||
+                        lowerOffset / kind->stride > 63 ||
+                        (load && RegisterInfo::aliases(firstData,
+                                                       secondData)))
                         break;
 
                     // Hoisting the second load must not make its physical
@@ -333,8 +358,7 @@ bool PostRAAddressingOptimizer::run(
                                      ? first : second;
                     auto upper = firstOffset < secondOffset
                                      ? second : first;
-                    MachineInstr pair(load ? Opcode::LDPQi
-                                           : Opcode::STPQi);
+                    MachineInstr pair(kind->pairOpcode);
                     pair.addOperand(lower->operands()[0])
                         .addOperand(upper->operands()[0])
                         .addOperand(MachineOperand::physReg(
@@ -344,7 +368,9 @@ bool PostRAAddressingOptimizer::run(
                     pair.addMemoryOperand(MachineMemOperand{
                         load ? MachineMemOperand::Access::Load
                              : MachineMemOperand::Access::Store,
-                        32, 16, nullptr, std::nullopt, lowerOffset, false});
+                        static_cast<unsigned>(kind->stride * 2),
+                        static_cast<unsigned>(kind->stride), nullptr,
+                        std::nullopt, lowerOffset, false});
 
                     auto replacement = load ? first : second;
                     auto removed = load ? second : first;

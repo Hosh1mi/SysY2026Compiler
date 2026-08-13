@@ -18,6 +18,7 @@ public:
     PreservedAnalyses execute(Module *module, AnalysisManager &AM) override;
     std::string name() const override { return "IndVarSimplify"; }
     LoopForm requiredLoopForm() const override { return LoopForm::LCSSA; }
+    LoopForm establishedLoopForm() const override { return LoopForm::LCSSA; }
 
 private:
     bool runOnFunction(Function *func, AnalysisManager &AM);

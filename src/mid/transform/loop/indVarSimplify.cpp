@@ -874,14 +874,20 @@ bool rewriteConstantExitValues(Loop &loop, ScalarEvolution &scalarEvolution,
     return changed;
 }
 
-bool simplifyLoop(Loop &loop, ScalarEvolution &scalarEvolution,
-                  Module *module) {
-    bool changed = canonicalizeConstantControl(loop, module);
-    changed |= rewriteFirstIterationExitValues(loop);
-    changed |= eliminateCongruentIVs(loop, scalarEvolution);
-    changed |= simplifyRangeUsers(loop, scalarEvolution, module);
-    changed |= rewriteConstantExitValues(loop, scalarEvolution, module);
-    return changed;
+bool simplifyLoopOnce(Loop &loop, ScalarEvolution &scalarEvolution,
+                      Module *module) {
+    // Each transformation can change the recurrence graph consumed by the
+    // following one.  Return after the first mutation so the caller rebuilds
+    // LoopInfo and ScalarEvolution before continuing.
+    if (canonicalizeConstantControl(loop, module))
+        return true;
+    if (rewriteFirstIterationExitValues(loop))
+        return true;
+    if (eliminateCongruentIVs(loop, scalarEvolution))
+        return true;
+    if (simplifyRangeUsers(loop, scalarEvolution, module))
+        return true;
+    return rewriteConstantExitValues(loop, scalarEvolution, module);
 }
 
 } // namespace
@@ -911,19 +917,30 @@ bool IndVarSimplify::runOnFunction(Function *func,
     if (!func || func->basic_blocks_.empty())
         return false;
 
-    LoopInfo &loopInfo = analysisManager.getLoopInfo(func);
-    ScalarEvolution &scalarEvolution =
-        analysisManager.getScalarEvolution(func);
-    std::vector<Loop *> loops;
-    for (const auto &loop : loopInfo.allLoops())
-        loops.push_back(loop.get());
-    std::sort(loops.begin(), loops.end(),
-              [](Loop *lhs, Loop *rhs) {
-                  return lhs->depth > rhs->depth;
-              });
-
     bool changed = false;
-    for (Loop *loop : loops)
-        changed |= simplifyLoop(*loop, scalarEvolution, func->parent_);
+    while (true) {
+        LoopInfo &loopInfo = analysisManager.getLoopInfo(func);
+        ScalarEvolution &scalarEvolution =
+            analysisManager.getScalarEvolution(func);
+        std::vector<Loop *> loops;
+        for (const auto &loop : loopInfo.allLoops())
+            loops.push_back(loop.get());
+        std::sort(loops.begin(), loops.end(),
+                  [](Loop *lhs, Loop *rhs) {
+                      return lhs->depth > rhs->depth;
+                  });
+
+        bool iterationChanged = false;
+        for (Loop *loop : loops) {
+            if (!simplifyLoopOnce(*loop, scalarEvolution, func->parent_))
+                continue;
+            changed = true;
+            iterationChanged = true;
+            analysisManager.clear(func);
+            break;
+        }
+        if (!iterationChanged)
+            break;
+    }
     return changed;
 }

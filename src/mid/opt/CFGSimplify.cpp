@@ -188,12 +188,25 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
     auto *target = dynamic_cast<BasicBlock *>(br->get_operand(0));
     if (target == bb) return false; // 自环
 
-    // 检查是否有前驱既是 bb 的前驱，又已经是 target 的前驱
-    // 这种情况如果合并会导致 target 的 phi 中出现同一个前驱的重复条目
-    // 且两个值可能不同，应避免合并以避免语义歧义
+    // A predecessor may already branch directly to target.  The two logical
+    // edges can be collapsed when every target PHI observes the same value;
+    // otherwise merging would lose the edge distinction.
     for (auto *pred : bb->pre_bbs_) {
         if (std::find(target->pre_bbs_.begin(), target->pre_bbs_.end(), pred) != target->pre_bbs_.end()) {
-            return false;
+            for (auto *instr : target->instr_list_) {
+                if (!instr->is_phi()) break;
+                auto *phi = static_cast<PhiInst *>(instr);
+                Value *viaEmpty = nullptr;
+                Value *direct = nullptr;
+                for (unsigned i = 0; i < phi->num_ops(); i += 2) {
+                    if (phi->get_operand(i + 1) == bb)
+                        viaEmpty = phi->get_operand(i);
+                    else if (phi->get_operand(i + 1) == pred)
+                        direct = phi->get_operand(i);
+                }
+                if (!viaEmpty || !direct || viaEmpty != direct)
+                    return false;
+            }
         }
     }
 
@@ -231,11 +244,17 @@ static bool mergeEmptyBlock(BasicBlock *bb) {
             if (predBr->num_ops() == 1) {
                 redirectUncondBr(pred, bb, target);
             } else if (predBr->num_ops() == 3) {
+                bool redirected = false;
                 for (int i = 1; i <= 2; ++i) {
                     if (predBr->get_operand(i) == bb) {
                         redirectCondBr(pred, i, bb, target);
-                        break;
+                        redirected = true;
                     }
+                }
+                if (redirected &&
+                    predBr->get_operand(1) == predBr->get_operand(2)) {
+                    pred->delete_instr(predBr);
+                    new BranchInst(target, pred);
                 }
             }
         }

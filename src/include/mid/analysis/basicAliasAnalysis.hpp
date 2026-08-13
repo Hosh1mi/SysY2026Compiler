@@ -66,6 +66,9 @@ public:
 
     // 解析指针的底层内存对象（穿透 bitcast / GEP 链），返回 alloca / global / argument 等。
     Value *getUnderlyingObject(Value *ptr) const;
+    // 当整条指针链仅含常量偏移时，返回相对底层对象的字节偏移。
+    bool getConstantOffsetFromObject(Value *ptr, Value *&object,
+                                     long long &offsetBytes) const;
 
 private:
     struct PointerInfo {

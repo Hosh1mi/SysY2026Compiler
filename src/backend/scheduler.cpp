@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <list>
+#include <optional>
 #include <set>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -39,6 +41,7 @@ struct Node {
     SchedResource resource = SchedResource::None;
     bool load = false;
     bool store = false;
+    const MachineInstr *instruction = nullptr;
 };
 
 struct RegisterPressure {
@@ -155,6 +158,80 @@ bool intersects(const std::set<RegisterKey> &lhs,
     return false;
 }
 
+std::optional<unsigned> immediateMemoryBaseIndex(Opcode opcode) {
+    switch (opcode) {
+    case Opcode::LDRWui: case Opcode::STRWui:
+    case Opcode::LDRSui: case Opcode::STRSui:
+    case Opcode::LDRDui: case Opcode::STRDui:
+    case Opcode::LDRQui: case Opcode::STRQui:
+    case Opcode::LDRXui: case Opcode::STRXui:
+        return 1;
+    case Opcode::LDPWi: case Opcode::STPWi:
+    case Opcode::LDPSi: case Opcode::STPSi:
+    case Opcode::LDPXi: case Opcode::STPXi:
+    case Opcode::LDPDi: case Opcode::STPDi:
+    case Opcode::LDPQi: case Opcode::STPQi:
+        return 2;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string_view> memorySymbol(
+    const MachineInstr &instruction) {
+    for (const MachineOperand &operand : instruction.operands())
+        if (operand.kind() == MachineOperand::Kind::GlobalSymbol)
+            return operand.symbol();
+    return std::nullopt;
+}
+
+bool memoryMayAlias(const MachineInstr &lhs, const MachineInstr &rhs) {
+    if (lhs.memoryOperands().empty() || rhs.memoryOperands().empty())
+        return true;
+    const MachineMemOperand &a = lhs.memoryOperands().front();
+    const MachineMemOperand &b = rhs.memoryOperands().front();
+    if (a.isVolatile || b.isVolatile)
+        return true;
+
+    if (a.frameIndex && b.frameIndex && *a.frameIndex != *b.frameIndex)
+        return false;
+
+    const std::optional<std::string_view> aSymbol = memorySymbol(lhs);
+    const std::optional<std::string_view> bSymbol = memorySymbol(rhs);
+    if (aSymbol && bSymbol && *aSymbol != *bSymbol)
+        return false;
+
+    const std::optional<unsigned> aBaseIndex =
+        immediateMemoryBaseIndex(lhs.opcode());
+    const std::optional<unsigned> bBaseIndex =
+        immediateMemoryBaseIndex(rhs.opcode());
+    if (!aBaseIndex || !bBaseIndex ||
+        lhs.operands().size() <= *aBaseIndex + 1 ||
+        rhs.operands().size() <= *bBaseIndex + 1)
+        return true;
+    const MachineOperand &aBase = lhs.operands()[*aBaseIndex];
+    const MachineOperand &bBase = rhs.operands()[*bBaseIndex];
+    const MachineOperand &aOffset = lhs.operands()[*aBaseIndex + 1];
+    const MachineOperand &bOffset = rhs.operands()[*bBaseIndex + 1];
+    if (!aBase.isRegister() || !bBase.isRegister() ||
+        !aBase.isSameRegisterAs(bBase) ||
+        aOffset.kind() != MachineOperand::Kind::Immediate ||
+        bOffset.kind() != MachineOperand::Kind::Immediate ||
+        a.size == 0 || b.size == 0)
+        return true;
+
+    const std::int64_t aBegin = aOffset.immediate();
+    const std::int64_t bBegin = bOffset.immediate();
+    std::int64_t aEnd = 0;
+    std::int64_t bEnd = 0;
+    if (__builtin_add_overflow(aBegin, static_cast<std::int64_t>(a.size),
+                               &aEnd) ||
+        __builtin_add_overflow(bBegin, static_cast<std::int64_t>(b.size),
+                               &bEnd))
+        return true;
+    return !(aEnd <= bBegin || bEnd <= aBegin);
+}
+
 bool schedulingBarrier(const MachineInstr &instruction) {
     if (instruction.isTerminator() || instruction.isCall() ||
         instruction.isPseudo() || instruction.hasSideEffects())
@@ -192,6 +269,7 @@ bool scheduleRegion(
         nodes[i].resource = descriptor.resource;
         nodes[i].load = instruction.mayLoad();
         nodes[i].store = instruction.mayStore();
+        nodes[i].instruction = &instruction;
         for (const MachineOperand &operand :
              instruction.operands()) {
             if (!operand.isRegister())
@@ -218,7 +296,9 @@ bool scheduleRegion(
             bool memoryDependency =
                 (nodes[i].load || nodes[i].store) &&
                 (nodes[j].load || nodes[j].store) &&
-                (nodes[i].store || nodes[j].store);
+                (nodes[i].store || nodes[j].store) &&
+                memoryMayAlias(*nodes[i].instruction,
+                               *nodes[j].instruction);
             if (!registerDependency && !memoryDependency)
                 continue;
             nodes[i].successors.push_back(j);
