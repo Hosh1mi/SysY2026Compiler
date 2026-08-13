@@ -227,10 +227,29 @@ bool minimumVectorRangesOverlap(
     const BasicAliasAnalysis &BAA) {
     if (!a.underlyingObject || a.underlyingObject != b.underlyingObject)
         return false;
+
+    using AddressKind = LoopVectorizationAnalysis::AddressKind;
+    const bool mixedInductionForms =
+        (a.addressKind == AddressKind::PointerRecurrence &&
+         b.addressKind == AddressKind::InductionGEP) ||
+        (a.addressKind == AddressKind::InductionGEP &&
+         b.addressKind == AddressKind::PointerRecurrence);
+    std::optional<long long> inductionValue;
+    if (mixedInductionForms) {
+        // A pointer recurrence is rooted at the address used by the first
+        // scalar iteration.  Normalize a mixed InductionGEP to that same
+        // iteration; substituting zero would compare different origins when
+        // the loop IV has a non-zero start.  A dynamic start cannot be folded
+        // here, so leave the pair to the runtime overlap check below.
+        auto *initial = dynamic_cast<ConstantInt *>(plan.induction.init);
+        if (!initial)
+            return false;
+        inductionValue = initial->value_;
+    }
     const std::optional<long long> aStart =
-        constantByteOffset(a, plan, BAA, std::nullopt);
+        constantByteOffset(a, plan, BAA, inductionValue);
     const std::optional<long long> bStart =
-        constantByteOffset(b, plan, BAA, std::nullopt);
+        constantByteOffset(b, plan, BAA, inductionValue);
     const int aBytes = typeSize(a.scalarType);
     const int bBytes = typeSize(b.scalarType);
     if (!aStart || !bStart || aBytes <= 0 || bBytes <= 0)
