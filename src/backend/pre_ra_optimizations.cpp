@@ -6,7 +6,6 @@
 
 #include <deque>
 #include <algorithm>
-#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -90,19 +89,18 @@ bool flagsUsedAfter(
 
 } // namespace
 
-bool AArch64PreRAOptimizer::run(MachineFunction &function,
-                                PreRAOptimizationKind kind) const {
+bool MachineConstantCSE::run(MachineFunction &function) const {
   bool changed = false;
   // Local Machine CSE for materialized constants.  Keeping this before RA
   // lets graph coloring decide whether the shared value belongs in a
   // caller-saved register, a callee-saved register, or a spill slot.  The
   // table is cleared at calls so this transformation does not manufacture
   // a new live-across-call range.
-  if (kind == PreRAOptimizationKind::ConstantCSE) {
-    for (auto &block : function.blocks()) {
-      std::unordered_map<std::string, VReg> available;
-      auto &instructions = block->instructions();
-      for (auto it = instructions.begin(); it != instructions.end();) {
+  MachineRegisterIndex registers(function);
+  for (auto &block : function.blocks()) {
+    std::unordered_map<std::string, VReg> available;
+    auto &instructions = block->instructions();
+    for (auto it = instructions.begin(); it != instructions.end();) {
         if (it->isCall()) {
           available.clear();
           ++it;
@@ -171,29 +169,27 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
         }
 
         VReg replacement = canonical->second;
-        for (auto &useBlock : function.blocks())
-          for (MachineInstr &instruction : useBlock->instructions())
-            for (MachineOperand &operand : instruction.operands())
-              if (operand.isVirtualRegister() && !operand.isDef &&
-                  operand.virtualRegister() == duplicate)
-                operand = MachineOperand::vreg(replacement, operand.regClass());
+        registers.replaceUses(duplicate, replacement);
         it = instructions.erase(it);
         function.registerInfo().eraseVirtualRegister(duplicate);
         changed = true;
-      }
     }
   }
+  return changed;
+}
 
+bool AArch64VectorImmediateSelection::run(
+    MachineFunction &function) const {
+  bool changed = false;
   // GPR vs NEON bank choice for splat immediates.
   //
   // ISel keeps Splat as DUP from a scalar so integer users can share the
   // same MOVi.  When that scalar immediate has no non-broadcast users,
   // rewrite the DUP into a NEON immediate.  Dead scalar materializations
   // are left for Machine DCE.
-  if (kind == PreRAOptimizationKind::VectorImmediateSelection) {
-    MachineRegisterIndex registers(function);
+  MachineRegisterIndex registers(function);
 
-    for (auto &block : function.blocks()) {
+  for (auto &block : function.blocks()) {
       auto &instructions = block->instructions();
       for (auto it = instructions.begin(); it != instructions.end(); ++it) {
         const bool integerDup = it->opcode() == Opcode::DUPv4i32;
@@ -244,12 +240,14 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
           function.registerInfo().setDefinition(destination.virtualRegister(),
                                                 &*it);
         changed = true;
-      }
     }
   }
+  return changed;
+}
 
-  if (kind == PreRAOptimizationKind::Peephole) {
-    for (auto &block : function.blocks()) {
+bool AArch64PreRAPeephole::run(MachineFunction &function) const {
+  bool changed = false;
+  for (auto &block : function.blocks()) {
       auto &instructions = block->instructions();
       for (auto it = instructions.begin(); it != instructions.end();) {
         if (isZeroIdentity(*it)) {
@@ -268,14 +266,17 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
           continue;
         }
         ++it;
-      }
     }
   }
+  return changed;
+}
 
-  if (kind == PreRAOptimizationKind::LoadStoreOptimization) {
-    // Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
-    // architectural scale (4/8/16): the pair offset must be a multiple of that
-    // scale and fit the signed 7-bit scaled immediate.
+bool AArch64LoadStoreOptimization::run(
+    MachineFunction &function) const {
+  bool changed = false;
+  // Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
+  // architectural scale (4/8/16): the pair offset must be a multiple of that
+  // scale and fit the signed 7-bit scaled immediate.
     struct AddressForm {
       VReg root = 0;
       std::int64_t offset = 0;
@@ -303,7 +304,7 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
           return true;
       return false;
     };
-    for (auto &block : function.blocks()) {
+  for (auto &block : function.blocks()) {
       bool fused = true;
       while (fused) {
         fused = false;
@@ -342,8 +343,10 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
                      it->operands()[2].kind() ==
                          MachineOperand::Kind::Immediate) {
             AddressForm form = addressOf(it->operands()[1]);
-            if (form.valid) {
-              form.offset += it->operands()[2].immediate();
+            if (form.valid &&
+                !__builtin_add_overflow(
+                    form.offset, it->operands()[2].immediate(),
+                    &form.offset)) {
               addresses[it->operands()[0].virtualRegister()] = form;
             }
           }
@@ -371,7 +374,10 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
           AddressForm form = addressOf(it->operands()[1]);
           if (!form.valid)
             continue;
-          form.offset += it->operands()[2].immediate();
+          if (__builtin_add_overflow(
+                  form.offset, it->operands()[2].immediate(),
+                  &form.offset))
+            continue;
           (load ? loads : stores).push_back(MemoryCandidate{it, form, kind});
         }
 
@@ -382,9 +388,15 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
               auto &lhs = candidates[i];
               auto &rhs = candidates[j];
               if (lhs.kind != rhs.kind ||
-                  lhs.address.root != rhs.address.root ||
-                  std::llabs(lhs.address.offset - rhs.address.offset) !=
-                      lhs.kind->stride)
+                  lhs.address.root != rhs.address.root)
+                continue;
+              std::int64_t difference = 0;
+              const std::int64_t high =
+                  std::max(lhs.address.offset, rhs.address.offset);
+              const std::int64_t low =
+                  std::min(lhs.address.offset, rhs.address.offset);
+              if (__builtin_sub_overflow(high, low, &difference) ||
+                  difference != lhs.kind->stride)
                 continue;
               std::int64_t stride = lhs.kind->stride;
               std::int64_t lowerOffset =
@@ -461,12 +473,14 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
         if (!fused)
           fused = tryPair(stores, false);
         changed |= fused;
-      }
     }
   }
+  return changed;
+}
 
-  if (kind == PreRAOptimizationKind::MachineSink &&
-      function.hasProperty(MachineProperty::IsSSA)) {
+bool MachineSink::run(MachineFunction &function) const {
+  bool changed = false;
+  if (function.hasProperty(MachineProperty::IsSSA)) {
     std::unordered_map<VReg, MachineInstr *> uniqueUse;
     std::unordered_map<VReg, MachineBasicBlock *> useBlock;
     for (auto &owned : function.blocks())
@@ -591,8 +605,7 @@ bool AArch64PreRAOptimizer::run(MachineFunction &function,
       function.clearProperty(MachineProperty::TracksLiveness);
   }
 
-  if (kind == PreRAOptimizationKind::MachineSink &&
-      !function.hasProperty(MachineProperty::HasPHIs)) {
+  if (!function.hasProperty(MachineProperty::HasPHIs)) {
     auto sinkableOpcode = [](Opcode opcode) {
       switch (opcode) {
       case Opcode::MOVi32:

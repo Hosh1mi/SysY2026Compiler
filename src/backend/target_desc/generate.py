@@ -228,7 +228,7 @@ IMMEDIATE_CONSTRAINTS = {
 }
 FIELDS = {
     "mnemonic", "defs", "operands", "latency", "resource", "properties",
-    "immediate", "remat",
+    "immediate", "remat", "tied_use", "tied_def", "early_clobber_def",
 }
 DAG_FIELDS = {"arity", "mode", "address"}
 PATTERN_FIELDS = {
@@ -282,6 +282,9 @@ class Instruction:
     properties: frozenset[str]
     immediate: str
     remat: int
+    tied_use: int
+    tied_def: int
+    early_clobber_def: int
     location: Location
 
 
@@ -358,9 +361,15 @@ def validate_instructions(records: Iterable[ParsedRecord]) -> list[Instruction]:
         property_list = typed_field(record, "properties", "list", ())
         immediate = typed_field(record, "immediate", "identifier", "None")
         remat = typed_field(record, "remat", "integer", 0)
+        tied_use = typed_field(record, "tied_use", "integer", -1)
+        tied_def = typed_field(record, "tied_def", "integer", -1)
+        early_clobber_def = typed_field(
+            record, "early_clobber_def", "integer", -1)
 
         assert isinstance(defs, int) and isinstance(operands, int)
         assert isinstance(latency, int) and isinstance(remat, int)
+        assert isinstance(tied_use, int) and isinstance(tied_def, int)
+        assert isinstance(early_clobber_def, int)
         assert isinstance(resource, str) and isinstance(immediate, str)
         assert isinstance(mnemonic, str) and isinstance(property_list, tuple)
         properties = frozenset(property_list)
@@ -391,9 +400,29 @@ def validate_instructions(records: Iterable[ParsedRecord]) -> list[Instruction]:
             raise DescriptionError(record.location, "branch instructions must be terminators")
         if "return" in properties and "terminator" not in properties:
             raise DescriptionError(record.location, "return instructions must be terminators")
+        if (tied_use < 0) != (tied_def < 0):
+            raise DescriptionError(
+                record.location,
+                "tied_use and tied_def must be specified together")
+        if tied_use >= operands or tied_def >= operands:
+            raise DescriptionError(record.location,
+                                   "tied operand index is out of range")
+        if tied_use >= 0 and tied_use < defs:
+            raise DescriptionError(record.location,
+                                   "tied_use must name a use operand")
+        if tied_def >= defs:
+            raise DescriptionError(record.location,
+                                   "tied_def must name a definition")
+        if early_clobber_def >= operands:
+            raise DescriptionError(record.location,
+                                   "early-clobber operand is out of range")
+        if early_clobber_def >= defs:
+            raise DescriptionError(record.location,
+                                   "early_clobber_def must name a definition")
         result.append(Instruction(record.name, mnemonic, defs, operands,
                                   latency, resource, properties, immediate,
-                                  remat, record.location))
+                                  remat, tied_use, tied_def,
+                                  early_clobber_def, record.location))
     if not result:
         raise DescriptionError(Location(Path("<input>"), 1, 1),
                                "target description contains no instructions")
@@ -642,6 +671,26 @@ def validate_patterns(
                     raise DescriptionError(
                         record.fields["operands"].location,
                         f"operand {index} must tie to a definition")
+
+        actual_ties = [(index, operand.tied_to)
+                       for index, operand in enumerate(operands)
+                       if operand.tied_to >= 0]
+        expected_ties = ([] if instruction.tied_use < 0 else
+                         [(instruction.tied_use, instruction.tied_def)])
+        if actual_ties != expected_ties:
+            raise DescriptionError(
+                record.fields["operands"].location,
+                f"pattern operand ties do not match '{emit}'")
+        actual_early_clobbers = [
+            index for index, operand in enumerate(operands)
+            if operand.early_clobber]
+        expected_early_clobbers = (
+            [] if instruction.early_clobber_def < 0 else
+            [instruction.early_clobber_def])
+        if actual_early_clobbers != expected_early_clobbers:
+            raise DescriptionError(
+                record.fields["operands"].location,
+                f"pattern early-clobber operands do not match '{emit}'")
 
         dag_opcode = dag_by_name[root]
         for operand in operands:
@@ -942,12 +991,19 @@ def emit_info_source(source: Path, instructions: list[Instruction]) -> str:
     for instruction in instructions:
         flags = [bool_literal(name in instruction.properties)
                  for name in DESCRIPTOR_PROPERTIES]
+        operand_constraint = ""
+        if (instruction.tied_use >= 0 or instruction.tied_def >= 0 or
+                instruction.early_clobber_def >= 0):
+            operand_constraint = ", OperandConstraint{%d, %d, %d}" % (
+                instruction.tied_use, instruction.tied_def,
+                instruction.early_clobber_def)
         descriptors.append(
             "    InstrDesc{Opcode::%s, %s, %u, %u, %s, %s, %s, %s, "
-            "%s, %s, %s, %s, %s, %s, %u, SchedResource::%s}," %
+            "%s, %s, %s, %s, %s, %s, %u, SchedResource::%s%s}," %
             (instruction.name, cpp_string(instruction.mnemonic),
              instruction.defs, instruction.operands, *flags,
-             instruction.latency, instruction.resource))
+             instruction.latency, instruction.resource,
+             operand_constraint))
         constraints.append(
             f"    ImmediateConstraint::{instruction.immediate}, // {instruction.name}")
         commutable.append(

@@ -16,24 +16,58 @@ void addPass(MachineFunctionPassManager &pipeline, std::string name,
                    std::move(runner));
 }
 
-void addPreRAOptimizations(MachineFunctionPassManager &pipeline,
-                           MachinePipelineServices &services,
-                           MachinePassStage stage, MachineProperty required,
-                           const std::string &suffix) {
-  auto addOptimization = [&](const std::string &name,
-                             PreRAOptimizationKind kind) {
-    addPass(pipeline, name + suffix, stage, required, MachineProperty::NoVRegs,
-            [&services, kind](MachineFunction &function) {
-              return services.preRAOptimizer.run(function, kind);
-            });
-  };
-  addOptimization("MachineConstantCSE", PreRAOptimizationKind::ConstantCSE);
-  addOptimization("AArch64VectorImmediateSelection",
-                  PreRAOptimizationKind::VectorImmediateSelection);
-  addOptimization("AArch64PreRAPeephole", PreRAOptimizationKind::Peephole);
-  addOptimization("AArch64LoadStoreOptimization",
-                  PreRAOptimizationKind::LoadStoreOptimization);
-  addOptimization("MachineSink", PreRAOptimizationKind::MachineSink);
+template <typename Transform>
+void addPreRAOptimization(MachineFunctionPassManager &pipeline,
+                          Transform &transform, std::string name,
+                          MachinePassStage stage,
+                          MachineProperty required) {
+  addPass(pipeline, std::move(name), stage, required,
+          MachineProperty::NoVRegs,
+          [&transform](MachineFunction &function) {
+            return transform.run(function);
+          });
+}
+
+void addMachineSSAOptimizations(MachineFunctionPassManager &pipeline,
+                                MachinePipelineServices &services,
+                                MachineProperty selectedSSA) {
+  addPreRAOptimization(pipeline, services.constantCSE, "MachineConstantCSE",
+                       MachinePassStage::MachineSSA, selectedSSA);
+  addPreRAOptimization(pipeline, services.vectorImmediateSelection,
+                       "AArch64VectorImmediateSelection",
+                       MachinePassStage::MachineSSA, selectedSSA);
+  addPreRAOptimization(pipeline, services.preRAPeephole,
+                       "AArch64PreRAPeephole",
+                       MachinePassStage::MachineSSA, selectedSSA);
+  addPreRAOptimization(pipeline, services.loadStoreOptimization,
+                       "AArch64LoadStoreOptimization",
+                       MachinePassStage::MachineSSA, selectedSSA);
+  addPreRAOptimization(pipeline, services.machineSink, "MachineSink",
+                       MachinePassStage::MachineSSA, selectedSSA);
+}
+
+void addPostPhiOptimizations(MachineFunctionPassManager &pipeline,
+                             MachinePipelineServices &services,
+                             MachineProperty selected) {
+  // PHI lowering only introduces copies and edge blocks, so rerun the one
+  // local transform that can consume those new placements.
+  addPreRAOptimization(pipeline, services.machineSink, "MachineSinkAfterPHI",
+                       MachinePassStage::PreRegAlloc, selected);
+
+  addPass(pipeline, "MachineInvariantConstantMotion",
+          MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
+          [&services](MachineFunction &function) {
+            return services.invariantConstantMotion.run(function);
+          });
+
+  // Hoisting can expose equivalent constants in a shared preheader and can
+  // leave a single-use materialization on a colder successor edge.
+  addPreRAOptimization(pipeline, services.constantCSE,
+                       "MachineConstantCSEAfterLICM",
+                       MachinePassStage::PreRegAlloc, selected);
+  addPreRAOptimization(pipeline, services.machineSink,
+                       "MachineSinkAfterLICM",
+                       MachinePassStage::PreRegAlloc, selected);
 }
 
 } // namespace
@@ -51,8 +85,7 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
   const bool optimize = options.optimizationLevel >= 1;
 
   if (optimize) {
-    addPreRAOptimizations(pipeline, services, MachinePassStage::MachineSSA,
-                          selectedSSA, "");
+    addMachineSSAOptimizations(pipeline, services, selectedSSA);
     addPass(pipeline, "AArch64PreRAAddressingFolder",
             MachinePassStage::MachineSSA, selectedSSA, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
@@ -66,14 +99,7 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
     addPass(pipeline, "MachineDCE", MachinePassStage::MachineSSA, selectedSSA,
             MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
-              bool changed = false;
-              for (unsigned iteration = 0; iteration < 4; ++iteration) {
-                const bool localChange = services.machineDCE.run(function);
-                changed |= localChange;
-                if (!localChange)
-                  break;
-              }
-              return changed;
+              return services.machineDCE.run(function);
             });
   }
 
@@ -84,15 +110,7 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
           });
 
   if (optimize) {
-    addPreRAOptimizations(pipeline, services, MachinePassStage::PreRegAlloc,
-                          selected, "AfterPHI");
-    addPass(pipeline, "MachineInvariantConstantMotion",
-            MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
-            [&services](MachineFunction &function) {
-              return services.invariantConstantMotion.run(function);
-            });
-    addPreRAOptimizations(pipeline, services, MachinePassStage::PreRegAlloc,
-                          selected, "AfterLICM");
+    addPostPhiOptimizations(pipeline, services, selected);
     addPass(pipeline, "AArch64PreRACFGOptimizer",
             MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {

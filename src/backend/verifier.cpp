@@ -198,6 +198,24 @@ MachineVerifier::verify(const MachineFunction &function) const {
                 report(block.get(), instructionIndex,
                        "instruction has too few operands");
 
+            const OperandConstraint &constraint = descriptor.operands;
+            if (constraint.tiedUse >= 0 &&
+                static_cast<std::size_t>(constraint.tiedUse) <
+                    instruction.operands().size()) {
+                const MachineOperand &use =
+                    instruction.operands()[constraint.tiedUse];
+                if (use.tiedTo != constraint.tiedDef)
+                    report(block.get(), instructionIndex,
+                           "opcode-required tied operand is missing");
+            }
+            if (constraint.earlyClobberDef >= 0 &&
+                static_cast<std::size_t>(constraint.earlyClobberDef) <
+                    instruction.operands().size() &&
+                !instruction.operands()[constraint.earlyClobberDef]
+                     .isEarlyClobber)
+                report(block.get(), instructionIndex,
+                       "opcode-required early-clobber is missing");
+
             unsigned operandIndex = 0;
             for (const auto &operand : instruction.operands()) {
                 if (operand.isVirtualRegister()) {
@@ -251,7 +269,17 @@ MachineVerifier::verify(const MachineFunction &function) const {
                     else if (!instruction.operands()[operand.tiedTo].isDef)
                         report(block.get(), instructionIndex,
                                "operand is tied to a non-def operand");
+                    if (constraint.tiedUse !=
+                            static_cast<int>(operandIndex) ||
+                        constraint.tiedDef != operand.tiedTo)
+                        report(block.get(), instructionIndex,
+                               "operand tie does not match opcode contract");
                 }
+                if (operand.isEarlyClobber &&
+                    constraint.earlyClobberDef !=
+                        static_cast<int>(operandIndex))
+                    report(block.get(), instructionIndex,
+                           "early-clobber does not match opcode contract");
                 ++operandIndex;
             }
 

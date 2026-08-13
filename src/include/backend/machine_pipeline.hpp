@@ -18,7 +18,11 @@ struct BackendOptions;
 // Hold every MachineFunction transform used by the AArch64 pipeline so the
 // driver can assemble the sequence once and reuse it across functions.
 struct MachinePipelineServices {
-  AArch64PreRAOptimizer preRAOptimizer;
+  MachineConstantCSE constantCSE;
+  AArch64VectorImmediateSelection vectorImmediateSelection;
+  AArch64PreRAPeephole preRAPeephole;
+  AArch64LoadStoreOptimization loadStoreOptimization;
+  MachineSink machineSink;
   DeadMachineInstructionElimination machineDCE;
   MachineInvariantConstantMotion invariantConstantMotion;
   AArch64ConditionOptimizer conditionOptimizer;

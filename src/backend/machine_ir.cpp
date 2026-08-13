@@ -109,6 +109,12 @@ bool MachineOperand::isSameRegisterAs(const MachineOperand &other) const {
     return false;
 }
 
+void MachineOperand::replaceVirtualRegister(VReg reg) {
+    if (!isVirtualRegister() || reg == 0)
+        throw std::logic_error("virtual-register replacement requires a vreg");
+    vreg_ = reg;
+}
+
 MachineInstr &MachineInstr::addOperand(MachineOperand operand) {
     operands_.push_back(std::move(operand));
     return *this;

@@ -60,6 +60,7 @@ public:
     bool isSameRegisterAs(const MachineOperand &other) const;
     bool isVirtualRegister() const { return kind_ == Kind::VirtualRegister; }
     bool isPhysicalRegister() const { return kind_ == Kind::PhysicalRegister; }
+    void replaceVirtualRegister(VReg reg);
 
     VReg virtualRegister() const { return vreg_; }
     PhysReg physicalRegister() const { return physReg_; }

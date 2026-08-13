@@ -66,6 +66,14 @@ enum class SchedResource : std::uint8_t {
     FPMulDiv,
 };
 
+// Operand constraints are part of the opcode contract, not properties of a
+// particular selection pattern.  Negative indices mean no such constraint.
+struct OperandConstraint {
+    int tiedUse = -1;
+    int tiedDef = -1;
+    int earlyClobberDef = -1;
+};
+
 // 单条 Opcode 的静态属性表项；由 InstrInfo::get 返回，供 MIR 分类、调度、校验、打印。
 struct InstrDesc {
     Opcode opcode = Opcode::Invalid;
@@ -84,6 +92,7 @@ struct InstrDesc {
     bool usesFlags = false;
     unsigned latency = 1;
     SchedResource resource = SchedResource::ALU;
+    OperandConstraint operands;
 };
 
 // 寄存器查询工具：类型/ABI/名字/分配序；isel、RA、帧降低、asm_printer 共用。

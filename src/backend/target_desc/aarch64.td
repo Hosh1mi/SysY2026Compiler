@@ -1,6 +1,7 @@
 // AArch64 machine-instruction metadata and instruction-selection patterns.
 // Defaults: defs=0, operands=0, latency=1, resource=ALU,
-// properties=[], immediate=None, remat=0.
+// properties=[], immediate=None, remat=0.  tied_use/tied_def and
+// early_clobber_def describe opcode-wide register constraints.
 
 // Generic, control-flow, and call-frame instructions.
 instruction PHI { mnemonic = "PHI"; defs = 1; latency = 0; resource = None; properties = [pseudo]; }
@@ -27,7 +28,7 @@ instruction MOVi32 { mnemonic = "MOVi32"; defs = 1; operands = 2; remat = 1; }
 instruction MOVi64 { mnemonic = "MOVi64"; defs = 1; operands = 2; remat = 1; }
 instruction MOVZ { mnemonic = "movz"; defs = 1; operands = 3; }
 instruction MOVN { mnemonic = "movn"; defs = 1; operands = 3; }
-instruction MOVK { mnemonic = "movk"; defs = 1; operands = 4; }
+instruction MOVK { mnemonic = "movk"; defs = 1; operands = 4; tied_use = 1; tied_def = 0; }
 instruction MOVIv4Zero { mnemonic = "movi"; defs = 1; operands = 1; latency = 2; resource = FPALU; remat = 2; }
 instruction MOVIv4s { mnemonic = "movi"; defs = 1; operands = 3; latency = 2; resource = FPALU; remat = 2; }
 instruction MOVIv4sMsl { mnemonic = "movi"; defs = 1; operands = 3; latency = 2; resource = FPALU; remat = 2; }
@@ -169,8 +170,8 @@ instruction UXTW { mnemonic = "uxtw"; defs = 1; operands = 2; }
 instruction DUPv4i32 { mnemonic = "dup"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
 instruction DUPv4f32 { mnemonic = "dup"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
 instruction DUPv4sLane { mnemonic = "dup"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
-instruction INSv4i32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; }
-instruction INSv4f32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; }
+instruction INSv4i32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
+instruction INSv4f32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
 instruction EXTRACTv4i32 { mnemonic = "umov"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction EXTRACTv4f32 { mnemonic = "umov"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction ZIP1v4s { mnemonic = "zip1"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
@@ -194,15 +195,15 @@ instruction USHLv4i32 { mnemonic = "ushl"; defs = 1; operands = 3; latency = 6; 
 instruction SHLiv4i32 { mnemonic = "shl"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction SSHRiv4i32 { mnemonic = "sshr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction USHRiv4i32 { mnemonic = "ushr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
-instruction MLAv4i32 { mnemonic = "mla"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; }
-instruction MLSv4i32 { mnemonic = "mls"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; }
+instruction MLAv4i32 { mnemonic = "mla"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; early_clobber_def = 0; }
+instruction MLSv4i32 { mnemonic = "mls"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; early_clobber_def = 0; }
 instruction ADDv4f32 { mnemonic = "add"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }
 instruction SUBv4f32 { mnemonic = "sub"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction MULv4f32 { mnemonic = "fmul"; defs = 1; operands = 3; latency = 6; resource = FPMulDiv; properties = [commutable]; }
 instruction DIVv4f32 { mnemonic = "fdiv"; defs = 1; operands = 3; latency = 18; resource = FPMulDiv; }
 instruction NEGv4f32 { mnemonic = "fneg"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
-instruction FMLAv4f32 { mnemonic = "fmla"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; }
-instruction FMLSv4f32 { mnemonic = "fmls"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; }
+instruction FMLAv4f32 { mnemonic = "fmla"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; }
+instruction FMLSv4f32 { mnemonic = "fmls"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; }
 instruction ANDv16i8 { mnemonic = "and"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction ORRv16i8 { mnemonic = "orr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction EORv16i8 { mnemonic = "eor"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
@@ -215,7 +216,7 @@ instruction CMHSv4i32 { mnemonic = "vector-compare"; defs = 1; operands = 3; lat
 instruction FCMEQv4f32 { mnemonic = "vector-compare"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction FCMGTv4f32 { mnemonic = "vector-compare"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction FCMGEv4f32 { mnemonic = "vector-compare"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
-instruction BSLv16i8 { mnemonic = "bsl"; defs = 1; operands = 4; latency = 6; resource = FPALU; }
+instruction BSLv16i8 { mnemonic = "bsl"; defs = 1; operands = 4; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
 instruction TBL1v16i8 { mnemonic = "tbl"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction SHUFFLEv16i8 { mnemonic = "tbl"; defs = 1; operands = 4; latency = 6; resource = FPALU; }
 instruction ADDVv4i32 { mnemonic = "addv"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
@@ -432,8 +433,8 @@ pattern MAddI32 { root = MAdd; result = I32; emit = MADDWrrr; operands = [def, u
 pattern MSubI32 { root = MSub; result = I32; emit = MSUBWrrr; operands = [def, use0, use1, use2]; priority = 10; }
 pattern MAddV4I32 { root = MAdd; result = V4I32; emit = MLAv4i32; operands = [def_early, use2_tied0, use0, use1]; priority = 10; }
 pattern MSubV4I32 { root = MSub; result = V4I32; emit = MLSv4i32; operands = [def_early, use2_tied0, use0, use1]; priority = 10; }
-pattern FMAddV4F32 { root = FMAdd; result = V4F32; emit = FMLAv4f32; operands = [def, use0, use1, use2_tied0]; priority = 10; }
-pattern FMSubV4F32 { root = FMSub; result = V4F32; emit = FMLSv4f32; operands = [def, use0, use1, use2_tied0]; priority = 10; }
+pattern FMAddV4F32 { root = FMAdd; result = V4F32; emit = FMLAv4f32; operands = [def, use2_tied0, use0, use1]; priority = 10; }
+pattern FMSubV4F32 { root = FMSub; result = V4F32; emit = FMLSv4f32; operands = [def, use2_tied0, use0, use1]; priority = 10; }
 pattern SMinV4I32 { root = SMin; result = V4I32; emit = SMINv4i32; operands = [def, use0, use1]; priority = 10; }
 pattern SMaxV4I32 { root = SMax; result = V4I32; emit = SMAXv4i32; operands = [def, use0, use1]; priority = 10; }
 pattern BranchBlock { root = Branch; result = Invalid; emit = B; operands = [block0]; priority = 10; }

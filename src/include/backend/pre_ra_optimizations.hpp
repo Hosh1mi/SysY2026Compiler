@@ -6,17 +6,29 @@
 
 namespace backend::aarch64 {
 
-enum class PreRAOptimizationKind {
-    ConstantCSE,
-    VectorImmediateSelection,
-    Peephole,
-    LoadStoreOptimization,
-    MachineSink,
+class MachineConstantCSE {
+public:
+    bool run(MachineFunction &function) const;
 };
 
-class AArch64PreRAOptimizer {
+class AArch64VectorImmediateSelection {
 public:
-    bool run(MachineFunction &function, PreRAOptimizationKind kind) const;
+    bool run(MachineFunction &function) const;
+};
+
+class AArch64PreRAPeephole {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class AArch64LoadStoreOptimization {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class MachineSink {
+public:
+    bool run(MachineFunction &function) const;
 };
 
 class DeadMachineInstructionElimination {

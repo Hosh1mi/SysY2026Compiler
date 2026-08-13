@@ -69,6 +69,24 @@ bool MachineRegisterIndex::allUsesHaveOpcode(VReg reg, Opcode opcode) const {
                      });
 }
 
+unsigned MachineRegisterIndex::replaceUses(VReg from, VReg to) {
+  if (from == to)
+    return 0;
+  auto found = uses_.find(from);
+  if (found == uses_.end())
+    return 0;
+
+  std::vector<MachineRegisterReference> references = std::move(found->second);
+  uses_.erase(found);
+  auto &replacementUses = uses_[to];
+  replacementUses.reserve(replacementUses.size() + references.size());
+  for (MachineRegisterReference &reference : references) {
+    reference.operand().replaceVirtualRegister(to);
+    replacementUses.push_back(reference);
+  }
+  return static_cast<unsigned>(references.size());
+}
+
 void MachineDominatorTree::analyze(const MachineFunction &function) {
   reachable_.clear();
   dominators_.clear();

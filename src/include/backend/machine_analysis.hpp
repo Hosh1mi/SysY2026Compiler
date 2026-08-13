@@ -35,6 +35,7 @@ public:
   MachineBasicBlock *uniqueDefinitionBlock(VReg reg) const;
   unsigned useCount(VReg reg) const;
   bool allUsesHaveOpcode(VReg reg, Opcode opcode) const;
+  unsigned replaceUses(VReg from, VReg to);
 
 private:
   using ReferenceMap =
