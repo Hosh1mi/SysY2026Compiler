@@ -1,5 +1,6 @@
 #pragma once
 
+#include "backend/aarch64_dag_opcodes.hpp"
 #include "machine_ir.hpp"
 #include "../mid/ir/ir.hpp"
 
@@ -11,65 +12,6 @@
 #include <vector>
 
 namespace backend::aarch64 {
-
-enum class SDOpcode : std::uint16_t {
-    Invalid,
-    EntryToken,
-    Argument,
-    Constant,
-    FPConstant,
-    GlobalAddress,
-    FrameIndex,
-    Add,
-    Sub,
-    Mul,
-    SDiv,
-    SRem,
-    UDiv,
-    URem,
-    FAdd,
-    FSub,
-    FMul,
-    FDiv,
-    FNeg,
-    Shl,
-    LShr,
-    AShr,
-    And,
-    Or,
-    Xor,
-    ICmp,
-    FCmp,
-    Select,
-    GEP,
-    Load,
-    Store,
-    ZExt,
-    SExt,
-    Trunc,
-    FPToSI,
-    SIToFP,
-    Bitcast,
-    Clz,
-    Splat,
-    InsertElement,
-    ExtractElement,
-    ShuffleVector,
-    Phi,
-    Call,
-    TailCall,
-    Branch,
-    BranchCond,
-    Return,
-    MAdd,
-    MSub,
-    FMAdd,
-    FMSub,
-    VectorReduceAdd,
-    SMin,
-    SMax,
-    MulMod,
-};
 
 class SDNode;
 

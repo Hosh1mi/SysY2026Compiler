@@ -37,26 +37,6 @@ SDOpcode binaryOpcode(Instruction::OpID opcode) {
     }
 }
 
-const char *opcodeName(SDOpcode opcode) {
-    switch (opcode) {
-#define NAME(OP) case SDOpcode::OP: return #OP
-    NAME(Invalid); NAME(EntryToken); NAME(Argument); NAME(Constant);
-    NAME(FPConstant); NAME(GlobalAddress); NAME(FrameIndex); NAME(Add);
-    NAME(Sub); NAME(Mul); NAME(SDiv); NAME(SRem); NAME(UDiv); NAME(URem);
-    NAME(FAdd); NAME(FSub); NAME(FMul); NAME(FDiv); NAME(FNeg); NAME(Shl);
-    NAME(LShr); NAME(AShr); NAME(And); NAME(Or); NAME(Xor); NAME(ICmp);
-    NAME(FCmp); NAME(Select); NAME(GEP); NAME(Load); NAME(Store); NAME(ZExt);
-    NAME(SExt); NAME(Trunc);
-    NAME(FPToSI); NAME(SIToFP); NAME(Bitcast); NAME(Clz);
-    NAME(Splat); NAME(InsertElement); NAME(ExtractElement);
-    NAME(ShuffleVector); NAME(Phi); NAME(Call); NAME(TailCall); NAME(Branch);
-    NAME(BranchCond); NAME(Return); NAME(MAdd); NAME(MSub);
-    NAME(VectorReduceAdd); NAME(SMin); NAME(SMax); NAME(MulMod);
-#undef NAME
-    }
-    return "Invalid";
-}
-
 const char *typeName(ValueType type) {
     switch (type) {
     case ValueType::I1: return "i1";
@@ -905,7 +885,7 @@ void printSelectionDAG(const FunctionDAG &functionDAG, std::ostream &output) {
         output << "  block " << block->name_ << ":\n";
         for (const auto &node : functionDAG.blocks.at(block)->nodes()) {
             output << "    t" << node->id() << " = "
-                   << opcodeName(node->opcode());
+                   << sdOpcodeName(node->opcode());
             if (!node->resultTypes().empty()) {
                 output << ':';
                 for (ValueType type : node->resultTypes())

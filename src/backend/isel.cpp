@@ -1,4 +1,5 @@
 #include "backend/isel.hpp"
+#include "backend/aarch64_isel.hpp"
 #include "backend/constant_division.hpp"
 #include "backend/vector_immediate.hpp"
 
@@ -38,44 +39,6 @@ bool maskEquals(const std::array<int, 4> &mask,
         ++index;
     }
     return index == mask.size();
-}
-
-CondCode integerCondition(int predicate) {
-    switch (static_cast<ICmpInst::ICmpOp>(predicate)) {
-    case ICmpInst::ICMP_EQ: return CondCode::EQ;
-    case ICmpInst::ICMP_NE: return CondCode::NE;
-    case ICmpInst::ICMP_UGT: return CondCode::HI;
-    case ICmpInst::ICMP_UGE: return CondCode::HS;
-    case ICmpInst::ICMP_ULT: return CondCode::LO;
-    case ICmpInst::ICMP_ULE: return CondCode::LS;
-    case ICmpInst::ICMP_SGT: return CondCode::GT;
-    case ICmpInst::ICMP_SGE: return CondCode::GE;
-    case ICmpInst::ICMP_SLT: return CondCode::LT;
-    case ICmpInst::ICMP_SLE: return CondCode::LE;
-    }
-    throw std::logic_error("unknown integer predicate");
-}
-
-CondCode floatingCondition(int predicate) {
-    switch (static_cast<FCmpInst::FCmpOp>(predicate)) {
-    case FCmpInst::FCMP_OEQ: return CondCode::EQ;
-    case FCmpInst::FCMP_OGT: return CondCode::GT;
-    case FCmpInst::FCMP_OGE: return CondCode::GE;
-    case FCmpInst::FCMP_OLT: return CondCode::MI;
-    case FCmpInst::FCMP_OLE: return CondCode::LS;
-    case FCmpInst::FCMP_ONE: return CondCode::NE;
-    case FCmpInst::FCMP_UEQ: return CondCode::EQ;
-    case FCmpInst::FCMP_UGT: return CondCode::HI;
-    case FCmpInst::FCMP_UGE: return CondCode::PL;
-    case FCmpInst::FCMP_ULT: return CondCode::LT;
-    case FCmpInst::FCMP_ULE: return CondCode::LE;
-    case FCmpInst::FCMP_UNE: return CondCode::NE;
-    case FCmpInst::FCMP_ORD: return CondCode::VC;
-    case FCmpInst::FCMP_UNO: return CondCode::VS;
-    case FCmpInst::FCMP_FALSE: return CondCode::AL;
-    case FCmpInst::FCMP_TRUE: return CondCode::AL;
-    }
-    throw std::logic_error("unknown floating predicate");
 }
 
 RegisterMask callPreservedMask() {
@@ -191,6 +154,82 @@ private:
     std::unordered_map<SDNode *, VReg> &results_;
 };
 
+bool emitGeneratedPattern(
+    InstructionSelectionContext &selection, MachineBasicBlock &block,
+    SDNode &node,
+    const std::unordered_map<BasicBlock *, MachineBasicBlock *> &blocks,
+    bool directGlobal = false) {
+    const generated::SelectionPattern *pattern =
+        generated::matchPattern(node, directGlobal);
+    if (!pattern)
+        return false;
+
+    MachineInstr instruction(pattern->opcode);
+    for (unsigned index = 0; index < pattern->operandCount; ++index) {
+        const generated::PatternOperand operand = pattern->operands[index];
+        switch (operand.kind) {
+        case generated::PatternOperandKind::Definition:
+            instruction.addOperand(selection.makeDef(node));
+            break;
+        case generated::PatternOperandKind::Use:
+            instruction.addOperand(
+                selection.makeUse(node.operands().at(operand.index)));
+            break;
+        case generated::PatternOperandKind::OperandInteger: {
+            SDNode *constant = node.operands().at(operand.index).node;
+            if (!constant || constant->opcode() != SDOpcode::Constant)
+                throw std::logic_error(
+                    "generated immediate operand is not constant");
+            instruction.addOperand(
+                MachineOperand::immediate(constant->integer));
+            break;
+        }
+        case generated::PatternOperandKind::NodeInteger:
+            instruction.addOperand(MachineOperand::immediate(node.integer));
+            break;
+        case generated::PatternOperandKind::FrameIndex:
+            instruction.addOperand(MachineOperand::frameIndex(node.index));
+            break;
+        case generated::PatternOperandKind::NodeGlobal:
+            instruction.addOperand(MachineOperand::global(node.symbol));
+            break;
+        case generated::PatternOperandKind::Block:
+            instruction.addOperand(MachineOperand::block(
+                blocks.at(node.incomingBlocks.at(operand.index))));
+            break;
+        case generated::PatternOperandKind::OperandGlobal: {
+            SDNode *address = node.operands().at(operand.index).node;
+            if (!address || address->opcode() != SDOpcode::GlobalAddress)
+                throw std::logic_error(
+                    "generated global operand has no symbol");
+            instruction.addOperand(MachineOperand::global(address->symbol));
+            break;
+        }
+        case generated::PatternOperandKind::Zero:
+            instruction.addOperand(MachineOperand::immediate(0));
+            break;
+        }
+        MachineOperand &emitted = instruction.operands().back();
+        emitted.tiedTo = operand.tiedTo;
+        emitted.isEarlyClobber = operand.earlyClobber;
+    }
+    if (pattern->memory != generated::PatternMemoryAction::None) {
+        const auto access =
+            pattern->memory == generated::PatternMemoryAction::Load
+                ? MachineMemOperand::Access::Load
+                : MachineMemOperand::Access::Store;
+        instruction.addMemoryOperand(MachineMemOperand{
+            access, node.memorySize, node.alignment, node.origin,
+            std::nullopt, 0, false});
+    }
+    selection.emit(block, std::move(instruction),
+                   node.resultTypes().empty() ||
+                           node.resultTypes().front() == ValueType::Invalid
+                       ? nullptr
+                       : &node);
+    return true;
+}
+
 } // namespace
 
 std::unique_ptr<MachineFunction>
@@ -237,11 +276,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 auto global = directGlobalMemory.find(operand);
                 if (global == directGlobalMemory.end())
                     continue;
-                bool directLoad =
-                    user.opcode() == SDOpcode::Load && index == 1;
-                bool directStore =
-                    user.opcode() == SDOpcode::Store && index == 2;
-                if (!directLoad && !directStore)
+                if (generated::dagAddressOperand(user.opcode()) !=
+                    static_cast<int>(index))
                     global->second = false;
             }
         }
@@ -497,11 +533,34 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
         for (const auto &owned :
              functionDAG.blocks.at(sourceBlock)->nodes()) {
             SDNode &node = *owned;
-            switch (node.opcode()) {
-            case SDOpcode::Invalid:
-            case SDOpcode::EntryToken:
-                break;
-            case SDOpcode::Argument: {
+            const generated::SelectionMode selectionMode =
+                generated::selectionMode(node.opcode());
+            if (selectionMode == generated::SelectionMode::Ignore)
+                continue;
+            if (selectionMode == generated::SelectionMode::Generated) {
+                bool directGlobal = false;
+                const int addressIndex =
+                    generated::dagAddressOperand(node.opcode());
+                if (addressIndex >= 0) {
+                    SDNode *address =
+                        node.operands().at(addressIndex).node;
+                    directGlobal =
+                        address &&
+                        address->opcode() == SDOpcode::GlobalAddress &&
+                        directGlobalMemory.at(address);
+                }
+                if (!emitGeneratedPattern(
+                        selection, block, node, blocks, directGlobal))
+                    throw std::logic_error(
+                        std::string("no generated pattern for ") +
+                        sdOpcodeName(node.opcode()));
+                continue;
+            }
+            switch (generated::customSelector(node.opcode())) {
+            case generated::CustomSelector::None:
+                throw std::logic_error(
+                    "ignored DAG opcode reached custom selection");
+            case generated::CustomSelector::Argument: {
                 ValueType type = node.resultTypes().front();
                 RegClass regClass = RegisterInfo::classForType(type);
                 unsigned bank = argumentBankIndex.at(node.index);
@@ -538,7 +597,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 }
                 break;
             }
-            case SDOpcode::Constant: {
+            case generated::CustomSelector::Constant: {
                 ValueType type = node.resultTypes().front();
                 if (type == ValueType::V4I32 ||
                     type == ValueType::V4F32) {
@@ -551,18 +610,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         block, selection.makeDef(node), lanes, &node);
                     break;
                 }
-                Opcode opcode = (type == ValueType::Ptr ||
-                                 type == ValueType::I64)
-                                    ? Opcode::MOVi64
-                                    : Opcode::MOVi32;
-                MachineInstr materialize(opcode);
-                materialize.addOperand(selection.makeDef(node))
-                    .addOperand(
-                        MachineOperand::immediate(node.integer));
-                selection.emit(block, std::move(materialize), &node);
+                if (!emitGeneratedPattern(selection, block, node, blocks))
+                    throw std::logic_error(
+                        "no generated scalar constant pattern");
                 break;
             }
-            case SDOpcode::FPConstant: {
+            case generated::CustomSelector::FPConstant: {
                 VReg bits = selection.createVReg(ValueType::I32);
                 MachineInstr materialize(Opcode::MOVi32);
                 materialize
@@ -580,13 +633,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(move), &node);
                 break;
             }
-            case SDOpcode::GlobalAddress: {
+            case generated::CustomSelector::GlobalAddress: {
                 if (directGlobalMemory.at(&node)) {
-                    MachineInstr adrp(Opcode::ADRP);
-                    adrp.addOperand(selection.makeDef(node))
-                        .addOperand(
-                            MachineOperand::global(node.symbol));
-                    selection.emit(block, std::move(adrp), &node);
+                    if (!emitGeneratedPattern(
+                            selection, block, node, blocks, true))
+                        throw std::logic_error(
+                            "no generated direct-global pattern");
                     break;
                 }
                 VReg page = selection.createVReg(ValueType::Ptr);
@@ -603,77 +655,25 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(add), &node);
                 break;
             }
-            case SDOpcode::FrameIndex: {
-                MachineInstr lea(Opcode::LEA_FRAME);
-                lea.addOperand(selection.makeDef(node))
-                    .addOperand(MachineOperand::frameIndex(node.index));
-                selection.emit(block, std::move(lea), &node);
-                break;
-            }
-            case SDOpcode::Add:
-            case SDOpcode::Sub:
-            case SDOpcode::Mul:
-            case SDOpcode::SDiv:
-            case SDOpcode::UDiv:
-            case SDOpcode::And:
-            case SDOpcode::Or:
-            case SDOpcode::Xor:
-            case SDOpcode::Shl:
-            case SDOpcode::LShr:
-            case SDOpcode::AShr:
-            case SDOpcode::FAdd:
-            case SDOpcode::FSub:
-            case SDOpcode::FMul:
-            case SDOpcode::FDiv: {
+            case generated::CustomSelector::Add:
+            case generated::CustomSelector::Sub:
+            case generated::CustomSelector::Mul:
+            case generated::CustomSelector::SDiv:
+            case generated::CustomSelector::UDiv:
+            case generated::CustomSelector::And:
+            case generated::CustomSelector::Or:
+            case generated::CustomSelector::Xor:
+            case generated::CustomSelector::Shl:
+            case generated::CustomSelector::LShr:
+            case generated::CustomSelector::AShr:
+            case generated::CustomSelector::FAdd:
+            case generated::CustomSelector::FSub:
+            case generated::CustomSelector::FMul:
+            case generated::CustomSelector::FDiv: {
                 ValueType resultType = node.resultTypes().front();
                 bool integerVector = resultType == ValueType::V4I32;
                 bool floatingVector = resultType == ValueType::V4F32;
                 bool integer64 = resultType == ValueType::I64;
-                Opcode opcode = Opcode::Invalid;
-                if (integerVector) {
-                    switch (node.opcode()) {
-                    case SDOpcode::Add: opcode = Opcode::ADDv4i32; break;
-                    case SDOpcode::Sub: opcode = Opcode::SUBv4i32; break;
-                    case SDOpcode::Mul: opcode = Opcode::MULv4i32; break;
-                    case SDOpcode::And: opcode = Opcode::ANDv16i8; break;
-                    case SDOpcode::Or: opcode = Opcode::ORRv16i8; break;
-                    case SDOpcode::Xor: opcode = Opcode::EORv16i8; break;
-                    case SDOpcode::Shl: opcode = Opcode::SSHLv4i32; break;
-                    case SDOpcode::LShr: opcode = Opcode::USHLv4i32; break;
-                    case SDOpcode::AShr: opcode = Opcode::SSHLv4i32; break;
-                    default: break;
-                    }
-                } else if (floatingVector) {
-                    switch (node.opcode()) {
-                    case SDOpcode::FAdd: opcode = Opcode::ADDv4f32; break;
-                    case SDOpcode::FSub: opcode = Opcode::SUBv4f32; break;
-                    case SDOpcode::FMul: opcode = Opcode::MULv4f32; break;
-                    case SDOpcode::FDiv: opcode = Opcode::DIVv4f32; break;
-                    default: break;
-                    }
-                } else {
-                    switch (node.opcode()) {
-                    case SDOpcode::Add: opcode = integer64 ? Opcode::ADDXrr : Opcode::ADDWrr; break;
-                    case SDOpcode::Sub: opcode = integer64 ? Opcode::SUBXrr : Opcode::SUBWrr; break;
-                    case SDOpcode::Mul: opcode = integer64 ? Opcode::MULXrr : Opcode::MULWrr; break;
-                    case SDOpcode::SDiv: opcode = integer64 ? Opcode::SDIVXrr : Opcode::SDIVWrr; break;
-                    case SDOpcode::UDiv: opcode = integer64 ? Opcode::UDIVXrr : Opcode::UDIVWrr; break;
-                    case SDOpcode::And: opcode = integer64 ? Opcode::ANDXrr : Opcode::ANDWrr; break;
-                    case SDOpcode::Or: opcode = integer64 ? Opcode::ORRXrr : Opcode::ORRWrr; break;
-                    case SDOpcode::Xor: opcode = integer64 ? Opcode::EORXrr : Opcode::EORWrr; break;
-                    case SDOpcode::Shl: opcode = integer64 ? Opcode::LSLXrr : Opcode::LSLWrr; break;
-                    case SDOpcode::LShr: opcode = integer64 ? Opcode::LSRXrr : Opcode::LSRWrr; break;
-                    case SDOpcode::AShr: opcode = integer64 ? Opcode::ASRXrr : Opcode::ASRWrr; break;
-                    case SDOpcode::FAdd: opcode = Opcode::FADDS; break;
-                    case SDOpcode::FSub: opcode = Opcode::FSUBS; break;
-                    case SDOpcode::FMul: opcode = Opcode::FMULS; break;
-                    case SDOpcode::FDiv: opcode = Opcode::FDIVS; break;
-                    default: break;
-                    }
-                }
-                if (opcode == Opcode::Invalid)
-                    throw std::logic_error(
-                        "unsupported typed binary operation");
 
                 SDNode *rhs = node.operands()[1].node;
                 SDNode *lhs = node.operands()[0].node;
@@ -865,34 +865,6 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                         break;
                     }
                 }
-                Opcode immediateOpcode = Opcode::Invalid;
-                if (!integerVector && !floatingVector &&
-                    node.opcode() == SDOpcode::Add)
-                    immediateOpcode = integer64 ? Opcode::ADDXri
-                                                : Opcode::ADDWri;
-                else if (!integerVector && !floatingVector &&
-                         node.opcode() == SDOpcode::Sub)
-                    immediateOpcode = integer64 ? Opcode::SUBXri
-                                                : Opcode::SUBWri;
-                else if (!integerVector && !floatingVector && !integer64 &&
-                         node.opcode() == SDOpcode::And)
-                    immediateOpcode = Opcode::ANDWri;
-                else if (!integerVector && !floatingVector &&
-                         node.opcode() == SDOpcode::Shl)
-                    immediateOpcode = integer64 ? Opcode::LSLXri
-                                                : Opcode::LSLWri;
-                else if (!integerVector && !floatingVector &&
-                         node.opcode() == SDOpcode::LShr)
-                    immediateOpcode = integer64 ? Opcode::LSRXri
-                                                : Opcode::LSRWri;
-                else if (!integerVector && !floatingVector &&
-                         node.opcode() == SDOpcode::AShr)
-                    immediateOpcode = integer64 ? Opcode::ASRXri
-                                                : Opcode::ASRWri;
-
-                MachineInstr instruction(opcode);
-                instruction.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
                 if (integerVector &&
                     (node.opcode() == SDOpcode::LShr ||
                      node.opcode() == SDOpcode::AShr)) {
@@ -905,35 +877,31 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     MachineInstr &negateDef =
                         selection.emit(block, std::move(negate));
                     registerInfo.setDefinition(negated, &negateDef);
+                    MachineInstr instruction(
+                        node.opcode() == SDOpcode::LShr
+                            ? Opcode::USHLv4i32
+                            : Opcode::SSHLv4i32);
+                    instruction.addOperand(selection.makeDef(node))
+                        .addOperand(selection.makeUse(node.operands()[0]));
                     instruction.addOperand(MachineOperand::vreg(
                         negated, RegClass::NEON128));
                     selection.emit(block, std::move(instruction), &node);
                     break;
                 }
-                if (rhs && rhs->opcode() == SDOpcode::Constant &&
-                    immediateOpcode != Opcode::Invalid &&
-                    InstrInfo::acceptsImmediate(immediateOpcode,
-                                                rhs->integer)) {
-                    instruction.setOpcode(immediateOpcode);
-                    instruction.addOperand(
-                        MachineOperand::immediate(rhs->integer));
-                } else {
-                    instruction.addOperand(selection.makeUse(node.operands()[1]));
-                }
-                selection.emit(block, std::move(instruction), &node);
+                if (!emitGeneratedPattern(selection, block, node, blocks))
+                    throw std::logic_error(
+                        std::string("no generated fallback for ") +
+                        sdOpcodeName(node.opcode()));
                 break;
             }
-            case SDOpcode::SMin:
-            case SDOpcode::SMax: {
+            case generated::CustomSelector::SMin:
+            case generated::CustomSelector::SMax: {
                 ValueType resultType = node.resultTypes().front();
                 if (resultType == ValueType::V4I32) {
-                    MachineInstr instruction(
-                        node.opcode() == SDOpcode::SMin ? Opcode::SMINv4i32
-                                                        : Opcode::SMAXv4i32);
-                    instruction.addOperand(selection.makeDef(node))
-                        .addOperand(selection.makeUse(node.operands()[0]))
-                        .addOperand(selection.makeUse(node.operands()[1]));
-                    selection.emit(block, std::move(instruction), &node);
+                    if (!emitGeneratedPattern(
+                            selection, block, node, blocks))
+                        throw std::logic_error(
+                            "no generated vector min/max pattern");
                     break;
                 }
                 if (resultType != ValueType::I32)
@@ -958,7 +926,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(select), &node);
                 break;
             }
-            case SDOpcode::MulMod: {
+            case generated::CustomSelector::MulMod: {
                 SDNode *modulusNode = node.operands()[2].node;
                 if (!modulusNode ||
                     modulusNode->opcode() != SDOpcode::Constant ||
@@ -1171,8 +1139,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(narrow), &node);
                 break;
             }
-            case SDOpcode::SRem:
-            case SDOpcode::URem: {
+            case generated::CustomSelector::SRem:
+            case generated::CustomSelector::URem: {
                 bool integer64 =
                     node.resultTypes().front() == ValueType::I64;
                 SDNode *rhs = node.operands()[1].node;
@@ -1287,61 +1255,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(remainder), &node);
                 break;
             }
-            case SDOpcode::MAdd:
-            case SDOpcode::MSub: {
-                const bool vector =
-                    node.resultTypes().front() == ValueType::V4I32;
-                MachineInstr fused(
-                    vector ? (node.opcode() == SDOpcode::MAdd
-                                  ? Opcode::MLAv4i32
-                                  : Opcode::MLSv4i32)
-                           : (node.opcode() == SDOpcode::MAdd
-                                  ? Opcode::MADDWrrr
-                                  : Opcode::MSUBWrrr));
-                fused.addOperand(selection.makeDef(node));
-                if (vector) {
-                    fused.operands()[0].isEarlyClobber = true;
-                    fused.addOperand(selection.makeUse(node.operands()[2]))
-                        .addOperand(selection.makeUse(node.operands()[0]))
-                        .addOperand(selection.makeUse(node.operands()[1]));
-                    fused.operands()[1].tiedTo = 0;
-                } else {
-                    fused.addOperand(selection.makeUse(node.operands()[0]))
-                        .addOperand(selection.makeUse(node.operands()[1]))
-                        .addOperand(selection.makeUse(node.operands()[2]));
-                }
-                selection.emit(block, std::move(fused), &node);
-                break;
-            }
-            case SDOpcode::FMAdd:
-            case SDOpcode::FMSub: {
-                // fmla/fmls vd, vn, vm accumulate into vd in place.  The
-                // accumulator operand (index 3) is tied to the destination;
-                // regalloc keeps them in the same register and excludes vd
-                // from vn/vm.
-                MachineInstr fused(node.opcode() == SDOpcode::FMAdd
-                                       ? Opcode::FMLAv4f32
-                                       : Opcode::FMLSv4f32);
-                fused.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]))
-                    .addOperand(selection.makeUse(node.operands()[1]))
-                    .addOperand(selection.makeUse(node.operands()[2]));
-                fused.operands()[3].tiedTo = 0;
-                selection.emit(block, std::move(fused), &node);
-                break;
-            }
-            case SDOpcode::FNeg: {
-                MachineInstr instruction(
-                    node.resultTypes().front() == ValueType::V4F32
-                        ? Opcode::NEGv4f32
-                        : Opcode::FNEGS);
-                instruction.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
-                selection.emit(block, std::move(instruction), &node);
-                break;
-            }
-            case SDOpcode::ICmp:
-            case SDOpcode::FCmp: {
+            case generated::CustomSelector::ICmp:
+            case generated::CustomSelector::FCmp: {
                 bool floating = node.opcode() == SDOpcode::FCmp;
                 bool vectorCompare =
                     node.resultTypes().front() == ValueType::V4I32;
@@ -1649,14 +1564,15 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 MachineInstr set(Opcode::CSETW);
                 set.addOperand(selection.makeDef(node))
                     .addOperand(MachineOperand::condition(
-                        floating ? floatingCondition(node.predicate)
-                                 : integerCondition(node.predicate)))
+                        floating
+                            ? generated::floatingCondition(node.predicate)
+                            : generated::integerCondition(node.predicate)))
                     .addOperand(MachineOperand::physReg(
                         PhysReg::NZCV, RegClass::CCR, false, true));
                 selection.emit(block, std::move(set), &node);
                 break;
             }
-            case SDOpcode::Select: {
+            case generated::CustomSelector::Select: {
                 RegClass selectedClass = selection.getValueClass(node.operands()[1]);
                 if (selectedClass == RegClass::NEON128) {
                     VReg mask = 0;
@@ -1737,7 +1653,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(select), &node);
                 break;
             }
-            case SDOpcode::GEP: {
+            case generated::CustomSelector::GEP: {
                 VReg current = selection.getResult(node.operands()[0]);
                 for (unsigned i = 1; i < node.operands().size(); ++i) {
                     SDNode *indexNode = node.operands()[i].node;
@@ -1851,138 +1767,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 }
                 break;
             }
-            case SDOpcode::Load: {
-                RegClass resultClass =
-                    registerInfo.get(results.at(&node)).regClass;
-                SDNode *address = node.operands()[1].node;
-                bool directGlobal =
-                    address &&
-                    address->opcode() == SDOpcode::GlobalAddress &&
-                    directGlobalMemory.at(address);
-                Opcode opcode =
-                    resultClass == RegClass::FPR32
-                        ? (directGlobal ? Opcode::LDRSlo
-                                        : Opcode::LDRSui)
-                    : resultClass == RegClass::NEON128
-                        ? (directGlobal ? Opcode::LDRQlo
-                                        : Opcode::LDRQui)
-                    : resultClass == RegClass::GPR64
-                        ? (directGlobal ? Opcode::LDRXlo
-                                        : Opcode::LDRXui)
-                        : (directGlobal ? Opcode::LDRWlo
-                                        : Opcode::LDRWui);
-                MachineInstr load(opcode);
-                load.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[1]));
-                if (directGlobal)
-                    load.addOperand(
-                        MachineOperand::global(address->symbol));
-                else
-                    load.addOperand(MachineOperand::immediate(0));
-                load.addMemoryOperand(MachineMemOperand{
-                    MachineMemOperand::Access::Load, node.memorySize,
-                    node.alignment, node.origin, std::nullopt, 0, false});
-                selection.emit(block, std::move(load), &node);
-                break;
-            }
-            case SDOpcode::Store: {
-                RegClass storedClass = selection.getValueClass(node.operands()[1]);
-                SDNode *address = node.operands()[2].node;
-                bool directGlobal =
-                    address &&
-                    address->opcode() == SDOpcode::GlobalAddress &&
-                    directGlobalMemory.at(address);
-                Opcode opcode =
-                    storedClass == RegClass::FPR32
-                        ? (directGlobal ? Opcode::STRSlo
-                                        : Opcode::STRSui)
-                    : storedClass == RegClass::NEON128
-                        ? (directGlobal ? Opcode::STRQlo
-                                        : Opcode::STRQui)
-                    : storedClass == RegClass::GPR64
-                        ? (directGlobal ? Opcode::STRXlo
-                                        : Opcode::STRXui)
-                        : (directGlobal ? Opcode::STRWlo
-                                        : Opcode::STRWui);
-                MachineInstr store(opcode);
-                store.addOperand(selection.makeUse(node.operands()[1]))
-                    .addOperand(selection.makeUse(node.operands()[2]));
-                if (directGlobal)
-                    store.addOperand(
-                        MachineOperand::global(address->symbol));
-                else
-                    store.addOperand(MachineOperand::immediate(0));
-                store.addMemoryOperand(MachineMemOperand{
-                    MachineMemOperand::Access::Store, node.memorySize,
-                    node.alignment, node.origin, std::nullopt, 0, false});
-                selection.emit(block, std::move(store));
-                break;
-            }
-            case SDOpcode::ZExt:
-            case SDOpcode::SExt:
-            case SDOpcode::Trunc:
-            case SDOpcode::Bitcast: {
-                ValueType resultType = node.resultTypes().front();
-                ValueType sourceType =
-                    node.operands()[0].node->resultTypes().front();
-                if (resultType == ValueType::I64 &&
-                    (sourceType == ValueType::I32 ||
-                     sourceType == ValueType::I1)) {
-                    MachineInstr extend(node.opcode() == SDOpcode::SExt
-                                            ? Opcode::SXTW
-                                            : Opcode::UXTW);
-                    extend.addOperand(selection.makeDef(node))
-                        .addOperand(selection.makeUse(node.operands()[0]));
-                    selection.emit(block, std::move(extend), &node);
-                    break;
-                }
-                if ((resultType == ValueType::I32 ||
-                     resultType == ValueType::I1) &&
-                    sourceType == ValueType::I64) {
-                    MachineInstr truncate(Opcode::COPYXtoW);
-                    truncate.addOperand(selection.makeDef(node))
-                        .addOperand(selection.makeUse(node.operands()[0]));
-                    selection.emit(block, std::move(truncate), &node);
-                    break;
-                }
-                MachineInstr copy(Opcode::COPY);
-                copy.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
-                selection.emit(block, std::move(copy), &node);
-                break;
-            }
-            case SDOpcode::FPToSI:
-            case SDOpcode::SIToFP: {
-                MachineInstr convert(node.opcode() == SDOpcode::FPToSI
-                                         ? Opcode::FCVTZSW
-                                         : Opcode::SCVTFWS);
-                convert.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
-                selection.emit(block, std::move(convert), &node);
-                break;
-            }
-            case SDOpcode::Clz: {
-                MachineInstr clz(Opcode::CLZW);
-                clz.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
-                selection.emit(block, std::move(clz), &node);
-                break;
-            }
-            case SDOpcode::Splat: {
-                // Splat is broadcast-from-scalar, not vector-immediate
-                // materialization.  Shared scalar immediates must stay in
-                // GPR form so integer users can reuse them; the pre-RA
-                // peephole promotes orphaned mov+dup chains to NEON form.
-                MachineInstr duplicate(
-                    node.resultTypes().front() == ValueType::V4F32
-                        ? Opcode::DUPv4f32
-                        : Opcode::DUPv4i32);
-                duplicate.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]));
-                selection.emit(block, std::move(duplicate), &node);
-                break;
-            }
-            case SDOpcode::InsertElement: {
+            case generated::CustomSelector::InsertElement: {
                 SDNode *index = node.operands()[2].node;
                 if (!index || index->opcode() != SDOpcode::Constant) {
                     VReg laneNumbers = selection.createVReg(ValueType::V4I32);
@@ -2042,22 +1827,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     selection.emit(block, std::move(select), &node);
                     break;
                 }
-                if (index->integer < 0 || index->integer >= 4)
-                    throw std::logic_error("vector insert lane is out of range");
-                MachineInstr insert(
-                    node.resultTypes().front() == ValueType::V4F32
-                        ? Opcode::INSv4f32
-                        : Opcode::INSv4i32);
-                insert.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]))
-                    .addOperand(selection.makeUse(node.operands()[1]))
-                    .addOperand(
-                        MachineOperand::immediate(index->integer));
-                insert.operands()[1].tiedTo = 0;
-                selection.emit(block, std::move(insert), &node);
+                if (!emitGeneratedPattern(selection, block, node, blocks))
+                    throw std::logic_error(
+                        "no generated fixed-lane insert pattern");
                 break;
             }
-            case SDOpcode::ExtractElement: {
+            case generated::CustomSelector::ExtractElement: {
                 SDNode *index = node.operands()[1].node;
                 if (!index || index->opcode() != SDOpcode::Constant) {
                     if (!dynamicExtractSlot)
@@ -2115,20 +1890,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                     selection.emit(block, std::move(load), &node);
                     break;
                 }
-                if (index->integer < 0 || index->integer >= 4)
-                    throw std::logic_error("vector extract lane is out of range");
-                MachineInstr extract(
-                    node.resultTypes().front() == ValueType::F32
-                        ? Opcode::EXTRACTv4f32
-                        : Opcode::EXTRACTv4i32);
-                extract.addOperand(selection.makeDef(node))
-                    .addOperand(selection.makeUse(node.operands()[0]))
-                    .addOperand(
-                        MachineOperand::immediate(index->integer));
-                selection.emit(block, std::move(extract), &node);
+                if (!emitGeneratedPattern(selection, block, node, blocks))
+                    throw std::logic_error(
+                        "no generated fixed-lane extract pattern");
                 break;
             }
-            case SDOpcode::ShuffleVector: {
+            case generated::CustomSelector::ShuffleVector: {
                 std::array<int, 4> mask{};
                 for (unsigned lane = 0; lane < mask.size(); ++lane)
                     mask[lane] =
@@ -2345,7 +2112,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(combine), &node);
                 break;
             }
-            case SDOpcode::VectorReduceAdd: {
+            case generated::CustomSelector::VectorReduceAdd: {
                 VReg reduced = selection.createVReg(ValueType::F32);
                 MachineInstr reduce(Opcode::ADDVv4i32);
                 reduce
@@ -2362,7 +2129,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(move), &node);
                 break;
             }
-            case SDOpcode::Phi: {
+            case generated::CustomSelector::Phi: {
                 MachineInstr phi(Opcode::PHI);
                 phi.addOperand(selection.makeDef(node));
                 for (unsigned i = 0; i < node.operands().size(); ++i) {
@@ -2373,7 +2140,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(phi), &node);
                 break;
             }
-            case SDOpcode::Call: {
+            case generated::CustomSelector::Call: {
                 // A shared frame address is cheap within a call-free region,
                 // but keeping it live across a call can force an otherwise
                 // unnecessary callee-saved register or spill.
@@ -2532,7 +2299,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 }
                 break;
             }
-            case SDOpcode::TailCall: {
+            case generated::CustomSelector::TailCall: {
                 // Register-only sibling/general TCO.  Does not set hasCalls so
                 // a function whose only calls are tail calls can stay frameless.
                 unsigned integerIndex = 0;
@@ -2566,14 +2333,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(call));
                 break;
             }
-            case SDOpcode::Branch: {
-                MachineInstr branch(Opcode::B);
-                branch.addOperand(MachineOperand::block(
-                    blocks.at(node.incomingBlocks.at(0))));
-                selection.emit(block, std::move(branch));
-                break;
-            }
-            case SDOpcode::BranchCond: {
+            case generated::CustomSelector::BranchCond: {
                 MachineInstr conditional(Opcode::CBNZ);
                 conditional.addOperand(selection.makeUse(node.operands()[1]))
                     .addOperand(MachineOperand::block(
@@ -2585,7 +2345,14 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, std::move(fallback));
                 break;
             }
-            case SDOpcode::Return: {
+            case generated::CustomSelector::Return: {
+                if (node.operands().size() == 1) {
+                    if (!emitGeneratedPattern(
+                            selection, block, node, blocks))
+                        throw std::logic_error(
+                            "no generated void return pattern");
+                    break;
+                }
                 if (node.operands().size() > 1) {
                     RegClass resultClass = selection.getValueClass(node.operands()[1]);
                     PhysReg destination =
@@ -2602,6 +2369,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
                 selection.emit(block, MachineInstr(Opcode::RET));
                 break;
             }
+            case generated::CustomSelector::Count:
+                throw std::logic_error("invalid SelectionDAG opcode");
+            default:
+                throw std::logic_error(
+                    std::string("custom selector is not implemented for ") +
+                    sdOpcodeName(node.opcode()));
             }
         }
     }
