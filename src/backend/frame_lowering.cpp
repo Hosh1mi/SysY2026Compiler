@@ -1,11 +1,24 @@
 #include "backend/frame_lowering.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <unordered_set>
+#include <vector>
 
 namespace backend::aarch64 {
 namespace {
+
+constexpr unsigned kStackAlignment = 16;
+constexpr unsigned kMaxAddSubImmediate = 4095;
+constexpr unsigned kMaxAlignedAddSubImmediate = 4080;
+
+enum class StackAdjustment { Allocate, Deallocate };
+enum class SavedRegisterOrder { Save, Restore };
+
+using InstrList = MachineBasicBlock::InstrList;
+using InstrPosition = InstrList::iterator;
 
 unsigned alignTo(unsigned value, unsigned alignment) {
 	return (value + alignment - 1) / alignment * alignment;
@@ -32,6 +45,126 @@ void addMemoryInfo(MachineInstr &instruction, MachineMemOperand::Access access,
                    std::optional<int> frameIndex, std::int64_t offset) {
 	instruction.addMemoryOperand(MachineMemOperand{
 	    access, size, alignment, nullptr, frameIndex, offset, false});
+}
+
+void insertStackAdjustment(InstrList &instructions, InstrPosition position,
+                           StackAdjustment direction, std::uint64_t amount,
+                           unsigned maxChunk = kMaxAddSubImmediate) {
+	const Opcode opcode = direction == StackAdjustment::Allocate
+	                          ? Opcode::SUBSPri
+	                          : Opcode::ADDSPri;
+	while (amount) {
+		const unsigned chunk =
+		    static_cast<unsigned>(std::min<std::uint64_t>(amount, maxChunk));
+		MachineInstr adjust(opcode);
+		adjust.addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
+		    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
+		    .addOperand(MachineOperand::immediate(chunk));
+		instructions.insert(position, std::move(adjust));
+		amount -= chunk;
+	}
+}
+
+struct SavedRegisterGroup {
+	PhysReg first;
+	std::optional<PhysReg> second;
+	int offset;
+	bool vector;
+};
+
+std::vector<SavedRegisterGroup>
+groupSavedRegisters(const MachineFrameInfo &frame, SavedRegisterOrder order) {
+	std::vector<SavedRegisterGroup> groups;
+	auto makeGroup = [&](std::size_t firstIndex,
+	                     std::optional<std::size_t> secondIndex) {
+		const PhysReg first = frame.savedRegisters[firstIndex];
+		const int offset = frame.savedRegisterOffsets.at(first);
+		const bool vector = isVectorRegister(first);
+		std::optional<PhysReg> second;
+		if (secondIndex)
+			second = frame.savedRegisters[*secondIndex];
+		groups.push_back(SavedRegisterGroup{first, second, offset, vector});
+	};
+	auto canPair = [&](std::size_t firstIndex, std::size_t secondIndex) {
+		const PhysReg first = frame.savedRegisters[firstIndex];
+		const PhysReg second = frame.savedRegisters[secondIndex];
+		const std::int64_t offset = frame.savedRegisterOffsets.at(first);
+		if (isVectorRegister(first) != isVectorRegister(second) ||
+		    frame.savedRegisterOffsets.at(second) != offset + 8)
+			return false;
+		// Prefer two direct scalar accesses once a pair offset is out of range.
+		// A far pair is kept together so one SP adjustment serves both
+		// registers.
+		return isPairOffsetEncodable(offset, 8) ||
+		       !isScaledOffsetEncodable(offset, 8) ||
+		       !isScaledOffsetEncodable(offset + 8, 8);
+	};
+
+	if (order == SavedRegisterOrder::Save) {
+		for (std::size_t i = 0; i < frame.savedRegisters.size();) {
+			const bool pair =
+			    i + 1 < frame.savedRegisters.size() && canPair(i, i + 1);
+			makeGroup(i,
+			          pair ? std::optional<std::size_t>(i + 1) : std::nullopt);
+			i += pair ? 2 : 1;
+		}
+	} else {
+		for (std::size_t i = frame.savedRegisters.size(); i > 0;) {
+			const bool pair = i >= 2 && canPair(i - 2, i - 1);
+			if (pair) {
+				makeGroup(i - 2, i - 1);
+				i -= 2;
+			} else {
+				makeGroup(i - 1, std::nullopt);
+				--i;
+			}
+		}
+	}
+	return groups;
+}
+
+void insertSavedRegisterAccess(InstrList &instructions, InstrPosition position,
+                               const SavedRegisterGroup &group,
+                               MachineMemOperand::Access accessKind) {
+	const bool load = accessKind == MachineMemOperand::Access::Load;
+	const bool pair = group.second.has_value();
+	const bool encodable = pair ? isPairOffsetEncodable(group.offset, 8)
+	                            : isScaledOffsetEncodable(group.offset, 8);
+	std::uint64_t adjustment = 0;
+	std::int64_t memoryOffset = group.offset;
+	if (!encodable) {
+		if (group.offset < 0)
+			throw std::logic_error("negative callee-save offset");
+		adjustment = static_cast<std::uint64_t>(group.offset) /
+		             kStackAlignment * kStackAlignment;
+		memoryOffset -= static_cast<std::int64_t>(adjustment);
+		insertStackAdjustment(instructions, position,
+		                      StackAdjustment::Deallocate, adjustment,
+		                      kMaxAlignedAddSubImmediate);
+	}
+
+	const RegClass regClass =
+	    group.vector ? RegClass::NEON128 : RegClass::GPR64;
+	Opcode opcode;
+	if (pair)
+		opcode = load ? (group.vector ? Opcode::LDPDi : Opcode::LDPXi)
+		              : (group.vector ? Opcode::STPDi : Opcode::STPXi);
+	else
+		opcode = load ? (group.vector ? Opcode::LDRDui : Opcode::LDRXui)
+		              : (group.vector ? Opcode::STRDui : Opcode::STRXui);
+	MachineInstr access(opcode);
+	access.addOperand(phys(group.first, regClass, load));
+	if (pair)
+		access.addOperand(phys(*group.second, regClass, load));
+	access.addOperand(phys(PhysReg::SP, RegClass::GPR64))
+	    .addOperand(MachineOperand::immediate(memoryOffset));
+	addMemoryInfo(access, accessKind, pair ? 16 : 8, 8, std::nullopt,
+	              group.offset);
+	instructions.insert(position, std::move(access));
+
+	if (adjustment)
+		insertStackAdjustment(instructions, position, StackAdjustment::Allocate,
+		                      adjustment, kMaxAlignedAddSubImmediate);
 }
 
 } // namespace
@@ -87,7 +220,7 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
 	// above them without adding work to each dynamic spill/reload.
 	layoutObjects(true);
 	layoutObjects(false);
-	frame.stackSize = alignTo(cursor, 16);
+	frame.stackSize = alignTo(cursor, kStackAlignment);
 	bool hasFixedObject = false;
 	for (const StackObject &object : frame.objects())
 		if (object.fixed) {
@@ -200,38 +333,18 @@ void AArch64FrameLowering::eliminateFrameIndices(
 					// scheduling and verification; no hidden scratch
 					// register is introduced.
 					std::uint64_t adjustment =
-					    static_cast<std::uint64_t>(absoluteOffset) / 16 * 16;
+					    static_cast<std::uint64_t>(absoluteOffset) /
+					    kStackAlignment * kStackAlignment;
 					memoryOffset =
 					    absoluteOffset - static_cast<std::int64_t>(adjustment);
 					base = PhysReg::SP;
-					std::uint64_t remaining = adjustment;
-					while (remaining) {
-						unsigned amount = static_cast<unsigned>(
-						    std::min<std::uint64_t>(remaining, 4080));
-						MachineInstr adjust(Opcode::ADDSPri);
-						adjust
-						    .addOperand(
-						        phys(PhysReg::SP, RegClass::GPR64, true))
-						    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-						    .addOperand(MachineOperand::immediate(amount));
-						instructions.insert(it, std::move(adjust));
-						remaining -= amount;
-					}
+					insertStackAdjustment(
+					    instructions, it, StackAdjustment::Deallocate,
+					    adjustment, kMaxAlignedAddSubImmediate);
 					auto restorePosition = std::next(it);
-					remaining = adjustment;
-					while (remaining) {
-						unsigned amount = static_cast<unsigned>(
-						    std::min<std::uint64_t>(remaining, 4080));
-						MachineInstr restore(Opcode::SUBSPri);
-						restore
-						    .addOperand(
-						        phys(PhysReg::SP, RegClass::GPR64, true))
-						    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-						    .addOperand(MachineOperand::immediate(amount));
-						instructions.insert(restorePosition,
-						                    std::move(restore));
-						remaining -= amount;
-					}
+					insertStackAdjustment(instructions, restorePosition,
+					                      StackAdjustment::Allocate, adjustment,
+					                      kMaxAlignedAddSubImmediate);
 				}
 				it->operands().clear();
 				it->addOperand(std::move(value))
@@ -270,116 +383,26 @@ void AArch64FrameLowering::insertPrologueEpilogues(
 	    .addOperand(phys(PhysReg::SP, RegClass::GPR64));
 	entry->instructions().insert(insertion, std::move(setFrame));
 
-	unsigned remaining = frame.stackSize;
-	while (remaining) {
-		unsigned amount = std::min(remaining, 4095U);
-		MachineInstr adjust(Opcode::SUBSPri);
-		adjust.addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
-		    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-		    .addOperand(MachineOperand::immediate(amount));
-		entry->instructions().insert(insertion, std::move(adjust));
-		remaining -= amount;
-	}
-
-	for (std::size_t i = 0; i < frame.savedRegisters.size();) {
-		PhysReg reg = frame.savedRegisters[i];
-		bool vector = isVectorRegister(reg);
-		unsigned size = 8;
-		if (i + 1 < frame.savedRegisters.size()) {
-			PhysReg next = frame.savedRegisters[i + 1];
-			bool nextVector = isVectorRegister(next);
-			int offset = frame.savedRegisterOffsets.at(reg);
-			if (vector == nextVector &&
-			    frame.savedRegisterOffsets.at(next) ==
-			        offset + static_cast<int>(size) &&
-			    isPairOffsetEncodable(offset, size)) {
-				MachineInstr save(vector ? Opcode::STPDi : Opcode::STPXi);
-				save.addOperand(
-				        phys(reg, vector ? RegClass::NEON128 : RegClass::GPR64))
-				    .addOperand(phys(next, vector ? RegClass::NEON128
-				                                  : RegClass::GPR64))
-				    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-				    .addOperand(MachineOperand::immediate(offset));
-				addMemoryInfo(save, MachineMemOperand::Access::Store, size * 2,
-				              size, std::nullopt, offset);
-				entry->instructions().insert(insertion, std::move(save));
-				i += 2;
-				continue;
-			}
-		}
-		MachineInstr save(vector ? Opcode::STRDui : Opcode::STRXui);
-		save.addOperand(phys(reg, vector ? RegClass::NEON128 : RegClass::GPR64))
-		    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-		    .addOperand(
-		        MachineOperand::immediate(frame.savedRegisterOffsets.at(reg)));
-		addMemoryInfo(save, MachineMemOperand::Access::Store, 8, 8,
-		              std::nullopt, frame.savedRegisterOffsets.at(reg));
-		entry->instructions().insert(insertion, std::move(save));
-		++i;
-	}
+	insertStackAdjustment(entry->instructions(), insertion,
+	                      StackAdjustment::Allocate, frame.stackSize);
+	const std::vector<SavedRegisterGroup> savedGroups =
+	    groupSavedRegisters(frame, SavedRegisterOrder::Save);
+	const std::vector<SavedRegisterGroup> restoredGroups =
+	    groupSavedRegisters(frame, SavedRegisterOrder::Restore);
+	for (const SavedRegisterGroup &group : savedGroups)
+		insertSavedRegisterAccess(entry->instructions(), insertion, group,
+		                          MachineMemOperand::Access::Store);
 
 	for (auto &owned : function.blocks()) {
 		auto &instructions = owned->instructions();
 		for (auto it = instructions.begin(); it != instructions.end(); ++it) {
 			if (it->opcode() != Opcode::RET && it->opcode() != Opcode::TAILCALL)
 				continue;
-			for (std::size_t i = frame.savedRegisters.size(); i > 0;) {
-				if (i >= 2) {
-					PhysReg first = frame.savedRegisters[i - 2];
-					PhysReg second = frame.savedRegisters[i - 1];
-					bool vector = isVectorRegister(first);
-					unsigned size = 8;
-					int offset = frame.savedRegisterOffsets.at(first);
-					if (vector == isVectorRegister(second) &&
-					    frame.savedRegisterOffsets.at(second) ==
-					        offset + static_cast<int>(size) &&
-					    isPairOffsetEncodable(offset, size)) {
-						MachineInstr restore(vector ? Opcode::LDPDi
-						                            : Opcode::LDPXi);
-						restore
-						    .addOperand(phys(first,
-						                     vector ? RegClass::NEON128
-						                            : RegClass::GPR64,
-						                     true))
-						    .addOperand(phys(second,
-						                     vector ? RegClass::NEON128
-						                            : RegClass::GPR64,
-						                     true))
-						    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-						    .addOperand(MachineOperand::immediate(offset));
-						addMemoryInfo(restore, MachineMemOperand::Access::Load,
-						              size * 2, size, std::nullopt, offset);
-						instructions.insert(it, std::move(restore));
-						i -= 2;
-						continue;
-					}
-				}
-				PhysReg saved = frame.savedRegisters[i - 1];
-				bool vector = isVectorRegister(saved);
-				MachineInstr restore(vector ? Opcode::LDRDui : Opcode::LDRXui);
-				restore
-				    .addOperand(phys(
-				        saved, vector ? RegClass::NEON128 : RegClass::GPR64,
-				        true))
-				    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-				    .addOperand(MachineOperand::immediate(
-				        frame.savedRegisterOffsets.at(saved)));
-				addMemoryInfo(restore, MachineMemOperand::Access::Load, 8, 8,
-				              std::nullopt,
-				              frame.savedRegisterOffsets.at(saved));
-				instructions.insert(it, std::move(restore));
-				--i;
-			}
-			unsigned restore = frame.stackSize;
-			while (restore) {
-				unsigned amount = std::min(restore, 4095U);
-				MachineInstr adjust(Opcode::ADDSPri);
-				adjust.addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
-				    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-				    .addOperand(MachineOperand::immediate(amount));
-				instructions.insert(it, std::move(adjust));
-				restore -= amount;
-			}
+			for (const SavedRegisterGroup &group : restoredGroups)
+				insertSavedRegisterAccess(instructions, it, group,
+				                          MachineMemOperand::Access::Load);
+			insertStackAdjustment(instructions, it, StackAdjustment::Deallocate,
+			                      frame.stackSize);
 			MachineInstr pop(Opcode::LDPXpost);
 			pop.addOperand(phys(PhysReg::X29, RegClass::GPR64, true))
 			    .addOperand(phys(PhysReg::X30, RegClass::GPR64, true))
