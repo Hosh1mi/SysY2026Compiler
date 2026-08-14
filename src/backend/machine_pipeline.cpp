@@ -182,13 +182,20 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
 		        [&services](MachineFunction &function) {
 			        return services.spillSlotOptimizer.run(function);
 		        });
-	if (optimize)
+	if (optimize) {
 		addPass(pipeline, "PostRACopyPropagation",
 		        MachinePassStage::PostRegAlloc, allocated,
 		        MachineProperty::FrameFinalized,
 		        [&services](MachineFunction &function) {
 			        return services.copyPropagation.run(function);
 		        });
+		addPass(pipeline, "PostRAFinalCopyCleanup",
+		        MachinePassStage::PostRegAlloc, allocated,
+		        MachineProperty::FrameFinalized,
+		        [&services](MachineFunction &function) {
+			        return services.redundantCopyElimination.run(function);
+		        });
+	}
 
 	addPass(pipeline, "AArch64FrameLowering",
 	        MachinePassStage::FrameFinalization, allocated,
