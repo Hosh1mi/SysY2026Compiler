@@ -19,6 +19,7 @@ struct BackendOptions;
 // driver can assemble the sequence once and reuse it across functions.
 struct MachinePipelineServices {
   MachineConstantCSE constantCSE;
+  MachineExpressionCSE expressionCSE;
   AArch64VectorImmediateSelection vectorImmediateSelection;
   AArch64PreRAPeephole preRAPeephole;
   AArch64LoadStoreOptimization loadStoreOptimization;

@@ -228,7 +228,6 @@ public:
     unsigned maxCallFrameSize = 0;
     unsigned maxAlignment = 16;
     bool hasCalls = false;
-    bool usesFramePointer = false;
     std::vector<PhysReg> savedRegisters;
     std::unordered_map<PhysReg, int> savedRegisterOffsets;
 
