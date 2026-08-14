@@ -79,6 +79,16 @@ struct MachineExpressionKeyHash {
   }
 };
 
+bool expressionOperandLess(const ExpressionOperandKey &lhs,
+                           const ExpressionOperandKey &rhs) {
+  if (lhs.kind != rhs.kind)
+    return static_cast<unsigned>(lhs.kind) < static_cast<unsigned>(rhs.kind);
+  if (lhs.value != rhs.value)
+    return lhs.value < rhs.value;
+  return static_cast<unsigned>(lhs.regClass) <
+         static_cast<unsigned>(rhs.regClass);
+}
+
 std::optional<MachineExpressionKey>
 buildExpressionKey(const MachineInstr &instruction,
                    const MachineRegisterInfo &registers) {
@@ -126,6 +136,9 @@ buildExpressionKey(const MachineInstr &instruction,
 
   if (!result || key.inputs.empty() || !registers.contains(result))
     return std::nullopt;
+  if (InstrInfo::isCommutable(key.opcode) && key.inputs.size() == 2 &&
+      expressionOperandLess(key.inputs[1], key.inputs[0]))
+    std::swap(key.inputs[0], key.inputs[1]);
   key.resultType = registers.get(result).valueType;
   return key;
 }
