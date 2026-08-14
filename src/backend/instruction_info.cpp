@@ -49,7 +49,9 @@ bool InstrInfo::acceptsImmediate(Opcode opcode, std::int64_t immediate) {
 	using generated::ImmediateConstraint;
 	switch (generated::immediateConstraint(opcode)) {
 	case ImmediateConstraint::AddSub12:
-		return immediate >= 0 && immediate <= 4095;
+		return immediate >= 0 &&
+		       (immediate <= 4095 ||
+		        (immediate % 4096 == 0 && immediate / 4096 <= 4095));
 	case ImmediateConstraint::Shift32:
 		return immediate >= 0 && immediate <= 31;
 	case ImmediateConstraint::Shift64:

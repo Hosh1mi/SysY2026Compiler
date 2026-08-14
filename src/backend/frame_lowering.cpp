@@ -12,7 +12,9 @@ namespace {
 
 constexpr unsigned kStackAlignment = 16;
 constexpr unsigned kMaxAddSubImmediate = 4095;
-constexpr unsigned kMaxAlignedAddSubImmediate = 4080;
+constexpr unsigned kAddSubImmediateShift = 12;
+constexpr std::uint64_t kAddSubImmediateScale = std::uint64_t{1}
+                                                << kAddSubImmediateShift;
 
 enum class StackAdjustment { Allocate, Deallocate };
 enum class SavedRegisterOrder { Save, Restore };
@@ -47,22 +49,43 @@ void addMemoryInfo(MachineInstr &instruction, MachineMemOperand::Access access,
 	    access, size, alignment, nullptr, frameIndex, offset, false});
 }
 
+std::uint64_t nextAddSubImmediate(std::uint64_t amount) {
+	if (amount < kAddSubImmediateScale)
+		return std::min<std::uint64_t>(amount, kMaxAddSubImmediate);
+	const std::uint64_t shifted = std::min<std::uint64_t>(
+	    amount / kAddSubImmediateScale, kMaxAddSubImmediate);
+	return shifted * kAddSubImmediateScale;
+}
+
 void insertStackAdjustment(InstrList &instructions, InstrPosition position,
-                           StackAdjustment direction, std::uint64_t amount,
-                           unsigned maxChunk = kMaxAddSubImmediate) {
+                           StackAdjustment direction, std::uint64_t amount) {
 	const Opcode opcode = direction == StackAdjustment::Allocate
 	                          ? Opcode::SUBSPri
 	                          : Opcode::ADDSPri;
 	while (amount) {
-		const unsigned chunk =
-		    static_cast<unsigned>(std::min<std::uint64_t>(amount, maxChunk));
+		const std::uint64_t chunk = nextAddSubImmediate(amount);
 		MachineInstr adjust(opcode);
 		adjust.addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
 		    .addOperand(phys(PhysReg::SP, RegClass::GPR64))
-		    .addOperand(MachineOperand::immediate(chunk));
+		    .addOperand(
+		        MachineOperand::immediate(static_cast<std::int64_t>(chunk)));
 		instructions.insert(position, std::move(adjust));
 		amount -= chunk;
 	}
+}
+
+unsigned frameRecordSize(const MachineFrameInfo &frame) {
+	return frame.hasCalls ? kStackAlignment : 0;
+}
+
+std::int64_t resolvedFrameOffset(const MachineFrameInfo &frame,
+                                 const StackObject &object) {
+	if (!object.fixed)
+		return object.offset;
+	// SP remains stable throughout the body.  Fixed objects therefore sit
+	// above the local frame and the optional return-address record.
+	return static_cast<std::int64_t>(frame.stackSize) + frameRecordSize(frame) +
+	       object.offset;
 }
 
 struct SavedRegisterGroup {
@@ -139,8 +162,7 @@ void insertSavedRegisterAccess(InstrList &instructions, InstrPosition position,
 		             kStackAlignment * kStackAlignment;
 		memoryOffset -= static_cast<std::int64_t>(adjustment);
 		insertStackAdjustment(instructions, position,
-		                      StackAdjustment::Deallocate, adjustment,
-		                      kMaxAlignedAddSubImmediate);
+		                      StackAdjustment::Deallocate, adjustment);
 	}
 
 	const RegClass regClass =
@@ -164,7 +186,7 @@ void insertSavedRegisterAccess(InstrList &instructions, InstrPosition position,
 
 	if (adjustment)
 		insertStackAdjustment(instructions, position, StackAdjustment::Allocate,
-		                      adjustment, kMaxAlignedAddSubImmediate);
+		                      adjustment);
 }
 
 } // namespace
@@ -199,13 +221,6 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
 		frame.savedRegisterOffsets[reg] = static_cast<int>(cursor);
 		cursor += size;
 	}
-	for (StackObject &object : frame.objects()) {
-		if (object.fixed) {
-			// x29 is established after the 16-byte FP/LR push, so the
-			// caller's incoming stack argument area starts at x29 + 16.
-			object.offset += 16;
-		}
-	}
 	auto layoutObjects = [&](bool spills) {
 		for (StackObject &object : frame.objects()) {
 			if (object.fixed || object.spill != spills)
@@ -221,17 +236,6 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
 	layoutObjects(true);
 	layoutObjects(false);
 	frame.stackSize = alignTo(cursor, kStackAlignment);
-	bool hasFixedObject = false;
-	for (const StackObject &object : frame.objects())
-		if (object.fixed) {
-			hasFixedObject = true;
-			break;
-		}
-	// Incoming stack arguments are addressed from x29 after the FP/LR push.
-	// Even when the body needs no locals, spills, or callee-saves, a frame
-	// pointer is still required whenever those fixed objects exist.
-	frame.usesFramePointer = frame.stackSize != 0 || frame.hasCalls ||
-	                         !frame.savedRegisters.empty() || hasFixedObject;
 }
 
 void AArch64FrameLowering::eliminateFrameIndices(
@@ -256,14 +260,14 @@ void AArch64FrameLowering::eliminateFrameIndices(
 					throw std::logic_error("malformed LEA_FRAME");
 				const StackObject &object =
 				    frame.getObject(it->operands()[1].frameIndex());
-				PhysReg base = object.fixed ? PhysReg::X29 : PhysReg::SP;
-				std::int64_t offset = object.offset;
+				const PhysReg base = PhysReg::SP;
+				std::int64_t offset = resolvedFrameOffset(frame, object);
 				MachineOperand destination = it->operands()[0];
 				if (offset < 0)
 					throw std::logic_error(
 					    "negative frame address is unsupported");
-				unsigned amount =
-				    static_cast<unsigned>(std::min<std::int64_t>(offset, 4095));
+				std::uint64_t amount =
+				    nextAddSubImmediate(static_cast<std::uint64_t>(offset));
 				it->operands().clear();
 				if (amount == 0) {
 					it->setOpcode(Opcode::MOVXrr);
@@ -273,18 +277,20 @@ void AArch64FrameLowering::eliminateFrameIndices(
 					it->setOpcode(Opcode::ADDXri);
 					it->addOperand(destination)
 					    .addOperand(phys(base, RegClass::GPR64))
-					    .addOperand(MachineOperand::immediate(amount));
+					    .addOperand(MachineOperand::immediate(
+					        static_cast<std::int64_t>(amount)));
 				}
 				offset -= amount;
 				auto insertion = std::next(it);
 				while (offset) {
-					amount = static_cast<unsigned>(
-					    std::min<std::int64_t>(offset, 4095));
+					amount =
+					    nextAddSubImmediate(static_cast<std::uint64_t>(offset));
 					MachineInstr add(Opcode::ADDXri);
 					add.addOperand(destination)
 					    .addOperand(MachineOperand::physReg(
 					        destination.physicalRegister(), RegClass::GPR64))
-					    .addOperand(MachineOperand::immediate(amount));
+					    .addOperand(MachineOperand::immediate(
+					        static_cast<std::int64_t>(amount)));
 					instructions.insert(insertion, std::move(add));
 					offset -= amount;
 				}
@@ -319,12 +325,10 @@ void AArch64FrameLowering::eliminateFrameIndices(
 					    : regClass == RegClass::GPR64   ? Opcode::STRXui
 					                                    : Opcode::STRWui);
 				MachineOperand value = it->operands()[0];
-				std::int64_t absoluteOffset =
-				    object.fixed ? static_cast<std::int64_t>(frame.stackSize) +
-				                       object.offset
-				                 : object.offset;
-				std::int64_t memoryOffset = object.offset;
-				PhysReg base = object.fixed ? PhysReg::X29 : PhysReg::SP;
+				const std::int64_t absoluteOffset =
+				    resolvedFrameOffset(frame, object);
+				std::int64_t memoryOffset = absoluteOffset;
+				const PhysReg base = PhysReg::SP;
 				if (!isScaledOffsetEncodable(memoryOffset, width)) {
 					// Frame offsets are known only after spilling.  When an
 					// offset is beyond the unsigned scaled memory encoding,
@@ -337,14 +341,13 @@ void AArch64FrameLowering::eliminateFrameIndices(
 					    kStackAlignment * kStackAlignment;
 					memoryOffset =
 					    absoluteOffset - static_cast<std::int64_t>(adjustment);
-					base = PhysReg::SP;
-					insertStackAdjustment(
-					    instructions, it, StackAdjustment::Deallocate,
-					    adjustment, kMaxAlignedAddSubImmediate);
+					insertStackAdjustment(instructions, it,
+					                      StackAdjustment::Deallocate,
+					                      adjustment);
 					auto restorePosition = std::next(it);
 					insertStackAdjustment(instructions, restorePosition,
-					                      StackAdjustment::Allocate, adjustment,
-					                      kMaxAlignedAddSubImmediate);
+					                      StackAdjustment::Allocate,
+					                      adjustment);
 				}
 				it->operands().clear();
 				it->addOperand(std::move(value))
@@ -361,7 +364,7 @@ void AArch64FrameLowering::eliminateFrameIndices(
 void AArch64FrameLowering::insertPrologueEpilogues(
     MachineFunction &function) const {
 	MachineFrameInfo &frame = function.frameInfo();
-	if (!frame.usesFramePointer)
+	if (frame.stackSize == 0 && !frame.hasCalls)
 		return;
 
 	MachineBasicBlock *entry = function.entryBlock();
@@ -369,19 +372,16 @@ void AArch64FrameLowering::insertPrologueEpilogues(
 		throw std::logic_error("cannot insert prologue without entry");
 	auto insertion = entry->instructions().begin();
 
-	MachineInstr push(Opcode::STPXpre);
-	push.addOperand(phys(PhysReg::X29, RegClass::GPR64))
-	    .addOperand(phys(PhysReg::X30, RegClass::GPR64))
-	    .addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
-	    .addOperand(MachineOperand::immediate(-16));
-	addMemoryInfo(push, MachineMemOperand::Access::Store, 16, 16, std::nullopt,
-	              -16);
-	entry->instructions().insert(insertion, std::move(push));
-
-	MachineInstr setFrame(Opcode::MOVXrr);
-	setFrame.addOperand(phys(PhysReg::X29, RegClass::GPR64, true))
-	    .addOperand(phys(PhysReg::SP, RegClass::GPR64));
-	entry->instructions().insert(insertion, std::move(setFrame));
+	if (frame.hasCalls) {
+		MachineInstr push(Opcode::STPXpre);
+		push.addOperand(phys(PhysReg::XZR, RegClass::GPR64))
+		    .addOperand(phys(PhysReg::X30, RegClass::GPR64))
+		    .addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
+		    .addOperand(MachineOperand::immediate(-16));
+		addMemoryInfo(push, MachineMemOperand::Access::Store, 16, 16,
+		              std::nullopt, -16);
+		entry->instructions().insert(insertion, std::move(push));
+	}
 
 	insertStackAdjustment(entry->instructions(), insertion,
 	                      StackAdjustment::Allocate, frame.stackSize);
@@ -403,14 +403,16 @@ void AArch64FrameLowering::insertPrologueEpilogues(
 				                          MachineMemOperand::Access::Load);
 			insertStackAdjustment(instructions, it, StackAdjustment::Deallocate,
 			                      frame.stackSize);
-			MachineInstr pop(Opcode::LDPXpost);
-			pop.addOperand(phys(PhysReg::X29, RegClass::GPR64, true))
-			    .addOperand(phys(PhysReg::X30, RegClass::GPR64, true))
-			    .addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
-			    .addOperand(MachineOperand::immediate(16));
-			addMemoryInfo(pop, MachineMemOperand::Access::Load, 16, 16,
-			              std::nullopt, 0);
-			instructions.insert(it, std::move(pop));
+			if (frame.hasCalls) {
+				MachineInstr pop(Opcode::LDPXpost);
+				pop.addOperand(phys(PhysReg::XZR, RegClass::GPR64, true))
+				    .addOperand(phys(PhysReg::X30, RegClass::GPR64, true))
+				    .addOperand(phys(PhysReg::SP, RegClass::GPR64, true))
+				    .addOperand(MachineOperand::immediate(16));
+				addMemoryInfo(pop, MachineMemOperand::Access::Load, 16, 16,
+				              std::nullopt, 0);
+				instructions.insert(it, std::move(pop));
+			}
 		}
 	}
 }

@@ -147,6 +147,33 @@ void emitThreeWithImmediate(std::ostream &output, const char *mnemonic,
 	       << instruction.operands()[2].immediate() << '\n';
 }
 
+void emitAddSubImmediateValue(std::ostream &output, Opcode opcode,
+                              std::int64_t immediate) {
+	if (!InstrInfo::acceptsImmediate(opcode, immediate))
+		throw std::logic_error(
+		    "illegal add/sub immediate reached assembly printer");
+	output << '#';
+	if (immediate > 4095)
+		output << immediate / 4096 << ", lsl #12";
+	else
+		output << immediate;
+}
+
+void emitAddSubWithImmediate(std::ostream &output, const char *mnemonic,
+                             const MachineInstr &instruction) {
+	if (instruction.operands().size() != 3 ||
+	    !instruction.operands()[0].isPhysicalRegister() ||
+	    !instruction.operands()[1].isPhysicalRegister() ||
+	    instruction.operands()[2].kind() != MachineOperand::Kind::Immediate)
+		throw std::logic_error(
+		    "malformed add/sub immediate at assembly printing");
+	output << '\t' << mnemonic << ' ' << registerName(instruction.operands()[0])
+	       << ", " << registerName(instruction.operands()[1]) << ", ";
+	emitAddSubImmediateValue(output, instruction.opcode(),
+	                         instruction.operands()[2].immediate());
+	output << '\n';
+}
+
 std::string vectorView(const MachineOperand &operand) {
 	return registerName(operand) + ".4s";
 }
@@ -392,10 +419,10 @@ void printInstruction(const MachineFunction &function,
 		emitThreeRegisters(output, "sub", instruction);
 		break;
 	case Opcode::ADDWri:
-		emitThreeWithImmediate(output, "add", instruction);
+		emitAddSubWithImmediate(output, "add", instruction);
 		break;
 	case Opcode::SUBWri:
-		emitThreeWithImmediate(output, "sub", instruction);
+		emitAddSubWithImmediate(output, "sub", instruction);
 		break;
 	case Opcode::ANDWri:
 		emitThreeWithImmediate(output, "and", instruction);
@@ -410,10 +437,10 @@ void printInstruction(const MachineFunction &function,
 		emitThreeWithImmediate(output, "asr", instruction);
 		break;
 	case Opcode::ADDXri:
-		emitThreeWithImmediate(output, "add", instruction);
+		emitAddSubWithImmediate(output, "add", instruction);
 		break;
 	case Opcode::SUBXri:
-		emitThreeWithImmediate(output, "sub", instruction);
+		emitAddSubWithImmediate(output, "sub", instruction);
 		break;
 	case Opcode::LSLXri:
 		emitThreeWithImmediate(output, "lsl", instruction);
@@ -432,10 +459,10 @@ void printInstruction(const MachineFunction &function,
 			       << '\n';
 		break;
 	case Opcode::SUBSPri:
-		emitThreeWithImmediate(output, "sub", instruction);
+		emitAddSubWithImmediate(output, "sub", instruction);
 		break;
 	case Opcode::ADDSPri:
-		emitThreeWithImmediate(output, "add", instruction);
+		emitAddSubWithImmediate(output, "add", instruction);
 		break;
 	case Opcode::MOVXrr:
 		output << "\tmov " << registerName(operands[0]) << ", "
@@ -467,8 +494,10 @@ void printInstruction(const MachineFunction &function,
 		       << registerName(operands[1]) << '\n';
 		break;
 	case Opcode::CMPWri:
-		output << "\tcmp " << registerName(operands[0]) << ", #"
-		       << operands[1].immediate() << '\n';
+		output << "\tcmp " << registerName(operands[0]) << ", ";
+		emitAddSubImmediateValue(output, instruction.opcode(),
+		                         operands[1].immediate());
+		output << '\n';
 		break;
 	case Opcode::CMPXrr:
 		output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
@@ -476,7 +505,10 @@ void printInstruction(const MachineFunction &function,
 		break;
 	case Opcode::CMPXri:
 		output << "\tcmp " << registerNameAs(operands[0], RegClass::GPR64)
-		       << ", #" << operands[1].immediate() << '\n';
+		       << ", ";
+		emitAddSubImmediateValue(output, instruction.opcode(),
+		                         operands[1].immediate());
+		output << '\n';
 		break;
 	case Opcode::TSTWrr:
 		output << "\ttst " << registerName(operands[0]) << ", "
