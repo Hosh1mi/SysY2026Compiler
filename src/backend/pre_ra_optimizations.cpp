@@ -4,8 +4,9 @@
 #include "backend/machine_analysis.hpp"
 #include "backend/vector_immediate.hpp"
 
-#include <deque>
 #include <algorithm>
+#include <deque>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
@@ -14,6 +15,120 @@
 
 namespace backend::aarch64 {
 namespace {
+
+bool isConstantMaterialization(Opcode opcode) {
+  switch (opcode) {
+  case Opcode::MOVi32:
+  case Opcode::MOVi64:
+  case Opcode::MOVIv4Zero:
+  case Opcode::MOVIv4s:
+  case Opcode::MOVIv4sMsl:
+  case Opcode::MVNIv4s:
+  case Opcode::MOVIv16b:
+  case Opcode::FMOVv4s:
+  case Opcode::DUPv4i32:
+  case Opcode::DUPv4f32:
+    return true;
+  default:
+    return false;
+  }
+}
+
+struct ExpressionOperandKey {
+  MachineOperand::Kind kind = MachineOperand::Kind::Invalid;
+  std::uint64_t value = 0;
+  RegClass regClass = RegClass::Invalid;
+
+  bool operator==(const ExpressionOperandKey &other) const {
+    return kind == other.kind && value == other.value &&
+           regClass == other.regClass;
+  }
+};
+
+struct MachineExpressionKey {
+  Opcode opcode = Opcode::Invalid;
+  RegClass resultClass = RegClass::Invalid;
+  ValueType resultType = ValueType::Invalid;
+  std::vector<ExpressionOperandKey> inputs;
+
+  bool operator==(const MachineExpressionKey &other) const {
+    return opcode == other.opcode && resultClass == other.resultClass &&
+           resultType == other.resultType && inputs == other.inputs;
+  }
+};
+
+void combineHash(std::size_t &seed, std::size_t value) {
+  seed ^= value + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+}
+
+struct MachineExpressionKeyHash {
+  std::size_t operator()(const MachineExpressionKey &key) const {
+    std::size_t hash = std::hash<unsigned>{}(static_cast<unsigned>(key.opcode));
+    combineHash(hash,
+                std::hash<unsigned>{}(static_cast<unsigned>(key.resultClass)));
+    combineHash(hash,
+                std::hash<unsigned>{}(static_cast<unsigned>(key.resultType)));
+    for (const ExpressionOperandKey &input : key.inputs) {
+      combineHash(hash,
+                  std::hash<unsigned>{}(static_cast<unsigned>(input.kind)));
+      combineHash(hash, std::hash<std::uint64_t>{}(input.value));
+      combineHash(hash,
+                  std::hash<unsigned>{}(static_cast<unsigned>(input.regClass)));
+    }
+    return hash;
+  }
+};
+
+std::optional<MachineExpressionKey>
+buildExpressionKey(const MachineInstr &instruction,
+                   const MachineRegisterInfo &registers) {
+  const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
+  if (descriptor.explicitDefs != 1 || descriptor.terminator || descriptor.call ||
+      descriptor.mayLoad || descriptor.mayStore || descriptor.hasSideEffects ||
+      descriptor.pseudo || descriptor.setsFlags || descriptor.usesFlags ||
+      isConstantMaterialization(instruction.opcode()) ||
+      !instruction.memoryOperands().empty() || instruction.parallelCopyGroup)
+    return std::nullopt;
+
+  MachineExpressionKey key;
+  key.opcode = instruction.opcode();
+  VReg result = 0;
+  for (const MachineOperand &operand : instruction.operands()) {
+    if (operand.isImplicit || operand.isUndef || operand.isEarlyClobber ||
+        operand.tiedTo >= 0)
+      return std::nullopt;
+    if (operand.isDef) {
+      if (!operand.isVirtualRegister() || result)
+        return std::nullopt;
+      result = operand.virtualRegister();
+      key.resultClass = operand.regClass();
+      continue;
+    }
+
+    ExpressionOperandKey input;
+    input.kind = operand.kind();
+    switch (operand.kind()) {
+    case MachineOperand::Kind::VirtualRegister:
+      input.value = operand.virtualRegister();
+      input.regClass = operand.regClass();
+      break;
+    case MachineOperand::Kind::Immediate:
+      input.value = static_cast<std::uint64_t>(operand.immediate());
+      break;
+    case MachineOperand::Kind::FloatingBits:
+      input.value = operand.floatingBits();
+      break;
+    default:
+      return std::nullopt;
+    }
+    key.inputs.push_back(input);
+  }
+
+  if (!result || key.inputs.empty() || !registers.contains(result))
+    return std::nullopt;
+  key.resultType = registers.get(result).valueType;
+  return key;
+}
 
 bool isZeroIdentity(const MachineInstr &instruction) {
     switch (instruction.opcode()) {
@@ -106,16 +221,7 @@ bool MachineConstantCSE::run(MachineFunction &function) const {
           ++it;
           continue;
         }
-        bool cseCandidate = it->opcode() == Opcode::MOVi32 ||
-                            it->opcode() == Opcode::MOVi64 ||
-                            it->opcode() == Opcode::MOVIv4Zero ||
-                            it->opcode() == Opcode::MOVIv4s ||
-                            it->opcode() == Opcode::MOVIv4sMsl ||
-                            it->opcode() == Opcode::MVNIv4s ||
-                            it->opcode() == Opcode::MOVIv16b ||
-                            it->opcode() == Opcode::FMOVv4s ||
-                            it->opcode() == Opcode::DUPv4i32 ||
-                            it->opcode() == Opcode::DUPv4f32;
+        bool cseCandidate = isConstantMaterialization(it->opcode());
         if (!cseCandidate || it->operands().empty() ||
             !it->operands()[0].isVirtualRegister() ||
             !it->operands()[0].isDef) {
@@ -175,6 +281,78 @@ bool MachineConstantCSE::run(MachineFunction &function) const {
         changed = true;
     }
   }
+  return changed;
+}
+
+bool MachineExpressionCSE::run(MachineFunction &function) const {
+  if (!function.hasProperty(MachineProperty::IsSSA))
+    return false;
+
+  struct AvailableExpression {
+    VReg result = 0;
+    unsigned ordinal = 0;
+  };
+  // Reusing a value farther away can trade one instruction for a spill.
+  // Keep CSE inside a small scheduling window until pressure-aware global
+  // value numbering is available.
+  constexpr unsigned kMaxReuseDistance = 8;
+
+  bool changed = false;
+  MachineRegisterIndex registers(function);
+  for (auto &block : function.blocks()) {
+    std::unordered_map<MachineExpressionKey, AvailableExpression,
+                       MachineExpressionKeyHash>
+        available;
+    unsigned ordinal = 0;
+    auto &instructions = block->instructions();
+    for (auto instruction = instructions.begin();
+         instruction != instructions.end();) {
+      if (instruction->isCall()) {
+        available.clear();
+        ++ordinal;
+        ++instruction;
+        continue;
+      }
+
+      std::optional<MachineExpressionKey> key =
+          buildExpressionKey(*instruction, function.registerInfo());
+      if (!key) {
+        ++ordinal;
+        ++instruction;
+        continue;
+      }
+
+      auto result = std::find_if(
+          instruction->operands().begin(), instruction->operands().end(),
+          [](const MachineOperand &operand) {
+            return operand.isDef && operand.isVirtualRegister();
+          });
+      VReg duplicate = result->virtualRegister();
+      auto canonical = available.find(*key);
+      if (canonical == available.end()) {
+        available.emplace(std::move(*key),
+                          AvailableExpression{duplicate, ordinal});
+        ++ordinal;
+        ++instruction;
+        continue;
+      }
+      if (ordinal - canonical->second.ordinal > kMaxReuseDistance) {
+        canonical->second = AvailableExpression{duplicate, ordinal};
+        ++ordinal;
+        ++instruction;
+        continue;
+      }
+
+      registers.replaceUses(duplicate, canonical->second.result);
+      instruction = instructions.erase(instruction);
+      function.registerInfo().eraseVirtualRegister(duplicate);
+      changed = true;
+      ++ordinal;
+    }
+  }
+
+  if (changed)
+    function.clearProperty(MachineProperty::TracksLiveness);
   return changed;
 }
 

@@ -100,6 +100,11 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
             [&services](MachineFunction &function) {
               return services.conditionOptimizer.run(function);
             });
+    addPass(pipeline, "MachineExpressionCSE", MachinePassStage::MachineSSA,
+            selectedSSA, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.expressionCSE.run(function);
+            });
     addPass(pipeline, "MachineDCE", MachinePassStage::MachineSSA, selectedSSA,
             MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {

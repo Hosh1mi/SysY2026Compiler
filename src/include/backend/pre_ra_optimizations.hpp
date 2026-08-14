@@ -11,6 +11,11 @@ public:
     bool run(MachineFunction &function) const;
 };
 
+class MachineExpressionCSE {
+public:
+    bool run(MachineFunction &function) const;
+};
+
 class AArch64VectorImmediateSelection {
 public:
     bool run(MachineFunction &function) const;
