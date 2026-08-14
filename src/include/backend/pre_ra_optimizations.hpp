@@ -26,17 +26,19 @@ public:
     bool run(MachineFunction &function) const;
 };
 
-class MachineSink {
+// Shorten local SSA live ranges without crossing a control-flow edge.
+class MachineSSALocalSink {
 public:
     bool run(MachineFunction &function) const;
 };
 
-class DeadMachineInstructionElimination {
+// Move a single-use materialization across a proven single-predecessor edge.
+class SinglePredecessorMaterializationSink {
 public:
     bool run(MachineFunction &function) const;
 };
 
-class MachineInvariantConstantMotion {
+class PreRAAddressingFolder {
 public:
     bool run(MachineFunction &function) const;
 };
@@ -46,12 +48,23 @@ public:
     bool run(MachineFunction &function) const;
 };
 
-class PreRACFGOptimizer {
+class DeadMachineInstructionElimination {
 public:
     bool run(MachineFunction &function) const;
 };
 
-class PreRAAddressingFolder {
+// Hoist scalar constants into preheaders created during PHI elimination.
+class PostPhiConstantHoisting {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class AArch64BranchFolding {
+public:
+    bool run(MachineFunction &function) const;
+};
+
+class AArch64ExactHalvingLoopOptimizer {
 public:
     bool run(MachineFunction &function) const;
 };

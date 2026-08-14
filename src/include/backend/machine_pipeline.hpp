@@ -22,12 +22,15 @@ struct MachinePipelineServices {
   AArch64VectorImmediateSelection vectorImmediateSelection;
   AArch64PreRAPeephole preRAPeephole;
   AArch64LoadStoreOptimization loadStoreOptimization;
-  MachineSink machineSink;
-  DeadMachineInstructionElimination machineDCE;
-  MachineInvariantConstantMotion invariantConstantMotion;
+  MachineSSALocalSink machineSSALocalSink;
+  SinglePredecessorMaterializationSink materializationSink;
+  PreRAAddressingFolder addressingFolder;
   AArch64ConditionOptimizer conditionOptimizer;
+  DeadMachineInstructionElimination machineDCE;
+  PostPhiConstantHoisting postPhiConstantHoisting;
   PhiElimination phiElimination;
-  PreRACFGOptimizer preRACFGOptimizer;
+  AArch64BranchFolding branchFolding;
+  AArch64ExactHalvingLoopOptimizer exactHalvingLoopOptimizer;
   UnreachableMachineBlockElimination unreachableBlockElimination;
   A53MachineScheduler scheduler;
   GraphColoringRegisterAllocator registerAllocator;
@@ -36,7 +39,6 @@ struct MachinePipelineServices {
   PostRAInstructionExpansion instructionExpansion;
   PostRACopyPropagation copyPropagation;
   PostRARedundantCopyElimination redundantCopyElimination;
-  PreRAAddressingFolder addressingFolder;
   PostRAAddressingOptimizer addressingOptimizer;
   MachineBlockPlacement blockPlacement;
   AArch64BranchRelaxation branchRelaxation;

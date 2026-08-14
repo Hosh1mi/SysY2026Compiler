@@ -478,221 +478,225 @@ bool AArch64LoadStoreOptimization::run(
   return changed;
 }
 
-bool MachineSink::run(MachineFunction &function) const {
+bool MachineSSALocalSink::run(MachineFunction &function) const {
+  if (!function.hasProperty(MachineProperty::IsSSA))
+    return false;
+
   bool changed = false;
-  if (function.hasProperty(MachineProperty::IsSSA)) {
-    std::unordered_map<VReg, MachineInstr *> uniqueUse;
+  std::unordered_map<VReg, MachineInstr *> uniqueUse;
+  std::unordered_map<VReg, MachineBasicBlock *> useBlock;
+  for (auto &owned : function.blocks())
+    for (MachineInstr &instruction : owned->instructions())
+      for (const MachineOperand &operand : instruction.operands())
+        if (operand.isVirtualRegister() && !operand.isDef) {
+          const VReg reg = operand.virtualRegister();
+          auto [use, inserted] = uniqueUse.emplace(reg, &instruction);
+          if (!inserted && use->second != &instruction)
+            use->second = nullptr;
+          auto [block, blockInserted] = useBlock.emplace(reg, owned.get());
+          if (!blockInserted && block->second != owned.get())
+            block->second = nullptr;
+        }
+
+  auto isFixedStackLoad = [&](const MachineInstr &instruction) {
+    if (instruction.opcode() != Opcode::SPILL_LOAD ||
+        instruction.operands().size() < 2 ||
+        instruction.operands()[1].kind() != MachineOperand::Kind::FrameIndex ||
+        instruction.memoryOperands().empty() ||
+        instruction.memoryOperands().front().isVolatile)
+      return false;
+    const int index = instruction.operands()[1].frameIndex();
+    return index >= 0 &&
+           static_cast<std::size_t>(index) <
+               function.frameInfo().objects().size() &&
+           function.frameInfo().objects()[index].fixed;
+  };
+  auto locallySinkable = [&](const MachineInstr &instruction) {
+    if (instruction.isTerminator() || instruction.isCall() ||
+        instruction.mayStore() || instruction.hasSideEffects() ||
+        instruction.parallelCopyGroup)
+      return false;
+    if (instruction.mayLoad() && !isFixedStackLoad(instruction))
+      return false;
+    const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
+    if (descriptor.setsFlags || descriptor.usesFlags ||
+        (descriptor.pseudo && instruction.opcode() != Opcode::SPILL_LOAD))
+      return false;
+    for (const MachineOperand &operand : instruction.operands())
+      if (operand.isPhysicalRegister())
+        return false;
+    return true;
+  };
+
+  for (auto &owned : function.blocks()) {
+    auto &instructions = owned->instructions();
+    unsigned fixedGPRLoads = 0;
+    unsigned fixedVectorLoads = 0;
+    for (const MachineInstr &instruction : instructions) {
+      if (!isFixedStackLoad(instruction))
+        continue;
+      const RegClass regClass = instruction.operands()[0].regClass();
+      if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
+        ++fixedGPRLoads;
+      else if (regClass == RegClass::FPR32 || regClass == RegClass::NEON128)
+        ++fixedVectorLoads;
+    }
+    // Ordinary scheduling should retain freedom when register pressure is
+    // below capacity.  Large incoming argument sets are different: their
+    // eager fixed-stack loads necessarily create avoidable live ranges.
+    if (fixedGPRLoads <=
+            RegisterInfo::allocationOrder(RegClass::GPR32).size() &&
+        fixedVectorLoads <=
+            RegisterInfo::allocationOrder(RegClass::FPR32).size())
+      continue;
+
+    using Iterator = MachineBasicBlock::InstrList::iterator;
+    struct Candidate {
+      Iterator instruction;
+      MachineInstr *use = nullptr;
+    };
+    std::vector<Candidate> candidates;
+    std::unordered_map<MachineInstr *, Iterator> position;
+    std::unordered_map<MachineInstr *, unsigned> ordinal;
+    unsigned nextOrdinal = 0;
+    for (auto instruction = instructions.begin();
+         instruction != instructions.end(); ++instruction) {
+      position.emplace(&*instruction, instruction);
+      ordinal.emplace(&*instruction, nextOrdinal++);
+    }
+
+    for (auto instruction = instructions.begin();
+         instruction != instructions.end(); ++instruction) {
+      if (!locallySinkable(*instruction))
+        continue;
+      VReg definition = 0;
+      bool singleDefinition = true;
+      for (const MachineOperand &operand : instruction->operands()) {
+        if (!operand.isVirtualRegister() || !operand.isDef)
+          continue;
+        if (definition) {
+          singleDefinition = false;
+          break;
+        }
+        definition = operand.virtualRegister();
+      }
+      if (!singleDefinition || !definition ||
+          useBlock[definition] != owned.get() || !uniqueUse[definition] ||
+          ordinal[&*instruction] >= ordinal[uniqueUse[definition]] ||
+          uniqueUse[definition]->opcode() == Opcode::PHI)
+        continue;
+      candidates.push_back(Candidate{instruction, uniqueUse[definition]});
+    }
+
+    // Process consumers before their operands.  If both are moved, the
+    // producer then follows its consumer to the new location rather than
+    // being stranded at the consumer's old position.
+    for (auto candidate = candidates.rbegin(); candidate != candidates.rend();
+         ++candidate) {
+      Iterator use = position.at(candidate->use);
+      if (std::next(candidate->instruction) == use)
+        continue;
+      instructions.splice(use, instructions, candidate->instruction);
+      changed = true;
+    }
+  }
+  if (changed)
+    function.clearProperty(MachineProperty::TracksLiveness);
+  return changed;
+}
+
+bool SinglePredecessorMaterializationSink::run(
+    MachineFunction &function) const {
+  if (function.hasProperty(MachineProperty::HasPHIs))
+    return false;
+
+  bool changed = false;
+  auto sinkableOpcode = [](Opcode opcode) {
+    switch (opcode) {
+    case Opcode::MOVi32:
+    case Opcode::MOVi64:
+    case Opcode::MOVIv4Zero:
+    case Opcode::FMOVWS:
+    case Opcode::FMOVSW:
+    case Opcode::COPYXtoW:
+    case Opcode::SXTW:
+    case Opcode::UXTW:
+      return true;
+    default:
+      return false;
+    }
+  };
+
+  // Sink a single-use, side-effect-free materialization through a
+  // single-predecessor edge.  This is deliberately narrower than
+  // general code sinking: the edge proves availability and prevents a
+  // PHI or alternate predecessor from observing an undefined value.
+  bool sunk = true;
+  while (sunk) {
+    sunk = false;
+    std::unordered_map<VReg, unsigned> useCount;
     std::unordered_map<VReg, MachineBasicBlock *> useBlock;
+    std::unordered_map<VReg, MachineInstr *> useInstruction;
     for (auto &owned : function.blocks())
       for (MachineInstr &instruction : owned->instructions())
         for (const MachineOperand &operand : instruction.operands())
           if (operand.isVirtualRegister() && !operand.isDef) {
-            const VReg reg = operand.virtualRegister();
-            auto [use, inserted] = uniqueUse.emplace(reg, &instruction);
-            if (!inserted && use->second != &instruction)
-              use->second = nullptr;
-            auto [block, blockInserted] = useBlock.emplace(reg, owned.get());
-            if (!blockInserted && block->second != owned.get())
-              block->second = nullptr;
+            VReg reg = operand.virtualRegister();
+            ++useCount[reg];
+            useBlock[reg] = owned.get();
+            useInstruction[reg] = &instruction;
           }
 
-    auto isFixedStackLoad = [&](const MachineInstr &instruction) {
-      if (instruction.opcode() != Opcode::SPILL_LOAD ||
-          instruction.operands().size() < 2 ||
-          instruction.operands()[1].kind() !=
-              MachineOperand::Kind::FrameIndex ||
-          instruction.memoryOperands().empty() ||
-          instruction.memoryOperands().front().isVolatile)
-        return false;
-      const int index = instruction.operands()[1].frameIndex();
-      return index >= 0 &&
-             static_cast<std::size_t>(index) <
-                 function.frameInfo().objects().size() &&
-             function.frameInfo().objects()[index].fixed;
-    };
-    auto locallySinkable = [&](const MachineInstr &instruction) {
-      if (instruction.isTerminator() || instruction.isCall() ||
-          instruction.mayStore() || instruction.hasSideEffects() ||
-          instruction.parallelCopyGroup)
-        return false;
-      if (instruction.mayLoad() && !isFixedStackLoad(instruction))
-        return false;
-      const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
-      if (descriptor.setsFlags || descriptor.usesFlags ||
-          (descriptor.pseudo && instruction.opcode() != Opcode::SPILL_LOAD))
-        return false;
-      for (const MachineOperand &operand : instruction.operands())
-        if (operand.isPhysicalRegister())
-          return false;
-      return true;
-    };
-
     for (auto &owned : function.blocks()) {
-      auto &instructions = owned->instructions();
-      unsigned fixedGPRLoads = 0;
-      unsigned fixedVectorLoads = 0;
-      for (const MachineInstr &instruction : instructions) {
-        if (!isFixedStackLoad(instruction))
-          continue;
-        const RegClass regClass = instruction.operands()[0].regClass();
-        if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
-          ++fixedGPRLoads;
-        else if (regClass == RegClass::FPR32 ||
-                 regClass == RegClass::NEON128)
-          ++fixedVectorLoads;
-      }
-      // Ordinary scheduling should retain freedom when register pressure is
-      // below capacity.  Large incoming argument sets are different: their
-      // eager fixed-stack loads necessarily create avoidable live ranges.
-      if (fixedGPRLoads <=
-              RegisterInfo::allocationOrder(RegClass::GPR32).size() &&
-          fixedVectorLoads <=
-              RegisterInfo::allocationOrder(RegClass::FPR32).size())
-        continue;
-
-      using Iterator = MachineBasicBlock::InstrList::iterator;
-      struct Candidate {
-        Iterator instruction;
-        MachineInstr *use = nullptr;
-      };
-      std::vector<Candidate> candidates;
-      std::unordered_map<MachineInstr *, Iterator> position;
-      std::unordered_map<MachineInstr *, unsigned> ordinal;
-      unsigned nextOrdinal = 0;
-      for (auto instruction = instructions.begin();
-           instruction != instructions.end(); ++instruction) {
-        position.emplace(&*instruction, instruction);
-        ordinal.emplace(&*instruction, nextOrdinal++);
-      }
-
-      for (auto instruction = instructions.begin();
-           instruction != instructions.end(); ++instruction) {
-        if (!locallySinkable(*instruction))
+      MachineBasicBlock *source = owned.get();
+      auto &sourceInstructions = source->instructions();
+      for (auto instruction = sourceInstructions.begin();
+           instruction != sourceInstructions.end(); ++instruction) {
+        if (!sinkableOpcode(instruction->opcode()) ||
+            instruction->isTerminator() || instruction->isCall() ||
+            instruction->mayLoad() || instruction->mayStore() ||
+            instruction->hasSideEffects())
           continue;
         VReg definition = 0;
-        bool singleDefinition = true;
+        bool valid = true;
         for (const MachineOperand &operand : instruction->operands()) {
+          if (operand.isPhysicalRegister()) {
+            valid = false;
+            break;
+          }
           if (!operand.isVirtualRegister() || !operand.isDef)
             continue;
           if (definition) {
-            singleDefinition = false;
+            valid = false;
             break;
           }
           definition = operand.virtualRegister();
         }
-        if (!singleDefinition || !definition ||
-            useBlock[definition] != owned.get() || !uniqueUse[definition] ||
-            ordinal[&*instruction] >= ordinal[uniqueUse[definition]] ||
-            uniqueUse[definition]->opcode() == Opcode::PHI)
+        if (!valid || !definition || useCount[definition] != 1)
           continue;
-        candidates.push_back(
-            Candidate{instruction, uniqueUse[definition]});
-      }
+        MachineBasicBlock *destination = useBlock[definition];
+        if (!destination || destination == source ||
+            destination->predecessors().size() != 1 ||
+            destination->predecessors().front() != source)
+          continue;
 
-      // Process consumers before their operands.  If both are moved, the
-      // producer then follows its consumer to the new location rather than
-      // being stranded at the consumer's old position.
-      for (auto candidate = candidates.rbegin();
-           candidate != candidates.rend(); ++candidate) {
-        Iterator use = position.at(candidate->use);
-        if (std::next(candidate->instruction) == use)
+        auto &destinationInstructions = destination->instructions();
+        auto insertion = std::find_if(
+            destinationInstructions.begin(), destinationInstructions.end(),
+            [&](const MachineInstr &candidate) {
+              return &candidate == useInstruction[definition];
+            });
+        if (insertion == destinationInstructions.end())
           continue;
-        instructions.splice(use, instructions, candidate->instruction);
+        destinationInstructions.splice(insertion, sourceInstructions,
+                                       instruction);
+        function.clearProperty(MachineProperty::TracksLiveness);
         changed = true;
+        sunk = true;
+        break;
       }
-    }
-    if (changed)
-      function.clearProperty(MachineProperty::TracksLiveness);
-  }
-
-  if (!function.hasProperty(MachineProperty::HasPHIs)) {
-    auto sinkableOpcode = [](Opcode opcode) {
-      switch (opcode) {
-      case Opcode::MOVi32:
-      case Opcode::MOVi64:
-      case Opcode::MOVIv4Zero:
-      case Opcode::FMOVWS:
-      case Opcode::FMOVSW:
-      case Opcode::COPYXtoW:
-      case Opcode::SXTW:
-      case Opcode::UXTW:
-        return true;
-      default:
-        return false;
-      }
-    };
-
-    // Sink a single-use, side-effect-free materialization through a
-    // single-predecessor edge.  This is deliberately narrower than
-    // general code sinking: the edge proves availability and prevents a
-    // PHI or alternate predecessor from observing an undefined value.
-    bool sunk = true;
-    while (sunk) {
-      sunk = false;
-      std::unordered_map<VReg, unsigned> useCount;
-      std::unordered_map<VReg, MachineBasicBlock *> useBlock;
-      std::unordered_map<VReg, MachineInstr *> useInstruction;
-      for (auto &owned : function.blocks())
-        for (MachineInstr &instruction : owned->instructions())
-          for (const MachineOperand &operand : instruction.operands())
-            if (operand.isVirtualRegister() && !operand.isDef) {
-              VReg reg = operand.virtualRegister();
-              ++useCount[reg];
-              useBlock[reg] = owned.get();
-              useInstruction[reg] = &instruction;
-            }
-
-      for (auto &owned : function.blocks()) {
-        MachineBasicBlock *source = owned.get();
-        auto &sourceInstructions = source->instructions();
-        for (auto instruction = sourceInstructions.begin();
-             instruction != sourceInstructions.end(); ++instruction) {
-          if (!sinkableOpcode(instruction->opcode()) ||
-              instruction->isTerminator() || instruction->isCall() ||
-              instruction->mayLoad() || instruction->mayStore() ||
-              instruction->hasSideEffects())
-            continue;
-          VReg definition = 0;
-          bool valid = true;
-          for (const MachineOperand &operand : instruction->operands()) {
-            if (operand.isPhysicalRegister()) {
-              valid = false;
-              break;
-            }
-            if (!operand.isVirtualRegister() || !operand.isDef)
-              continue;
-            if (definition) {
-              valid = false;
-              break;
-            }
-            definition = operand.virtualRegister();
-          }
-          if (!valid || !definition || useCount[definition] != 1)
-            continue;
-          MachineBasicBlock *destination = useBlock[definition];
-          if (!destination || destination == source ||
-              destination->predecessors().size() != 1 ||
-              destination->predecessors().front() != source)
-            continue;
-
-          auto &destinationInstructions = destination->instructions();
-          auto insertion = std::find_if(
-              destinationInstructions.begin(), destinationInstructions.end(),
-              [&](const MachineInstr &candidate) {
-                return &candidate == useInstruction[definition];
-              });
-          if (insertion == destinationInstructions.end())
-            continue;
-          destinationInstructions.splice(insertion, sourceInstructions,
-                                         instruction);
-          function.clearProperty(MachineProperty::TracksLiveness);
-          changed = true;
-          sunk = true;
-          break;
-        }
-        if (sunk)
-          break;
-      }
+      if (sunk)
+        break;
     }
   }
   return changed;
@@ -775,9 +779,10 @@ bool DeadMachineInstructionElimination::run(MachineFunction &function) const {
   return true;
 }
 
-bool MachineInvariantConstantMotion::run(
-    MachineFunction &function) const {
-    if (function.blocks().empty())
+bool PostPhiConstantHoisting::run(MachineFunction &function) const {
+    if (function.hasProperty(MachineProperty::IsSSA) ||
+        function.hasProperty(MachineProperty::HasPHIs) ||
+        function.blocks().empty())
         return false;
 
     std::vector<MachineBasicBlock *> blocks;
@@ -1110,7 +1115,7 @@ bool AArch64ConditionOptimizer::run(
     return changed;
 }
 
-bool PreRACFGOptimizer::run(MachineFunction &function) const {
+bool AArch64BranchFolding::run(MachineFunction &function) const {
     if (function.hasProperty(MachineProperty::NoVRegs))
         return false;
 
@@ -1383,6 +1388,23 @@ bool PreRACFGOptimizer::run(MachineFunction &function) const {
             changed = true;
         }
     }
+
+    if (changed)
+        function.clearProperty(MachineProperty::TracksLiveness);
+    return changed;
+}
+
+bool AArch64ExactHalvingLoopOptimizer::run(MachineFunction &function) const {
+    if (function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+
+    auto sameVReg = [](const MachineOperand &lhs,
+                       const MachineOperand &rhs) {
+        return lhs.isVirtualRegister() && rhs.isVirtualRegister() &&
+               lhs.virtualRegister() == rhs.virtualRegister();
+    };
+
+    bool changed = false;
 
     // Batch an exact-halving loop.  The matched even edge contains only
     // `state >>= 1`; the shared latch contains only `count += 1` and a test

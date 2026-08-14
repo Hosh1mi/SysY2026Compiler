@@ -42,31 +42,35 @@ void addMachineSSAOptimizations(MachineFunctionPassManager &pipeline,
   addPreRAOptimization(pipeline, services.loadStoreOptimization,
                        "AArch64LoadStoreOptimization",
                        MachinePassStage::MachineSSA, selectedSSA);
-  addPreRAOptimization(pipeline, services.machineSink, "MachineSink",
+  addPreRAOptimization(pipeline, services.machineSSALocalSink,
+                       "MachineSSALocalSink", MachinePassStage::MachineSSA,
+                       selectedSSA);
+  addPreRAOptimization(pipeline, services.materializationSink,
+                       "SinglePredecessorMaterializationSink",
                        MachinePassStage::MachineSSA, selectedSSA);
 }
 
 void addPostPhiOptimizations(MachineFunctionPassManager &pipeline,
                              MachinePipelineServices &services,
                              MachineProperty selected) {
-  // PHI lowering only introduces copies and edge blocks, so rerun the one
-  // local transform that can consume those new placements.
-  addPreRAOptimization(pipeline, services.machineSink, "MachineSinkAfterPHI",
+  addPreRAOptimization(pipeline, services.materializationSink,
+                       "PostPhiMaterializationSink",
                        MachinePassStage::PreRegAlloc, selected);
 
-  addPass(pipeline, "MachineInvariantConstantMotion",
+  // PHI elimination creates edge blocks that act as preheaders for this
+  // narrow constant-only transform.  General LICM belongs in Machine SSA
+  // once loop canonicalization can provide preheaders there.
+  addPass(pipeline, "PostPhiConstantHoisting",
           MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
           [&services](MachineFunction &function) {
-            return services.invariantConstantMotion.run(function);
+            return services.postPhiConstantHoisting.run(function);
           });
 
-  // Hoisting can expose equivalent constants in a shared preheader and can
-  // leave a single-use materialization on a colder successor edge.
   addPreRAOptimization(pipeline, services.constantCSE,
-                       "MachineConstantCSEAfterLICM",
+                       "MachineConstantCSEAfterHoisting",
                        MachinePassStage::PreRegAlloc, selected);
-  addPreRAOptimization(pipeline, services.machineSink,
-                       "MachineSinkAfterLICM",
+  addPreRAOptimization(pipeline, services.materializationSink,
+                       "PostPhiMaterializationSinkAfterHoisting",
                        MachinePassStage::PreRegAlloc, selected);
 }
 
@@ -111,10 +115,15 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
 
   if (optimize) {
     addPostPhiOptimizations(pipeline, services, selected);
-    addPass(pipeline, "AArch64PreRACFGOptimizer",
+    addPass(pipeline, "AArch64BranchFolding",
             MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
-              return services.preRACFGOptimizer.run(function);
+              return services.branchFolding.run(function);
+            });
+    addPass(pipeline, "AArch64ExactHalvingLoopOptimizer",
+            MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.exactHalvingLoopOptimizer.run(function);
             });
   }
 
