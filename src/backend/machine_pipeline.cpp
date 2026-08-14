@@ -16,22 +16,9 @@ void addPass(MachineFunctionPassManager &pipeline, std::string name,
                    std::move(runner));
 }
 
-template <typename Transform>
-void addPreRAOptimization(MachineFunctionPassManager &pipeline,
-                          Transform &transform, std::string name,
-                          MachinePassStage stage,
-                          MachineProperty required) {
-  addPass(pipeline, std::move(name), stage, required,
-          MachineProperty::NoVRegs,
-          [&transform](MachineFunction &function) {
-            return transform.run(function);
-          });
-}
-
 } // namespace
 
-// To isolate a pass, remove or restore its addPass or
-// addPreRAOptimization registration below.
+// To isolate a pass, remove or restore its addPass registration below.
 void buildMachinePipeline(MachineFunctionPassManager &pipeline,
                           MachinePipelineServices &services,
                           const BackendOptions &options) {
@@ -45,23 +32,40 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
   const bool optimize = options.optimizationLevel >= 1;
 
   if (optimize) {
-    addPreRAOptimization(pipeline, services.constantCSE, "MachineConstantCSE",
-                         MachinePassStage::MachineSSA, selectedSSA);
-    addPreRAOptimization(pipeline, services.vectorImmediateSelection,
-                         "AArch64VectorImmediateSelection",
-                         MachinePassStage::MachineSSA, selectedSSA);
-    addPreRAOptimization(pipeline, services.preRAPeephole,
-                         "AArch64PreRAPeephole",
-                         MachinePassStage::MachineSSA, selectedSSA);
-    addPreRAOptimization(pipeline, services.loadStoreOptimization,
-                         "AArch64LoadStoreOptimization",
-                         MachinePassStage::MachineSSA, selectedSSA);
-    addPreRAOptimization(pipeline, services.machineSSALocalSink,
-                         "MachineSSALocalSink", MachinePassStage::MachineSSA,
-                         selectedSSA);
-    addPreRAOptimization(pipeline, services.materializationSink,
-                         "SinglePredecessorMaterializationSink",
-                         MachinePassStage::MachineSSA, selectedSSA);
+    addPass(pipeline, "MachineConstantCSE", MachinePassStage::MachineSSA,
+            selectedSSA, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.constantCSE.run(function);
+            });
+    addPass(pipeline, "AArch64VectorImmediateSelection",
+            MachinePassStage::MachineSSA, selectedSSA,
+            MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.vectorImmediateSelection.run(function);
+            });
+    addPass(pipeline, "AArch64PreRAPeephole",
+            MachinePassStage::MachineSSA, selectedSSA,
+            MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.preRAPeephole.run(function);
+            });
+    addPass(pipeline, "AArch64LoadStoreOptimization",
+            MachinePassStage::MachineSSA, selectedSSA,
+            MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.loadStoreOptimization.run(function);
+            });
+    addPass(pipeline, "MachineSSALocalSink", MachinePassStage::MachineSSA,
+            selectedSSA, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.machineSSALocalSink.run(function);
+            });
+    addPass(pipeline, "SinglePredecessorMaterializationSink",
+            MachinePassStage::MachineSSA, selectedSSA,
+            MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.materializationSink.run(function);
+            });
     addPass(pipeline, "AArch64PreRAAddressingFolder",
             MachinePassStage::MachineSSA, selectedSSA, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
@@ -91,9 +95,11 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
           });
 
   if (optimize) {
-    addPreRAOptimization(pipeline, services.materializationSink,
-                         "PostPhiMaterializationSink",
-                         MachinePassStage::PreRegAlloc, selected);
+    addPass(pipeline, "PostPhiMaterializationSink",
+            MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.materializationSink.run(function);
+            });
 
     // PHI elimination creates edge blocks that act as preheaders for this
     // narrow constant-only transform.  General LICM belongs in Machine SSA
@@ -105,12 +111,16 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
               return services.postPhiConstantHoisting.run(function);
             });
 
-    addPreRAOptimization(pipeline, services.constantCSE,
-                         "MachineConstantCSEAfterHoisting",
-                         MachinePassStage::PreRegAlloc, selected);
-    addPreRAOptimization(pipeline, services.materializationSink,
-                         "PostPhiMaterializationSinkAfterHoisting",
-                         MachinePassStage::PreRegAlloc, selected);
+    addPass(pipeline, "MachineConstantCSEAfterHoisting",
+            MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.constantCSE.run(function);
+            });
+    addPass(pipeline, "PostPhiMaterializationSinkAfterHoisting",
+            MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.materializationSink.run(function);
+            });
     addPass(pipeline, "AArch64BranchFolding",
             MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
