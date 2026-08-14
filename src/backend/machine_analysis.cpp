@@ -87,6 +87,154 @@ unsigned MachineRegisterIndex::replaceUses(VReg from, VReg to) {
   return static_cast<unsigned>(references.size());
 }
 
+namespace {
+
+using PhysSet = MachinePhysicalRegisterLiveness::RegisterSet;
+
+void collectPhysicalUsesAndDefs(const MachineInstr &instruction,
+                                PhysSet &uses, PhysSet &defs) {
+  for (const MachineOperand &operand : instruction.operands()) {
+    if (operand.isPhysicalRegister()) {
+      (operand.isDef ? defs : uses).insert(operand.physicalRegister());
+      continue;
+    }
+    if (operand.kind() != MachineOperand::Kind::RegisterMask)
+      continue;
+    for (unsigned raw = static_cast<unsigned>(PhysReg::X0);
+         raw <= static_cast<unsigned>(PhysReg::V31); ++raw) {
+      PhysReg reg = static_cast<PhysReg>(raw);
+      if (reg == PhysReg::SP || reg == PhysReg::XZR)
+        continue;
+      if (!operand.registerMask().preserves(reg))
+        defs.insert(reg);
+    }
+  }
+
+  if (instruction.isCall()) {
+    for (unsigned index = 0; index < 8; ++index) {
+      uses.insert(RegisterInfo::integerArgumentRegister(index));
+      uses.insert(RegisterInfo::vectorArgumentRegister(index));
+    }
+  } else if (instruction.opcode() == Opcode::RET) {
+    uses.insert(PhysReg::X0);
+    uses.insert(PhysReg::V0);
+    uses.insert(PhysReg::X30);
+  }
+}
+
+const PhysSet &lookupPhysicalSet(
+    const std::unordered_map<const MachineBasicBlock *, PhysSet> &sets,
+    const MachineBasicBlock *block) {
+  static const PhysSet empty;
+  auto found = sets.find(block);
+  return found == sets.end() ? empty : found->second;
+}
+
+const PhysSet &lookupPhysicalSet(
+    const std::unordered_map<const MachineInstr *, PhysSet> &sets,
+    const MachineInstr *instruction) {
+  static const PhysSet empty;
+  auto found = sets.find(instruction);
+  return found == sets.end() ? empty : found->second;
+}
+
+} // namespace
+
+void MachinePhysicalRegisterLiveness::analyze(
+    const MachineFunction &function) {
+  liveIn_.clear();
+  liveOut_.clear();
+  liveBefore_.clear();
+  liveAfter_.clear();
+
+  std::unordered_map<const MachineBasicBlock *, RegisterSet> blockUses;
+  std::unordered_map<const MachineBasicBlock *, RegisterSet> blockDefs;
+  for (const auto &owned : function.blocks()) {
+    const MachineBasicBlock *block = owned.get();
+    for (const MachineInstr &instruction : block->instructions()) {
+      RegisterSet uses;
+      RegisterSet defs;
+      collectPhysicalUsesAndDefs(instruction, uses, defs);
+      for (PhysReg reg : uses)
+        if (!blockDefs[block].count(reg))
+          blockUses[block].insert(reg);
+      blockDefs[block].insert(defs.begin(), defs.end());
+    }
+  }
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto owned = function.blocks().rbegin();
+         owned != function.blocks().rend(); ++owned) {
+      const MachineBasicBlock *block = owned->get();
+      RegisterSet nextOut;
+      for (const MachineBasicBlock *successor : block->successors()) {
+        const RegisterSet &successorLiveIn = liveIn_[successor];
+        nextOut.insert(successorLiveIn.begin(), successorLiveIn.end());
+      }
+      RegisterSet nextIn = blockUses[block];
+      for (PhysReg reg : nextOut)
+        if (!blockDefs[block].count(reg))
+          nextIn.insert(reg);
+      if (nextIn != liveIn_[block] || nextOut != liveOut_[block]) {
+        liveIn_[block] = std::move(nextIn);
+        liveOut_[block] = std::move(nextOut);
+        changed = true;
+      }
+    }
+  }
+
+  for (const auto &owned : function.blocks()) {
+    RegisterSet live = liveOut_[owned.get()];
+    for (auto instruction = owned->instructions().rbegin();
+         instruction != owned->instructions().rend(); ++instruction) {
+      liveAfter_[&*instruction] = live;
+      RegisterSet uses;
+      RegisterSet defs;
+      collectPhysicalUsesAndDefs(*instruction, uses, defs);
+      for (PhysReg reg : defs)
+        live.erase(reg);
+      live.insert(uses.begin(), uses.end());
+      liveBefore_[&*instruction] = live;
+    }
+  }
+}
+
+const MachinePhysicalRegisterLiveness::RegisterSet &
+MachinePhysicalRegisterLiveness::liveIn(
+    const MachineBasicBlock *block) const {
+  return lookupPhysicalSet(liveIn_, block);
+}
+
+const MachinePhysicalRegisterLiveness::RegisterSet &
+MachinePhysicalRegisterLiveness::liveOut(
+    const MachineBasicBlock *block) const {
+  return lookupPhysicalSet(liveOut_, block);
+}
+
+const MachinePhysicalRegisterLiveness::RegisterSet &
+MachinePhysicalRegisterLiveness::liveBefore(
+    const MachineInstr *instruction) const {
+  return lookupPhysicalSet(liveBefore_, instruction);
+}
+
+const MachinePhysicalRegisterLiveness::RegisterSet &
+MachinePhysicalRegisterLiveness::liveAfter(
+    const MachineInstr *instruction) const {
+  return lookupPhysicalSet(liveAfter_, instruction);
+}
+
+bool MachinePhysicalRegisterLiveness::isLiveBefore(
+    const MachineInstr *instruction, PhysReg reg) const {
+  return liveBefore(instruction).count(reg) != 0;
+}
+
+bool MachinePhysicalRegisterLiveness::isLiveAfter(
+    const MachineInstr *instruction, PhysReg reg) const {
+  return liveAfter(instruction).count(reg) != 0;
+}
+
 void MachineDominatorTree::analyze(const MachineFunction &function) {
   reachable_.clear();
   dominators_.clear();

@@ -44,6 +44,32 @@ private:
   ReferenceMap uses_;
 };
 
+// Physical-register liveness after allocation.  Besides explicit operands it
+// models call clobbers/arguments and the architectural return registers.
+class MachinePhysicalRegisterLiveness {
+public:
+  using RegisterSet = std::unordered_set<PhysReg>;
+
+  MachinePhysicalRegisterLiveness() = default;
+  explicit MachinePhysicalRegisterLiveness(const MachineFunction &function) {
+    analyze(function);
+  }
+
+  void analyze(const MachineFunction &function);
+  const RegisterSet &liveIn(const MachineBasicBlock *block) const;
+  const RegisterSet &liveOut(const MachineBasicBlock *block) const;
+  const RegisterSet &liveBefore(const MachineInstr *instruction) const;
+  const RegisterSet &liveAfter(const MachineInstr *instruction) const;
+  bool isLiveBefore(const MachineInstr *instruction, PhysReg reg) const;
+  bool isLiveAfter(const MachineInstr *instruction, PhysReg reg) const;
+
+private:
+  std::unordered_map<const MachineBasicBlock *, RegisterSet> liveIn_;
+  std::unordered_map<const MachineBasicBlock *, RegisterSet> liveOut_;
+  std::unordered_map<const MachineInstr *, RegisterSet> liveBefore_;
+  std::unordered_map<const MachineInstr *, RegisterSet> liveAfter_;
+};
+
 class MachineDominatorTree {
 public:
   void analyze(const MachineFunction &function);

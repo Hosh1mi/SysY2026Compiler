@@ -38,6 +38,7 @@ struct MachinePipelineServices {
   PostRAParallelCopyResolver parallelCopyResolver;
   PostRAInstructionExpansion instructionExpansion;
   PostRACopyPropagation copyPropagation;
+  A53FPRegisterBalancing fpRegisterBalancing;
   PostRARedundantCopyElimination redundantCopyElimination;
   PostRAAddressingOptimizer addressingOptimizer;
   MachineBlockPlacement blockPlacement;

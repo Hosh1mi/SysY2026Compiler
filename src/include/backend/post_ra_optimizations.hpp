@@ -16,6 +16,11 @@ public:
     bool run(MachineFunction &function) const;
 };
 
+class A53FPRegisterBalancing {
+public:
+    bool run(MachineFunction &function) const;
+};
+
 class PostRAInstructionExpansion {
 public:
     bool run(MachineFunction &function) const;

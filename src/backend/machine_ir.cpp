@@ -115,6 +115,13 @@ void MachineOperand::replaceVirtualRegister(VReg reg) {
     vreg_ = reg;
 }
 
+void MachineOperand::replacePhysicalRegister(PhysReg reg) {
+    if (!isPhysicalRegister() || reg == PhysReg::NoReg)
+        throw std::logic_error(
+            "physical-register replacement requires a physical register");
+    physReg_ = reg;
+}
+
 MachineInstr &MachineInstr::addOperand(MachineOperand operand) {
     operands_.push_back(std::move(operand));
     return *this;

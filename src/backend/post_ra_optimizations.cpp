@@ -8,7 +8,6 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace backend::aarch64 {
@@ -112,80 +111,7 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
         }
     }
 
-    using PhysSet = std::unordered_set<PhysReg>;
-    std::unordered_map<MachineBasicBlock *, PhysSet> physicalUses;
-    std::unordered_map<MachineBasicBlock *, PhysSet> physicalDefs;
-    std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveIn;
-    std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveOut;
-    auto addUse = [&](MachineBasicBlock *block, PhysReg reg) {
-        if (!physicalDefs[block].count(reg))
-            physicalUses[block].insert(reg);
-    };
-    for (auto &owned : function.blocks()) {
-        MachineBasicBlock *block = owned.get();
-        for (const MachineInstr &instruction :
-             block->instructions()) {
-            for (const MachineOperand &operand :
-                 instruction.operands()) {
-                if (operand.isPhysicalRegister() &&
-                    !operand.isDef)
-                    addUse(block, operand.physicalRegister());
-            }
-            if (instruction.isCall()) {
-                for (unsigned index = 0; index < 8; ++index) {
-                    addUse(block, RegisterInfo::integerArgumentRegister(index));
-                    addUse(block, RegisterInfo::vectorArgumentRegister(index));
-                }
-            } else if (instruction.opcode() == Opcode::RET) {
-                addUse(block, PhysReg::X0);
-                addUse(block, PhysReg::V0);
-                addUse(block, PhysReg::X30);
-            }
-            // Uses are collected before definitions so an allocated
-            // read/modify/write such as `add x9, x9, #1` contributes x9 to
-            // the block's live-in set when it is the first mention.
-            for (const MachineOperand &operand :
-                 instruction.operands())
-                if (operand.isPhysicalRegister() &&
-                    operand.isDef)
-                    physicalDefs[block].insert(
-                        operand.physicalRegister());
-            if (instruction.isCall()) {
-                for (unsigned raw =
-                         static_cast<unsigned>(PhysReg::X0);
-                     raw <= static_cast<unsigned>(PhysReg::V31);
-                     ++raw) {
-                    PhysReg reg = static_cast<PhysReg>(raw);
-                    if (RegisterInfo::isCallerSaved(reg))
-                        physicalDefs[block].insert(reg);
-                }
-            }
-        }
-    }
-    bool livenessChanged = true;
-    while (livenessChanged) {
-        livenessChanged = false;
-        for (auto block = function.blocks().rbegin();
-             block != function.blocks().rend(); ++block) {
-            MachineBasicBlock *current = block->get();
-            PhysSet nextOut;
-            for (MachineBasicBlock *successor :
-                 current->successors())
-                nextOut.insert(
-                    physicalLiveIn[successor].begin(),
-                    physicalLiveIn[successor].end());
-            PhysSet nextIn = physicalUses[current];
-            for (PhysReg reg : nextOut)
-                if (!physicalDefs[current].count(reg))
-                    nextIn.insert(reg);
-            if (nextOut != physicalLiveOut[current] ||
-                nextIn != physicalLiveIn[current]) {
-                physicalLiveOut[current] = std::move(nextOut);
-                physicalLiveIn[current] = std::move(nextIn);
-                livenessChanged = true;
-            }
-        }
-    }
+    MachinePhysicalRegisterLiveness physicalLiveness(function);
 
     // Forward a physical copy through its local uses until the copied value
     // is provably killed.  This handles call results such as
@@ -247,7 +173,7 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
                     // block's outgoing edge.  Keep the copy in that case.
                     if (terminatorUsesDestination) {
                         blocked = true;
-                    } else if (!physicalLiveOut[block.get()].count(
+                    } else if (!physicalLiveness.liveOut(block.get()).count(
                             destination) &&
                         (scan->opcode() != Opcode::RET ||
                          (!RegisterInfo::isReturnRegister(destination) &&
@@ -384,6 +310,166 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
             }
             copy = instructions.erase(copy);
             changed = true;
+        }
+    }
+    return changed;
+}
+
+namespace {
+
+unsigned fpRegisterColor(PhysReg reg) {
+    return (static_cast<unsigned>(reg) -
+            static_cast<unsigned>(PhysReg::V0)) & 1U;
+}
+
+bool samePreservationClass(PhysReg lhs, PhysReg rhs) {
+    return RegisterInfo::isCallerSaved(lhs) ==
+               RegisterInfo::isCallerSaved(rhs) &&
+           RegisterInfo::isCalleeSaved(lhs) ==
+               RegisterInfo::isCalleeSaved(rhs);
+}
+
+bool instructionTouchesRegister(const MachineInstr &instruction,
+                                PhysReg reg) {
+    if (instruction.readsRegister(reg) ||
+        instruction.definesRegister(reg))
+        return true;
+    if (instruction.isCall() &&
+        RegisterInfo::isArgumentRegister(reg))
+        return true;
+    return instruction.opcode() == Opcode::RET &&
+           RegisterInfo::isReturnRegister(reg);
+}
+
+struct FPValueChain {
+    bool renamable = false;
+    std::size_t end = 0;
+    std::vector<MachineOperand *> uses;
+};
+
+FPValueChain findFPValueChain(
+    MachineBasicBlock &block, const std::vector<MachineInstr *> &instructions,
+    std::size_t start, PhysReg reg,
+    const MachinePhysicalRegisterLiveness &liveness) {
+    FPValueChain chain;
+    bool redefined = false;
+    for (std::size_t index = start + 1; index < instructions.size(); ++index) {
+        MachineInstr &instruction = *instructions[index];
+        if ((instruction.isCall() &&
+             RegisterInfo::isArgumentRegister(reg)) ||
+            (instruction.opcode() == Opcode::RET &&
+             RegisterInfo::isReturnRegister(reg)))
+            return chain;
+
+        for (MachineOperand &operand : instruction.operands()) {
+            if (!operand.isPhysicalRegister() || operand.isDef ||
+                !RegisterInfo::aliases(operand.physicalRegister(), reg))
+                continue;
+            if (operand.isImplicit || !operand.isRenamable ||
+                operand.tiedTo >= 0 ||
+                operand.regClass() != RegClass::FPR32)
+                return chain;
+            chain.uses.push_back(&operand);
+            chain.end = index;
+        }
+        if (instruction.definesRegister(reg)) {
+            redefined = true;
+            break;
+        }
+    }
+
+    if (!redefined && liveness.liveOut(&block).count(reg))
+        return FPValueChain{};
+    chain.renamable = !chain.uses.empty();
+    return chain;
+}
+
+} // namespace
+
+bool A53FPRegisterBalancing::run(MachineFunction &function) const {
+    if (!function.hasProperty(MachineProperty::NoVRegs))
+        return false;
+
+    MachinePhysicalRegisterLiveness liveness(function);
+    bool changed = false;
+    for (auto &owned : function.blocks()) {
+        MachineBasicBlock &block = *owned;
+        std::vector<MachineInstr *> instructions;
+        instructions.reserve(block.instructions().size());
+        for (MachineInstr &instruction : block.instructions())
+            instructions.push_back(&instruction);
+
+        struct OccupiedRange {
+            PhysReg reg;
+            std::size_t begin;
+            std::size_t end;
+        };
+        std::vector<OccupiedRange> recoloredRanges;
+        int balance = 0;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            MachineInstr &multiply = *instructions[index];
+            if (multiply.opcode() != Opcode::FMULS ||
+                multiply.operands().empty() ||
+                !multiply.operands()[0].isPhysicalRegister() ||
+                !multiply.operands()[0].isDef ||
+                multiply.operands()[0].regClass() != RegClass::FPR32)
+                continue;
+
+            MachineOperand &definition = multiply.operands()[0];
+            PhysReg original = definition.physicalRegister();
+            unsigned originalColor = fpRegisterColor(original);
+            unsigned desiredColor = balance > 0 ? 1U
+                                  : balance < 0 ? 0U
+                                                : originalColor;
+            PhysReg selected = original;
+
+            if (desiredColor != originalColor && !definition.isImplicit &&
+                definition.isRenamable && definition.tiedTo < 0) {
+                FPValueChain chain = findFPValueChain(
+                    block, instructions, index, original, liveness);
+                if (chain.renamable) {
+                    for (PhysReg candidate :
+                         RegisterInfo::allocationOrder(RegClass::FPR32)) {
+                        if (candidate == original ||
+                            !RegisterInfo::isVector(candidate) ||
+                            RegisterInfo::isReserved(candidate) ||
+                            fpRegisterColor(candidate) != desiredColor ||
+                            !samePreservationClass(original, candidate) ||
+                            liveness.isLiveBefore(&multiply, candidate))
+                            continue;
+
+                        bool unavailable = false;
+                        for (std::size_t scan = index; scan <= chain.end;
+                             ++scan)
+                            if (instructionTouchesRegister(
+                                    *instructions[scan], candidate)) {
+                                unavailable = true;
+                                break;
+                            }
+                        if (unavailable)
+                            continue;
+                        for (const OccupiedRange &range : recoloredRanges)
+                            if (range.reg == candidate &&
+                                index <= range.end &&
+                                range.begin <= chain.end) {
+                                unavailable = true;
+                                break;
+                            }
+                        if (unavailable)
+                            continue;
+
+                        selected = candidate;
+                        definition.replacePhysicalRegister(candidate);
+                        for (MachineOperand *use : chain.uses)
+                            use->replacePhysicalRegister(candidate);
+                        recoloredRanges.push_back(
+                            {candidate, index, chain.end});
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            balance += fpRegisterColor(selected) == 0 ? 1 : -1;
         }
     }
     return changed;

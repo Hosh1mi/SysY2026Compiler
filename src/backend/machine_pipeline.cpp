@@ -177,6 +177,13 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
             [&services](MachineFunction &function) {
               return services.copyPropagation.run(function);
             });
+  if (optimize)
+    addPass(pipeline, "A53FPRegisterBalancing",
+            MachinePassStage::PostRegAlloc, allocated,
+            MachineProperty::FrameFinalized,
+            [&services](MachineFunction &function) {
+              return services.fpRegisterBalancing.run(function);
+            });
 
   addPass(pipeline, "AArch64FrameLowering",
           MachinePassStage::FrameFinalization, allocated,
