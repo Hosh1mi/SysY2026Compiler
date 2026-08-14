@@ -12,11 +12,107 @@
 #include <vector>
 
 namespace backend::aarch64 {
+namespace {
+
+using PhysSet = std::unordered_set<PhysReg>;
+using BlockPhysSets = std::unordered_map<MachineBasicBlock *, PhysSet>;
+
+bool readsPhysicalRegister(const MachineInstr &instruction, PhysReg reg) {
+	if (instruction.readsRegister(reg))
+		return true;
+	if (instruction.isCall() && RegisterInfo::isArgumentRegister(reg))
+		return true;
+	return instruction.opcode() == Opcode::RET &&
+	       (RegisterInfo::isReturnRegister(reg) || reg == PhysReg::X30);
+}
+
+BlockPhysSets computePhysicalLiveOut(MachineFunction &function) {
+	BlockPhysSets physicalUses;
+	BlockPhysSets physicalDefs;
+	BlockPhysSets physicalLiveIn;
+	BlockPhysSets physicalLiveOut;
+	auto addUse = [&](MachineBasicBlock *block, PhysReg reg) {
+		if (!physicalDefs[block].count(reg))
+			physicalUses[block].insert(reg);
+	};
+
+	for (auto &owned : function.blocks()) {
+		MachineBasicBlock *block = owned.get();
+		for (const MachineInstr &instruction : block->instructions()) {
+			for (const MachineOperand &operand : instruction.operands())
+				if (operand.isPhysicalRegister() && !operand.isDef)
+					addUse(block, operand.physicalRegister());
+			if (instruction.isCall()) {
+				for (unsigned index = 0; index < 8; ++index) {
+					addUse(block,
+					       RegisterInfo::integerArgumentRegister(index));
+					addUse(block, RegisterInfo::vectorArgumentRegister(index));
+				}
+			} else if (instruction.opcode() == Opcode::RET) {
+				addUse(block, PhysReg::X0);
+				addUse(block, PhysReg::V0);
+				addUse(block, PhysReg::X30);
+			}
+
+			// Uses precede definitions for read/modify/write instructions.
+			for (const MachineOperand &operand : instruction.operands())
+				if (operand.isPhysicalRegister() && operand.isDef)
+					physicalDefs[block].insert(operand.physicalRegister());
+			if (instruction.isCall()) {
+				for (unsigned raw = static_cast<unsigned>(PhysReg::X0);
+				     raw <= static_cast<unsigned>(PhysReg::V31); ++raw) {
+					PhysReg reg = static_cast<PhysReg>(raw);
+					if (RegisterInfo::isCallerSaved(reg))
+						physicalDefs[block].insert(reg);
+				}
+			}
+		}
+	}
+
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (auto block = function.blocks().rbegin();
+		     block != function.blocks().rend(); ++block) {
+			MachineBasicBlock *current = block->get();
+			PhysSet nextOut;
+			for (MachineBasicBlock *successor : current->successors())
+				nextOut.insert(physicalLiveIn[successor].begin(),
+				               physicalLiveIn[successor].end());
+			PhysSet nextIn = physicalUses[current];
+			for (PhysReg reg : nextOut)
+				if (!physicalDefs[current].count(reg))
+					nextIn.insert(reg);
+			if (nextOut != physicalLiveOut[current] ||
+			    nextIn != physicalLiveIn[current]) {
+				physicalLiveOut[current] = std::move(nextOut);
+				physicalLiveIn[current] = std::move(nextIn);
+				changed = true;
+			}
+		}
+	}
+	return physicalLiveOut;
+}
+
+bool isRegisterLiveAfter(MachineBasicBlock::InstrList::const_iterator scan,
+                         MachineBasicBlock::InstrList::const_iterator end,
+                         PhysReg reg, const PhysSet &liveOut) {
+	for (; scan != end; ++scan) {
+		if (readsPhysicalRegister(*scan, reg))
+			return true;
+		if (scan->definesRegister(reg))
+			return false;
+	}
+	return liveOut.count(reg);
+}
+
+} // namespace
 
 bool PostRACopyPropagation::run(MachineFunction &function) const {
 	if (!function.hasProperty(MachineProperty::NoVRegs))
 		return false;
 
+	const BlockPhysSets physicalLiveOut = computePhysicalLiveOut(function);
 	bool changed = false;
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -60,7 +156,10 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
 				    RegisterInfo::aliases(
 				        copy->operands()[0].physicalRegister(), input) &&
 				    RegisterInfo::aliases(
-				        copy->operands()[1].physicalRegister(), temporary)) {
+				        copy->operands()[1].physicalRegister(), temporary) &&
+				    !isRegisterLiveAfter(std::next(copy), instructions.end(),
+				                         temporary,
+				                         physicalLiveOut.at(block.get()))) {
 					producer->operands()[0] = MachineOperand::physReg(
 					    input, producer->operands()[0].regClass(), true);
 					instructions.erase(copy);
@@ -99,71 +198,6 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
 				continue;
 			}
 			++instruction;
-		}
-	}
-
-	using PhysSet = std::unordered_set<PhysReg>;
-	std::unordered_map<MachineBasicBlock *, PhysSet> physicalUses;
-	std::unordered_map<MachineBasicBlock *, PhysSet> physicalDefs;
-	std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveIn;
-	std::unordered_map<MachineBasicBlock *, PhysSet> physicalLiveOut;
-	auto addUse = [&](MachineBasicBlock *block, PhysReg reg) {
-		if (!physicalDefs[block].count(reg))
-			physicalUses[block].insert(reg);
-	};
-	for (auto &owned : function.blocks()) {
-		MachineBasicBlock *block = owned.get();
-		for (const MachineInstr &instruction : block->instructions()) {
-			for (const MachineOperand &operand : instruction.operands()) {
-				if (operand.isPhysicalRegister() && !operand.isDef)
-					addUse(block, operand.physicalRegister());
-			}
-			if (instruction.isCall()) {
-				for (unsigned index = 0; index < 8; ++index) {
-					addUse(block, RegisterInfo::integerArgumentRegister(index));
-					addUse(block, RegisterInfo::vectorArgumentRegister(index));
-				}
-			} else if (instruction.opcode() == Opcode::RET) {
-				addUse(block, PhysReg::X0);
-				addUse(block, PhysReg::V0);
-				addUse(block, PhysReg::X30);
-			}
-			// Uses are collected before definitions so an allocated
-			// read/modify/write such as `add x9, x9, #1` contributes x9 to
-			// the block's live-in set when it is the first mention.
-			for (const MachineOperand &operand : instruction.operands())
-				if (operand.isPhysicalRegister() && operand.isDef)
-					physicalDefs[block].insert(operand.physicalRegister());
-			if (instruction.isCall()) {
-				for (unsigned raw = static_cast<unsigned>(PhysReg::X0);
-				     raw <= static_cast<unsigned>(PhysReg::V31); ++raw) {
-					PhysReg reg = static_cast<PhysReg>(raw);
-					if (RegisterInfo::isCallerSaved(reg))
-						physicalDefs[block].insert(reg);
-				}
-			}
-		}
-	}
-	bool livenessChanged = true;
-	while (livenessChanged) {
-		livenessChanged = false;
-		for (auto block = function.blocks().rbegin();
-		     block != function.blocks().rend(); ++block) {
-			MachineBasicBlock *current = block->get();
-			PhysSet nextOut;
-			for (MachineBasicBlock *successor : current->successors())
-				nextOut.insert(physicalLiveIn[successor].begin(),
-				               physicalLiveIn[successor].end());
-			PhysSet nextIn = physicalUses[current];
-			for (PhysReg reg : nextOut)
-				if (!physicalDefs[current].count(reg))
-					nextIn.insert(reg);
-			if (nextOut != physicalLiveOut[current] ||
-			    nextIn != physicalLiveIn[current]) {
-				physicalLiveOut[current] = std::move(nextOut);
-				physicalLiveIn[current] = std::move(nextIn);
-				livenessChanged = true;
-			}
 		}
 	}
 
@@ -220,7 +254,7 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
 					// block's outgoing edge.  Keep the copy in that case.
 					if (terminatorUsesDestination) {
 						blocked = true;
-					} else if (!physicalLiveOut[block.get()].count(
+					} else if (!physicalLiveOut.at(block.get()).count(
 					               destination) &&
 					           (scan->opcode() != Opcode::RET ||
 					            (!RegisterInfo::isReturnRegister(destination) &&
