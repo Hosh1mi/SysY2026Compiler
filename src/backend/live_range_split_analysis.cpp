@@ -44,11 +44,11 @@ bool isSoleColorBlocker(
 
 std::vector<VReg> independentSpills(
     std::vector<VReg> candidates, const InterferenceGraph &graph,
-    const std::unordered_map<VReg, LiveInterval> &intervalFor) {
+    const std::unordered_map<VReg, const LiveInterval *> &intervalFor) {
   std::sort(candidates.begin(), candidates.end(),
             [&intervalFor](VReg lhs, VReg rhs) {
-              const double lhsCost = intervalFor.at(lhs).spillCost;
-              const double rhsCost = intervalFor.at(rhs).spillCost;
+              const double lhsCost = intervalFor.at(lhs)->spillCost;
+              const double rhsCost = intervalFor.at(rhs)->spillCost;
               return lhsCost != rhsCost ? lhsCost > rhsCost : lhs < rhs;
             });
   std::vector<VReg> independent;
@@ -64,10 +64,10 @@ std::vector<VReg> independentSpills(
 
 double spillBenefit(
     const std::vector<VReg> &spills,
-    const std::unordered_map<VReg, LiveInterval> &intervalFor) {
+    const std::unordered_map<VReg, const LiveInterval *> &intervalFor) {
   double benefit = 0.0;
   for (VReg spill : spills)
-    benefit += intervalFor.at(spill).spillCost;
+    benefit += intervalFor.at(spill)->spillCost;
   return benefit;
 }
 
@@ -93,9 +93,10 @@ LiveRangeSplitPlans LiveRangeSplitAnalysis::analyze(
   if (spills.empty())
     return result;
 
-  std::unordered_map<VReg, LiveInterval> intervalFor;
+  std::unordered_map<VReg, const LiveInterval *> intervalFor;
+  intervalFor.reserve(liveness.intervals.size());
   for (const LiveInterval &interval : liveness.intervals)
-    intervalFor.emplace(interval.reg, interval);
+    intervalFor.emplace(interval.reg, &interval);
 
   std::vector<VReg> assignedRegs;
   assignedRegs.reserve(assignments.size());
@@ -110,7 +111,7 @@ LiveRangeSplitPlans LiveRangeSplitAnalysis::analyze(
 
   std::unordered_map<VReg, LocalSplitPlan> bestLocal;
   for (const auto &[blocker, color] : assignments) {
-    const LiveInterval &blockerInterval = intervalFor.at(blocker);
+    const LiveInterval &blockerInterval = *intervalFor.at(blocker);
     const VRegInfo &blockerInfo = function.registerInfo().get(blocker);
     if (blockerInfo.spillTemporary || blockerInfo.splitGeneration != 0)
       continue;
@@ -164,7 +165,7 @@ LiveRangeSplitPlans LiveRangeSplitAnalysis::analyze(
       std::vector<VReg> helped;
       const MachineSlotRange gap{gapBegin, gapEnd};
       for (VReg spill : spills) {
-        const LiveInterval &spillInterval = intervalFor.at(spill);
+        const LiveInterval &spillInterval = *intervalFor.at(spill);
         if (!intervalInside(spillInterval, gap) ||
             !graph.hasEdge(blocker, spill) ||
             !colorIsLegal(spillInterval, color, forbiddenColors) ||
@@ -184,7 +185,10 @@ LiveRangeSplitPlans LiveRangeSplitAnalysis::analyze(
       if (netBenefit > previousNet)
         bestLocal[blocker] = LocalSplitPlan{
             blocker, block, left.instruction, right.instruction, right.slot,
-            benefit, boundaryCost, std::move(helped)};
+            benefit, boundaryCost,
+            canRematerialize ? rematerialization->second
+                             : RematerializationRecipe{},
+            std::move(helped)};
     }
   }
 

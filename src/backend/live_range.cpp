@@ -141,11 +141,14 @@ const LiveInterval *LivenessResult::find(VReg reg) const {
   return found == intervalIndex.end() ? nullptr : &intervals[found->second];
 }
 
-LivenessResult MachineLiveness::run(MachineFunction &function) const {
-  MachineDominatorTree dominators;
-  dominators.analyze(function);
-  MachineLoopInfo loops;
-  loops.analyze(function, dominators);
+LivenessResult MachineLiveness::run(MachineFunction &function,
+                                    bool refreshLoopInfo) const {
+  if (refreshLoopInfo) {
+    MachineDominatorTree dominators;
+    dominators.analyze(function);
+    MachineLoopInfo loops;
+    loops.analyze(function, dominators);
+  }
 
   LivenessResult result;
   result.slots.number(function);

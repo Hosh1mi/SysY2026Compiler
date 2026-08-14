@@ -31,7 +31,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
     std::vector<VReg> &spills,
     LiveRangeSplitPlans &splitPlans) const {
     splitPlans = {};
-    std::unordered_map<VReg, LiveInterval> intervalFor;
+    std::unordered_map<VReg, const LiveInterval *> intervalFor;
+    intervalFor.reserve(liveness.intervals.size());
     std::unordered_map<VReg, std::unordered_map<VReg, double>>
         affinities;
     std::unordered_map<VReg, VReg> tiedPairs;  // tied use -> def
@@ -41,7 +42,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
     std::unordered_map<VReg, std::vector<PhysReg>> physicalHints;
     ForbiddenColorMap forbiddenColors;
     for (const LiveInterval &interval : liveness.intervals) {
-        intervalFor.emplace(interval.reg, interval);
+        intervalFor.emplace(interval.reg, &interval);
     }
 
     InterferenceGraph graph(liveness.intervals);
@@ -296,8 +297,8 @@ bool GraphColoringRegisterAllocator::colorOnce(
         const bool preferCallerSaved = !function.frameInfo().hasCalls;
         std::vector<VReg> nodes;
         for (const auto &[reg, interval] : intervalFor) {
-            bool isVector = interval.regClass == RegClass::FPR32 ||
-                            interval.regClass == RegClass::NEON128;
+            bool isVector = interval->regClass == RegClass::FPR32 ||
+                            interval->regClass == RegClass::NEON128;
             if (isVector == vectorBank)
                 nodes.push_back(reg);
         }
@@ -311,7 +312,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
         std::set<VReg> lowDegree;
         for (VReg reg : nodes) {
             degree[reg] = graph.degree(reg);
-            const LiveInterval &interval = intervalFor.at(reg);
+            const LiveInterval &interval = *intervalFor.at(reg);
             unsigned availableColors = 0;
             for (PhysReg physical :
                  RegisterInfo::allocationOrder(interval.regClass,
@@ -346,7 +347,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                 for (VReg reg : nodes) {
                     if (!remaining.count(reg))
                         continue;
-                    const LiveInterval &interval = intervalFor.at(reg);
+                    const LiveInterval &interval = *intervalFor.at(reg);
                     double cost =
                         function.registerInfo().get(reg).spillTemporary
                             ? std::numeric_limits<double>::infinity()
@@ -377,7 +378,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
         while (!simplifyStack.empty()) {
             VReg reg = simplifyStack.back();
             simplifyStack.pop_back();
-            const LiveInterval &interval = intervalFor.at(reg);
+            const LiveInterval &interval = *intervalFor.at(reg);
             std::set<PhysReg> unavailable;
             for (VReg neighbor : graph.neighbors(reg)) {
                 auto assigned = assignments.find(neighbor);
@@ -419,7 +420,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                     assignments.count(tiedPartner))
                     return true;
                 const LiveInterval &partnerInterval =
-                    intervalFor.at(tiedPartner);
+                    *intervalFor.at(tiedPartner);
                 if (RegisterInfo::isReserved(physical) ||
                     forbiddenColors[tiedPartner].count(physical) ||
                     (partnerInterval.crossesCall &&
@@ -460,10 +461,12 @@ bool GraphColoringRegisterAllocator::colorOnce(
                     }
             }
             if (selected == PhysReg::NoReg) {
-                std::vector<std::pair<VReg, double>>
-                    weightedAffinities(
-                        affinities[reg].begin(),
-                        affinities[reg].end());
+                std::vector<std::pair<VReg, double>> weightedAffinities;
+                auto regAffinities = affinities.find(reg);
+                if (regAffinities != affinities.end())
+                    weightedAffinities.assign(
+                        regAffinities->second.begin(),
+                        regAffinities->second.end());
                 std::sort(
                     weightedAffinities.begin(),
                     weightedAffinities.end(),
@@ -540,8 +543,11 @@ bool GraphColoringRegisterAllocator::colorOnce(
         auto assigned = assignments.find(reg);
         if (assigned == assignments.end())
             return weight;
+        auto regAffinities = affinities.find(reg);
+        if (regAffinities == affinities.end())
+            return weight;
         for (const auto &[partner, candidateWeight] :
-             affinities[reg]) {
+             regAffinities->second) {
             auto partnerAssignment =
                 assignments.find(partner);
             if (partnerAssignment != assignments.end() &&
@@ -563,7 +569,7 @@ bool GraphColoringRegisterAllocator::colorOnce(
                 continue;
                 auto canRecolor = [&](VReg value, PhysReg color) {
                     const LiveInterval &interval =
-                        intervalFor.at(value);
+                        *intervalFor.at(value);
                     if (RegisterInfo::isReserved(color) ||
                         forbiddenColors[value].count(color) ||
                         (interval.crossesCall &&
@@ -631,7 +637,9 @@ void GraphColoringRegisterAllocator::run(MachineFunction &function) const {
         std::numeric_limits<double>::infinity();
     constexpr unsigned kMaximumAllocationRounds = 64;
     for (unsigned round = 0; round < kMaximumAllocationRounds; ++round) {
-        LivenessResult liveness = analysis.run(function);
+        // Spill and split rewrites do not change the CFG, so loop depth is
+        // invariant across allocation rounds.
+        LivenessResult liveness = analysis.run(function, round == 0);
         std::unordered_map<VReg, PhysReg> assignments;
         std::vector<VReg> spills;
         LiveRangeSplitPlans splitPlans;

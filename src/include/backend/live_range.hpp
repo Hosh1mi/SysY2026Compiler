@@ -81,7 +81,10 @@ struct LivenessResult {
 
 class MachineLiveness {
 public:
-  LivenessResult run(MachineFunction &function) const;
+  // Reuse existing loop depths when only instructions changed since the
+  // previous run; CFG edits require a refresh.
+  LivenessResult run(MachineFunction &function,
+                     bool refreshLoopInfo = true) const;
 };
 
 } // namespace backend::aarch64

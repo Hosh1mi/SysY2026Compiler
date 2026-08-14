@@ -3,6 +3,7 @@
 #pragma once
 
 #include "live_range.hpp"
+#include "rematerialization.hpp"
 
 #include <unordered_map>
 #include <vector>
@@ -17,6 +18,7 @@ struct LocalSplitPlan {
   MachineSlot resumeSlot = 0;
   double estimatedBenefit = 0.0;
   double estimatedCost = 0.0;
+  RematerializationRecipe rematerialization;
   std::vector<VReg> relievedSpills;
 };
 

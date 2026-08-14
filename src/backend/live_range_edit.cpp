@@ -2,12 +2,8 @@
 // rematerialization at the gap boundaries and rewriting the resumed sibling.
 #include "backend/live_range_edit.hpp"
 
-#include "backend/machine_analysis.hpp"
-#include "backend/rematerialization.hpp"
-
 #include <algorithm>
 #include <stdexcept>
-#include <vector>
 
 namespace backend::aarch64 {
 namespace {
@@ -115,14 +111,8 @@ bool LiveRangeEdit::splitLocalGap(
   if (!rewroteUse)
     throw std::logic_error("local live-range split rewrote no uses");
 
-  MachineRegisterIndex registers(function);
-  RematerializationAnalysis rematerializationAnalysis;
-  RematerializationAnalysis::RecipeMap recipes =
-      rematerializationAnalysis.analyze(
-          function, registers, std::vector<VReg>{plan.parent});
-  auto recipe = recipes.find(plan.parent);
-  if (recipe != recipes.end()) {
-    MachineInstr materialized = recipe->second.clone(sibling);
+  if (plan.rematerialization.definition) {
+    MachineInstr materialized = plan.rematerialization.clone(sibling);
     auto inserted = plan.block->instructions().insert(
         resume, std::move(materialized));
     function.registerInfo().setDefinition(sibling, &*inserted);
