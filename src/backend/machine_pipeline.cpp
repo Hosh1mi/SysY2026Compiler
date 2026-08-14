@@ -76,6 +76,8 @@ void addPostPhiOptimizations(MachineFunctionPassManager &pipeline,
 
 } // namespace
 
+// To isolate a pass, remove or restore its addPass or
+// addPreRAOptimization registration below.
 void buildMachinePipeline(MachineFunctionPassManager &pipeline,
                           MachinePipelineServices &services,
                           const BackendOptions &options) {
