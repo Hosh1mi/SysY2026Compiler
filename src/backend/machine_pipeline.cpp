@@ -28,52 +28,6 @@ void addPreRAOptimization(MachineFunctionPassManager &pipeline,
           });
 }
 
-void addMachineSSAOptimizations(MachineFunctionPassManager &pipeline,
-                                MachinePipelineServices &services,
-                                MachineProperty selectedSSA) {
-  addPreRAOptimization(pipeline, services.constantCSE, "MachineConstantCSE",
-                       MachinePassStage::MachineSSA, selectedSSA);
-  addPreRAOptimization(pipeline, services.vectorImmediateSelection,
-                       "AArch64VectorImmediateSelection",
-                       MachinePassStage::MachineSSA, selectedSSA);
-  addPreRAOptimization(pipeline, services.preRAPeephole,
-                       "AArch64PreRAPeephole",
-                       MachinePassStage::MachineSSA, selectedSSA);
-  addPreRAOptimization(pipeline, services.loadStoreOptimization,
-                       "AArch64LoadStoreOptimization",
-                       MachinePassStage::MachineSSA, selectedSSA);
-  addPreRAOptimization(pipeline, services.machineSSALocalSink,
-                       "MachineSSALocalSink", MachinePassStage::MachineSSA,
-                       selectedSSA);
-  addPreRAOptimization(pipeline, services.materializationSink,
-                       "SinglePredecessorMaterializationSink",
-                       MachinePassStage::MachineSSA, selectedSSA);
-}
-
-void addPostPhiOptimizations(MachineFunctionPassManager &pipeline,
-                             MachinePipelineServices &services,
-                             MachineProperty selected) {
-  addPreRAOptimization(pipeline, services.materializationSink,
-                       "PostPhiMaterializationSink",
-                       MachinePassStage::PreRegAlloc, selected);
-
-  // PHI elimination creates edge blocks that act as preheaders for this
-  // narrow constant-only transform.  General LICM belongs in Machine SSA
-  // once loop canonicalization can provide preheaders there.
-  addPass(pipeline, "PostPhiConstantHoisting",
-          MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
-          [&services](MachineFunction &function) {
-            return services.postPhiConstantHoisting.run(function);
-          });
-
-  addPreRAOptimization(pipeline, services.constantCSE,
-                       "MachineConstantCSEAfterHoisting",
-                       MachinePassStage::PreRegAlloc, selected);
-  addPreRAOptimization(pipeline, services.materializationSink,
-                       "PostPhiMaterializationSinkAfterHoisting",
-                       MachinePassStage::PreRegAlloc, selected);
-}
-
 } // namespace
 
 // To isolate a pass, remove or restore its addPass or
@@ -91,7 +45,23 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
   const bool optimize = options.optimizationLevel >= 1;
 
   if (optimize) {
-    addMachineSSAOptimizations(pipeline, services, selectedSSA);
+    addPreRAOptimization(pipeline, services.constantCSE, "MachineConstantCSE",
+                         MachinePassStage::MachineSSA, selectedSSA);
+    addPreRAOptimization(pipeline, services.vectorImmediateSelection,
+                         "AArch64VectorImmediateSelection",
+                         MachinePassStage::MachineSSA, selectedSSA);
+    addPreRAOptimization(pipeline, services.preRAPeephole,
+                         "AArch64PreRAPeephole",
+                         MachinePassStage::MachineSSA, selectedSSA);
+    addPreRAOptimization(pipeline, services.loadStoreOptimization,
+                         "AArch64LoadStoreOptimization",
+                         MachinePassStage::MachineSSA, selectedSSA);
+    addPreRAOptimization(pipeline, services.machineSSALocalSink,
+                         "MachineSSALocalSink", MachinePassStage::MachineSSA,
+                         selectedSSA);
+    addPreRAOptimization(pipeline, services.materializationSink,
+                         "SinglePredecessorMaterializationSink",
+                         MachinePassStage::MachineSSA, selectedSSA);
     addPass(pipeline, "AArch64PreRAAddressingFolder",
             MachinePassStage::MachineSSA, selectedSSA, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
@@ -121,7 +91,26 @@ void buildMachinePipeline(MachineFunctionPassManager &pipeline,
           });
 
   if (optimize) {
-    addPostPhiOptimizations(pipeline, services, selected);
+    addPreRAOptimization(pipeline, services.materializationSink,
+                         "PostPhiMaterializationSink",
+                         MachinePassStage::PreRegAlloc, selected);
+
+    // PHI elimination creates edge blocks that act as preheaders for this
+    // narrow constant-only transform.  General LICM belongs in Machine SSA
+    // once loop canonicalization can provide preheaders there.
+    addPass(pipeline, "PostPhiConstantHoisting",
+            MachinePassStage::PreRegAlloc, selected,
+            MachineProperty::NoVRegs,
+            [&services](MachineFunction &function) {
+              return services.postPhiConstantHoisting.run(function);
+            });
+
+    addPreRAOptimization(pipeline, services.constantCSE,
+                         "MachineConstantCSEAfterHoisting",
+                         MachinePassStage::PreRegAlloc, selected);
+    addPreRAOptimization(pipeline, services.materializationSink,
+                         "PostPhiMaterializationSinkAfterHoisting",
+                         MachinePassStage::PreRegAlloc, selected);
     addPass(pipeline, "AArch64BranchFolding",
             MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
             [&services](MachineFunction &function) {
