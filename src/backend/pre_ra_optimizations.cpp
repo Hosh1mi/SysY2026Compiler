@@ -849,14 +849,19 @@ bool SinglePredecessorMaterializationSink::run(
             instruction->hasSideEffects())
           continue;
         VReg definition = 0;
+        std::unordered_set<VReg> inputs;
         bool valid = true;
         for (const MachineOperand &operand : instruction->operands()) {
           if (operand.isPhysicalRegister()) {
             valid = false;
             break;
           }
-          if (!operand.isVirtualRegister() || !operand.isDef)
+          if (!operand.isVirtualRegister())
             continue;
+          if (!operand.isDef) {
+            inputs.insert(operand.virtualRegister());
+            continue;
+          }
           if (definition) {
             valid = false;
             break;
@@ -879,6 +884,23 @@ bool SinglePredecessorMaterializationSink::run(
             });
         if (insertion == destinationInstructions.end())
           continue;
+
+        // PHI elimination may place new definitions on the edge. Preserve the
+        // reaching definitions seen by the instruction at its original site.
+        auto redefinesInput = [&](const MachineInstr &candidate) {
+          return std::any_of(
+              candidate.operands().begin(), candidate.operands().end(),
+              [&](const MachineOperand &operand) {
+                return operand.isVirtualRegister() && operand.isDef &&
+                       inputs.find(operand.virtualRegister()) != inputs.end();
+              });
+        };
+        if (std::any_of(std::next(instruction), sourceInstructions.end(),
+                        redefinesInput) ||
+            std::any_of(destinationInstructions.begin(), insertion,
+                        redefinesInput))
+          continue;
+
         destinationInstructions.splice(insertion, sourceInstructions,
                                        instruction);
         function.clearProperty(MachineProperty::TracksLiveness);
