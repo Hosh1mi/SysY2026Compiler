@@ -293,6 +293,7 @@ public:
 
 private:
     std::string name_;
+    unsigned nextBlockNumber_ = 0;
     std::vector<std::unique_ptr<MachineBasicBlock>> blocks_;
     MachineRegisterInfo registerInfo_;
     MachineFrameInfo frameInfo_;

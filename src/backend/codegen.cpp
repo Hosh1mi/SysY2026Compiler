@@ -7,12 +7,10 @@
 #include "backend/verifier.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <cstring>
-#include <functional>
-#include <iostream>
-#include <sstream>
 #include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <limits>
 
 namespace backend::aarch64 {
 namespace {
@@ -35,13 +33,6 @@ unsigned log2Alignment(unsigned alignment) {
 	while ((1U << result) < alignment)
 		++result;
 	return result;
-}
-
-Function *calledFunction(Instruction *instruction) {
-	auto *call = dynamic_cast<CallInst *>(instruction);
-	if (!call || call->num_ops() == 0)
-		return nullptr;
-	return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
 bool isAllZeroConstant(Constant *constant) {
@@ -178,38 +169,29 @@ void AArch64Backend::generate() {
 }
 
 void AArch64Backend::emitParallelRuntime() {
-	bool hasParallelFor = false;
+	std::vector<int> bodyIds;
 	for (Function *function : module_->function_list_) {
 		if (function->is_declaration())
 			continue;
 		for (BasicBlock *block : function->basic_blocks_)
 			for (Instruction *instruction : block->instr_list_) {
-				Function *callee = calledFunction(instruction);
-				hasParallelFor |=
-				    callee && callee->name_ == "__sysy_parallel_for";
+				auto *call = dynamic_cast<CallInst *>(instruction);
+				if (!call || call->num_ops() < 2)
+					continue;
+				auto *callee = dynamic_cast<Function *>(
+				    call->get_operand(call->num_ops() - 1));
+				if (!callee || callee->name_ != "__sysy_parallel_for")
+					continue;
+				auto *id = dynamic_cast<ConstantInt *>(call->get_operand(0));
+				if (!id || id->value_ < 0 ||
+				    id->value_ > std::numeric_limits<int>::max())
+					continue;
+				bodyIds.push_back(static_cast<int>(id->value_));
 			}
 	}
-	if (!hasParallelFor)
+	if (bodyIds.empty())
 		return;
 
-	std::vector<int> bodyIds;
-	const std::string prefix = "__sysy_par_body_";
-	for (Function *function : module_->function_list_) {
-		if (function->name_.rfind(prefix, 0) != 0)
-			continue;
-		const std::string suffix = function->name_.substr(prefix.size());
-		if (suffix.empty())
-			continue;
-		bool numeric = true;
-		for (char character : suffix)
-			if (!std::isdigit(static_cast<unsigned char>(character))) {
-				numeric = false;
-				break;
-			}
-		if (!numeric)
-			continue;
-		bodyIds.push_back(std::stoi(suffix));
-	}
 	std::sort(bodyIds.begin(), bodyIds.end());
 	bodyIds.erase(std::unique(bodyIds.begin(), bodyIds.end()), bodyIds.end());
 

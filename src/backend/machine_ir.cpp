@@ -263,9 +263,8 @@ const StackObject &MachineFrameInfo::getObject(int index) const {
 }
 
 MachineBasicBlock &MachineFunction::createBlock(std::string name) {
-	unsigned number = static_cast<unsigned>(blocks_.size());
 	blocks_.push_back(
-	    std::make_unique<MachineBasicBlock>(number, std::move(name)));
+	    std::make_unique<MachineBasicBlock>(nextBlockNumber_++, std::move(name)));
 	return *blocks_.back();
 }
 
