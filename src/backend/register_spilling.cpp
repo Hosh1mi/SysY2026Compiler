@@ -8,22 +8,6 @@
 #include <unordered_set>
 
 namespace backend::aarch64 {
-namespace {
-
-MachineOperand replacementRegister(const MachineOperand &old, VReg reg,
-                                   RegClass regClass) {
-	MachineOperand replacement = MachineOperand::vreg(reg, regClass, old.isDef);
-	replacement.isImplicit = old.isImplicit;
-	replacement.isKill = old.isKill;
-	replacement.isDead = old.isDead;
-	replacement.isUndef = old.isUndef;
-	replacement.isEarlyClobber = old.isEarlyClobber;
-	replacement.isRenamable = old.isRenamable;
-	replacement.tiedTo = old.tiedTo;
-	return replacement;
-}
-
-} // namespace
 
 void GraphColoringRegisterAllocator::insertSpills(
     MachineFunction &function, const std::vector<VReg> &spills,
@@ -97,9 +81,7 @@ void GraphColoringRegisterAllocator::insertSpills(
 				    !spilled.count(operand.virtualRegister()))
 					continue;
 				VReg old = operand.virtualRegister();
-				operand = replacementRegister(
-				    operand, temporaries.at(old),
-				    function.registerInfo().get(old).regClass);
+				operand.replaceVirtualRegister(temporaries.at(old));
 				if (operand.isDef)
 					function.registerInfo().setDefinition(temporaries.at(old),
 					                                      &*it);

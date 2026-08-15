@@ -1,5 +1,4 @@
-// Owns machine-level transform instances and registers them onto a staged
-// MachineFunctionPassManager, mirroring how the mid-end builds its pipeline.
+// Builds the ordered MachineFunction pass list.
 #pragma once
 
 #include "machine_pass_manager.hpp"

@@ -16,7 +16,7 @@ struct BackendOptions {
 
 class AArch64Backend {
 public:
-    AArch64Backend(Module *module, std::ostream &output,
+    AArch64Backend(Module &module, std::ostream &output,
                    BackendOptions options = {})
         : module_(module), output_(output), options_(options) {}
 
@@ -26,7 +26,7 @@ private:
     void emitGlobal(GlobalVariable *global);
     void emitParallelRuntime();
 
-    Module *module_;
+    Module &module_;
     std::ostream &output_;
     BackendOptions options_;
 };

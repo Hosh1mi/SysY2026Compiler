@@ -7,33 +7,12 @@
 #include "backend/verifier.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 
 namespace backend::aarch64 {
 namespace {
-
-unsigned globalTypeSize(Type *type) {
-	return SelectionDAGBuilder::typeSize(type);
-}
-
-unsigned globalTypeAlignment(Type *type) {
-	unsigned size = globalTypeSize(type);
-	if (size >= 16)
-		return 16;
-	if (size >= 8)
-		return 8;
-	return size >= 4 ? 4 : 1;
-}
-
-unsigned log2Alignment(unsigned alignment) {
-	unsigned result = 0;
-	while ((1U << result) < alignment)
-		++result;
-	return result;
-}
 
 bool isAllZeroConstant(Constant *constant) {
 	if (dynamic_cast<ConstantZero *>(constant))
@@ -61,15 +40,9 @@ bool isAllZeroConstant(Constant *constant) {
 	return false;
 }
 
-void emitFloatConstant(std::ostream &output, float value) {
-	std::uint32_t bits = 0;
-	std::memcpy(&bits, &value, sizeof(bits));
-	output << "\t.word 0x" << std::hex << bits << std::dec << '\n';
-}
-
 void emitConstantValue(std::ostream &output, Constant *constant, Type *type) {
 	if (isAllZeroConstant(constant)) {
-		output << "\t.zero " << globalTypeSize(type) << '\n';
+		output << "\t.zero " << SelectionDAGBuilder::typeSize(type) << '\n';
 		return;
 	}
 	if (auto *integer = dynamic_cast<ConstantInt *>(constant)) {
@@ -83,7 +56,9 @@ void emitConstantValue(std::ostream &output, Constant *constant, Type *type) {
 		return;
 	}
 	if (auto *floating = dynamic_cast<ConstantFloat *>(constant)) {
-		emitFloatConstant(output, floating->value_);
+		std::uint32_t bits = 0;
+		std::memcpy(&bits, &floating->value_, sizeof(bits));
+		output << "\t.word 0x" << std::hex << bits << std::dec << '\n';
 		return;
 	}
 	if (auto *array = dynamic_cast<ConstantArray *>(constant)) {
@@ -103,9 +78,6 @@ void emitConstantValue(std::ostream &output, Constant *constant, Type *type) {
 } // namespace
 
 void AArch64Backend::generate() {
-	if (!module_)
-		std::abort();
-
 	SelectionDAGBuilder dagBuilder;
 	DAGLegalizer legalizer;
 	DAGCombiner combiner;
@@ -113,13 +85,12 @@ void AArch64Backend::generate() {
 	MachineVerifier verifier;
 	AArch64AssemblyPrinter printer;
 
-	MachineFunctionPassManager machinePipeline(&verifier,
-	                                           options_.verifyMachineIR);
-	machinePipeline.setDump(options_.dumpMachineIR);
+	MachineFunctionPassManager machinePipeline(
+	    verifier, options_.verifyMachineIR, options_.dumpMachineIR);
 	buildMachinePipeline(machinePipeline, options_);
 
 	output_ << "\t.arch armv8-a\n\t.text\n";
-	for (Function *function : module_->function_list_) {
+	for (Function *function : module_.function_list_) {
 		if (function->is_declaration())
 			continue;
 		function->set_instr_name();
@@ -127,7 +98,7 @@ void AArch64Backend::generate() {
 		legalizer.run(*dag);
 		combiner.run(*dag, options_.optimizationLevel >= 1);
 		if (options_.dumpSelectionDAG)
-			std::cerr << printSelectionDAG(*dag);
+			printSelectionDAG(*dag, std::cerr);
 
 		auto machineFunction = selector.select(*dag);
 		if (options_.verifyMachineIR)
@@ -141,7 +112,7 @@ void AArch64Backend::generate() {
 	std::vector<GlobalVariable *> data;
 	std::vector<GlobalVariable *> bss;
 	std::vector<GlobalVariable *> rodata;
-	for (GlobalVariable *global : module_->global_list_) {
+	for (GlobalVariable *global : module_.global_list_) {
 		if (global->is_const_)
 			rodata.push_back(global);
 		else if (global->init_val_ &&
@@ -170,7 +141,7 @@ void AArch64Backend::generate() {
 
 void AArch64Backend::emitParallelRuntime() {
 	std::vector<int> bodyIds;
-	for (Function *function : module_->function_list_) {
+	for (Function *function : module_.function_list_) {
 		if (function->is_declaration())
 			continue;
 		for (BasicBlock *block : function->basic_blocks_)
@@ -213,15 +184,25 @@ void AArch64Backend::emitParallelRuntime() {
 void AArch64Backend::emitGlobal(GlobalVariable *global) {
 	auto *pointerType = dynamic_cast<PointerType *>(global->type_);
 	Type *valueType = pointerType->contained_;
+	const unsigned size = SelectionDAGBuilder::typeSize(valueType);
+	unsigned alignment = 1;
+	if (size >= 16)
+		alignment = 16;
+	else if (size >= 8)
+		alignment = 8;
+	else if (size >= 4)
+		alignment = 4;
+	unsigned alignmentPower = 0;
+	while ((1U << alignmentPower) < alignment)
+		++alignmentPower;
 	output_ << "\t.global " << global->name_ << '\n'
-	        << "\t.p2align " << log2Alignment(globalTypeAlignment(valueType))
-	        << '\n'
+	        << "\t.p2align " << alignmentPower << '\n'
 	        << global->name_ << ":\n";
 
 	if (global->init_val_)
 		emitConstantValue(output_, global->init_val_, valueType);
 	else
-		output_ << "\t.zero " << globalTypeSize(valueType) << '\n';
+		output_ << "\t.zero " << size << '\n';
 }
 
 } // namespace backend::aarch64

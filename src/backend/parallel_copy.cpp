@@ -1,7 +1,6 @@
 // This file lowers SSA PHIs to parallel virtual copies and resolves their
 // remaining physical-register groups after register allocation.
 #include "backend/regalloc.hpp"
-#include "backend/machine_cfg_edit.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -29,9 +28,44 @@ bool PhiElimination::run(MachineFunction &function) {
 
 	unsigned splitNumber = 0;
 	for (const Edge &edge : edgesToSplit) {
-		MachineBasicBlock &split = MachineCFGEdit::splitEdge(
-		    function, *edge.predecessor, *edge.successor,
+		if (std::find(edge.predecessor->successors().begin(),
+		              edge.predecessor->successors().end(), edge.successor) ==
+		    edge.predecessor->successors().end())
+			std::abort();
+		bool explicitEdge = false;
+		for (const MachineInstr &instruction :
+		     edge.predecessor->instructions()) {
+			if (!instruction.isBranch())
+				continue;
+			for (const MachineOperand &operand : instruction.operands())
+				explicitEdge |=
+				    operand.kind() == MachineOperand::Kind::BasicBlock &&
+				    operand.basicBlock() == edge.successor;
+		}
+		if (!explicitEdge)
+			std::abort();
+
+		MachineBasicBlock &split = function.createBlock(
 		    "phi.edge." + std::to_string(splitNumber++));
+		split.frequency =
+		    std::min(edge.predecessor->frequency, edge.successor->frequency);
+		split.loopDepth =
+		    std::min(edge.predecessor->loopDepth, edge.successor->loopDepth);
+		edge.predecessor->removeSuccessor(edge.successor);
+		edge.predecessor->addSuccessor(&split);
+		split.addSuccessor(edge.successor);
+		for (MachineInstr &instruction : edge.predecessor->instructions()) {
+			if (!instruction.isBranch())
+				continue;
+			for (MachineOperand &operand : instruction.operands())
+				if (operand.kind() == MachineOperand::Kind::BasicBlock &&
+				    operand.basicBlock() == edge.successor)
+					operand = MachineOperand::block(&split);
+		}
+		MachineInstr branch(Opcode::B);
+		branch.addOperand(MachineOperand::block(edge.successor));
+		split.append(std::move(branch));
+		function.clearProperty(MachineProperty::TracksLiveness);
 
 		for (MachineInstr &instruction : edge.successor->instructions()) {
 			if (instruction.opcode() != Opcode::PHI)

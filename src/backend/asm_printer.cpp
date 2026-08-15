@@ -970,11 +970,4 @@ void AArch64AssemblyPrinter::printFunction(const MachineFunction &function,
 	}
 }
 
-std::string
-AArch64AssemblyPrinter::printFunction(const MachineFunction &function) const {
-	std::ostringstream output;
-	printFunction(function, output);
-	return output.str();
-}
-
 } // namespace backend::aarch64

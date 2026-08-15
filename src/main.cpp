@@ -313,7 +313,7 @@ int main(int argc, char **argv) {
             options.dumpPreMachineInstr;
         backendOptions.dumpMachineIR = options.dumpMachineInstr;
         backend::aarch64::AArch64Backend codegen(
-            m.get(), *out, backendOptions);
+            *m, *out, backendOptions);
         codegen.generate();
     } else if (options.printIR) {
         *out << m->print();

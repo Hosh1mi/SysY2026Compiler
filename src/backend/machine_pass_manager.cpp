@@ -4,20 +4,14 @@
 
 #include "backend/verifier.hpp"
 
-#include <chrono>
 #include <cstdlib>
 #include <iostream>
 
 namespace backend::aarch64 {
-namespace {
-
-bool envEnabled(const char *name) { return std::getenv(name) != nullptr; }
-
-} // namespace
 
 MachineFunctionPassManager::MachineFunctionPassManager(
-    const MachineVerifier *verifier, bool verifyEachPass)
-    : verifier_(verifier), verifyEachPass_(verifyEachPass) {}
+    const MachineVerifier &verifier, bool verifyEachPass, bool dump)
+    : verifier_(verifier), verifyEachPass_(verifyEachPass), dump_(dump) {}
 
 void MachineFunctionPassManager::addPass(std::string name,
                                          PassRunner runner) {
@@ -25,33 +19,25 @@ void MachineFunctionPassManager::addPass(std::string name,
 }
 
 void MachineFunctionPassManager::run(MachineFunction &function) const {
-	const bool trace = trace_ || envEnabled("TRACE_MACHINE_PIPELINE");
-	const bool dump = dump_ || envEnabled("DUMP_MACHINE_PIPELINE");
-	const bool profile = envEnabled("PROFILE_MACHINE_PASSES");
+	const bool trace = std::getenv("TRACE_MACHINE_PIPELINE") != nullptr;
+	const bool dump =
+	    dump_ || std::getenv("DUMP_MACHINE_PIPELINE") != nullptr;
 
 	for (const PassEntry &pass : passes_) {
 		if (trace)
 			std::cerr << "[MachinePipeline] " << pass.name << '\n';
-		if (dump)
-			std::cerr << "; *** MIR before " << pass.name << " ***\n"
-			          << printMachineIR(function);
+		if (dump) {
+			std::cerr << "; *** MIR before " << pass.name << " ***\n";
+			printMachineIR(function, std::cerr);
+		}
 
-		const auto start = std::chrono::steady_clock::now();
-		const bool changed = pass.runner(function);
-		const auto end = std::chrono::steady_clock::now();
+		pass.runner(function);
 
-		if (verifyEachPass_ && verifier_)
-			verifier_->verifyOrAbort(function, pass.name);
-		if (dump)
-			std::cerr << "; *** MIR after " << pass.name << " ***\n"
-			          << printMachineIR(function);
-		if (profile) {
-			const auto micros =
-			    std::chrono::duration_cast<std::chrono::microseconds>(end -
-			                                                          start)
-			        .count();
-			std::cerr << "[MachinePassProfile] " << pass.name << ' ' << micros
-			          << " us changed=" << changed << '\n';
+		if (verifyEachPass_)
+			verifier_.verifyOrAbort(function, pass.name);
+		if (dump) {
+			std::cerr << "; *** MIR after " << pass.name << " ***\n";
+			printMachineIR(function, std::cerr);
 		}
 	}
 }

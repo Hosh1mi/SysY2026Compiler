@@ -104,7 +104,6 @@ public:
     bool run(FunctionDAG &functionDAG, bool enableOptimizations) const;
 };
 
-std::string printSelectionDAG(const FunctionDAG &functionDAG);
 void printSelectionDAG(const FunctionDAG &functionDAG, std::ostream &output);
 
 } // namespace backend::aarch64

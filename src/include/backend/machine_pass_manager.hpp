@@ -15,11 +15,8 @@ class MachineFunctionPassManager {
 public:
   typedef bool (*PassRunner)(MachineFunction &);
 
-  explicit MachineFunctionPassManager(const MachineVerifier *verifier,
-                                      bool verifyEachPass);
-
-  void setDump(bool value) { dump_ = value; }
-  void setTrace(bool value) { trace_ = value; }
+  MachineFunctionPassManager(const MachineVerifier &verifier,
+                             bool verifyEachPass, bool dump);
 
   void addPass(std::string name, PassRunner runner);
   void run(MachineFunction &function) const;
@@ -30,10 +27,9 @@ private:
     PassRunner runner;
   };
 
-  const MachineVerifier *verifier_;
+  const MachineVerifier &verifier_;
   bool verifyEachPass_;
-  bool dump_ = false;
-  bool trace_ = false;
+  bool dump_;
   std::vector<PassEntry> passes_;
 };
 

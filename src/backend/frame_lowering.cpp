@@ -74,18 +74,14 @@ void insertStackAdjustment(InstrList &instructions, InstrPosition position,
 	}
 }
 
-unsigned frameRecordSize(const MachineFrameInfo &frame) {
-	return frame.hasCalls ? kStackAlignment : 0;
-}
-
 std::int64_t resolvedFrameOffset(const MachineFrameInfo &frame,
                                  const StackObject &object) {
 	if (!object.fixed)
 		return object.offset;
 	// SP remains stable throughout the body.  Fixed objects therefore sit
 	// above the local frame and the optional return-address record.
-	return static_cast<std::int64_t>(frame.stackSize) + frameRecordSize(frame) +
-	       object.offset;
+	return static_cast<std::int64_t>(frame.stackSize) +
+	       (frame.hasCalls ? kStackAlignment : 0) + object.offset;
 }
 
 struct SavedRegisterGroup {
@@ -94,19 +90,6 @@ struct SavedRegisterGroup {
 	int offset;
 	bool vector;
 };
-
-void appendSavedRegisterGroup(const MachineFrameInfo &frame,
-                              std::vector<SavedRegisterGroup> &groups,
-                              std::size_t firstIndex,
-                              std::optional<std::size_t> secondIndex) {
-	const PhysReg first = frame.savedRegisters[firstIndex];
-	const int offset = frame.savedRegisterOffsets.at(first);
-	const bool vector = isVectorRegister(first);
-	std::optional<PhysReg> second;
-	if (secondIndex)
-		second = frame.savedRegisters[*secondIndex];
-	groups.push_back(SavedRegisterGroup{first, second, offset, vector});
-}
 
 bool canPairSavedRegisters(const MachineFrameInfo &frame,
                            std::size_t firstIndex,
@@ -122,35 +105,35 @@ bool canPairSavedRegisters(const MachineFrameInfo &frame,
 	       !isScaledOffsetEncodable(offset + 8, 8);
 }
 
-bool physicalRegisterLess(PhysReg lhs, PhysReg rhs) {
-	return static_cast<unsigned>(lhs) < static_cast<unsigned>(rhs);
-}
-
 std::vector<SavedRegisterGroup>
 groupSavedRegisters(const MachineFrameInfo &frame, SavedRegisterOrder order) {
 	std::vector<SavedRegisterGroup> groups;
-
 	if (order == SavedRegisterOrder::Save) {
 		for (std::size_t i = 0; i < frame.savedRegisters.size();) {
-			const bool pair =
-			    i + 1 < frame.savedRegisters.size() &&
-			        canPairSavedRegisters(frame, i, i + 1);
-			appendSavedRegisterGroup(
-			    frame, groups, i,
-			    pair ? std::optional<std::size_t>(i + 1) : std::nullopt);
+			const bool pair = i + 1 < frame.savedRegisters.size() &&
+			                  canPairSavedRegisters(frame, i, i + 1);
+			const PhysReg first = frame.savedRegisters[i];
+			std::optional<PhysReg> second;
+			if (pair)
+				second = frame.savedRegisters[i + 1];
+			groups.push_back(SavedRegisterGroup{
+			    first, second, frame.savedRegisterOffsets.at(first),
+			    isVectorRegister(first)});
 			i += pair ? 2 : 1;
 		}
 	} else {
 		for (std::size_t i = frame.savedRegisters.size(); i > 0;) {
-			const bool pair = i >= 2 &&
-			                  canPairSavedRegisters(frame, i - 2, i - 1);
-			if (pair) {
-				appendSavedRegisterGroup(frame, groups, i - 2, i - 1);
-				i -= 2;
-			} else {
-				appendSavedRegisterGroup(frame, groups, i - 1, std::nullopt);
-				--i;
-			}
+			const bool pair =
+			    i >= 2 && canPairSavedRegisters(frame, i - 2, i - 1);
+			const std::size_t firstIndex = pair ? i - 2 : i - 1;
+			const PhysReg first = frame.savedRegisters[firstIndex];
+			std::optional<PhysReg> second;
+			if (pair)
+				second = frame.savedRegisters[i - 1];
+			groups.push_back(SavedRegisterGroup{
+			    first, second, frame.savedRegisterOffsets.at(first),
+			    isVectorRegister(first)});
+			i -= pair ? 2 : 1;
 		}
 	}
 	return groups;
@@ -213,7 +196,7 @@ void AArch64FrameLowering::determineCalleeSaves(
 
 	auto &saved = function.frameInfo().savedRegisters;
 	saved.assign(used.begin(), used.end());
-	std::sort(saved.begin(), saved.end(), physicalRegisterLess);
+	std::sort(saved.begin(), saved.end());
 }
 
 void AArch64FrameLowering::layoutFrame(MachineFunction &function) {

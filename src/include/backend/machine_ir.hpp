@@ -301,7 +301,6 @@ private:
     std::uint32_t properties_ = 0;
 };
 
-std::string printMachineIR(const MachineFunction &function);
 void printMachineIR(const MachineFunction &function, std::ostream &output);
 
 } // namespace backend::aarch64

@@ -6,8 +6,6 @@
 #include <cstring>
 #include <functional>
 #include <set>
-#include <sstream>
-#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -920,12 +918,6 @@ void printSelectionDAG(const FunctionDAG &functionDAG, std::ostream &output) {
 		}
 	}
 	output << "}\n";
-}
-
-std::string printSelectionDAG(const FunctionDAG &functionDAG) {
-	std::ostringstream output;
-	printSelectionDAG(functionDAG, output);
-	return output.str();
 }
 
 } // namespace backend::aarch64

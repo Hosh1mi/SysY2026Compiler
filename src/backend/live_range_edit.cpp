@@ -8,19 +8,6 @@
 namespace backend::aarch64 {
 namespace {
 
-MachineOperand replacementRegister(const MachineOperand &old, VReg reg,
-                                   RegClass regClass) {
-	MachineOperand replacement = MachineOperand::vreg(reg, regClass, old.isDef);
-	replacement.isImplicit = old.isImplicit;
-	replacement.isKill = old.isKill;
-	replacement.isDead = old.isDead;
-	replacement.isUndef = old.isUndef;
-	replacement.isEarlyClobber = old.isEarlyClobber;
-	replacement.isRenamable = old.isRenamable;
-	replacement.tiedTo = old.tiedTo;
-	return replacement;
-}
-
 MachineBasicBlock::InstrList::iterator
 findInstruction(MachineBasicBlock &block, MachineInstr *instruction) {
 	MachineBasicBlock::InstrList::iterator it = block.instructions().begin();
@@ -98,7 +85,7 @@ bool LiveRangeEdit::splitLocalGap(
 		MachineOperand &operand = reference.operand();
 		if (operand.isDef)
 			std::abort();
-		operand = replacementRegister(operand, sibling, parentInfo.regClass);
+		operand.replaceVirtualRegister(sibling);
 		rewroteUse = true;
 	}
 	if (!rewroteUse)

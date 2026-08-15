@@ -429,10 +429,4 @@ void printMachineIR(const MachineFunction &function, std::ostream &output) {
 	output << "# End machine code for function " << function.name() << ".\n";
 }
 
-std::string printMachineIR(const MachineFunction &function) {
-	std::ostringstream output;
-	printMachineIR(function, output);
-	return output.str();
-}
-
 } // namespace backend::aarch64
