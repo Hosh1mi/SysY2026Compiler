@@ -129,6 +129,87 @@ struct LaneSource {
     unsigned lane = 0;
 };
 
+bool combinePackedConstantRemainder(InsertElementInst *root) {
+    auto *vectorType = dynamic_cast<VectorType *>(root->type_);
+    auto *elementType = vectorType
+                            ? dynamic_cast<IntegerType *>(
+                                  vectorType->contained_)
+                            : nullptr;
+    if (!elementType || elementType->num_bits_ != 32 ||
+        vectorType->num_elements_ != VectorWidth)
+        return false;
+
+    std::array<bool, VectorWidth> populated{};
+    Value *sourceVector = nullptr;
+    std::int64_t divisor = 0;
+    unsigned populatedCount = 0;
+    Instruction *expectedUser = nullptr;
+    Value *cursor = root;
+
+    while (auto *insert = dynamic_cast<InsertElementInst *>(cursor)) {
+        if (insert != root && !onlyUsedBy(insert, expectedUser))
+            return false;
+        auto destinationLane = constantLane(insert->get_operand(2));
+        if (!destinationLane)
+            return false;
+
+        if (!populated[*destinationLane]) {
+            auto *remainder = dynamic_cast<BinaryInst *>(
+                insert->get_operand(1));
+            auto *extract = remainder
+                                ? dynamic_cast<ExtractElementInst *>(
+                                      remainder->get_operand(0))
+                                : nullptr;
+            auto *constant = remainder
+                                 ? dynamic_cast<ConstantInt *>(
+                                       remainder->get_operand(1))
+                                 : nullptr;
+            auto sourceLane = extract
+                                  ? constantLane(extract->get_operand(1))
+                                  : std::nullopt;
+            if (!remainder || remainder->op_id_ != Instruction::SRem ||
+                !extract || !constant || !sourceLane ||
+                *sourceLane != *destinationLane ||
+                !onlyUsedBy(remainder, insert) ||
+                constant->value_ <= 1 ||
+                (constant->value_ & (constant->value_ - 1)) == 0)
+                return false;
+
+            if (!sourceVector) {
+                sourceVector = extract->get_operand(0);
+                divisor = constant->value_;
+            } else if (sourceVector != extract->get_operand(0) ||
+                       divisor != constant->value_) {
+                return false;
+            }
+            populated[*destinationLane] = true;
+            ++populatedCount;
+        }
+
+        if (populatedCount == VectorWidth)
+            break;
+        expectedUser = insert;
+        cursor = insert->get_operand(0);
+    }
+
+    if (populatedCount != VectorWidth || !sourceVector ||
+        sourceVector->type_ != root->type_)
+        return false;
+
+    std::vector<Constant *> divisors;
+    divisors.reserve(VectorWidth);
+    for (unsigned lane = 0; lane < VectorWidth; ++lane)
+        divisors.push_back(new ConstantInt(elementType, divisor));
+    auto *divisorVector = new ConstantVector(vectorType, divisors);
+    auto *vectorRemainder = new BinaryInst(
+        vectorType, Instruction::SRem, sourceVector, divisorVector,
+        root->parent_, false);
+    if (!root->parent_->add_instruction_before_inst(vectorRemainder, root))
+        return false;
+    root->replace_all_use_with(vectorRemainder);
+    return true;
+}
+
 bool combineInsertChain(InsertElementInst *root,
                         const VectorizationCostModel &costs) {
     if (!isSupportedVectorType(root->type_))
@@ -262,9 +343,10 @@ bool VectorCombine::runOnFunction(Function *function) {
             if (auto *binary = dynamic_cast<BinaryInst *>(instruction))
                 changed |= combineLaneBinary(binary, costs);
             else if (auto *insert =
-                         dynamic_cast<InsertElementInst *>(instruction))
+                         dynamic_cast<InsertElementInst *>(instruction)) {
+                changed |= combinePackedConstantRemainder(insert);
                 changed |= combineInsertChain(insert, costs);
-            else if (auto *shuffle =
+            } else if (auto *shuffle =
                          dynamic_cast<ShuffleVectorInst *>(instruction))
                 changed |= combineShuffleChain(shuffle, costs);
         }

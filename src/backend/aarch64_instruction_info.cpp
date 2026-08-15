@@ -326,6 +326,8 @@ constexpr std::array<InstrDesc, kOpcodeCount> kDescriptors{{
               false, false, false, false, false, 6, SchedResource::FPALU},
     InstrDesc{Opcode::DUPv4f32, "dup", 1, 2, false, false, false, false, false,
               false, false, false, false, false, 6, SchedResource::FPALU},
+    InstrDesc{Opcode::DUPv16i8, "dup", 1, 2, false, false, false, false, false,
+              false, false, false, false, false, 6, SchedResource::FPALU},
     InstrDesc{Opcode::DUPv4sLane, "dup", 1, 3, false, false, false, false,
               false, false, false, false, false, false, 6,
               SchedResource::FPALU},
@@ -358,12 +360,25 @@ constexpr std::array<InstrDesc, kOpcodeCount> kDescriptors{{
     InstrDesc{Opcode::REV64v4s, "rev64", 1, 2, false, false, false, false,
               false, false, false, false, false, false, 6,
               SchedResource::FPALU},
+    InstrDesc{Opcode::XTNv2i32, "xtn", 1, 2, false, false, false, false, false,
+              false, false, false, false, false, 6, SchedResource::FPALU},
+    InstrDesc{Opcode::XTN2v4i32, "xtn2", 1, 3, false, false, false, false,
+              false, false, false, false, false, false, 6, SchedResource::FPALU,
+              OperandConstraint{1, 0, -1}},
+    InstrDesc{Opcode::ADDv16i8, "add", 1, 3, false, false, false, false, false,
+              false, false, false, false, false, 6, SchedResource::FPALU},
     InstrDesc{Opcode::ADDv4i32, "add", 1, 3, false, false, false, false, false,
               false, false, false, false, false, 6, SchedResource::FPALU},
     InstrDesc{Opcode::SUBv4i32, "sub", 1, 3, false, false, false, false, false,
               false, false, false, false, false, 6, SchedResource::FPALU},
     InstrDesc{Opcode::MULv4i32, "mul", 1, 3, false, false, false, false, false,
               false, false, false, false, false, 6, SchedResource::FPMulDiv},
+    InstrDesc{Opcode::SMULLv2i64, "smull", 1, 3, false, false, false, false,
+              false, false, false, false, false, false, 6,
+              SchedResource::FPMulDiv},
+    InstrDesc{Opcode::SMULL2v2i64, "smull2", 1, 3, false, false, false, false,
+              false, false, false, false, false, false, 6,
+              SchedResource::FPMulDiv},
     InstrDesc{Opcode::SMINv4i32, "smin", 1, 3, false, false, false, false,
               false, false, false, false, false, false, 6,
               SchedResource::FPALU},
@@ -384,6 +399,9 @@ constexpr std::array<InstrDesc, kOpcodeCount> kDescriptors{{
               false, false, false, false, false, false, 6,
               SchedResource::FPALU},
     InstrDesc{Opcode::USHRiv4i32, "ushr", 1, 3, false, false, false, false,
+              false, false, false, false, false, false, 6,
+              SchedResource::FPALU},
+    InstrDesc{Opcode::SSHRiv2i64, "sshr", 1, 3, false, false, false, false,
               false, false, false, false, false, false, 6,
               SchedResource::FPALU},
     InstrDesc{Opcode::MLAv4i32, "mla", 1, 4, false, false, false, false, false,
@@ -620,6 +638,7 @@ constexpr std::array<ImmediateConstraint, kOpcodeCount> kImmediateConstraints{{
     ImmediateConstraint::None,      // UXTW
     ImmediateConstraint::None,      // DUPv4i32
     ImmediateConstraint::None,      // DUPv4f32
+    ImmediateConstraint::None,      // DUPv16i8
     ImmediateConstraint::None,      // DUPv4sLane
     ImmediateConstraint::None,      // INSv4i32
     ImmediateConstraint::None,      // INSv4f32
@@ -633,9 +652,14 @@ constexpr std::array<ImmediateConstraint, kOpcodeCount> kImmediateConstraints{{
     ImmediateConstraint::None,      // TRN2v4s
     ImmediateConstraint::None,      // EXTv16b
     ImmediateConstraint::None,      // REV64v4s
+    ImmediateConstraint::None,      // XTNv2i32
+    ImmediateConstraint::None,      // XTN2v4i32
+    ImmediateConstraint::None,      // ADDv16i8
     ImmediateConstraint::None,      // ADDv4i32
     ImmediateConstraint::None,      // SUBv4i32
     ImmediateConstraint::None,      // MULv4i32
+    ImmediateConstraint::None,      // SMULLv2i64
+    ImmediateConstraint::None,      // SMULL2v2i64
     ImmediateConstraint::None,      // SMINv4i32
     ImmediateConstraint::None,      // SMAXv4i32
     ImmediateConstraint::None,      // NEGv4i32
@@ -644,6 +668,7 @@ constexpr std::array<ImmediateConstraint, kOpcodeCount> kImmediateConstraints{{
     ImmediateConstraint::None,      // SHLiv4i32
     ImmediateConstraint::None,      // SSHRiv4i32
     ImmediateConstraint::None,      // USHRiv4i32
+    ImmediateConstraint::None,      // SSHRiv2i64
     ImmediateConstraint::None,      // MLAv4i32
     ImmediateConstraint::None,      // MLSv4i32
     ImmediateConstraint::None,      // ADDv4f32
@@ -830,6 +855,7 @@ constexpr std::array<bool, kOpcodeCount> kCommutable{{
     false, // UXTW
     false, // DUPv4i32
     false, // DUPv4f32
+    false, // DUPv16i8
     false, // DUPv4sLane
     false, // INSv4i32
     false, // INSv4f32
@@ -843,9 +869,14 @@ constexpr std::array<bool, kOpcodeCount> kCommutable{{
     false, // TRN2v4s
     false, // EXTv16b
     false, // REV64v4s
+    false, // XTNv2i32
+    false, // XTN2v4i32
+    true,  // ADDv16i8
     true,  // ADDv4i32
     false, // SUBv4i32
     true,  // MULv4i32
+    false, // SMULLv2i64
+    false, // SMULL2v2i64
     true,  // SMINv4i32
     true,  // SMAXv4i32
     false, // NEGv4i32
@@ -854,6 +885,7 @@ constexpr std::array<bool, kOpcodeCount> kCommutable{{
     false, // SHLiv4i32
     false, // SSHRiv4i32
     false, // USHRiv4i32
+    false, // SSHRiv2i64
     false, // MLAv4i32
     false, // MLSv4i32
     true,  // ADDv4f32
@@ -1040,6 +1072,7 @@ constexpr std::array<unsigned, kOpcodeCount> kRematerializationCosts{{
     0, // UXTW
     0, // DUPv4i32
     0, // DUPv4f32
+    0, // DUPv16i8
     0, // DUPv4sLane
     0, // INSv4i32
     0, // INSv4f32
@@ -1053,9 +1086,14 @@ constexpr std::array<unsigned, kOpcodeCount> kRematerializationCosts{{
     0, // TRN2v4s
     0, // EXTv16b
     0, // REV64v4s
+    0, // XTNv2i32
+    0, // XTN2v4i32
+    0, // ADDv16i8
     0, // ADDv4i32
     0, // SUBv4i32
     0, // MULv4i32
+    0, // SMULLv2i64
+    0, // SMULL2v2i64
     0, // SMINv4i32
     0, // SMAXv4i32
     0, // NEGv4i32
@@ -1064,6 +1102,7 @@ constexpr std::array<unsigned, kOpcodeCount> kRematerializationCosts{{
     0, // SHLiv4i32
     0, // SSHRiv4i32
     0, // USHRiv4i32
+    0, // SSHRiv2i64
     0, // MLAv4i32
     0, // MLSv4i32
     0, // ADDv4f32
@@ -1100,7 +1139,7 @@ std::size_t opcodeIndex(Opcode opcode) {
 	return index < kOpcodeCount ? index : 0;
 }
 
-static_assert(kOpcodeCount == 207, "generated opcode table is incomplete");
+static_assert(kOpcodeCount == 214, "generated opcode table is incomplete");
 
 } // namespace
 

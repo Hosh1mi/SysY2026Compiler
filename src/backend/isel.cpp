@@ -374,6 +374,97 @@ struct SignedConstantDivisionEmitter {
 	}
 };
 
+struct SignedVectorConstantRemainderEmitter {
+	InstructionSelectionContext &selection;
+	VectorConstantEmitter &constants;
+	MachineRegisterInfo &registerInfo;
+
+	MachineOperand emitSplat(MachineBasicBlock &block, std::int32_t value) {
+		VReg reg = selection.createVReg(ValueType::V4I32);
+		const std::uint32_t bits = static_cast<std::uint32_t>(value);
+		constants.emit(
+		    block, MachineOperand::vreg(reg, RegClass::NEON128, true),
+		    {bits, bits, bits, bits});
+		return MachineOperand::vreg(reg, RegClass::NEON128);
+	}
+
+	MachineOperand emitProductHigh(MachineBasicBlock &block,
+	                               MachineOperand numerator,
+	                               MachineOperand multiplier) {
+		MachineOperand lowProduct = selection.emitBinary(
+		    block, Opcode::SMULLv2i64, ValueType::V4I32, numerator,
+		    multiplier);
+		MachineOperand highProduct = selection.emitBinary(
+		    block, Opcode::SMULL2v2i64, ValueType::V4I32, numerator,
+		    multiplier);
+		MachineOperand lowHigh = selection.emitUnary(
+		    block, Opcode::SSHRiv2i64, ValueType::V4I32, lowProduct, 32);
+		MachineOperand highHigh = selection.emitUnary(
+		    block, Opcode::SSHRiv2i64, ValueType::V4I32, highProduct, 32);
+
+		VReg lowLanes = selection.createVReg(ValueType::V4I32);
+		MachineInstr narrowLow(Opcode::XTNv2i32);
+		narrowLow
+		    .addOperand(MachineOperand::vreg(lowLanes, RegClass::NEON128, true))
+		    .addOperand(lowHigh);
+		MachineInstr &lowDefinition =
+		    selection.emit(block, std::move(narrowLow));
+		registerInfo.setDefinition(lowLanes, &lowDefinition);
+
+		VReg lanes = selection.createVReg(ValueType::V4I32);
+		MachineInstr narrowHigh(Opcode::XTN2v4i32);
+		narrowHigh
+		    .addOperand(MachineOperand::vreg(lanes, RegClass::NEON128, true))
+		    .addOperand(MachineOperand::vreg(lowLanes, RegClass::NEON128))
+		    .addOperand(highHigh);
+		narrowHigh.operands()[1].tiedTo = 0;
+		MachineInstr &highDefinition =
+		    selection.emit(block, std::move(narrowHigh));
+		registerInfo.setDefinition(lanes, &highDefinition);
+		return MachineOperand::vreg(lanes, RegClass::NEON128);
+	}
+
+	bool emit(MachineBasicBlock &block, MachineOperand destination,
+	          MachineOperand numerator, std::int32_t divisor,
+	          SDNode *definition) {
+		division::SignedDivisorInfo info =
+		    division::analyzeSignedDivisor(divisor);
+		if (divisor <= 1 || !info.usesMagic())
+			return false;
+
+		division::MagicNumber magic = division::computeSignedMagic(divisor);
+		if (magic.strategy == division::MagicStrategy::MultiplySubShift)
+			return false;
+		MachineOperand multiplier = emitSplat(block, magic.multiplier);
+		MachineOperand quotient =
+		    emitProductHigh(block, numerator, multiplier);
+		if (magic.strategy == division::MagicStrategy::MultiplyAddShift)
+			quotient = selection.emitBinary(block, Opcode::ADDv4i32,
+			                                ValueType::V4I32, quotient,
+			                                numerator);
+		if (magic.shift)
+			quotient = selection.emitUnary(block, Opcode::SSHRiv4i32,
+			                               ValueType::V4I32, quotient,
+			                               magic.shift);
+		MachineOperand sign = selection.emitUnary(
+		    block, Opcode::USHRiv4i32, ValueType::V4I32, quotient, 31);
+		quotient = selection.emitBinary(block, Opcode::ADDv4i32,
+		                                ValueType::V4I32, quotient, sign);
+		MachineOperand modulus = emitSplat(block, divisor);
+
+		MachineInstr remainder(Opcode::MLSv4i32);
+		remainder.addOperand(destination)
+		    .addOperand(numerator)
+		    .addOperand(quotient)
+		    .addOperand(modulus);
+		remainder.operands()[0].isEarlyClobber = true;
+		remainder.operands()[1].tiedTo = 0;
+		selection.emitFinal(block, std::move(remainder), destination,
+		                    definition);
+		return true;
+	}
+};
+
 MachineOperand emitXTemporary(InstructionSelectionContext &selection,
                                MachineRegisterInfo &registerInfo,
                                MachineBasicBlock &block, Opcode opcode,
@@ -612,6 +703,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 	SignedConstantDivisionEmitter signedDivision{selection};
 	VectorConstantEmitter vectorConstants{selection, *machineFunction,
 	                                      registerInfo};
+	SignedVectorConstantRemainderEmitter signedVectorRemainder{
+	    selection, vectorConstants, registerInfo};
 	unsigned nextParallelCopyGroup = 1;
 	const unsigned entryArgumentCopyGroup = nextParallelCopyGroup++;
 
@@ -656,10 +749,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 		}
 	}
 
-	std::optional<int> dynamicExtractSlot;
 	for (BasicBlock *sourceBlock : functionDAG.blockOrder) {
 		MachineBasicBlock &block = *blocks.at(sourceBlock);
-		std::optional<VReg> dynamicExtractBase;
 		for (const auto &owned : functionDAG.blocks.at(sourceBlock)->nodes()) {
 			SDNode &node = *owned;
 			const generated::SelectionMode selectionMode =
@@ -1201,8 +1292,26 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 			}
 			case generated::CustomSelector::SRem:
 			case generated::CustomSelector::URem: {
-				bool integer64 = node.resultTypes().front() == ValueType::I64;
+				ValueType resultType = node.resultTypes().front();
+				bool integer64 = resultType == ValueType::I64;
+				bool integerVector = resultType == ValueType::V4I32;
 				SDNode *rhs = node.operands()[1].node;
+				if (integerVector) {
+					bool splat = node.opcode() == SDOpcode::SRem && rhs &&
+					             rhs->opcode() == SDOpcode::Constant &&
+					             rhs->shuffleMask.size() == 4;
+					for (unsigned lane = 1;
+					     splat && lane < rhs->shuffleMask.size(); ++lane)
+						splat = rhs->shuffleMask[lane] == rhs->shuffleMask[0];
+					if (!splat ||
+					    !signedVectorRemainder.emit(
+					        block, selection.makeDef(node),
+					        selection.makeUse(node.operands()[0]),
+					        static_cast<std::int32_t>(rhs->shuffleMask[0]),
+					        &node))
+						std::abort();
+					break;
+				}
 				if (!integer64 && node.opcode() == SDOpcode::SRem && rhs &&
 				    rhs->opcode() == SDOpcode::Constant) {
 					auto divisor = static_cast<std::int32_t>(rhs->integer);
@@ -1797,59 +1906,70 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 			case generated::CustomSelector::ExtractElement: {
 				SDNode *index = node.operands()[1].node;
 				if (!index || index->opcode() != SDOpcode::Constant) {
-					if (!dynamicExtractSlot)
-						dynamicExtractSlot =
-						    machineFunction->frameInfo().createStackObject(
-						        16, 16, false);
-					MachineInstr spill(Opcode::SPILL_STORE);
-					spill.addOperand(selection.makeUse(node.operands()[0]))
-					    .addOperand(
-					        MachineOperand::frameIndex(*dynamicExtractSlot));
-					spill.addMemoryOperand(MachineMemOperand{
-					    MachineMemOperand::Access::Store, 16, 16, nullptr,
-					    *dynamicExtractSlot, 0, true});
-					selection.emit(block, std::move(spill));
-
-					if (!dynamicExtractBase) {
-						dynamicExtractBase =
-						    selection.createVReg(ValueType::Ptr);
-						MachineInstr lea(Opcode::LEA_FRAME);
-						lea.addOperand(MachineOperand::vreg(*dynamicExtractBase,
-						                                    RegClass::GPR64,
-						                                    true))
-						    .addOperand(MachineOperand::frameIndex(
-						        *dynamicExtractSlot));
-						MachineInstr &baseDefinition =
-						    selection.emit(block, std::move(lea));
-						registerInfo.setDefinition(*dynamicExtractBase,
-						                           &baseDefinition);
-					}
-
-					VReg address = selection.createVReg(ValueType::Ptr);
-					MachineInstr add(Opcode::ADDXrs);
-					add.addOperand(
-					       MachineOperand::vreg(address, RegClass::GPR64, true))
-					    .addOperand(MachineOperand::vreg(*dynamicExtractBase,
-					                                     RegClass::GPR64))
+					VReg byteOffset = selection.createVReg(ValueType::I32);
+					MachineInstr shift(Opcode::LSLWri);
+					shift
+					    .addOperand(MachineOperand::vreg(
+					        byteOffset, RegClass::GPR32, true))
 					    .addOperand(selection.makeUse(node.operands()[1]))
-					    .addOperand(MachineOperand::immediate(2))
-					    .addOperand(MachineOperand::immediate(1));
-					MachineInstr &addressDefinition =
-					    selection.emit(block, std::move(add));
-					registerInfo.setDefinition(address, &addressDefinition);
+					    .addOperand(MachineOperand::immediate(2));
+					MachineInstr &shiftDefinition =
+					    selection.emit(block, std::move(shift));
+					registerInfo.setDefinition(byteOffset, &shiftDefinition);
 
-					MachineInstr load(node.resultTypes().front() ==
-					                          ValueType::F32
-					                      ? Opcode::LDRSui
-					                      : Opcode::LDRWui);
-					load.addOperand(selection.makeDef(node))
-					    .addOperand(
-					        MachineOperand::vreg(address, RegClass::GPR64))
+					VReg offsets = selection.createVReg(ValueType::V4I32);
+					MachineInstr duplicate(Opcode::DUPv16i8);
+					duplicate
+					    .addOperand(MachineOperand::vreg(
+					        offsets, RegClass::NEON128, true))
+					    .addOperand(MachineOperand::vreg(
+					        byteOffset, RegClass::GPR32));
+					MachineInstr &duplicateDefinition =
+					    selection.emit(block, std::move(duplicate));
+					registerInfo.setDefinition(offsets, &duplicateDefinition);
+
+					VReg indices = selection.createVReg(ValueType::V4I32);
+					// The low word selects one 32-bit lane. Indices 0x10 and
+					// above are outside the table and zero-fill unused bytes.
+					vectorConstants.emit(
+					    block,
+					    MachineOperand::vreg(indices, RegClass::NEON128, true),
+					    {0x03020100U, 0x10101010U, 0x10101010U,
+					     0x10101010U});
+
+					VReg adjusted = selection.createVReg(ValueType::V4I32);
+					MachineInstr add(Opcode::ADDv16i8);
+					add.addOperand(MachineOperand::vreg(
+					                   adjusted, RegClass::NEON128, true))
+					    .addOperand(MachineOperand::vreg(indices,
+					                                     RegClass::NEON128))
+					    .addOperand(MachineOperand::vreg(offsets,
+					                                     RegClass::NEON128));
+					MachineInstr &addDefinition =
+					    selection.emit(block, std::move(add));
+					registerInfo.setDefinition(adjusted, &addDefinition);
+
+					VReg selected = selection.createVReg(ValueType::V4I32);
+					MachineInstr lookup(Opcode::TBL1v16i8);
+					lookup
+					    .addOperand(MachineOperand::vreg(
+					        selected, RegClass::NEON128, true))
+					    .addOperand(selection.makeUse(node.operands()[0]))
+					    .addOperand(MachineOperand::vreg(
+					        adjusted, RegClass::NEON128));
+					MachineInstr &lookupDefinition =
+					    selection.emit(block, std::move(lookup));
+					registerInfo.setDefinition(selected, &lookupDefinition);
+
+					MachineInstr extract(
+					    node.resultTypes().front() == ValueType::F32
+					        ? Opcode::EXTRACTv4f32
+					        : Opcode::EXTRACTv4i32);
+					extract.addOperand(selection.makeDef(node))
+					    .addOperand(MachineOperand::vreg(
+					        selected, RegClass::NEON128))
 					    .addOperand(MachineOperand::immediate(0));
-					load.addMemoryOperand(MachineMemOperand{
-					    MachineMemOperand::Access::Load, 4, 4, nullptr,
-					    *dynamicExtractSlot, std::nullopt, true});
-					selection.emit(block, std::move(load), &node);
+					selection.emit(block, std::move(extract), &node);
 					break;
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks))
@@ -2025,10 +2145,6 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				break;
 			}
 			case generated::CustomSelector::Call: {
-				// A shared frame address is cheap within a call-free region,
-				// but keeping it live across a call can force an otherwise
-				// unnecessary callee-saved register or spill.
-				dynamicExtractBase.reset();
 				unsigned integerIndex = 0;
 				unsigned floatIndex = 0;
 				unsigned outgoingStackSize = 0;

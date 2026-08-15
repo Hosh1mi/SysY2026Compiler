@@ -734,6 +734,10 @@ void printInstruction(const MachineFunction &function,
 		               : registerName(operands[1]))
 		       << '\n';
 		break;
+	case Opcode::DUPv16i8:
+		output << "\tdup " << registerName(operands[0]) << ".16b, "
+		       << registerName(operands[1]) << '\n';
+		break;
 	case Opcode::DUPv4sLane:
 		if (operands.size() != 3 ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
@@ -765,6 +769,22 @@ void printInstruction(const MachineFunction &function,
 		       << registerName(operands[1]) << ".s[" << operands[2].immediate()
 		       << "]\n";
 		break;
+	case Opcode::XTNv2i32:
+		output << "\txtn " << registerName(operands[0]) << ".2s, "
+		       << registerName(operands[1]) << ".2d\n";
+		break;
+	case Opcode::XTN2v4i32:
+		if (!RegisterInfo::aliases(operands[0].physicalRegister(),
+		                           operands[1].physicalRegister()))
+			std::abort();
+		output << "\txtn2 " << registerName(operands[0]) << ".4s, "
+		       << registerName(operands[2]) << ".2d\n";
+		break;
+	case Opcode::ADDv16i8:
+		output << "\tadd " << registerName(operands[0]) << ".16b, "
+		       << registerName(operands[1]) << ".16b, "
+		       << registerName(operands[2]) << ".16b\n";
+		break;
 	case Opcode::ADDv4i32:
 	case Opcode::ADDv4f32:
 	case Opcode::SUBv4i32:
@@ -787,6 +807,19 @@ void printInstruction(const MachineFunction &function,
 		       << ' ' << vectorView(operands[0]) << ", "
 		       << vectorView(operands[1]) << ", " << vectorView(operands[2])
 		       << '\n';
+		break;
+	case Opcode::SMULLv2i64:
+	case Opcode::SMULL2v2i64:
+		output << '\t'
+		       << (instruction.opcode() == Opcode::SMULLv2i64 ? "smull"
+		                                                        : "smull2")
+		       << ' ' << registerName(operands[0]) << ".2d, "
+		       << registerName(operands[1])
+		       << (instruction.opcode() == Opcode::SMULLv2i64 ? ".2s, "
+		                                                        : ".4s, ")
+		       << registerName(operands[2])
+		       << (instruction.opcode() == Opcode::SMULLv2i64 ? ".2s\n"
+		                                                        : ".4s\n");
 		break;
 	case Opcode::NEGv4i32:
 	case Opcode::NEGv4f32:
@@ -854,6 +887,11 @@ void printInstruction(const MachineFunction &function,
 		       << ' ' << vectorView(operands[0]) << ", "
 		       << vectorView(operands[1]) << ", #" << operands[2].immediate()
 		       << '\n';
+		break;
+	case Opcode::SSHRiv2i64:
+		output << "\tsshr " << registerName(operands[0]) << ".2d, "
+		       << registerName(operands[1]) << ".2d, #"
+		       << operands[2].immediate() << '\n';
 		break;
 	case Opcode::MLAv4i32:
 	case Opcode::MLSv4i32:

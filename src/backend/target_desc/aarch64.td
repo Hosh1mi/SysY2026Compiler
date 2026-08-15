@@ -169,6 +169,7 @@ instruction UXTW { mnemonic = "uxtw"; defs = 1; operands = 2; }
 // Vector construction and lane operations.
 instruction DUPv4i32 { mnemonic = "dup"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
 instruction DUPv4f32 { mnemonic = "dup"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
+instruction DUPv16i8 { mnemonic = "dup"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
 instruction DUPv4sLane { mnemonic = "dup"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction INSv4i32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
 instruction INSv4f32 { mnemonic = "ins"; defs = 1; operands = 4; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
@@ -182,11 +183,16 @@ instruction TRN1v4s { mnemonic = "trn1"; defs = 1; operands = 3; latency = 6; re
 instruction TRN2v4s { mnemonic = "trn2"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction EXTv16b { mnemonic = "ext"; defs = 1; operands = 4; latency = 6; resource = FPALU; }
 instruction REV64v4s { mnemonic = "rev64"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
+instruction XTNv2i32 { mnemonic = "xtn"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
+instruction XTN2v4i32 { mnemonic = "xtn2"; defs = 1; operands = 3; latency = 6; resource = FPALU; tied_use = 1; tied_def = 0; }
 
 // Vector arithmetic and permutation.
+instruction ADDv16i8 { mnemonic = "add"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }
 instruction ADDv4i32 { mnemonic = "add"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }
 instruction SUBv4i32 { mnemonic = "sub"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction MULv4i32 { mnemonic = "mul"; defs = 1; operands = 3; latency = 6; resource = FPMulDiv; properties = [commutable]; }
+instruction SMULLv2i64 { mnemonic = "smull"; defs = 1; operands = 3; latency = 6; resource = FPMulDiv; }
+instruction SMULL2v2i64 { mnemonic = "smull2"; defs = 1; operands = 3; latency = 6; resource = FPMulDiv; }
 instruction SMINv4i32 { mnemonic = "smin"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }
 instruction SMAXv4i32 { mnemonic = "smax"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }
 instruction NEGv4i32 { mnemonic = "neg"; defs = 1; operands = 2; latency = 6; resource = FPALU; }
@@ -195,6 +201,7 @@ instruction USHLv4i32 { mnemonic = "ushl"; defs = 1; operands = 3; latency = 6; 
 instruction SHLiv4i32 { mnemonic = "shl"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction SSHRiv4i32 { mnemonic = "sshr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction USHRiv4i32 { mnemonic = "ushr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
+instruction SSHRiv2i64 { mnemonic = "sshr"; defs = 1; operands = 3; latency = 6; resource = FPALU; }
 instruction MLAv4i32 { mnemonic = "mla"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; early_clobber_def = 0; }
 instruction MLSv4i32 { mnemonic = "mls"; defs = 1; operands = 4; latency = 6; resource = FPMulDiv; tied_use = 1; tied_def = 0; early_clobber_def = 0; }
 instruction ADDv4f32 { mnemonic = "add"; defs = 1; operands = 3; latency = 6; resource = FPALU; properties = [commutable]; }

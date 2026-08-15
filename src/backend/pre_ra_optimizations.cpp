@@ -460,6 +460,7 @@ bool MachineExpressionCSE::run(MachineFunction &function) {
 	// Keep CSE inside a small scheduling window until pressure-aware global
 	// value numbering is available.
 	constexpr unsigned kMaxReuseDistance = 8;
+	constexpr unsigned kMaxDivideReuseDistance = 32;
 
 	bool changed = false;
 	MachineRegisterIndex registers(function);
@@ -491,6 +492,12 @@ bool MachineExpressionCSE::run(MachineFunction &function) {
 			       !(result->isDef && result->isVirtualRegister()))
 				++result;
 			VReg duplicate = result->virtualRegister();
+			const bool divide = key->opcode == Opcode::SDIVWrr ||
+			                    key->opcode == Opcode::UDIVWrr ||
+			                    key->opcode == Opcode::SDIVXrr ||
+			                    key->opcode == Opcode::UDIVXrr;
+			const unsigned maxReuseDistance =
+			    divide ? kMaxDivideReuseDistance : kMaxReuseDistance;
 			auto canonical = available.find(*key);
 			if (canonical == available.end()) {
 				available.emplace(std::move(*key),
@@ -499,7 +506,7 @@ bool MachineExpressionCSE::run(MachineFunction &function) {
 				++instruction;
 				continue;
 			}
-			if (ordinal - canonical->second.ordinal > kMaxReuseDistance) {
+			if (ordinal - canonical->second.ordinal > maxReuseDistance) {
 				canonical->second = AvailableExpression{duplicate, ordinal};
 				++ordinal;
 				++instruction;

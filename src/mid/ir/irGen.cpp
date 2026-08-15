@@ -615,15 +615,6 @@ static ScalarizedVectorValue *scalarizedVectorUnary(GenIR *gen,
     return new ScalarizedVectorValue(resultType, std::move(lanes));
 }
 
-static Value *vectorLanePointer(GenIR *gen, Value *vectorPointer,
-                                Value *index, VectorType *type) {
-    Type *elementPointerType =
-        gen->module->get_pointer_type(type->contained_);
-    Value *elements = gen->builder->create_bitcast(vectorPointer,
-                                                   elementPointerType);
-    return gen->builder->create_gep(elements, {index});
-}
-
 // 在函数内创建带语义名的基本块；同名冲突时加数字后缀（if.then → if.then1）。
 static BasicBlock *createNamedBB(Module *m, Function *func,
                                  const std::string &base) {
@@ -2134,11 +2125,8 @@ void GenIR::visit(LValueAST &ast) {
             }
             recentVal = constantVector->elements_[constantIndex->value_];
         } else {
-            auto *slot = builder->create_alloca(constantVector->type_);
-            builder->create_store(constantVector, slot);
-            auto *type = static_cast<VectorType *>(constantVector->type_);
-            Value *lanePointer = vectorLanePointer(this, slot, recentVal, type);
-            recentVal = builder->create_load(lanePointer);
+            recentVal = new ExtractElementInst(constantVector, recentVal,
+                                               builder->BB_);
         }
         return;
     }
@@ -2187,12 +2175,6 @@ void GenIR::visit(LValueAST &ast) {
              (unsigned)constantIndex->value_ >= type->num_elements_)) {
             std::cerr << "constant vector lane index is out of range\n";
             std::exit(1);
-        }
-        if (!constantIndex) {
-            Value *lanePointer = vectorLanePointer(this, var, index, type);
-            recentVal = isTrueLVal ? lanePointer
-                                   : (Value *)builder->create_load(lanePointer);
-            return;
         }
         if (isTrueLVal) {
             vectorLaneBase = var;
@@ -2277,14 +2259,6 @@ void GenIR::visit(LValueAST &ast) {
                      vectorType->num_elements_)) {
                 std::cerr << "constant vector lane index is out of range\n";
                 std::exit(1);
-            }
-            if (!constantIndex) {
-                Value *lanePointer = vectorLanePointer(
-                    this, vectorPointer, laneIndex, vectorType);
-                recentVal = isTrueLVal
-                                ? lanePointer
-                                : (Value *)builder->create_load(lanePointer);
-                return;
             }
             if (isTrueLVal) {
                 vectorLaneBase = vectorPointer;
