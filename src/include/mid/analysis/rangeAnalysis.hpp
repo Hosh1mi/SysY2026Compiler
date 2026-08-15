@@ -133,6 +133,8 @@ private:
     IntRange getNormalizedReturnRangeForCall(CallInst *call, BasicBlock *ctx);
     void computeNormalizedReturnSummary();
     bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod);
+    bool valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod,
+                                   std::set<Value *> &visiting);
     bool inferNormalizedModulus(Value *v, long long &mod, std::set<Value *> &visiting) const;
     long long getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx);
     long long inferDirectReturnModulus(Value *v) const;

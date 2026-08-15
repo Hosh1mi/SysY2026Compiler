@@ -1,0 +1,52 @@
+// Measures one vector array kernel through disjoint and exact-alias calls.
+const int N = 32768;
+const int SWEEPS = 512;
+int4 first[N];
+int4 second[N];
+int4 third[N];
+
+void transform(int4 source[], int4 destination[], int count, int bias) {
+    int i = 0;
+    while (i < count) {
+        destination[i] = (source[i] * 3 + bias) % 1009;
+        i = i + 1;
+    }
+}
+
+int main() {
+    int seed = getint();
+    int i = 0;
+    while (i < N) {
+        int base = (i + seed) % 1009;
+        first[i] = {base, base + 1, base + 2, base + 3};
+        second[i] = first[i] + 7;
+        third[i] = {0, 0, 0, 0};
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        if (sweep % 3 == 0) {
+            transform(first, first, N, sweep);
+        } else if (sweep % 3 == 1) {
+            transform(first, second, N, sweep);
+        } else {
+            transform(second, third, N, sweep);
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        int4 value = first[i] + second[i] + third[i];
+        checksum = (checksum + value[0] + value[1] + value[2] + value[3])
+                   % 1000000007;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

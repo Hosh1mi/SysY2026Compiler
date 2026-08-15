@@ -1,0 +1,54 @@
+// Measures hot calls whose ten vector arguments cross the register boundary.
+const int N = 4096;
+const int SWEEPS = 512;
+int4 streams[10][N];
+int4 output[N];
+
+int4 combine_ten(int4 a0, int4 a1, int4 a2, int4 a3, int4 a4,
+                 int4 a5, int4 a6, int4 a7, int4 a8, int4 a9) {
+    int4 left = a0 + a2 * 3 + a4 * 5 + a6 * 7 + a8 * 9;
+    int4 right = a1 * 2 + a3 * 4 + a5 * 6 + a7 * 8 + a9 * 10;
+    return (left + right) % 1009;
+}
+
+int main() {
+    int seed = getint();
+    int row = 0;
+    while (row < 10) {
+        int i = 0;
+        while (i < N) {
+            int base = (seed + row * 17 + i) % 1009;
+            streams[row][i] = {base, base + 1, base + 2, base + 3};
+            i = i + 1;
+        }
+        row = row + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        int i = 0;
+        while (i < N) {
+            output[i] = combine_ten(streams[0][i], streams[1][i],
+                                    streams[2][i], streams[3][i],
+                                    streams[4][i], streams[5][i],
+                                    streams[6][i], streams[7][i],
+                                    streams[8][i], streams[9][i]);
+            streams[sweep % 10][i] = (output[i] + sweep) % 1009;
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    int i = 0;
+    while (i < N) {
+        checksum = (checksum + output[i][0] + output[i][1]
+                    + output[i][2] + output[i][3]) % 1000000007;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

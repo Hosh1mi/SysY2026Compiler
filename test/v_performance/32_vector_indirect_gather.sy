@@ -1,0 +1,44 @@
+// Measures cache-sensitive whole-vector gathers through changing index arrays.
+const int N = 65521;
+const int SWEEPS = 512;
+int4 values[N];
+int indices[N];
+int steps[N];
+int4 output[N];
+
+int main() {
+    int seed = getint();
+    int i = 0;
+    while (i < N) {
+        int base = (i + seed) % 1009;
+        values[i] = {base, base + 1, base + 2, base + 3};
+        indices[i] = (i * 97 + seed) % N;
+        steps[i] = (i * 13 + 17) % 251 + 1;
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        i = 0;
+        while (i < N) {
+            int index = indices[i];
+            output[i] = (values[index] + sweep + i % 7) % 1009;
+            indices[i] = (index + steps[i]) % N;
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        checksum = (checksum + output[i][0] + output[i][1]
+                    + output[i][2] + output[i][3]) % 1000000007;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

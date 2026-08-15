@@ -1,0 +1,46 @@
+// Measures vector updates over a non-power-of-two circular working set.
+const int N = 32749;
+const int STEPS = 16777216;
+int4 ring[N];
+
+int main() {
+    int seed = getint();
+    int i = 0;
+    while (i < N) {
+        int base = (i + seed) % 1009;
+        ring[i] = {base, base + 1, base + 2, base + 3};
+        i = i + 1;
+    }
+
+    starttime();
+    int step = 0;
+    int read = 0;
+    int write = 97;
+    while (step < STEPS) {
+        ring[write] = (ring[write] + ring[read] * 3 + step % 17) % 1009;
+        read = read + 1;
+        write = write + 3;
+        if (read >= N) {
+            read = read - N;
+        }
+        if (write >= N) {
+            write = write - N;
+        }
+        if (write >= N) {
+            write = write - N;
+        }
+        step = step + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        checksum = (checksum + ring[i][0] + ring[i][1]
+                    + ring[i][2] + ring[i][3]) % 1000000007;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

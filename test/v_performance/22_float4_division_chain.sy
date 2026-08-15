@@ -1,0 +1,45 @@
+// Measures dependent float4 division chains with changing vector divisors.
+const int N = 8192;
+const int SWEEPS = 512;
+float4 values[N];
+float4 divisors[N];
+
+int main() {
+    float seed = getfloat();
+    int i = 0;
+    while (i < N) {
+        float base = (i % 31) * 0.125 + seed;
+        values[i] = base + {1.0, 2.0, 3.0, 4.0};
+        divisors[i] = {1.125, 1.25, 1.5, 1.75};
+        i = i + 1;
+    }
+
+    starttime();
+    int sweep = 0;
+    while (sweep < SWEEPS) {
+        i = 0;
+        while (i < N) {
+            values[i] = values[i] / divisors[i]
+                        + {0.125, 0.25, 0.375, 0.5};
+            divisors[i] = divisors[i] * 0.999
+                        + {0.001, 0.001, 0.001, 0.001};
+            i = i + 1;
+        }
+        sweep = sweep + 1;
+    }
+    stoptime();
+
+    int checksum = 0;
+    i = 0;
+    while (i < N) {
+        int l0 = values[i][0] * 1000.0;
+        int l1 = values[i][1] * 1000.0;
+        int l2 = values[i][2] * 1000.0;
+        int l3 = values[i][3] * 1000.0;
+        checksum = (checksum + l0 + l1 + l2 + l3) % 1000000007;
+        i = i + 1;
+    }
+    putint(checksum);
+    putch(10);
+    return 0;
+}

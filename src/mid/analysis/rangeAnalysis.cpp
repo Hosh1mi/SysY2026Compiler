@@ -31,6 +31,18 @@ void debugLog(const char *what, Value *v, BasicBlock *ctx, const RangeAnalysis::
     std::cerr << "\n";
 }
 
+class ValueVisitGuard {
+public:
+    ValueVisitGuard(std::set<Value *> &visiting, Value *value)
+        : visiting_(visiting), value_(value) {}
+
+    ~ValueVisitGuard() { visiting_.erase(value_); }
+
+private:
+    std::set<Value *> &visiting_;
+    Value *value_;
+};
+
 } // namespace
 
 RangeAnalysis::RangeAnalysis(Function *func, AnalysisManager *AM, const LoopInfo &LI,
@@ -1430,7 +1442,16 @@ bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
 }
 
 bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod) {
-    if (mod <= 0) return false;
+    std::set<Value *> visiting;
+    return valueMatchesNormalizedMod(v, ctx, mod, visiting);
+}
+
+bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx,
+                                               long long mod,
+                                               std::set<Value *> &visiting) {
+    if (mod <= 0 || !v || !visiting.insert(v).second) return false;
+    ValueVisitGuard visitGuard(visiting, v);
+
     if (inferDirectReturnModulus(v) == mod) {
         auto *inst = static_cast<Instruction *>(v);
         return proveOrRequireNonNegative(inst->get_operand(0), ctx);
@@ -1439,15 +1460,18 @@ bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long lo
     if (auto *phi = dynamic_cast<PhiInst *>(v)) {
         for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             auto *predBB = dynamic_cast<BasicBlock *>(phi->get_operand(i + 1));
-            if (!valueMatchesNormalizedMod(phi->get_operand(i), predBB, mod))
+            if (!valueMatchesNormalizedMod(phi->get_operand(i), predBB, mod,
+                                           visiting))
                 return false;
         }
         return true;
     }
 
     if (auto *sel = dynamic_cast<SelectInst *>(v)) {
-        return valueMatchesNormalizedMod(sel->get_operand(1), ctx, mod) &&
-               valueMatchesNormalizedMod(sel->get_operand(2), ctx, mod);
+        return valueMatchesNormalizedMod(sel->get_operand(1), ctx, mod,
+                                         visiting) &&
+               valueMatchesNormalizedMod(sel->get_operand(2), ctx, mod,
+                                         visiting);
     }
 
     if (auto *call = dynamic_cast<CallInst *>(v)) {
