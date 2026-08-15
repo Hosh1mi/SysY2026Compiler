@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
-#include <stdexcept>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +41,10 @@ bool maskEquals(const std::array<int, 4> &mask,
 	return index == mask.size();
 }
 
+bool sdNodeIndexLess(SDNode *lhs, SDNode *rhs) {
+	return lhs->index < rhs->index;
+}
+
 RegisterMask callPreservedMask() {
 	RegisterMask mask;
 	mask.setPreserved(PhysReg::SP);
@@ -70,7 +74,7 @@ public:
 	VReg getResult(SDValue value) const {
 		auto found = results_.find(value.node);
 		if (found == results_.end())
-			throw std::logic_error("DAG operand has no selected register");
+			std::abort();
 		return found->second;
 	}
 
@@ -150,6 +154,319 @@ private:
 	std::unordered_map<SDNode *, VReg> &results_;
 };
 
+struct VectorPredicateEmitter {
+	InstructionSelectionContext &selection;
+	MachineBasicBlock &block;
+	SDNode &node;
+	MachineRegisterInfo &registerInfo;
+
+	VReg temporaryCompare(Opcode opcode, SDValue left, SDValue right) {
+		VReg result = selection.createVReg(ValueType::V4I32);
+		MachineInstr compare(opcode);
+		compare.addOperand(MachineOperand::vreg(result, RegClass::NEON128, true))
+		    .addOperand(selection.makeUse(left))
+		    .addOperand(selection.makeUse(right));
+		MachineInstr &definition = selection.emit(block, std::move(compare));
+		registerInfo.setDefinition(result, &definition);
+		return result;
+	}
+
+	VReg temporaryLogical(Opcode opcode, VReg left, VReg right) {
+		VReg result = selection.createVReg(ValueType::V4I32);
+		MachineInstr logical(opcode);
+		logical.addOperand(MachineOperand::vreg(result, RegClass::NEON128, true))
+		    .addOperand(MachineOperand::vreg(left, RegClass::NEON128))
+		    .addOperand(MachineOperand::vreg(right, RegClass::NEON128));
+		MachineInstr &definition = selection.emit(block, std::move(logical));
+		registerInfo.setDefinition(result, &definition);
+		return result;
+	}
+
+	VReg temporaryNot(VReg value) {
+		VReg result = selection.createVReg(ValueType::V4I32);
+		MachineInstr invert(Opcode::MVNv16i8);
+		invert.addOperand(MachineOperand::vreg(result, RegClass::NEON128, true))
+		    .addOperand(MachineOperand::vreg(value, RegClass::NEON128));
+		MachineInstr &definition = selection.emit(block, std::move(invert));
+		registerInfo.setDefinition(result, &definition);
+		return result;
+	}
+
+	void emitCompare(Opcode opcode, SDValue left, SDValue right) {
+		MachineInstr compare(opcode);
+		compare.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(left))
+		    .addOperand(selection.makeUse(right));
+		selection.emit(block, std::move(compare), &node);
+	}
+
+	void emitLogical(Opcode opcode, VReg left, VReg right) {
+		MachineInstr logical(opcode);
+		logical.addOperand(selection.makeDef(node))
+		    .addOperand(MachineOperand::vreg(left, RegClass::NEON128))
+		    .addOperand(MachineOperand::vreg(right, RegClass::NEON128));
+		selection.emit(block, std::move(logical), &node);
+	}
+
+	void emitNot(VReg value) {
+		MachineInstr invert(Opcode::MVNv16i8);
+		invert.addOperand(selection.makeDef(node))
+		    .addOperand(MachineOperand::vreg(value, RegClass::NEON128));
+		selection.emit(block, std::move(invert), &node);
+	}
+};
+
+struct VectorConstantEmitter {
+	InstructionSelectionContext &selection;
+	MachineFunction &machineFunction;
+	MachineRegisterInfo &registerInfo;
+
+	void emit(MachineBasicBlock &block, MachineOperand destination,
+	          const std::array<std::uint32_t, 4> &lanes,
+	          SDNode *definition = nullptr) {
+		bool allEqual = lanes[0] == lanes[1] && lanes[1] == lanes[2] &&
+		                lanes[2] == lanes[3];
+		if (allEqual) {
+			if (auto immediate = classifyNeonSplatImmediate(lanes[0])) {
+				selection.emitFinal(
+				    block, makeNeonSplatImmediate(*immediate, destination),
+				    destination, definition);
+				return;
+			}
+
+			VReg scalar = selection.createVReg(ValueType::I32);
+			MachineInstr materialize(Opcode::MOVi32);
+			materialize
+			    .addOperand(MachineOperand::vreg(scalar, RegClass::GPR32, true))
+			    .addOperand(MachineOperand::immediate(
+			        static_cast<std::int64_t>(lanes[0])));
+			MachineInstr &scalarDefinition =
+			    selection.emit(block, std::move(materialize));
+			registerInfo.setDefinition(scalar, &scalarDefinition);
+			MachineInstr duplicate(Opcode::DUPv4i32);
+			duplicate.addOperand(destination)
+			    .addOperand(MachineOperand::vreg(scalar, RegClass::GPR32));
+			selection.emitFinal(block, std::move(duplicate), destination,
+			                    definition);
+			return;
+		}
+
+		const std::string &label =
+		    machineFunction.getOrCreateVectorConstant(lanes);
+		VReg page = selection.createVReg(ValueType::Ptr);
+		MachineInstr adrp(Opcode::ADRP);
+		adrp.addOperand(MachineOperand::vreg(page, RegClass::GPR64, true))
+		    .addOperand(MachineOperand::global(label));
+		MachineInstr &pageDefinition = selection.emit(block, std::move(adrp));
+		registerInfo.setDefinition(page, &pageDefinition);
+		MachineInstr load(Opcode::LDRQlo);
+		load.addOperand(destination)
+		    .addOperand(MachineOperand::vreg(page, RegClass::GPR64))
+		    .addOperand(MachineOperand::global(label));
+		load.addMemoryOperand(MachineMemOperand{MachineMemOperand::Access::Load,
+		                                        16, 16, nullptr, std::nullopt,
+		                                        0, false});
+		selection.emitFinal(block, std::move(load), destination, definition);
+	}
+};
+
+struct SignedConstantDivisionEmitter {
+	InstructionSelectionContext &selection;
+
+	bool emit(MachineBasicBlock &block, MachineOperand destination,
+	          MachineOperand numerator, std::int32_t divisor,
+	          SDNode *definition = nullptr) {
+		division::SignedDivisorInfo info =
+		    division::analyzeSignedDivisor(divisor);
+		if (!info.reducible)
+			return false;
+		if (divisor == 1) {
+			MachineInstr instruction(Opcode::COPY);
+			instruction.addOperand(destination).addOperand(numerator);
+			selection.emitFinal(block, std::move(instruction), destination,
+			                    definition);
+		} else if (divisor == -1) {
+			MachineInstr instruction(Opcode::NEGW);
+			instruction.addOperand(destination).addOperand(numerator);
+			selection.emitFinal(block, std::move(instruction), destination,
+			                    definition);
+		} else if (info.powerOfTwo) {
+			MachineOperand adjusted;
+			if (info.shift == 1) {
+				VReg adjustedReg = selection.createVReg(ValueType::I32);
+				MachineInstr addBias(Opcode::ADDWrs);
+				addBias
+				    .addOperand(MachineOperand::vreg(adjustedReg,
+				                                     RegClass::GPR32, true))
+				    .addOperand(numerator)
+				    .addOperand(numerator)
+				    .addOperand(MachineOperand::immediate(31));
+				adjusted = selection.emitTemporary(block, std::move(addBias),
+				                                   adjustedReg);
+			} else {
+				MachineOperand sign = selection.emitUnary(
+				    block, Opcode::ASRWri, ValueType::I32, numerator, 31);
+				MachineOperand bias = selection.emitUnary(
+				    block, Opcode::LSRWri, ValueType::I32, sign, 32 - info.shift);
+				adjusted = selection.emitBinary(
+				    block, Opcode::ADDWrr, ValueType::I32, numerator, bias);
+			}
+			if (divisor < 0) {
+				MachineOperand quotient = selection.emitUnary(
+				    block, Opcode::ASRWri, ValueType::I32, adjusted, info.shift);
+				MachineInstr negate(Opcode::NEGW);
+				negate.addOperand(destination).addOperand(quotient);
+				selection.emitFinal(block, std::move(negate), destination,
+				                    definition);
+			} else {
+				MachineInstr shift(Opcode::ASRWri);
+				shift.addOperand(destination)
+				    .addOperand(adjusted)
+				    .addOperand(MachineOperand::immediate(info.shift));
+				selection.emitFinal(block, std::move(shift), destination,
+				                    definition);
+			}
+		} else {
+			division::MagicNumber magic = division::computeSignedMagic(divisor);
+			VReg multiplierReg = selection.createVReg(ValueType::I32);
+			MachineInstr materialize(Opcode::MOVi32);
+			materialize
+			    .addOperand(MachineOperand::vreg(multiplierReg, RegClass::GPR32,
+			                                    true))
+			    .addOperand(MachineOperand::immediate(magic.multiplier));
+			MachineOperand multiplier = selection.emitTemporary(
+			    block, std::move(materialize), multiplierReg);
+			MachineOperand product = selection.emitBinary(
+			    block, Opcode::SMULLXrr, ValueType::Ptr, numerator, multiplier);
+			if (magic.strategy == division::MagicStrategy::MultiplyShift) {
+				MachineOperand shifted = selection.emitUnary(
+				    block, Opcode::ASRXri, ValueType::Ptr, product,
+				    32 + magic.shift);
+				MachineInstr add(Opcode::ADDWrsX);
+				add.addOperand(destination)
+				    .addOperand(shifted)
+				    .addOperand(shifted)
+				    .addOperand(MachineOperand::immediate(31));
+				selection.emitFinal(block, std::move(add), destination, definition);
+				return true;
+			}
+			MachineOperand highX = selection.emitUnary(
+			    block, Opcode::ASRXri, ValueType::Ptr, product, 32);
+			MachineOperand high = selection.emitUnary(
+			    block, Opcode::COPYXtoW, ValueType::I32, highX);
+			if (magic.strategy == division::MagicStrategy::MultiplyAddShift)
+				high = selection.emitBinary(block, Opcode::ADDWrr, ValueType::I32,
+				                            high, numerator);
+			else
+				high = selection.emitBinary(block, Opcode::SUBWrr, ValueType::I32,
+				                            high, numerator);
+			if (magic.shift)
+				high = selection.emitUnary(block, Opcode::ASRWri, ValueType::I32,
+				                           high, magic.shift);
+			MachineInstr add(Opcode::ADDWrs);
+			add.addOperand(destination)
+			    .addOperand(high)
+			    .addOperand(high)
+			    .addOperand(MachineOperand::immediate(31));
+			selection.emitFinal(block, std::move(add), destination, definition);
+		}
+		return true;
+	}
+};
+
+MachineOperand emitXTemporary(InstructionSelectionContext &selection,
+                               MachineRegisterInfo &registerInfo,
+                               MachineBasicBlock &block, Opcode opcode,
+                               std::vector<MachineOperand> operands) {
+	VReg reg = selection.createVReg(ValueType::Ptr);
+	MachineInstr instruction(opcode);
+	instruction.addOperand(MachineOperand::vreg(reg, RegClass::GPR64, true));
+	for (MachineOperand &operand : operands)
+		instruction.addOperand(std::move(operand));
+	MachineInstr &inserted = selection.emit(block, std::move(instruction));
+	registerInfo.setDefinition(reg, &inserted);
+	return MachineOperand::vreg(reg, RegClass::GPR64);
+}
+
+struct ShuffleEmitter {
+	InstructionSelectionContext &selection;
+	MachineBasicBlock &block;
+	SDNode &node;
+	std::array<int, 4> &mask;
+	VectorConstantEmitter &constants;
+
+	void emitBinaryShuffle(Opcode opcode) {
+		MachineInstr shuffle(opcode);
+		shuffle.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(node.operands()[0]))
+		    .addOperand(selection.makeUse(node.operands()[1]));
+		selection.emit(block, std::move(shuffle), &node);
+	}
+
+	void emitUnaryShuffle(Opcode opcode, unsigned sourceOperand) {
+		MachineInstr shuffle(opcode);
+		shuffle.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(node.operands()[sourceOperand]));
+		selection.emit(block, std::move(shuffle), &node);
+	}
+
+	void emitCopy(unsigned sourceOperand) {
+		MachineInstr copy(Opcode::COPY);
+		copy.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(node.operands()[sourceOperand]));
+		selection.emit(block, std::move(copy), &node);
+	}
+
+	void emitDupLane(unsigned sourceOperand, int lane) {
+		MachineInstr duplicate(Opcode::DUPv4sLane);
+		duplicate.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(node.operands()[sourceOperand]))
+		    .addOperand(MachineOperand::immediate(lane));
+		selection.emit(block, std::move(duplicate), &node);
+	}
+
+	void emitExt(unsigned lowOperand, unsigned highOperand, int byteOffset) {
+		MachineInstr extend(Opcode::EXTv16b);
+		extend.addOperand(selection.makeDef(node))
+		    .addOperand(selection.makeUse(node.operands()[lowOperand]))
+		    .addOperand(selection.makeUse(node.operands()[highOperand]))
+		    .addOperand(MachineOperand::immediate(byteOffset));
+		selection.emit(block, std::move(extend), &node);
+	}
+
+	std::array<std::uint32_t, 4> byteIndices(unsigned sourceOperand) const {
+		std::array<std::uint32_t, 4> words{};
+		for (unsigned lane = 0; lane < mask.size(); ++lane) {
+			const int selected = mask[lane];
+			const bool belongs = sourceOperand == 0 ? selected >= 0 && selected < 4
+			                                       : selected >= 4 && selected < 8;
+			if (!belongs) {
+				words[lane] = 0x10101010U;
+				continue;
+			}
+			const unsigned sourceLane = static_cast<unsigned>(selected) & 3U;
+			const unsigned firstByte = sourceLane * 4;
+			words[lane] = firstByte | ((firstByte + 1) << 8) |
+			              ((firstByte + 2) << 16) | ((firstByte + 3) << 24);
+		}
+		return words;
+	}
+
+	MachineInstr &emitTableLookup(unsigned sourceOperand,
+	                              MachineOperand destination,
+	                              SDNode *definition) {
+		VReg indices = selection.createVReg(ValueType::V4I32);
+		constants.emit(
+		    block, MachineOperand::vreg(indices, RegClass::NEON128, true),
+		    byteIndices(sourceOperand));
+		MachineInstr lookup(Opcode::TBL1v16i8);
+		lookup.addOperand(std::move(destination))
+		    .addOperand(selection.makeUse(node.operands()[sourceOperand]))
+		    .addOperand(MachineOperand::vreg(indices, RegClass::NEON128));
+		return selection.emit(block, std::move(lookup), definition);
+	}
+};
+
 bool emitGeneratedPattern(
     InstructionSelectionContext &selection, MachineBasicBlock &block,
     SDNode &node,
@@ -174,8 +491,7 @@ bool emitGeneratedPattern(
 		case generated::PatternOperandKind::OperandInteger: {
 			SDNode *constant = node.operands().at(operand.index).node;
 			if (!constant || constant->opcode() != SDOpcode::Constant)
-				throw std::logic_error(
-				    "generated immediate operand is not constant");
+				std::abort();
 			instruction.addOperand(
 			    MachineOperand::immediate(constant->integer));
 			break;
@@ -196,8 +512,7 @@ bool emitGeneratedPattern(
 		case generated::PatternOperandKind::OperandGlobal: {
 			SDNode *address = node.operands().at(operand.index).node;
 			if (!address || address->opcode() != SDOpcode::GlobalAddress)
-				throw std::logic_error(
-				    "generated global operand has no symbol");
+				std::abort();
 			instruction.addOperand(MachineOperand::global(address->symbol));
 			break;
 		}
@@ -231,8 +546,7 @@ bool emitGeneratedPattern(
 std::unique_ptr<MachineFunction>
 AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 	if (!functionDAG.legalized)
-		throw std::logic_error(
-		    "instruction selection requires a legalized SelectionDAG");
+		std::abort();
 	auto machineFunction =
 	    std::make_unique<MachineFunction>(functionDAG.function->name_);
 	machineFunction->setProperty(MachineProperty::IsSSA);
@@ -288,174 +602,16 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 			ValueType type = node.resultTypes().front();
 			RegClass regClass = RegisterInfo::classForType(type);
 			if (regClass == RegClass::Invalid)
-				throw std::logic_error("selected value has no register class");
+				std::abort();
 			results.emplace(&node,
 			                registerInfo.createVirtualRegister(regClass, type));
 		}
 	}
 
 	InstructionSelectionContext selection(*machineFunction, results);
-	auto emitSignedConstantDivision =
-	    [&](MachineBasicBlock &block, MachineOperand destination,
-	        MachineOperand numerator, std::int32_t divisor,
-	        SDNode *definition = nullptr) -> bool {
-		division::SignedDivisorInfo info =
-		    division::analyzeSignedDivisor(divisor);
-		if (!info.reducible)
-			return false;
-
-		if (divisor == 1) {
-			MachineInstr instruction(Opcode::COPY);
-			instruction.addOperand(destination).addOperand(numerator);
-			selection.emitFinal(block, std::move(instruction), destination,
-			                    definition);
-		} else if (divisor == -1) {
-			MachineInstr instruction(Opcode::NEGW);
-			instruction.addOperand(destination).addOperand(numerator);
-			selection.emitFinal(block, std::move(instruction), destination,
-			                    definition);
-		} else if (info.powerOfTwo) {
-			MachineOperand adjusted;
-			if (info.shift == 1) {
-				VReg adjustedReg = selection.createVReg(ValueType::I32);
-				MachineInstr addBias(Opcode::ADDWrs);
-				addBias
-				    .addOperand(MachineOperand::vreg(adjustedReg,
-				                                     RegClass::GPR32, true))
-				    .addOperand(numerator)
-				    .addOperand(numerator)
-				    .addOperand(MachineOperand::immediate(31));
-				adjusted = selection.emitTemporary(block, std::move(addBias),
-				                                   adjustedReg);
-			} else {
-				MachineOperand sign = selection.emitUnary(
-				    block, Opcode::ASRWri, ValueType::I32, numerator, 31);
-				MachineOperand bias =
-				    selection.emitUnary(block, Opcode::LSRWri, ValueType::I32,
-				                        sign, 32 - info.shift);
-				adjusted = selection.emitBinary(
-				    block, Opcode::ADDWrr, ValueType::I32, numerator, bias);
-			}
-			if (divisor < 0) {
-				MachineOperand quotient =
-				    selection.emitUnary(block, Opcode::ASRWri, ValueType::I32,
-				                        adjusted, info.shift);
-				MachineInstr negate(Opcode::NEGW);
-				negate.addOperand(destination).addOperand(quotient);
-				selection.emitFinal(block, std::move(negate), destination,
-				                    definition);
-			} else {
-				MachineInstr shift(Opcode::ASRWri);
-				shift.addOperand(destination)
-				    .addOperand(adjusted)
-				    .addOperand(MachineOperand::immediate(info.shift));
-				selection.emitFinal(block, std::move(shift), destination,
-				                    definition);
-			}
-		} else {
-			division::MagicNumber magic = division::computeSignedMagic(divisor);
-			VReg multiplierReg = selection.createVReg(ValueType::I32);
-			MachineInstr materialize(Opcode::MOVi32);
-			materialize
-			    .addOperand(
-			        MachineOperand::vreg(multiplierReg, RegClass::GPR32, true))
-			    .addOperand(MachineOperand::immediate(magic.multiplier));
-			MachineOperand multiplier = selection.emitTemporary(
-			    block, std::move(materialize), multiplierReg);
-
-			MachineOperand product = selection.emitBinary(
-			    block, Opcode::SMULLXrr, ValueType::Ptr, numerator, multiplier);
-			if (magic.strategy == division::MagicStrategy::MultiplyShift) {
-				MachineOperand shifted =
-				    selection.emitUnary(block, Opcode::ASRXri, ValueType::Ptr,
-				                        product, 32 + magic.shift);
-				MachineInstr add(Opcode::ADDWrsX);
-				add.addOperand(destination)
-				    .addOperand(shifted)
-				    .addOperand(shifted)
-				    .addOperand(MachineOperand::immediate(31));
-				selection.emitFinal(block, std::move(add), destination,
-				                    definition);
-				return true;
-			}
-			MachineOperand highX = selection.emitUnary(
-			    block, Opcode::ASRXri, ValueType::Ptr, product, 32);
-			MachineOperand high = selection.emitUnary(block, Opcode::COPYXtoW,
-			                                          ValueType::I32, highX);
-			if (magic.strategy == division::MagicStrategy::MultiplyAddShift)
-				high = selection.emitBinary(block, Opcode::ADDWrr,
-				                            ValueType::I32, high, numerator);
-			else
-				high = selection.emitBinary(block, Opcode::SUBWrr,
-				                            ValueType::I32, high, numerator);
-			if (magic.shift)
-				high = selection.emitUnary(block, Opcode::ASRWri,
-				                           ValueType::I32, high, magic.shift);
-			// The final round-toward-zero correction depends on the sign of
-			// the approximate quotient, not the dividend.  They have the
-			// same sign for positive divisors, which can hide this
-			// distinction; for a negative divisor the quotient sign is
-			// reversed.
-			MachineInstr add(Opcode::ADDWrs);
-			add.addOperand(destination)
-			    .addOperand(high)
-			    .addOperand(high)
-			    .addOperand(MachineOperand::immediate(31));
-			selection.emitFinal(block, std::move(add), destination, definition);
-		}
-		return true;
-	};
-	auto emitVectorConstant = [&](MachineBasicBlock &block,
-	                              MachineOperand destination,
-	                              const std::array<std::uint32_t, 4> &lanes,
-	                              SDNode *definition = nullptr) {
-		bool allEqual = lanes[0] == lanes[1] && lanes[1] == lanes[2] &&
-		                lanes[2] == lanes[3];
-		if (allEqual) {
-			if (auto immediate = classifyNeonSplatImmediate(lanes[0])) {
-				selection.emitFinal(
-				    block, makeNeonSplatImmediate(*immediate, destination),
-				    destination, definition);
-				return;
-			}
-
-			// Arbitrary identical lanes: scalar materialize + dup.
-			VReg scalar = selection.createVReg(ValueType::I32);
-			MachineInstr materialize(Opcode::MOVi32);
-			materialize
-			    .addOperand(MachineOperand::vreg(scalar, RegClass::GPR32, true))
-			    .addOperand(MachineOperand::immediate(
-			        static_cast<std::int64_t>(lanes[0])));
-			MachineInstr &scalarDefinition =
-			    selection.emit(block, std::move(materialize));
-			registerInfo.setDefinition(scalar, &scalarDefinition);
-			MachineInstr duplicate(Opcode::DUPv4i32);
-			duplicate.addOperand(destination)
-			    .addOperand(MachineOperand::vreg(scalar, RegClass::GPR32));
-			selection.emitFinal(block, std::move(duplicate), destination,
-			                    definition);
-			return;
-		}
-
-		// Non-splat 128-bit immediates are cheaper from a pool load than
-		// from a chain of per-lane inserts.
-		const std::string &label =
-		    machineFunction->getOrCreateVectorConstant(lanes);
-		VReg page = selection.createVReg(ValueType::Ptr);
-		MachineInstr adrp(Opcode::ADRP);
-		adrp.addOperand(MachineOperand::vreg(page, RegClass::GPR64, true))
-		    .addOperand(MachineOperand::global(label));
-		MachineInstr &pageDefinition = selection.emit(block, std::move(adrp));
-		registerInfo.setDefinition(page, &pageDefinition);
-		MachineInstr load(Opcode::LDRQlo);
-		load.addOperand(destination)
-		    .addOperand(MachineOperand::vreg(page, RegClass::GPR64))
-		    .addOperand(MachineOperand::global(label));
-		load.addMemoryOperand(MachineMemOperand{MachineMemOperand::Access::Load,
-		                                        16, 16, nullptr, std::nullopt,
-		                                        0, false});
-		selection.emitFinal(block, std::move(load), destination, definition);
-	};
+	SignedConstantDivisionEmitter signedDivision{selection};
+	VectorConstantEmitter vectorConstants{selection, *machineFunction,
+	                                      registerInfo};
 	unsigned nextParallelCopyGroup = 1;
 	const unsigned entryArgumentCopyGroup = nextParallelCopyGroup++;
 
@@ -465,13 +621,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 		for (const auto &node : functionDAG.blocks.at(block)->nodes())
 			if (node->opcode() == SDOpcode::FrameIndex)
 				frameNodes.push_back(node.get());
-	std::sort(frameNodes.begin(), frameNodes.end(),
-	          [](SDNode *lhs, SDNode *rhs) { return lhs->index < rhs->index; });
+	std::sort(frameNodes.begin(), frameNodes.end(), sdNodeIndexLess);
 	for (SDNode *node : frameNodes) {
 		int index = machineFunction->frameInfo().createStackObject(
 		    node->memorySize, node->alignment, false);
 		if (index != static_cast<int>(node->index))
-			throw std::logic_error("DAG frame-index numbering diverged");
+			std::abort();
 	}
 
 	// Source argument indices use independent GPR and SIMD register banks.
@@ -524,15 +679,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks,
 				                          directGlobal))
-					throw std::logic_error(
-					    std::string("no generated pattern for ") +
-					    sdOpcodeName(node.opcode()));
+					std::abort();
 				continue;
 			}
 			switch (generated::customSelector(node.opcode())) {
 			case generated::CustomSelector::None:
-				throw std::logic_error(
-				    "ignored DAG opcode reached custom selection");
+				std::abort();
 			case generated::CustomSelector::Argument: {
 				ValueType type = node.resultTypes().front();
 				RegClass regClass = RegisterInfo::classForType(type);
@@ -581,13 +733,12 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 						if (lane < node.shuffleMask.size())
 							lanes[lane] = static_cast<std::uint32_t>(
 							    node.shuffleMask[lane]);
-					emitVectorConstant(block, selection.makeDef(node), lanes,
-					                   &node);
+					vectorConstants.emit(block, selection.makeDef(node), lanes,
+					                    &node);
 					break;
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks))
-					throw std::logic_error(
-					    "no generated scalar constant pattern");
+					std::abort();
 				break;
 			}
 			case generated::CustomSelector::FPConstant: {
@@ -610,8 +761,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				if (directGlobalMemory.at(&node)) {
 					if (!emitGeneratedPattern(selection, block, node, blocks,
 					                          true))
-						throw std::logic_error(
-						    "no generated direct-global pattern");
+						std::abort();
 					break;
 				}
 				VReg page = selection.createVReg(ValueType::Ptr);
@@ -738,7 +888,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				if (!integerVector && !floatingVector && !integer64 &&
 				    node.opcode() == SDOpcode::SDiv && rhs &&
 				    rhs->opcode() == SDOpcode::Constant &&
-				    emitSignedConstantDivision(
+				    signedDivision.emit(
 				        block, selection.makeDef(node),
 				        selection.makeUse(node.operands()[0]),
 				        static_cast<std::int32_t>(rhs->integer), &node))
@@ -823,9 +973,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					break;
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks))
-					throw std::logic_error(
-					    std::string("no generated fallback for ") +
-					    sdOpcodeName(node.opcode()));
+					std::abort();
 				break;
 			}
 			case generated::CustomSelector::SMin:
@@ -833,12 +981,11 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				ValueType resultType = node.resultTypes().front();
 				if (resultType == ValueType::V4I32) {
 					if (!emitGeneratedPattern(selection, block, node, blocks))
-						throw std::logic_error(
-						    "no generated vector min/max pattern");
+						std::abort();
 					break;
 				}
 				if (resultType != ValueType::I32)
-					throw std::logic_error("unsupported signed min/max type");
+					std::abort();
 
 				MachineInstr compare(Opcode::CMPWrr);
 				compare.addOperand(selection.makeUse(node.operands()[0]))
@@ -864,8 +1011,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				if (!modulusNode ||
 				    modulusNode->opcode() != SDOpcode::Constant ||
 				    modulusNode->integer == 0)
-					throw std::logic_error("mulmod intrinsic requires a "
-					                       "non-zero constant modulus");
+					std::abort();
 
 				auto modulus = static_cast<std::int32_t>(modulusNode->integer);
 				division::SignedDivisorInfo info =
@@ -884,20 +1030,6 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				MachineOperand product =
 				    MachineOperand::vreg(productReg, RegClass::GPR64);
 
-				auto emitXTemp =
-				    [&](Opcode opcode,
-				        std::vector<MachineOperand> ops) -> MachineOperand {
-					VReg reg = selection.createVReg(ValueType::Ptr);
-					MachineInstr instruction(opcode);
-					instruction.addOperand(
-					    MachineOperand::vreg(reg, RegClass::GPR64, true));
-					for (MachineOperand &op : ops)
-						instruction.addOperand(std::move(op));
-					MachineInstr &inserted =
-					    selection.emit(block, std::move(instruction));
-					registerInfo.setDefinition(reg, &inserted);
-					return MachineOperand::vreg(reg, RegClass::GPR64);
-				};
 
 				// Fall back to a 64-bit sdiv for unsupported moduli.
 				if (!info.reducible || modulus < 0) {
@@ -915,8 +1047,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					    MachineOperand::vreg(modulusReg, RegClass::GPR64);
 
 					MachineOperand quotient =
-					    emitXTemp(Opcode::SDIVXrr, {product, modulusOp});
-					MachineOperand remainder = emitXTemp(
+					    emitXTemporary(selection, registerInfo, block, Opcode::SDIVXrr, {product, modulusOp});
+					MachineOperand remainder = emitXTemporary(selection, registerInfo, block,
 					    Opcode::MSUBXrrr, {quotient, modulusOp, product});
 					MachineInstr narrow(Opcode::COPYXtoW);
 					narrow.addOperand(selection.makeDef(node))
@@ -934,7 +1066,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				selection.emit(block, std::move(compareProduct));
 
 				MachineOperand negatedProduct =
-				    emitXTemp(Opcode::NEGX, {product});
+				    emitXTemporary(selection, registerInfo, block, Opcode::NEGX, {product});
 				VReg absReg = selection.createVReg(ValueType::Ptr);
 				MachineInstr selectAbs(Opcode::CSELX);
 				selectAbs
@@ -975,7 +1107,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					    selection.emit(block, std::move(andMask));
 					registerInfo.setDefinition(remW, &remWDef);
 
-					remainderX = emitXTemp(
+					remainderX = emitXTemporary(selection, registerInfo, block,
 					    Opcode::UXTW,
 					    {MachineOperand::vreg(remW, RegClass::GPR32)});
 				} else {
@@ -1005,15 +1137,15 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					MachineOperand modulusOp =
 					    MachineOperand::vreg(modulusReg, RegClass::GPR64);
 
-					MachineOperand quotient = emitXTemp(
+					MachineOperand quotient = emitXTemporary(selection, registerInfo, block,
 					    Opcode::UMULHXrr,
 					    {absolute,
 					     MachineOperand::vreg(muReg, RegClass::GPR64)});
-					MachineOperand provisional = emitXTemp(
+					MachineOperand provisional = emitXTemporary(selection, registerInfo, block,
 					    Opcode::MSUBXrrr, {quotient, modulusOp, absolute});
 
 					MachineOperand adjusted =
-					    emitXTemp(Opcode::SUBXrr, {provisional, modulusOp});
+					    emitXTemporary(selection, registerInfo, block, Opcode::SUBXrr, {provisional, modulusOp});
 					MachineInstr compareRem(Opcode::CMPXrr);
 					compareRem.addOperand(provisional)
 					    .addOperand(modulusOp)
@@ -1038,7 +1170,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				}
 
 				MachineOperand negatedRem =
-				    emitXTemp(Opcode::NEGX, {remainderX});
+				    emitXTemporary(selection, registerInfo, block, Opcode::NEGX, {remainderX});
 				MachineInstr compareSign(Opcode::CMPXri);
 				compareSign.addOperand(product)
 				    .addOperand(MachineOperand::immediate(0))
@@ -1146,7 +1278,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				    MachineOperand::vreg(quotient, quotientClass, true);
 				bool reduced = !integer64 && node.opcode() == SDOpcode::SRem &&
 				               rhs && rhs->opcode() == SDOpcode::Constant &&
-				               emitSignedConstantDivision(
+				               signedDivision.emit(
 				                   block, quotientDef,
 				                   selection.makeUse(node.operands()[0]),
 				                   static_cast<std::int32_t>(rhs->integer));
@@ -1177,74 +1309,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				bool vectorCompare =
 				    node.resultTypes().front() == ValueType::V4I32;
 				if (vectorCompare) {
-					auto temporaryCompare = [&](Opcode opcode, SDValue left,
-					                            SDValue right) {
-						VReg result = selection.createVReg(ValueType::V4I32);
-						MachineInstr compare(opcode);
-						compare
-						    .addOperand(MachineOperand::vreg(
-						        result, RegClass::NEON128, true))
-						    .addOperand(selection.makeUse(left))
-						    .addOperand(selection.makeUse(right));
-						MachineInstr &definition =
-						    selection.emit(block, std::move(compare));
-						registerInfo.setDefinition(result, &definition);
-						return result;
-					};
-					auto temporaryLogical = [&](Opcode opcode, VReg left,
-					                            VReg right) {
-						VReg result = selection.createVReg(ValueType::V4I32);
-						MachineInstr logical(opcode);
-						logical
-						    .addOperand(MachineOperand::vreg(
-						        result, RegClass::NEON128, true))
-						    .addOperand(
-						        MachineOperand::vreg(left, RegClass::NEON128))
-						    .addOperand(
-						        MachineOperand::vreg(right, RegClass::NEON128));
-						MachineInstr &definition =
-						    selection.emit(block, std::move(logical));
-						registerInfo.setDefinition(result, &definition);
-						return result;
-					};
-					auto temporaryNot = [&](VReg value) {
-						VReg result = selection.createVReg(ValueType::V4I32);
-						MachineInstr invert(Opcode::MVNv16i8);
-						invert
-						    .addOperand(MachineOperand::vreg(
-						        result, RegClass::NEON128, true))
-						    .addOperand(
-						        MachineOperand::vreg(value, RegClass::NEON128));
-						MachineInstr &definition =
-						    selection.emit(block, std::move(invert));
-						registerInfo.setDefinition(result, &definition);
-						return result;
-					};
-					auto emitCompare = [&](Opcode opcode, SDValue left,
-					                       SDValue right) {
-						MachineInstr compare(opcode);
-						compare.addOperand(selection.makeDef(node))
-						    .addOperand(selection.makeUse(left))
-						    .addOperand(selection.makeUse(right));
-						selection.emit(block, std::move(compare), &node);
-					};
-					auto emitLogical = [&](Opcode opcode, VReg left,
-					                       VReg right) {
-						MachineInstr logical(opcode);
-						logical.addOperand(selection.makeDef(node))
-						    .addOperand(
-						        MachineOperand::vreg(left, RegClass::NEON128))
-						    .addOperand(
-						        MachineOperand::vreg(right, RegClass::NEON128));
-						selection.emit(block, std::move(logical), &node);
-					};
-					auto emitNot = [&](VReg value) {
-						MachineInstr invert(Opcode::MVNv16i8);
-						invert.addOperand(selection.makeDef(node))
-						    .addOperand(
-						        MachineOperand::vreg(value, RegClass::NEON128));
-						selection.emit(block, std::move(invert), &node);
-					};
+					VectorPredicateEmitter emitter{selection, block, node,
+					                              registerInfo};
 
 					SDValue left = node.operands()[0];
 					SDValue right = node.operands()[1];
@@ -1288,14 +1354,13 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 							break;
 						}
 						if (opcode == Opcode::Invalid)
-							throw std::logic_error(
-							    "unsupported integer vector predicate");
+							std::abort();
 						if (predicate == ICmpInst::ICMP_NE) {
-							VReg equal = temporaryCompare(opcode, left, right);
-							emitNot(equal);
+							VReg equal = emitter.temporaryCompare(opcode, left, right);
+							emitter.emitNot(equal);
 						} else {
-							emitCompare(opcode, swap ? right : left,
-							            swap ? left : right);
+							emitter.emitCompare(opcode, swap ? right : left,
+							                   swap ? left : right);
 						}
 						break;
 					}
@@ -1306,8 +1371,8 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					    predicate == FCmpInst::FCMP_TRUE) {
 						const std::uint32_t value =
 						    predicate == FCmpInst::FCMP_TRUE ? ~0U : 0U;
-						emitVectorConstant(block, selection.makeDef(node),
-						                   {value, value, value, value}, &node);
+						vectorConstants.emit(block, selection.makeDef(node),
+						                    {value, value, value, value}, &node);
 						break;
 					}
 					if (predicate == FCmpInst::FCMP_OEQ ||
@@ -1323,33 +1388,30 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 						                        predicate == FCmpInst::FCMP_OLE
 						                    ? Opcode::FCMGEv4f32
 						                    : Opcode::FCMGTv4f32;
-						emitCompare(opcode, swap ? right : left,
-						            swap ? left : right);
+						emitter.emitCompare(opcode, swap ? right : left,
+						                   swap ? left : right);
 						break;
 					}
 
-					auto orderedMask = [&]() {
-						VReg ge =
-						    temporaryCompare(Opcode::FCMGEv4f32, left, right);
-						VReg le =
-						    temporaryCompare(Opcode::FCMGEv4f32, right, left);
-						return temporaryLogical(Opcode::ORRv16i8, ge, le);
-					};
 					if (predicate == FCmpInst::FCMP_ONE) {
 						VReg greater =
-						    temporaryCompare(Opcode::FCMGTv4f32, left, right);
+						    emitter.temporaryCompare(Opcode::FCMGTv4f32, left, right);
 						VReg less =
-						    temporaryCompare(Opcode::FCMGTv4f32, right, left);
-						emitLogical(Opcode::ORRv16i8, greater, less);
+						    emitter.temporaryCompare(Opcode::FCMGTv4f32, right, left);
+						emitter.emitLogical(Opcode::ORRv16i8, greater, less);
 						break;
 					}
 					if (predicate == FCmpInst::FCMP_UNE) {
-						VReg equal =
-						    temporaryCompare(Opcode::FCMEQv4f32, left, right);
-						emitNot(equal);
+						VReg equal = emitter.temporaryCompare(
+						    Opcode::FCMEQv4f32, left, right);
+						emitter.emitNot(equal);
 						break;
 					}
-					VReg ordered = orderedMask();
+					VReg ge = emitter.temporaryCompare(Opcode::FCMGEv4f32,
+					                                  left, right);
+					VReg le = emitter.temporaryCompare(Opcode::FCMGEv4f32,
+					                                  right, left);
+					VReg ordered = emitter.temporaryLogical(Opcode::ORRv16i8, ge, le);
 					if (predicate == FCmpInst::FCMP_ORD) {
 						MachineInstr copy(Opcode::COPY);
 						copy.addOperand(selection.makeDef(node))
@@ -1358,7 +1420,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 						selection.emit(block, std::move(copy), &node);
 						break;
 					}
-					VReg unordered = temporaryNot(ordered);
+						VReg unordered = emitter.temporaryNot(ordered);
 					if (predicate == FCmpInst::FCMP_UNO) {
 						MachineInstr copy(Opcode::COPY);
 						copy.addOperand(selection.makeDef(node))
@@ -1381,12 +1443,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 						swap = predicate == FCmpInst::FCMP_ULE;
 					}
 					if (compareOpcode == Opcode::Invalid)
-						throw std::logic_error(
-						    "unsupported floating vector predicate");
-					VReg compared =
-					    temporaryCompare(compareOpcode, swap ? right : left,
-					                     swap ? left : right);
-					emitLogical(Opcode::ORRv16i8, compared, unordered);
+						std::abort();
+					VReg compared = emitter.temporaryCompare(
+					    compareOpcode, swap ? right : left, swap ? left : right);
+					emitter.emitLogical(Opcode::ORRv16i8, compared, unordered);
 					break;
 				}
 				bool integer64 =
@@ -1675,11 +1735,10 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				SDNode *index = node.operands()[2].node;
 				if (!index || index->opcode() != SDOpcode::Constant) {
 					VReg laneNumbers = selection.createVReg(ValueType::V4I32);
-					emitVectorConstant(block,
-					                   MachineOperand::vreg(laneNumbers,
-					                                        RegClass::NEON128,
-					                                        true),
-					                   {0, 1, 2, 3});
+					vectorConstants.emit(
+					    block,
+					    MachineOperand::vreg(laneNumbers, RegClass::NEON128, true),
+					    {0, 1, 2, 3});
 
 					VReg selectedLane = selection.createVReg(ValueType::V4I32);
 					MachineInstr duplicateLane(Opcode::DUPv4i32);
@@ -1732,8 +1791,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					break;
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks))
-					throw std::logic_error(
-					    "no generated fixed-lane insert pattern");
+					std::abort();
 				break;
 			}
 			case generated::CustomSelector::ExtractElement: {
@@ -1795,8 +1853,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					break;
 				}
 				if (!emitGeneratedPattern(selection, block, node, blocks))
-					throw std::logic_error(
-					    "no generated fixed-lane extract pattern");
+					std::abort();
 				break;
 			}
 			case generated::CustomSelector::ShuffleVector: {
@@ -1805,92 +1862,52 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					mask[lane] = lane < node.shuffleMask.size()
 					                 ? node.shuffleMask[lane]
 					                 : 0;
-
-				auto emitBinaryShuffle = [&](Opcode opcode) {
-					MachineInstr shuffle(opcode);
-					shuffle.addOperand(selection.makeDef(node))
-					    .addOperand(selection.makeUse(node.operands()[0]))
-					    .addOperand(selection.makeUse(node.operands()[1]));
-					selection.emit(block, std::move(shuffle), &node);
-				};
-				auto emitUnaryShuffle = [&](Opcode opcode,
-				                            unsigned sourceOperand) {
-					MachineInstr shuffle(opcode);
-					shuffle.addOperand(selection.makeDef(node))
-					    .addOperand(
-					        selection.makeUse(node.operands()[sourceOperand]));
-					selection.emit(block, std::move(shuffle), &node);
-				};
-				auto emitCopy = [&](unsigned sourceOperand) {
-					MachineInstr copy(Opcode::COPY);
-					copy.addOperand(selection.makeDef(node))
-					    .addOperand(
-					        selection.makeUse(node.operands()[sourceOperand]));
-					selection.emit(block, std::move(copy), &node);
-				};
-				auto emitDupLane = [&](unsigned sourceOperand, int lane) {
-					MachineInstr duplicate(Opcode::DUPv4sLane);
-					duplicate.addOperand(selection.makeDef(node))
-					    .addOperand(
-					        selection.makeUse(node.operands()[sourceOperand]))
-					    .addOperand(MachineOperand::immediate(lane));
-					selection.emit(block, std::move(duplicate), &node);
-				};
-				auto emitExt = [&](unsigned lowOperand, unsigned highOperand,
-				                   int byteOffset) {
-					MachineInstr extend(Opcode::EXTv16b);
-					extend.addOperand(selection.makeDef(node))
-					    .addOperand(
-					        selection.makeUse(node.operands()[lowOperand]))
-					    .addOperand(
-					        selection.makeUse(node.operands()[highOperand]))
-					    .addOperand(MachineOperand::immediate(byteOffset));
-					selection.emit(block, std::move(extend), &node);
-				};
+				ShuffleEmitter emitter{selection, block, node, mask,
+				                       vectorConstants};
 
 				if (maskEquals(mask, {0, 1, 2, 3})) {
-					emitCopy(0);
+					emitter.emitCopy(0);
 					break;
 				}
 				if (maskEquals(mask, {4, 5, 6, 7})) {
-					emitCopy(1);
+					emitter.emitCopy(1);
 					break;
 				}
 				if (mask[0] == mask[1] && mask[1] == mask[2] &&
 				    mask[2] == mask[3] && mask[0] >= 0 && mask[0] <= 7) {
-					emitDupLane(mask[0] < 4 ? 0U : 1U, mask[0] & 3);
+					emitter.emitDupLane(mask[0] < 4 ? 0U : 1U, mask[0] & 3);
 					break;
 				}
 				if (maskEquals(mask, {0, 4, 1, 5})) {
-					emitBinaryShuffle(Opcode::ZIP1v4s);
+					emitter.emitBinaryShuffle(Opcode::ZIP1v4s);
 					break;
 				}
 				if (maskEquals(mask, {2, 6, 3, 7})) {
-					emitBinaryShuffle(Opcode::ZIP2v4s);
+					emitter.emitBinaryShuffle(Opcode::ZIP2v4s);
 					break;
 				}
 				if (maskEquals(mask, {0, 2, 4, 6})) {
-					emitBinaryShuffle(Opcode::UZP1v4s);
+					emitter.emitBinaryShuffle(Opcode::UZP1v4s);
 					break;
 				}
 				if (maskEquals(mask, {1, 3, 5, 7})) {
-					emitBinaryShuffle(Opcode::UZP2v4s);
+					emitter.emitBinaryShuffle(Opcode::UZP2v4s);
 					break;
 				}
 				if (maskEquals(mask, {0, 4, 2, 6})) {
-					emitBinaryShuffle(Opcode::TRN1v4s);
+					emitter.emitBinaryShuffle(Opcode::TRN1v4s);
 					break;
 				}
 				if (maskEquals(mask, {1, 5, 3, 7})) {
-					emitBinaryShuffle(Opcode::TRN2v4s);
+					emitter.emitBinaryShuffle(Opcode::TRN2v4s);
 					break;
 				}
 				if (maskEquals(mask, {1, 0, 3, 2})) {
-					emitUnaryShuffle(Opcode::REV64v4s, 0);
+					emitter.emitUnaryShuffle(Opcode::REV64v4s, 0);
 					break;
 				}
 				if (maskEquals(mask, {5, 4, 7, 6})) {
-					emitUnaryShuffle(Opcode::REV64v4s, 1);
+					emitter.emitUnaryShuffle(Opcode::REV64v4s, 1);
 					break;
 				}
 				if (maskEquals(mask, {3, 2, 1, 0})) {
@@ -1941,7 +1958,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					                               start + 3};
 					if (mask != expected)
 						continue;
-					emitExt(0, 1, start * 4);
+					emitter.emitExt(0, 1, start * 4);
 					matchedExt = true;
 					break;
 				}
@@ -1949,62 +1966,26 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					break;
 
 				const ValueType vectorType = node.resultTypes().front();
-				auto byteIndices = [&](unsigned sourceOperand) {
-					std::array<std::uint32_t, 4> words{};
-					for (unsigned lane = 0; lane < mask.size(); ++lane) {
-						const int selected = mask[lane];
-						const bool belongs =
-						    sourceOperand == 0 ? selected >= 0 && selected < 4
-						                       : selected >= 4 && selected < 8;
-						if (!belongs) {
-							words[lane] = 0x10101010U;
-							continue;
-						}
-						const unsigned sourceLane =
-						    static_cast<unsigned>(selected) & 3U;
-						const unsigned firstByte = sourceLane * 4;
-						words[lane] = firstByte | ((firstByte + 1) << 8) |
-						              ((firstByte + 2) << 16) |
-						              ((firstByte + 3) << 24);
-					}
-					return words;
-				};
-				auto emitTableLookup =
-				    [&](unsigned sourceOperand, MachineOperand destination,
-				        SDNode *definition) -> MachineInstr & {
-					VReg indices = selection.createVReg(ValueType::V4I32);
-					emitVectorConstant(
-					    block,
-					    MachineOperand::vreg(indices, RegClass::NEON128, true),
-					    byteIndices(sourceOperand));
-					MachineInstr lookup(Opcode::TBL1v16i8);
-					lookup.addOperand(destination)
-					    .addOperand(
-					        selection.makeUse(node.operands()[sourceOperand]))
-					    .addOperand(
-					        MachineOperand::vreg(indices, RegClass::NEON128));
-					return selection.emit(block, std::move(lookup), definition);
-				};
 
-				const bool onlyFirst =
-				    std::all_of(mask.begin(), mask.end(),
-				                [](int lane) { return lane >= 0 && lane < 4; });
-				const bool onlySecond =
-				    std::all_of(mask.begin(), mask.end(),
-				                [](int lane) { return lane >= 4 && lane < 8; });
+				bool onlyFirst = true;
+				bool onlySecond = true;
+				for (int lane : mask) {
+					onlyFirst &= lane >= 0 && lane < 4;
+					onlySecond &= lane >= 4 && lane < 8;
+				}
 				if (onlyFirst || onlySecond) {
-					emitTableLookup(onlySecond ? 1U : 0U,
-					                selection.makeDef(node), &node);
+					emitter.emitTableLookup(onlySecond ? 1U : 0U,
+					                       selection.makeDef(node), &node);
 					break;
 				}
 
 				VReg first = selection.createVReg(vectorType);
-				MachineInstr &firstDefinition = emitTableLookup(
+				MachineInstr &firstDefinition = emitter.emitTableLookup(
 				    0, MachineOperand::vreg(first, RegClass::NEON128, true),
 				    nullptr);
 				registerInfo.setDefinition(first, &firstDefinition);
 				VReg second = selection.createVReg(vectorType);
-				MachineInstr &secondDefinition = emitTableLookup(
+				MachineInstr &secondDefinition = emitter.emitTableLookup(
 				    1, MachineOperand::vreg(second, RegClass::NEON128, true),
 				    nullptr);
 				registerInfo.setDefinition(second, &secondDefinition);
@@ -2210,8 +2191,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 					                  regClass == RegClass::NEON128;
 					unsigned &index = vectorBank ? floatIndex : integerIndex;
 					if (index >= 8)
-						throw std::logic_error(
-						    "TailCall selected with stack-passed arguments");
+						std::abort();
 					PhysReg destination =
 					    vectorBank
 					        ? RegisterInfo::vectorArgumentRegister(index)
@@ -2246,8 +2226,7 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 			case generated::CustomSelector::Return: {
 				if (node.operands().size() == 1) {
 					if (!emitGeneratedPattern(selection, block, node, blocks))
-						throw std::logic_error(
-						    "no generated void return pattern");
+						std::abort();
 					break;
 				}
 				if (node.operands().size() > 1) {
@@ -2268,11 +2247,9 @@ AArch64InstructionSelector::select(FunctionDAG &functionDAG) const {
 				break;
 			}
 			case generated::CustomSelector::Count:
-				throw std::logic_error("invalid SelectionDAG opcode");
+				std::abort();
 			default:
-				throw std::logic_error(
-				    std::string("custom selector is not implemented for ") +
-				    sdOpcodeName(node.opcode()));
+				std::abort();
 			}
 		}
 	}

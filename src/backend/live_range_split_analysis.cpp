@@ -40,15 +40,28 @@ bool isSoleColorBlocker(VReg spill, VReg blocker, PhysReg color,
 	return true;
 }
 
+struct SpillCostGreater {
+	const std::unordered_map<VReg, const LiveInterval *> *intervals;
+
+	bool operator()(VReg lhs, VReg rhs) const {
+		const double lhsCost = intervals->at(lhs)->spillCost;
+		const double rhsCost = intervals->at(rhs)->spillCost;
+		return lhsCost != rhsCost ? lhsCost > rhsCost : lhs < rhs;
+	}
+};
+
+bool localSplitPlanGreater(const LocalSplitPlan &lhs,
+                           const LocalSplitPlan &rhs) {
+	const double lhsNet = lhs.estimatedBenefit - lhs.estimatedCost;
+	const double rhsNet = rhs.estimatedBenefit - rhs.estimatedCost;
+	return lhsNet != rhsNet ? lhsNet > rhsNet : lhs.parent < rhs.parent;
+}
+
 std::vector<VReg> independentSpills(
     std::vector<VReg> candidates, const InterferenceGraph &graph,
     const std::unordered_map<VReg, const LiveInterval *> &intervalFor) {
 	std::sort(candidates.begin(), candidates.end(),
-	          [&intervalFor](VReg lhs, VReg rhs) {
-		          const double lhsCost = intervalFor.at(lhs)->spillCost;
-		          const double rhsCost = intervalFor.at(rhs)->spillCost;
-		          return lhsCost != rhsCost ? lhsCost > rhsCost : lhs < rhs;
-	          });
+	          SpillCostGreater{&intervalFor});
 	std::vector<VReg> independent;
 	for (VReg candidate : candidates) {
 		bool interferes = false;
@@ -200,13 +213,8 @@ LiveRangeSplitPlans LiveRangeSplitAnalysis::analyze(
 		(void)reg;
 		localCandidates.push_back(std::move(plan));
 	}
-	std::sort(
-	    localCandidates.begin(), localCandidates.end(),
-	    [](const LocalSplitPlan &lhs, const LocalSplitPlan &rhs) {
-		    const double lhsNet = lhs.estimatedBenefit - lhs.estimatedCost;
-		    const double rhsNet = rhs.estimatedBenefit - rhs.estimatedCost;
-		    return lhsNet != rhsNet ? lhsNet > rhsNet : lhs.parent < rhs.parent;
-	    });
+	std::sort(localCandidates.begin(), localCandidates.end(),
+	          localSplitPlanGreater);
 
 	// A failed range may be repairable by several blockers.  Charge its saved
 	// spill cost once across all cuts selected in this round.

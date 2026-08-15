@@ -70,33 +70,24 @@ bool isScaledImmediateMemory(Opcode opcode) {
 	return scaledImmediateWidth(opcode) != 0;
 }
 
-} // namespace
+enum class AddressKind : std::uint8_t { Invalid, Immediate, Index };
 
-bool PreRAAddressingFolder::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::IsSSA) ||
-	    !function.hasProperty(MachineProperty::Selected) ||
-	    function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+struct Address {
+	AddressKind kind = AddressKind::Invalid;
+	VReg base = 0;
+	MachineOperand index;
+	std::int64_t offset = 0;
+	std::int64_t shift = 0;
+	std::int64_t extension = 0;
+};
 
-	enum class AddressKind : std::uint8_t {
-		Invalid,
-		Immediate,
-		Index,
-	};
-	struct Address {
-		AddressKind kind = AddressKind::Invalid;
-		VReg base = 0;
-		MachineOperand index;
-		std::int64_t offset = 0;
-		std::int64_t shift = 0;
-		std::int64_t extension = 0;
-	};
-
-	MachineRegisterIndex registers(function);
-
+struct AddressResolver {
+	MachineFunction &function;
+	MachineRegisterIndex &registers;
 	std::unordered_map<VReg, Address> memo;
 	std::unordered_set<VReg> resolving;
-	auto resolve = [&](auto &&self, VReg reg) -> Address {
+
+	Address resolve(VReg reg) {
 		auto cached = memo.find(reg);
 		if (cached != memo.end())
 			return cached->second;
@@ -106,7 +97,7 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 		form.base = reg;
 		if (!function.registerInfo().contains(reg) ||
 		    !resolving.insert(reg).second)
-			return Address{};
+			return Address();
 
 		MachineInstr *definition = registers.uniqueDefinition(reg);
 		if (definition && !definition->operands().empty() &&
@@ -114,20 +105,14 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 		    definition->operands()[0].isDef &&
 		    definition->operands()[0].virtualRegister() == reg &&
 		    definition->operands()[0].regClass() == RegClass::GPR64) {
-			const auto &operands = definition->operands();
+			const std::vector<MachineOperand> &operands = definition->operands();
 			if (definition->opcode() == Opcode::COPY && operands.size() == 2 &&
 			    operands[1].isVirtualRegister() &&
 			    operands[1].regClass() == RegClass::GPR64) {
-				form = self(self, operands[1].virtualRegister());
-				// A register-offset access carries both the base and index
-				// live until the memory instruction.  Folding a shared
-				// address trades one reusable address value for two longer
-				// live ranges and can introduce spills.  Require every COPY
-				// on the path to have a single consumer so the folded access
-				// replaces, rather than duplicates, the address computation.
+				form = resolve(operands[1].virtualRegister());
 				if (form.kind == AddressKind::Index &&
 				    registers.useCount(reg) != 1) {
-					form = Address{};
+					form = Address();
 					form.kind = AddressKind::Immediate;
 					form.base = reg;
 				}
@@ -136,12 +121,12 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 			           operands[1].isVirtualRegister() &&
 			           operands[1].regClass() == RegClass::GPR64 &&
 			           operands[2].kind() == MachineOperand::Kind::Immediate) {
-				Address base = self(self, operands[1].virtualRegister());
+				Address base = resolve(operands[1].virtualRegister());
 				std::int64_t combined = 0;
 				if (base.kind == AddressKind::Immediate &&
-				    !__builtin_add_overflow(
-				        base.offset, operands[2].immediate(), &combined)) {
-					form = std::move(base);
+				    !__builtin_add_overflow(base.offset, operands[2].immediate(),
+				                           &combined)) {
+					form = base;
 					form.offset = combined;
 				}
 			} else if (definition->opcode() == Opcode::ADDXrs &&
@@ -151,7 +136,7 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 			           operands[2].isVirtualRegister() &&
 			           operands[3].kind() == MachineOperand::Kind::Immediate &&
 			           operands[4].kind() == MachineOperand::Kind::Immediate) {
-				Address base = self(self, operands[1].virtualRegister());
+				Address base = resolve(operands[1].virtualRegister());
 				std::int64_t extension = operands[4].immediate();
 				bool validIndex =
 				    (extension == 0 || extension == 1)
@@ -173,7 +158,67 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 		resolving.erase(reg);
 		memo.emplace(reg, form);
 		return form;
-	};
+	}
+};
+
+struct StackPairKind {
+	bool load = false;
+	Opcode pairOpcode = Opcode::Invalid;
+	std::int64_t stride = 0;
+};
+
+std::optional<StackPairKind> stackPairKind(Opcode opcode) {
+	switch (opcode) {
+	case Opcode::LDRWui:
+		return StackPairKind{true, Opcode::LDPWi, 4};
+	case Opcode::STRWui:
+		return StackPairKind{false, Opcode::STPWi, 4};
+	case Opcode::LDRSui:
+		return StackPairKind{true, Opcode::LDPSi, 4};
+	case Opcode::STRSui:
+		return StackPairKind{false, Opcode::STPSi, 4};
+	case Opcode::LDRXui:
+		return StackPairKind{true, Opcode::LDPXi, 8};
+	case Opcode::STRXui:
+		return StackPairKind{false, Opcode::STPXi, 8};
+	case Opcode::LDRQui:
+		return StackPairKind{true, Opcode::LDPQi, 16};
+	case Opcode::STRQui:
+		return StackPairKind{false, Opcode::STPQi, 16};
+	default:
+		return std::nullopt;
+	}
+}
+
+Opcode postIndexedOpcode(Opcode opcode) {
+	switch (opcode) {
+	case Opcode::LDRWui:
+		return Opcode::LDRWpost;
+	case Opcode::STRWui:
+		return Opcode::STRWpost;
+	case Opcode::LDRSui:
+		return Opcode::LDRSpost;
+	case Opcode::STRSui:
+		return Opcode::STRSpost;
+	case Opcode::LDRQui:
+		return Opcode::LDRQpost;
+	case Opcode::STRQui:
+		return Opcode::STRQpost;
+	case Opcode::LDRXui:
+		return Opcode::LDRXpost;
+	case Opcode::STRXui:
+		return Opcode::STRXpost;
+	default:
+		return Opcode::Invalid;
+	}
+}
+
+} // namespace
+
+bool PreRAAddressingFolder::run(MachineFunction &function) {
+
+	MachineRegisterIndex registers(function);
+	AddressResolver resolver{function, registers, {}, {}};
 
 	bool changed = false;
 	for (auto &block : function.blocks()) {
@@ -188,7 +233,7 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 			VReg address = instruction.operands()[1].virtualRegister();
 			std::int64_t memOffset = instruction.operands()[2].immediate();
 			unsigned width = scaledImmediateWidth(instruction.opcode());
-			Address form = resolve(resolve, address);
+			Address form = resolver.resolve(address);
 
 			if (form.kind == AddressKind::Immediate &&
 			    (form.base != address || form.offset != 0)) {
@@ -226,9 +271,7 @@ bool PreRAAddressingFolder::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool PostRAAddressingOptimizer::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+bool PostRAAddressingOptimizer::run(MachineFunction &function) {
 
 	bool changed = false;
 
@@ -236,33 +279,6 @@ bool PostRAAddressingOptimizer::run(MachineFunction &function) const {
 	// frame offsets are not known until frame lowering.  Pair adjacent scalar
 	// and vector stack accesses once physical registers and addresses are
 	// available.
-	struct StackPairKind {
-		bool load = false;
-		Opcode pairOpcode = Opcode::Invalid;
-		std::int64_t stride = 0;
-	};
-	auto stackPairKind = [](Opcode opcode) -> std::optional<StackPairKind> {
-		switch (opcode) {
-		case Opcode::LDRWui:
-			return StackPairKind{true, Opcode::LDPWi, 4};
-		case Opcode::STRWui:
-			return StackPairKind{false, Opcode::STPWi, 4};
-		case Opcode::LDRSui:
-			return StackPairKind{true, Opcode::LDPSi, 4};
-		case Opcode::STRSui:
-			return StackPairKind{false, Opcode::STPSi, 4};
-		case Opcode::LDRXui:
-			return StackPairKind{true, Opcode::LDPXi, 8};
-		case Opcode::STRXui:
-			return StackPairKind{false, Opcode::STPXi, 8};
-		case Opcode::LDRQui:
-			return StackPairKind{true, Opcode::LDPQi, 16};
-		case Opcode::STRQui:
-			return StackPairKind{false, Opcode::STPQi, 16};
-		default:
-			return std::nullopt;
-		}
-	};
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
 		bool paired = true;
@@ -288,6 +304,8 @@ bool PostRAAddressingOptimizer::run(MachineFunction &function) const {
 					continue;
 				const PhysReg firstData =
 				    first->operands()[0].physicalRegister();
+				if (load && RegisterInfo::aliases(firstData, base))
+					continue;
 				const std::int64_t firstOffset =
 				    first->operands()[2].immediate();
 				for (auto second = std::next(first);
@@ -382,32 +400,11 @@ bool PostRAAddressingOptimizer::run(MachineFunction &function) const {
 					changed = true;
 					break;
 				}
+				if (paired)
+					break;
 			}
 		}
 	}
-
-	auto postIndexedOpcode = [](Opcode opcode) {
-		switch (opcode) {
-		case Opcode::LDRWui:
-			return Opcode::LDRWpost;
-		case Opcode::STRWui:
-			return Opcode::STRWpost;
-		case Opcode::LDRSui:
-			return Opcode::LDRSpost;
-		case Opcode::STRSui:
-			return Opcode::STRSpost;
-		case Opcode::LDRQui:
-			return Opcode::LDRQpost;
-		case Opcode::STRQui:
-			return Opcode::STRQpost;
-		case Opcode::LDRXui:
-			return Opcode::LDRXpost;
-		case Opcode::STRXui:
-			return Opcode::STRXpost;
-		default:
-			return Opcode::Invalid;
-		}
-	};
 
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -415,13 +412,16 @@ bool PostRAAddressingOptimizer::run(MachineFunction &function) const {
 		     ++memory) {
 			Opcode post = postIndexedOpcode(memory->opcode());
 			if (post == Opcode::Invalid || memory->operands().size() != 3 ||
+			    !memory->operands()[0].isPhysicalRegister() ||
 			    !memory->operands()[1].isPhysicalRegister() ||
 			    memory->operands()[2].kind() !=
 			        MachineOperand::Kind::Immediate ||
 			    memory->operands()[2].immediate() != 0)
 				continue;
+			PhysReg data = memory->operands()[0].physicalRegister();
 			PhysReg base = memory->operands()[1].physicalRegister();
-			if (base == PhysReg::SP || base == PhysReg::X29)
+			if (base == PhysReg::SP || base == PhysReg::X29 ||
+			    RegisterInfo::aliases(data, base))
 				continue;
 
 			for (auto scan = std::next(memory); scan != instructions.end();

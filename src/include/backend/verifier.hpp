@@ -17,7 +17,7 @@ struct VerificationError {
 class MachineVerifier {
 public:
     std::vector<VerificationError> verify(const MachineFunction &function) const;
-    void verifyOrThrow(const MachineFunction &function,
+    void verifyOrAbort(const MachineFunction &function,
                        const std::string &stage) const;
 };
 

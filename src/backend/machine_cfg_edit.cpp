@@ -3,7 +3,7 @@
 #include "backend/machine_cfg_edit.hpp"
 
 #include <algorithm>
-#include <stdexcept>
+#include <cstdlib>
 #include <utility>
 
 namespace backend::aarch64 {
@@ -44,8 +44,7 @@ MachineBasicBlock &MachineCFGEdit::splitEdge(MachineFunction &function,
                                              MachineBasicBlock &successor,
                                              std::string name) {
 	if (!canSplitEdge(predecessor, successor))
-		throw std::logic_error(
-		    "cannot split an implicit or missing Machine edge");
+		std::abort();
 
 	MachineBasicBlock &split = function.createBlock(std::move(name));
 	split.frequency = std::min(predecessor.frequency, successor.frequency);

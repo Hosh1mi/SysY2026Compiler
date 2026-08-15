@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_set>
 #include <utility>
 
@@ -33,6 +33,24 @@ struct MutableSegment {
 	}
 };
 
+bool machineSlotRangeLess(const MachineSlotRange &lhs,
+                          const MachineSlotRange &rhs) {
+	if (lhs.begin != rhs.begin)
+		return lhs.begin < rhs.begin;
+	return lhs.end < rhs.end;
+}
+
+bool slotBeforeRange(MachineSlot position, const MachineSlotRange &segment) {
+	return position < segment.begin;
+}
+
+bool liveRangeOperandLess(const LiveRangeOperand &lhs,
+                          const LiveRangeOperand &rhs) {
+	if (lhs.slot != rhs.slot)
+		return lhs.slot < rhs.slot;
+	return lhs.operandIndex < rhs.operandIndex;
+}
+
 MachineSlot operandSlot(const MachineSlotIndexes &slots,
                         const MachineInstr &instruction,
                         const MachineOperand &operand) {
@@ -44,12 +62,7 @@ MachineSlot operandSlot(const MachineSlotIndexes &slots,
 }
 
 void mergeSegments(std::vector<MachineSlotRange> &segments) {
-	std::sort(segments.begin(), segments.end(),
-	          [](const MachineSlotRange &lhs, const MachineSlotRange &rhs) {
-		          if (lhs.begin != rhs.begin)
-			          return lhs.begin < rhs.begin;
-		          return lhs.end < rhs.end;
-	          });
+	std::sort(segments.begin(), segments.end(), machineSlotRangeLess);
 	std::vector<MachineSlotRange> merged;
 	merged.reserve(segments.size());
 	for (const MachineSlotRange &segment : segments) {
@@ -102,7 +115,7 @@ MachineSlotRange
 MachineSlotIndexes::blockRange(const MachineBasicBlock *block) const {
 	auto found = blockRanges_.find(block);
 	if (found == blockRanges_.end())
-		throw std::logic_error("missing Machine block slot range");
+		std::abort();
 	return found->second;
 }
 
@@ -127,9 +140,7 @@ bool LiveInterval::overlaps(const LiveInterval &other) const {
 bool LiveInterval::liveAt(MachineSlot slot) const {
 	auto found = std::upper_bound(
 	    segments.begin(), segments.end(), slot,
-	    [](MachineSlot position, const MachineSlotRange &segment) {
-		    return position < segment.begin;
-	    });
+	    slotBeforeRange);
 	return found != segments.begin() && std::prev(found)->contains(slot);
 }
 
@@ -258,11 +269,7 @@ LivenessResult MachineLiveness::run(MachineFunction &function,
 		if (interval.segments.empty())
 			continue;
 		std::sort(interval.operands.begin(), interval.operands.end(),
-		          [](const LiveRangeOperand &lhs, const LiveRangeOperand &rhs) {
-			          if (lhs.slot != rhs.slot)
-				          return lhs.slot < rhs.slot;
-			          return lhs.operandIndex < rhs.operandIndex;
-		          });
+		          liveRangeOperandLess);
 		result.intervalIndex.emplace(reg, result.intervals.size());
 		result.intervals.push_back(LiveInterval{
 		    reg, function.registerInfo().get(reg).regClass,

@@ -6,7 +6,7 @@ namespace backend::aarch64 {
 
 class A53MachineScheduler {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

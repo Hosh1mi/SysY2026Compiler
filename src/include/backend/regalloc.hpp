@@ -11,7 +11,7 @@ namespace backend::aarch64 {
 
 class PhiElimination {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 /// Chaitin-Briggs optimistic global graph-coloring allocator over typed
@@ -20,25 +20,25 @@ public:
 /// during select before spill code is inserted.
 class GraphColoringRegisterAllocator {
 public:
-    void run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 
 private:
-    bool colorOnce(
+    static bool colorOnce(
         MachineFunction &function, const LivenessResult &liveness,
         std::unordered_map<VReg, PhysReg> &assignments,
         std::vector<VReg> &spills,
-        LiveRangeSplitPlans &splitPlans) const;
-    void insertSpills(MachineFunction &function,
-                      const std::vector<VReg> &spills,
-                      std::unordered_map<VReg, int> &spillSlots) const;
-    void rewriteVirtualRegisters(
+        LiveRangeSplitPlans &splitPlans);
+    static void insertSpills(MachineFunction &function,
+                             const std::vector<VReg> &spills,
+                             std::unordered_map<VReg, int> &spillSlots);
+    static void rewriteVirtualRegisters(
         MachineFunction &function,
-        const std::unordered_map<VReg, PhysReg> &assignments) const;
+        const std::unordered_map<VReg, PhysReg> &assignments);
 };
 
 class PostRAParallelCopyResolver {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

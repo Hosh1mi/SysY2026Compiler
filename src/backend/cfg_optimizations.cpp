@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,7 +13,231 @@
 
 namespace backend::aarch64 {
 
-bool UnreachableMachineBlockElimination::run(MachineFunction &function) const {
+namespace {
+
+struct ForwardTraceScore {
+	unsigned deepestLoop = 0;
+	unsigned weightedLength = 0;
+};
+
+struct BlockPlacementContext {
+	std::vector<MachineBasicBlock *> &order;
+	std::unordered_set<MachineBasicBlock *> &placed;
+
+	ForwardTraceScore scoreForwardTrace(
+	    MachineBasicBlock *current, MachineBasicBlock *traceStart,
+	    std::unordered_map<MachineBasicBlock *, ForwardTraceScore> &memo,
+	    std::unordered_set<MachineBasicBlock *> &active,
+	    MachineBasicBlock *block) {
+		if (!block || block == current)
+			return ForwardTraceScore();
+		if (block != traceStart &&
+		    (placed.count(block) || block->number() <= current->number()))
+			return ForwardTraceScore();
+		auto found = memo.find(block);
+		if (found != memo.end())
+			return found->second;
+		if (!active.insert(block).second)
+			return ForwardTraceScore();
+		if (memo.size() + active.size() > 64) {
+			active.erase(block);
+			return ForwardTraceScore{
+			    block->loopDepth,
+			    1 + 4 * std::min(block->loopDepth, 4U)};
+		}
+
+		ForwardTraceScore bestChild;
+		for (MachineBasicBlock *successor : block->successors()) {
+			ForwardTraceScore child = scoreForwardTrace(
+			    current, traceStart, memo, active, successor);
+			if (child.deepestLoop > bestChild.deepestLoop ||
+			    (child.deepestLoop == bestChild.deepestLoop &&
+			     child.weightedLength > bestChild.weightedLength))
+				bestChild = child;
+		}
+		active.erase(block);
+		ForwardTraceScore result;
+		result.deepestLoop = std::max(block->loopDepth, bestChild.deepestLoop);
+		result.weightedLength =
+		    1 + 4 * std::min(block->loopDepth, 4U) + bestChild.weightedLength;
+		memo.emplace(block, result);
+		return result;
+	}
+
+	void extendChain(MachineBasicBlock *start) {
+		MachineBasicBlock *current = start;
+		while (current && placed.insert(current).second) {
+			order.push_back(current);
+			MachineBasicBlock *preferredFallthrough = nullptr;
+			MachineBasicBlock *likelySuccessor = nullptr;
+			unsigned deepestSuccessor = 0;
+			bool depthsDiffer = false;
+			if (!current->successors().empty()) {
+				deepestSuccessor = current->successors().front()->loopDepth;
+				unsigned shallowestSuccessor = deepestSuccessor;
+				for (MachineBasicBlock *successor : current->successors()) {
+					deepestSuccessor =
+					    std::max(deepestSuccessor, successor->loopDepth);
+					shallowestSuccessor =
+					    std::min(shallowestSuccessor, successor->loopDepth);
+				}
+				depthsDiffer = deepestSuccessor != shallowestSuccessor;
+			}
+			if (!depthsDiffer && current->instructions().size() >= 2) {
+				auto unconditional = std::prev(current->instructions().end());
+				auto conditional = std::prev(unconditional);
+				bool hasConditional = conditional->opcode() == Opcode::Bcc ||
+				                      conditional->opcode() == Opcode::CBZ ||
+				                      conditional->opcode() == Opcode::CBNZ;
+				if (unconditional->opcode() == Opcode::B && hasConditional &&
+				    unconditional->operands().size() == 1 &&
+				    unconditional->operands()[0].kind() ==
+				        MachineOperand::Kind::BasicBlock) {
+					preferredFallthrough =
+					    unconditional->operands()[0].basicBlock();
+					if (conditional->opcode() == Opcode::Bcc &&
+					    conditional->operands().size() >= 2 &&
+					    conditional->operands()[0].kind() ==
+					        MachineOperand::Kind::ConditionCode &&
+					    conditional->operands()[1].kind() ==
+					        MachineOperand::Kind::BasicBlock) {
+						MachineBasicBlock *conditionalTarget =
+						    conditional->operands()[1].basicBlock();
+						CondCode condition =
+						    conditional->operands()[0].condition();
+						if (condition == CondCode::EQ)
+							likelySuccessor = preferredFallthrough;
+						else if (condition == CondCode::NE)
+							likelySuccessor = conditionalTarget;
+					} else if ((conditional->opcode() == Opcode::CBZ ||
+					            conditional->opcode() == Opcode::CBNZ) &&
+					           conditional->operands().size() >= 2 &&
+					           conditional->operands()[1].kind() ==
+					               MachineOperand::Kind::BasicBlock) {
+						MachineBasicBlock *conditionalTarget =
+						    conditional->operands()[1].basicBlock();
+						likelySuccessor = conditional->opcode() == Opcode::CBZ
+						                      ? preferredFallthrough
+						                      : conditionalTarget;
+					}
+				}
+			}
+
+			MachineBasicBlock *best = nullptr;
+			int bestScore = -1;
+			for (unsigned i = 0; i < current->successors().size(); ++i) {
+				MachineBasicBlock *successor = current->successors()[i];
+				if (placed.count(successor))
+					continue;
+				int score = successor->predecessors().size() == 1 ? 100 : 0;
+				if (depthsDiffer && successor->loopDepth == deepestSuccessor)
+					score += 300;
+				else if (!depthsDiffer) {
+					std::unordered_map<MachineBasicBlock *, ForwardTraceScore> memo;
+					std::unordered_set<MachineBasicBlock *> active;
+					ForwardTraceScore trace = scoreForwardTrace(
+					    current, successor, memo, active, successor);
+					score += static_cast<int>(
+					    std::min(trace.deepestLoop, 8U) * 100000U);
+					if (successor == likelySuccessor)
+						score += 10000;
+					score += static_cast<int>(
+					    std::min(trace.weightedLength, 999U) * 10U);
+					if (successor == preferredFallthrough)
+						++score;
+				} else if (!preferredFallthrough && i == 0)
+					score += 10;
+				score += successor->number() > current->number() ? 1 : 0;
+				if (score > bestScore) {
+					bestScore = score;
+					best = successor;
+				}
+			}
+			current = best;
+		}
+	}
+};
+
+bool hasExplicitTransfer(MachineBasicBlock *block) {
+	return !block->instructions().empty() &&
+	       block->instructions().back().isTerminator();
+}
+
+MachineBasicBlock *targetOfConditional(const MachineInstr &instruction) {
+	switch (instruction.opcode()) {
+	case Opcode::Bcc:
+	case Opcode::CBZ:
+	case Opcode::CBNZ:
+		if (instruction.operands().size() >= 2 &&
+		    instruction.operands()[1].kind() ==
+		        MachineOperand::Kind::BasicBlock)
+			return instruction.operands()[1].basicBlock();
+		break;
+	case Opcode::TBZ:
+	case Opcode::TBNZ:
+		if (instruction.operands().size() >= 3 &&
+		    instruction.operands()[2].kind() ==
+		        MachineOperand::Kind::BasicBlock)
+			return instruction.operands()[2].basicBlock();
+		break;
+	default:
+		break;
+	}
+	return nullptr;
+}
+
+bool invertConditional(MachineInstr &instruction, MachineBasicBlock *target) {
+	switch (instruction.opcode()) {
+	case Opcode::Bcc:
+		instruction.operands()[0] = MachineOperand::condition(
+		    InstrInfo::inverseCondition(
+		        instruction.operands()[0].condition()));
+		instruction.operands()[1] = MachineOperand::block(target);
+		return true;
+	case Opcode::CBZ:
+	case Opcode::CBNZ:
+		instruction.setOpcode(instruction.opcode() == Opcode::CBZ ? Opcode::CBNZ
+		                                                          : Opcode::CBZ);
+		instruction.operands()[1] = MachineOperand::block(target);
+		return true;
+	case Opcode::TBZ:
+	case Opcode::TBNZ:
+		instruction.setOpcode(instruction.opcode() == Opcode::TBZ ? Opcode::TBNZ
+		                                                          : Opcode::TBZ);
+		instruction.operands()[2] = MachineOperand::block(target);
+		return true;
+	default:
+		return false;
+	}
+}
+
+std::int64_t emittedInstructionSize(const MachineInstr &instruction) {
+	if (instruction.opcode() == Opcode::COPYXtoW &&
+	    instruction.operands().size() >= 2 &&
+	    instruction.operands()[0].isPhysicalRegister() &&
+	    instruction.operands()[1].isPhysicalRegister() &&
+	    RegisterInfo::aliases(instruction.operands()[0].physicalRegister(),
+                          instruction.operands()[1].physicalRegister()))
+		return 0;
+	return 4;
+}
+
+unsigned branchTargetOperand(Opcode opcode) {
+	return opcode == Opcode::TBZ || opcode == Opcode::TBNZ ? 2 : 1;
+}
+
+bool branchDisplacementFits(Opcode opcode, std::int64_t displacement) {
+	const std::int64_t range =
+	    opcode == Opcode::TBZ || opcode == Opcode::TBNZ
+	        ? (std::int64_t{1} << 15)
+	        : (std::int64_t{1} << 20);
+	return displacement >= -range && displacement <= range - 4 &&
+	       displacement % 4 == 0;
+}
+
+} // namespace
+
+bool UnreachableMachineBlockElimination::run(MachineFunction &function) {
 	auto &blocks = function.blocks();
 	if (blocks.size() < 2)
 		return false;
@@ -74,7 +298,7 @@ bool UnreachableMachineBlockElimination::run(MachineFunction &function) const {
 	return true;
 }
 
-bool MachineBlockPlacement::run(MachineFunction &function) const {
+bool MachineBlockPlacement::run(MachineFunction &function) {
 	auto &blocks = function.blocks();
 	if (blocks.size() < 2)
 		return false;
@@ -123,158 +347,11 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
 
 	std::vector<MachineBasicBlock *> order;
 	std::unordered_set<MachineBasicBlock *> placed;
-	auto extendChain = [&](MachineBasicBlock *start) {
-		MachineBasicBlock *current = start;
-		while (current && placed.insert(current).second) {
-			order.push_back(current);
-			MachineBasicBlock *preferredFallthrough = nullptr;
-			MachineBasicBlock *likelySuccessor = nullptr;
-			unsigned deepestSuccessor = 0;
-			bool depthsDiffer = false;
-			if (!current->successors().empty()) {
-				deepestSuccessor = current->successors().front()->loopDepth;
-				unsigned shallowestSuccessor = deepestSuccessor;
-				for (MachineBasicBlock *successor : current->successors()) {
-					deepestSuccessor =
-					    std::max(deepestSuccessor, successor->loopDepth);
-					shallowestSuccessor =
-					    std::min(shallowestSuccessor, successor->loopDepth);
-				}
-				depthsDiffer = deepestSuccessor != shallowestSuccessor;
-			}
-
-			// In the absence of profile data, natural-loop membership is
-			// the strongest static frequency signal.  Record the explicit
-			// fallthrough as the final tie breaker, but do not let it hide a
-			// successor that immediately enters a deeper forward region.
-			if (!depthsDiffer && current->instructions().size() >= 2) {
-				auto unconditional = std::prev(current->instructions().end());
-				auto conditional = std::prev(unconditional);
-				bool hasConditional = conditional->opcode() == Opcode::Bcc ||
-				                      conditional->opcode() == Opcode::CBZ ||
-				                      conditional->opcode() == Opcode::CBNZ;
-				if (unconditional->opcode() == Opcode::B && hasConditional &&
-				    unconditional->operands().size() == 1 &&
-				    unconditional->operands()[0].kind() ==
-				        MachineOperand::Kind::BasicBlock) {
-					preferredFallthrough =
-					    unconditional->operands()[0].basicBlock();
-					MachineBasicBlock *conditionalTarget = nullptr;
-					// Equality with zero or another single value is usually
-					// the less frequent edge.  Use the same static direction
-					// for flag branches and their CBZ/CBNZ counterparts.
-					if (conditional->opcode() == Opcode::Bcc &&
-					    conditional->operands().size() >= 2 &&
-					    conditional->operands()[0].kind() ==
-					        MachineOperand::Kind::ConditionCode &&
-					    conditional->operands()[1].kind() ==
-					        MachineOperand::Kind::BasicBlock) {
-						conditionalTarget =
-						    conditional->operands()[1].basicBlock();
-						CondCode condition =
-						    conditional->operands()[0].condition();
-						if (condition == CondCode::EQ)
-							likelySuccessor = preferredFallthrough;
-						else if (condition == CondCode::NE)
-							likelySuccessor = conditionalTarget;
-					} else if ((conditional->opcode() == Opcode::CBZ ||
-					            conditional->opcode() == Opcode::CBNZ) &&
-					           conditional->operands().size() >= 2 &&
-					           conditional->operands()[1].kind() ==
-					               MachineOperand::Kind::BasicBlock) {
-						conditionalTarget =
-						    conditional->operands()[1].basicBlock();
-						likelySuccessor = conditional->opcode() == Opcode::CBZ
-						                      ? preferredFallthrough
-						                      : conditionalTarget;
-					}
-				}
-			}
-
-			struct ForwardTraceScore {
-				unsigned deepestLoop = 0;
-				unsigned weightedLength = 0;
-			};
-			auto scoreForwardTrace = [&](MachineBasicBlock *traceStart) {
-				constexpr std::size_t traceBlockLimit = 64;
-				std::unordered_map<MachineBasicBlock *, ForwardTraceScore> memo;
-				std::unordered_set<MachineBasicBlock *> active;
-				auto visit =
-				    [&](auto &&self,
-				        MachineBasicBlock *block) -> ForwardTraceScore {
-					if (!block || block == current)
-						return {};
-					if (block != traceStart &&
-					    (placed.count(block) ||
-					     block->number() <= current->number()))
-						return {};
-					if (auto found = memo.find(block); found != memo.end())
-						return found->second;
-					if (!active.insert(block).second)
-						return {};
-					if (memo.size() + active.size() > traceBlockLimit) {
-						active.erase(block);
-						return ForwardTraceScore{
-						    block->loopDepth,
-						    1 + 4 * std::min(block->loopDepth, 4U)};
-					}
-
-					ForwardTraceScore bestChild;
-					for (MachineBasicBlock *successor : block->successors()) {
-						ForwardTraceScore child = self(self, successor);
-						if (child.deepestLoop > bestChild.deepestLoop ||
-						    (child.deepestLoop == bestChild.deepestLoop &&
-						     child.weightedLength > bestChild.weightedLength))
-							bestChild = child;
-					}
-					active.erase(block);
-
-					ForwardTraceScore result;
-					result.deepestLoop =
-					    std::max(block->loopDepth, bestChild.deepestLoop);
-					result.weightedLength = 1 +
-					                        4 * std::min(block->loopDepth, 4U) +
-					                        bestChild.weightedLength;
-					memo.emplace(block, result);
-					return result;
-				};
-				return visit(visit, traceStart);
-			};
-
-			MachineBasicBlock *best = nullptr;
-			int bestScore = -1;
-			for (unsigned i = 0; i < current->successors().size(); ++i) {
-				MachineBasicBlock *successor = current->successors()[i];
-				if (placed.count(successor))
-					continue;
-				int score = successor->predecessors().size() == 1 ? 100 : 0;
-				if (depthsDiffer && successor->loopDepth == deepestSuccessor)
-					score += 300;
-				else if (!depthsDiffer) {
-					ForwardTraceScore trace = scoreForwardTrace(successor);
-					score += static_cast<int>(std::min(trace.deepestLoop, 8U) *
-					                          100000U);
-					if (successor == likelySuccessor)
-						score += 10000;
-					score += static_cast<int>(
-					    std::min(trace.weightedLength, 999U) * 10U);
-					if (successor == preferredFallthrough)
-						++score;
-				} else if (!preferredFallthrough && i == 0)
-					score += 10;
-				score += successor->number() > current->number() ? 1 : 0;
-				if (score > bestScore) {
-					bestScore = score;
-					best = successor;
-				}
-			}
-			current = best;
-		}
-	};
-	extendChain(blocks.front().get());
+	BlockPlacementContext placement{order, placed};
+	placement.extendChain(blocks.front().get());
 	for (const auto &block : blocks)
 		if (!placed.count(block.get()))
-			extendChain(block.get());
+			placement.extendChain(block.get());
 
 	// Rotate a conditional loop latch immediately before its header when
 	// every displaced CFG edge is explicit.  The final branch cleanup can
@@ -297,10 +374,6 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
 		if (!header || header == function.entryBlock())
 			continue;
 
-		auto hasExplicitTransfer = [](MachineBasicBlock *block) {
-			return !block->instructions().empty() &&
-			       block->instructions().back().isTerminator();
-		};
 		bool safe = true;
 		for (MachineBasicBlock *predecessor : header->predecessors())
 			if (predecessor != latch && !hasExplicitTransfer(predecessor))
@@ -334,40 +407,20 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
 		blocks = std::move(reordered);
 	}
 
-	for (std::size_t i = 0; i + 1 < blocks.size(); ++i) {
-		MachineBasicBlock *fallthrough = blocks[i + 1].get();
+	for (std::size_t i = 0; i < blocks.size(); ++i) {
+		MachineBasicBlock *fallthrough =
+		    i + 1 < blocks.size() ? blocks[i + 1].get() : nullptr;
 		auto &instructions = blocks[i]->instructions();
-		if (instructions.empty())
-			continue;
-
-		auto targetOfConditional =
-		    [](const MachineInstr &instruction) -> MachineBasicBlock * {
-			switch (instruction.opcode()) {
-			case Opcode::Bcc:
-				if (instruction.operands().size() >= 2 &&
-				    instruction.operands()[1].kind() ==
-				        MachineOperand::Kind::BasicBlock)
-					return instruction.operands()[1].basicBlock();
-				break;
-			case Opcode::CBZ:
-			case Opcode::CBNZ:
-				if (instruction.operands().size() >= 2 &&
-				    instruction.operands()[1].kind() ==
-				        MachineOperand::Kind::BasicBlock)
-					return instruction.operands()[1].basicBlock();
-				break;
-			case Opcode::TBZ:
-			case Opcode::TBNZ:
-				if (instruction.operands().size() >= 3 &&
-				    instruction.operands()[2].kind() ==
-				        MachineOperand::Kind::BasicBlock)
-					return instruction.operands()[2].basicBlock();
-				break;
-			default:
-				break;
+		auto &successors = blocks[i]->successors();
+		if (instructions.empty() || !instructions.back().isTerminator()) {
+			if (successors.size() == 1 && successors.front() != fallthrough) {
+				MachineInstr branch(Opcode::B);
+				branch.addOperand(MachineOperand::block(successors.front()));
+				instructions.push_back(std::move(branch));
+				changed = true;
 			}
-			return nullptr;
-		};
+			continue;
+		}
 
 		// If both explicit branch arms name the same block, retain only the
 		// unconditional transfer.  This can appear after forwarding-block
@@ -386,14 +439,44 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
 			}
 		}
 
-		// A lone conditional branch to the physical successor has identical
-		// taken and fallthrough destinations and is therefore redundant.
+		// A lone conditional encodes its other CFG edge as an implicit
+		// fallthrough.  Rebuild that edge after layout changes.
 		if (!instructions.empty()) {
 			auto last = std::prev(instructions.end());
-			if (targetOfConditional(*last) == fallthrough) {
-				instructions.erase(last);
-				changed = true;
-				continue;
+			MachineBasicBlock *conditionalTarget = targetOfConditional(*last);
+			if (conditionalTarget) {
+				if (successors.size() == 1 &&
+				    successors.front() == conditionalTarget) {
+					if (conditionalTarget == fallthrough) {
+						instructions.erase(last);
+					} else {
+						MachineInstr branch(Opcode::B);
+						branch.addOperand(
+						    MachineOperand::block(conditionalTarget));
+						*last = std::move(branch);
+					}
+					changed = true;
+					continue;
+				}
+
+				if (successors.size() == 2) {
+					auto targetPosition =
+					    std::find(successors.begin(), successors.end(),
+					              conditionalTarget);
+					if (targetPosition != successors.end()) {
+						MachineBasicBlock *other =
+						    successors[targetPosition == successors.begin() ? 1 : 0];
+						if (fallthrough == conditionalTarget) {
+							changed |= invertConditional(*last, other);
+						} else if (fallthrough != other) {
+							MachineInstr branch(Opcode::B);
+							branch.addOperand(MachineOperand::block(other));
+							instructions.push_back(std::move(branch));
+							changed = true;
+						}
+						continue;
+					}
+				}
 			}
 		}
 
@@ -421,60 +504,15 @@ bool MachineBlockPlacement::run(MachineFunction &function) const {
 		if (conditionalTarget != fallthrough)
 			continue;
 
-		if (conditional->opcode() == Opcode::Bcc) {
-			CondCode inverse = InstrInfo::inverseCondition(
-			    conditional->operands()[0].condition());
-			conditional->operands()[0] = MachineOperand::condition(inverse);
-			conditional->operands()[1] = MachineOperand::block(fallback);
-		} else {
-			conditional->setOpcode(conditional->opcode() == Opcode::CBZ
-			                           ? Opcode::CBNZ
-			                           : Opcode::CBZ);
-			conditional->operands()[1] = MachineOperand::block(fallback);
-		}
+		if (!invertConditional(*conditional, fallback))
+			continue;
 		instructions.erase(unconditional);
 		changed = true;
 	}
 	return changed;
 }
 
-bool AArch64BranchRelaxation::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::FrameFinalized))
-		throw std::logic_error(
-		    "branch relaxation requires finalized frame instructions");
-
-	auto emittedSize = [](const MachineInstr &instruction) {
-		if (instruction.opcode() == Opcode::COPYXtoW &&
-		    instruction.operands().size() >= 2 &&
-		    instruction.operands()[0].isPhysicalRegister() &&
-		    instruction.operands()[1].isPhysicalRegister() &&
-		    RegisterInfo::aliases(instruction.operands()[0].physicalRegister(),
-		                          instruction.operands()[1].physicalRegister()))
-			return std::int64_t{0};
-		return std::int64_t{4};
-	};
-	auto targetOperand = [](Opcode opcode) -> unsigned {
-		switch (opcode) {
-		case Opcode::Bcc:
-			return 1;
-		case Opcode::CBZ:
-		case Opcode::CBNZ:
-			return 1;
-		case Opcode::TBZ:
-		case Opcode::TBNZ:
-			return 2;
-		default:
-			return 0;
-		}
-	};
-	auto displacementFits = [](Opcode opcode, std::int64_t displacement) {
-		const std::int64_t range =
-		    opcode == Opcode::TBZ || opcode == Opcode::TBNZ
-		        ? std::int64_t{1} << 15
-		        : std::int64_t{1} << 20;
-		return displacement >= -range && displacement <= range - 4 &&
-		       displacement % 4 == 0;
-	};
+bool AArch64BranchRelaxation::run(MachineFunction &function) {
 
 	bool changed = false;
 	unsigned splitNumber = 0;
@@ -487,7 +525,7 @@ bool AArch64BranchRelaxation::run(MachineFunction &function) const {
 			blockOffsets[owned.get()] = offset;
 			for (const MachineInstr &instruction : owned->instructions()) {
 				instructionOffsets[&instruction] = offset;
-				offset += emittedSize(instruction);
+				offset += emittedInstructionSize(instruction);
 			}
 		}
 
@@ -504,17 +542,16 @@ bool AArch64BranchRelaxation::run(MachineFunction &function) const {
 				    opcode != Opcode::CBNZ && opcode != Opcode::TBZ &&
 				    opcode != Opcode::TBNZ)
 					continue;
-				const unsigned operand = targetOperand(opcode);
+				const unsigned operand = branchTargetOperand(opcode);
 				if (it->operands().size() <= operand ||
 				    it->operands()[operand].kind() !=
 				        MachineOperand::Kind::BasicBlock)
-					throw std::logic_error(
-					    "malformed conditional branch during relaxation");
+					std::abort();
 				MachineBasicBlock *candidate =
 				    it->operands()[operand].basicBlock();
 				const std::int64_t displacement =
 				    blockOffsets.at(candidate) - instructionOffsets.at(&*it);
-				if (displacementFits(opcode, displacement))
+				if (branchDisplacementFits(opcode, displacement))
 					continue;
 				source = owned.get();
 				branch = it;
@@ -533,8 +570,7 @@ bool AArch64BranchRelaxation::run(MachineFunction &function) const {
 		if (originalSuccessors.size() != 2 ||
 		    std::find(originalSuccessors.begin(), originalSuccessors.end(),
 		              target) == originalSuccessors.end())
-			throw std::logic_error(
-			    "conditional branch does not match a two-way CFG edge");
+			std::abort();
 
 		MachineBasicBlock &continuation = function.createBlock(
 		    "branch.relax." + std::to_string(splitNumber++));
@@ -542,17 +578,17 @@ bool AArch64BranchRelaxation::run(MachineFunction &function) const {
 		continuation.loopDepth = source->loopDepth;
 
 		auto &blocks = function.blocks();
-		auto sourcePosition =
-		    std::find_if(blocks.begin(), blocks.end(), [&](const auto &owned) {
-			    return owned.get() == source;
-		    });
+		auto sourcePosition = blocks.begin();
+		while (sourcePosition != blocks.end() &&
+		       sourcePosition->get() != source)
+			++sourcePosition;
 		std::unique_ptr<MachineBasicBlock> continuationOwner =
 		    std::move(blocks.back());
 		blocks.pop_back();
-		sourcePosition =
-		    std::find_if(blocks.begin(), blocks.end(), [&](const auto &owned) {
-			    return owned.get() == source;
-		    });
+		sourcePosition = blocks.begin();
+		while (sourcePosition != blocks.end() &&
+		       sourcePosition->get() != source)
+			++sourcePosition;
 		blocks.insert(std::next(sourcePosition), std::move(continuationOwner));
 
 		auto afterBranch = std::next(branch);
@@ -587,7 +623,7 @@ bool AArch64BranchRelaxation::run(MachineFunction &function) const {
 			branch->operands()[2] = MachineOperand::block(&continuation);
 			break;
 		default:
-			throw std::logic_error("unsupported branch relaxation opcode");
+			std::abort();
 		}
 
 		MachineInstr longBranch(Opcode::B);

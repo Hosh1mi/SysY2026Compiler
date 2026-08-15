@@ -8,30 +8,28 @@ namespace backend::aarch64 {
 
 class PostRACopyPropagation {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class PostRARedundantCopyElimination {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class A53FPRegisterBalancing {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class PostRAInstructionExpansion {
 public:
-    bool run(MachineFunction &function) const;
-    bool expandConstantMaterializations(MachineFunction &function,
-                                        bool enableMovn = true,
-                                        bool enableLogicalImmediate = true) const;
+    static bool run(MachineFunction &function);
+    static bool expandConstantMaterializations(MachineFunction &function);
 };
 
 class PostRAAddressingOptimizer {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

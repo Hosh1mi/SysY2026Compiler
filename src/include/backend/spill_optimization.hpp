@@ -8,7 +8,7 @@ namespace backend::aarch64 {
 
 class PostRASpillSlotOptimizer {
 public:
-  bool run(MachineFunction &function) const;
+  static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

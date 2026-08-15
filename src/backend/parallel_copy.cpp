@@ -4,12 +4,12 @@
 #include "backend/machine_cfg_edit.hpp"
 
 #include <algorithm>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_set>
 
 namespace backend::aarch64 {
 
-bool PhiElimination::run(MachineFunction &function) const {
+bool PhiElimination::run(MachineFunction &function) {
 	if (!function.hasProperty(MachineProperty::HasPHIs))
 		return false;
 	struct Edge {
@@ -59,7 +59,7 @@ bool PhiElimination::run(MachineFunction &function) const {
 			if (it->operands().empty() ||
 			    !it->operands()[0].isVirtualRegister() ||
 			    !it->operands()[0].isDef)
-				throw std::logic_error("malformed Machine PHI");
+				std::abort();
 			VReg destination = it->operands()[0].virtualRegister();
 			RegClass regClass = it->operands()[0].regClass();
 			function.registerInfo().setDefinition(destination, nullptr);
@@ -67,7 +67,7 @@ bool PhiElimination::run(MachineFunction &function) const {
 				if (!it->operands()[i].isVirtualRegister() ||
 				    it->operands()[i + 1].kind() !=
 				        MachineOperand::Kind::BasicBlock)
-					throw std::logic_error("malformed Machine PHI incoming");
+					std::abort();
 				copies[it->operands()[i + 1].basicBlock()].push_back(
 				    Copy{destination, it->operands()[i].virtualRegister(),
 				         regClass});
@@ -78,20 +78,22 @@ bool PhiElimination::run(MachineFunction &function) const {
 	}
 
 	for (auto &[block, pending] : copies) {
-		auto insertion = std::find_if(block->instructions().begin(),
-		                              block->instructions().end(),
-		                              [](const MachineInstr &instruction) {
-			                              return instruction.isTerminator();
-		                              });
+		auto insertion = block->instructions().begin();
+		while (insertion != block->instructions().end() &&
+		       !insertion->isTerminator())
+			++insertion;
 		while (!pending.empty()) {
 			std::unordered_set<VReg> sources;
 			for (const Copy &copy : pending)
 				sources.insert(copy.source);
-			auto ready = std::find_if(
-			    pending.begin(), pending.end(), [&sources](const Copy &copy) {
-				    return copy.destination == copy.source ||
-				           !sources.count(copy.destination);
-			    });
+			auto ready = pending.end();
+			for (auto candidate = pending.begin(); candidate != pending.end();
+			     ++candidate)
+				if (candidate->destination == candidate->source ||
+				    !sources.count(candidate->destination)) {
+					ready = candidate;
+					break;
+				}
 			if (ready != pending.end()) {
 				Copy copy = *ready;
 				pending.erase(ready);
@@ -130,10 +132,7 @@ bool PhiElimination::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool PostRAParallelCopyResolver::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		throw std::logic_error(
-		    "parallel physical copies require completed allocation");
+bool PostRAParallelCopyResolver::run(MachineFunction &function) {
 
 	struct Copy {
 		PhysReg destination = PhysReg::NoReg;
@@ -156,7 +155,7 @@ bool PostRAParallelCopyResolver::run(MachineFunction &function) const {
 				    it->operands().size() != 2 ||
 				    !it->operands()[0].isPhysicalRegister() ||
 				    !it->operands()[1].isPhysicalRegister())
-					throw std::logic_error("malformed allocated parallel copy");
+					std::abort();
 				pending.push_back(Copy{it->operands()[0].physicalRegister(),
 				                       it->operands()[1].physicalRegister(),
 				                       it->operands()[0].regClass()});
@@ -168,12 +167,14 @@ bool PostRAParallelCopyResolver::run(MachineFunction &function) const {
 				std::unordered_set<PhysReg> sources;
 				for (const Copy &copy : pending)
 					sources.insert(copy.source);
-				auto ready =
-				    std::find_if(pending.begin(), pending.end(),
-				                 [&sources](const Copy &copy) {
-					                 return copy.destination == copy.source ||
-					                        !sources.count(copy.destination);
-				                 });
+				auto ready = pending.end();
+				for (auto candidate = pending.begin(); candidate != pending.end();
+				     ++candidate)
+					if (candidate->destination == candidate->source ||
+					    !sources.count(candidate->destination)) {
+						ready = candidate;
+						break;
+					}
 				if (ready != pending.end()) {
 					Copy copy = *ready;
 					pending.erase(ready);
@@ -189,9 +190,7 @@ bool PostRAParallelCopyResolver::run(MachineFunction &function) const {
 					continue;
 				}
 
-				throw std::logic_error(
-				    "register allocation produced an unresolved "
-				    "physical parallel-copy cycle");
+				std::abort();
 			}
 			changed = true;
 		}

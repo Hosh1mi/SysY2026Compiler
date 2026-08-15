@@ -8,7 +8,7 @@
 #include <deque>
 #include <functional>
 #include <optional>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -175,21 +175,168 @@ bool removableInstruction(const MachineInstr &instruction) {
 	return hasVirtualDef;
 }
 
+int flagsAccess(MachineBasicBlock::InstrList::const_iterator first,
+                MachineBasicBlock::InstrList::const_iterator last) {
+	for (; first != last; ++first) {
+		if (first->readsRegister(PhysReg::NZCV))
+			return 1;
+		if (first->definesRegister(PhysReg::NZCV))
+			return -1;
+	}
+	return 0;
+}
+
+bool definesVirtual(const MachineInstr &instruction, VReg reg) {
+	if (!reg)
+		return false;
+	for (const MachineOperand &operand : instruction.operands())
+		if (operand.isVirtualRegister() && operand.isDef &&
+		    operand.virtualRegister() == reg)
+			return true;
+	return false;
+}
+
+bool isFixedStackLoad(const MachineFunction &function,
+                      const MachineInstr &instruction) {
+	if (instruction.opcode() != Opcode::SPILL_LOAD ||
+	    instruction.operands().size() < 2 ||
+	    instruction.operands()[1].kind() != MachineOperand::Kind::FrameIndex ||
+	    instruction.memoryOperands().empty() ||
+	    instruction.memoryOperands().front().isVolatile)
+		return false;
+	const int index = instruction.operands()[1].frameIndex();
+	return index >= 0 &&
+	       static_cast<std::size_t>(index) <
+	           function.frameInfo().objects().size() &&
+	       function.frameInfo().objects()[index].fixed;
+}
+
+bool locallySinkable(const MachineFunction &function,
+                     const MachineInstr &instruction) {
+	if (instruction.isTerminator() || instruction.isCall() ||
+	    instruction.mayStore() || instruction.hasSideEffects() ||
+	    instruction.parallelCopyGroup)
+		return false;
+	if (instruction.mayLoad() && !isFixedStackLoad(function, instruction))
+		return false;
+	const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
+	if (descriptor.setsFlags || descriptor.usesFlags ||
+	    (descriptor.pseudo && instruction.opcode() != Opcode::SPILL_LOAD))
+		return false;
+	for (const MachineOperand &operand : instruction.operands())
+		if (operand.isPhysicalRegister())
+			return false;
+	return true;
+}
+
+bool sinkableOpcode(Opcode opcode) {
+	switch (opcode) {
+	case Opcode::MOVi32:
+	case Opcode::MOVi64:
+	case Opcode::MOVIv4Zero:
+	case Opcode::FMOVWS:
+	case Opcode::FMOVSW:
+	case Opcode::COPYXtoW:
+	case Opcode::SXTW:
+	case Opcode::UXTW:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool redefinesInput(const MachineInstr &instruction,
+                    const std::unordered_set<VReg> &inputs) {
+	for (const MachineOperand &operand : instruction.operands())
+		if (operand.isVirtualRegister() && operand.isDef &&
+		    inputs.find(operand.virtualRegister()) != inputs.end())
+			return true;
+	return false;
+}
+
+bool hoistableOpcode(Opcode opcode) {
+	return opcode == Opcode::MOVi32 || opcode == Opcode::MOVi64;
+}
+
+bool isBooleanCompare(const MachineInstr &instruction, VReg conditionReg) {
+	return instruction.opcode() == Opcode::CMPWri &&
+	       instruction.operands().size() >= 2 &&
+	       instruction.operands()[0].isVirtualRegister() &&
+	       instruction.operands()[0].virtualRegister() == conditionReg &&
+	       instruction.operands()[1].kind() == MachineOperand::Kind::Immediate &&
+	       instruction.operands()[1].immediate() == 0;
+}
+
+bool sameVReg(const MachineOperand &lhs, const MachineOperand &rhs);
+
+struct MaterializedI32 {
+	MachineInstr *instruction = nullptr;
+	VReg reg = 0;
+	std::uint32_t value = 0;
+};
+
+std::optional<MaterializedI32>
+materializedI32(const MachineFunction &function,
+                const MachineOperand &operand) {
+	if (!operand.isVirtualRegister() ||
+	    !function.registerInfo().contains(operand.virtualRegister()))
+		return std::nullopt;
+	const VRegInfo &info =
+	    function.registerInfo().get(operand.virtualRegister());
+	MachineInstr *definition = info.definition;
+	if (!definition || definition->opcode() != Opcode::MOVi32 ||
+	    definition->operands().size() != 2 ||
+	    !sameVReg(definition->operands()[0], operand) ||
+	    definition->operands()[1].kind() != MachineOperand::Kind::Immediate)
+		return std::nullopt;
+	return MaterializedI32{
+	    definition, operand.virtualRegister(),
+	    static_cast<std::uint32_t>(definition->operands()[1].immediate())};
+}
+
+void eraseInstruction(MachineFunction &function, MachineInstr *target) {
+	if (!target)
+		return;
+	for (auto &owned : function.blocks()) {
+		auto &instructions = owned->instructions();
+		auto found = instructions.begin();
+		while (found != instructions.end() && &*found != target)
+			++found;
+		if (found != instructions.end()) {
+			instructions.erase(found);
+			return;
+		}
+	}
+}
+
+bool sameVReg(const MachineOperand &lhs, const MachineOperand &rhs) {
+	return lhs.isVirtualRegister() && rhs.isVirtualRegister() &&
+	       lhs.virtualRegister() == rhs.virtualRegister();
+}
+
+struct LoadStoreAddressForm {
+	VReg root = 0;
+	std::int64_t offset = 0;
+	bool valid = false;
+};
+
+LoadStoreAddressForm addressForm(
+    const MachineOperand &operand,
+    const std::unordered_map<VReg, LoadStoreAddressForm> &addresses) {
+	LoadStoreAddressForm form;
+	if (!operand.isVirtualRegister() || operand.regClass() != RegClass::GPR64)
+		return form;
+	auto found = addresses.find(operand.virtualRegister());
+	if (found != addresses.end())
+		return found->second;
+	form.root = operand.virtualRegister();
+	form.valid = true;
+	return form;
+}
+
 bool flagsUsedAfter(MachineBasicBlock *block,
                     MachineBasicBlock::InstrList::const_iterator begin) {
-	auto inspectRange = [](auto first, auto last) {
-		for (; first != last; ++first) {
-			// An instruction that both reads and writes flags consumes the
-			// incoming value before defining the outgoing one.
-			if (first->readsRegister(PhysReg::NZCV))
-				return 1;
-			if (first->definesRegister(PhysReg::NZCV))
-				return -1;
-		}
-		return 0;
-	};
-
-	int local = inspectRange(begin, block->instructions().end());
+	int local = flagsAccess(begin, block->instructions().end());
 	if (local != 0)
 		return local > 0;
 
@@ -202,8 +349,8 @@ bool flagsUsedAfter(MachineBasicBlock *block,
 	while (!worklist.empty()) {
 		MachineBasicBlock *current = worklist.front();
 		worklist.pop_front();
-		int access = inspectRange(current->instructions().begin(),
-		                          current->instructions().end());
+		int access = flagsAccess(current->instructions().begin(),
+		                         current->instructions().end());
 		if (access > 0)
 			return true;
 		if (access < 0)
@@ -217,7 +364,7 @@ bool flagsUsedAfter(MachineBasicBlock *block,
 
 } // namespace
 
-bool MachineConstantCSE::run(MachineFunction &function) const {
+bool MachineConstantCSE::run(MachineFunction &function) {
 	bool changed = false;
 	// Local Machine CSE for materialized constants.  Keeping this before RA
 	// lets graph coloring decide whether the shared value belongs in a
@@ -303,9 +450,7 @@ bool MachineConstantCSE::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool MachineExpressionCSE::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::IsSSA))
-		return false;
+bool MachineExpressionCSE::run(MachineFunction &function) {
 
 	struct AvailableExpression {
 		VReg result = 0;
@@ -341,11 +486,10 @@ bool MachineExpressionCSE::run(MachineFunction &function) const {
 				continue;
 			}
 
-			auto result = std::find_if(
-			    instruction->operands().begin(), instruction->operands().end(),
-			    [](const MachineOperand &operand) {
-				    return operand.isDef && operand.isVirtualRegister();
-			    });
+			auto result = instruction->operands().begin();
+			while (result != instruction->operands().end() &&
+			       !(result->isDef && result->isVirtualRegister()))
+				++result;
 			VReg duplicate = result->virtualRegister();
 			auto canonical = available.find(*key);
 			if (canonical == available.end()) {
@@ -375,7 +519,7 @@ bool MachineExpressionCSE::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64VectorImmediateSelection::run(MachineFunction &function) const {
+bool AArch64VectorImmediateSelection::run(MachineFunction &function) {
 	bool changed = false;
 	// GPR vs NEON bank choice for splat immediates.
 	//
@@ -443,7 +587,7 @@ bool AArch64VectorImmediateSelection::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64PreRAPeephole::run(MachineFunction &function) const {
+bool AArch64PreRAPeephole::run(MachineFunction &function) {
 	bool changed = false;
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -470,16 +614,11 @@ bool AArch64PreRAPeephole::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
+bool AArch64LoadStoreOptimization::run(MachineFunction &function) {
 	bool changed = false;
 	// Pair adjacent same-width LDR/STR into LDP/STP.  Element size is the
 	// architectural scale (4/8/16): the pair offset must be a multiple of that
 	// scale and fit the signed 7-bit scaled immediate.
-	struct AddressForm {
-		VReg root = 0;
-		std::int64_t offset = 0;
-		bool valid = false;
-	};
 	struct PairKind {
 		Opcode loadOpcode;
 		Opcode storeOpcode;
@@ -493,37 +632,16 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 	    {Opcode::LDRXui, Opcode::STRXui, Opcode::LDPXi, Opcode::STPXi, 8},
 	    {Opcode::LDRQui, Opcode::STRQui, Opcode::LDPQi, Opcode::STPQi, 16},
 	};
-	auto definesVirtual = [](const MachineInstr &instruction, VReg reg) {
-		if (!reg)
-			return false;
-		for (const MachineOperand &operand : instruction.operands())
-			if (operand.isVirtualRegister() && operand.isDef &&
-			    operand.virtualRegister() == reg)
-				return true;
-		return false;
-	};
 	for (auto &block : function.blocks()) {
 		bool fused = true;
 		while (fused) {
 			fused = false;
 			auto &instructions = block->instructions();
-			std::unordered_map<VReg, AddressForm> addresses;
-			auto addressOf = [&](const MachineOperand &operand) {
-				AddressForm form;
-				if (!operand.isVirtualRegister() ||
-				    operand.regClass() != RegClass::GPR64)
-					return form;
-				auto found = addresses.find(operand.virtualRegister());
-				if (found != addresses.end())
-					return found->second;
-				form.root = operand.virtualRegister();
-				form.valid = true;
-				return form;
-			};
+			std::unordered_map<VReg, LoadStoreAddressForm> addresses;
 
 			struct MemoryCandidate {
 				MachineBasicBlock::InstrList::iterator instruction;
-				AddressForm address;
+				LoadStoreAddressForm address;
 				const PairKind *kind = nullptr;
 			};
 			std::vector<MemoryCandidate> loads;
@@ -534,7 +652,8 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 				    it->operands().size() == 2 &&
 				    it->operands()[0].isVirtualRegister() &&
 				    it->operands()[0].regClass() == RegClass::GPR64) {
-					AddressForm form = addressOf(it->operands()[1]);
+					LoadStoreAddressForm form =
+					    addressForm(it->operands()[1], addresses);
 					if (form.valid)
 						addresses[it->operands()[0].virtualRegister()] = form;
 				} else if (it->opcode() == Opcode::ADDXri &&
@@ -542,7 +661,8 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 				           it->operands()[0].isVirtualRegister() &&
 				           it->operands()[2].kind() ==
 				               MachineOperand::Kind::Immediate) {
-					AddressForm form = addressOf(it->operands()[1]);
+					LoadStoreAddressForm form =
+					    addressForm(it->operands()[1], addresses);
 					if (form.valid &&
 					    !__builtin_add_overflow(form.offset,
 					                            it->operands()[2].immediate(),
@@ -572,7 +692,8 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 				    it->memoryOperands().empty() ||
 				    it->memoryOperands().front().isVolatile)
 					continue;
-				AddressForm form = addressOf(it->operands()[1]);
+				LoadStoreAddressForm form =
+				    addressForm(it->operands()[1], addresses);
 				if (!form.valid)
 					continue;
 				if (__builtin_add_overflow(form.offset,
@@ -583,8 +704,11 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 				    .push_back(MemoryCandidate{it, form, kind});
 			}
 
-			auto tryPair = [&](std::vector<MemoryCandidate> &candidates,
-			                   bool load) {
+			struct PairAttempt {
+				MachineFunction &function;
+				MachineBasicBlock::InstrList &instructions;
+
+				bool run(std::vector<MemoryCandidate> &candidates, bool load) {
 				for (std::size_t i = 0; i < candidates.size(); ++i) {
 					for (std::size_t j = i + 1; j < candidates.size(); ++j) {
 						auto &lhs = candidates[i];
@@ -677,20 +801,20 @@ bool AArch64LoadStoreOptimization::run(MachineFunction &function) const {
 					}
 				}
 				return false;
+				}
 			};
+			PairAttempt tryPair{function, instructions};
 
-			fused = tryPair(loads, true);
+			fused = tryPair.run(loads, true);
 			if (!fused)
-				fused = tryPair(stores, false);
+				fused = tryPair.run(stores, false);
 			changed |= fused;
 		}
 	}
 	return changed;
 }
 
-bool MachineSSALocalSink::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::IsSSA))
-		return false;
+bool MachineSSALocalSink::run(MachineFunction &function) {
 
 	bool changed = false;
 	std::unordered_map<VReg, MachineInstr *> uniqueUse;
@@ -709,43 +833,12 @@ bool MachineSSALocalSink::run(MachineFunction &function) const {
 						block->second = nullptr;
 				}
 
-	auto isFixedStackLoad = [&](const MachineInstr &instruction) {
-		if (instruction.opcode() != Opcode::SPILL_LOAD ||
-		    instruction.operands().size() < 2 ||
-		    instruction.operands()[1].kind() !=
-		        MachineOperand::Kind::FrameIndex ||
-		    instruction.memoryOperands().empty() ||
-		    instruction.memoryOperands().front().isVolatile)
-			return false;
-		const int index = instruction.operands()[1].frameIndex();
-		return index >= 0 &&
-		       static_cast<std::size_t>(index) <
-		           function.frameInfo().objects().size() &&
-		       function.frameInfo().objects()[index].fixed;
-	};
-	auto locallySinkable = [&](const MachineInstr &instruction) {
-		if (instruction.isTerminator() || instruction.isCall() ||
-		    instruction.mayStore() || instruction.hasSideEffects() ||
-		    instruction.parallelCopyGroup)
-			return false;
-		if (instruction.mayLoad() && !isFixedStackLoad(instruction))
-			return false;
-		const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
-		if (descriptor.setsFlags || descriptor.usesFlags ||
-		    (descriptor.pseudo && instruction.opcode() != Opcode::SPILL_LOAD))
-			return false;
-		for (const MachineOperand &operand : instruction.operands())
-			if (operand.isPhysicalRegister())
-				return false;
-		return true;
-	};
-
 	for (auto &owned : function.blocks()) {
 		auto &instructions = owned->instructions();
 		unsigned fixedGPRLoads = 0;
 		unsigned fixedVectorLoads = 0;
 		for (const MachineInstr &instruction : instructions) {
-			if (!isFixedStackLoad(instruction))
+			if (!isFixedStackLoad(function, instruction))
 				continue;
 			const RegClass regClass = instruction.operands()[0].regClass();
 			if (regClass == RegClass::GPR32 || regClass == RegClass::GPR64)
@@ -780,7 +873,7 @@ bool MachineSSALocalSink::run(MachineFunction &function) const {
 
 		for (auto instruction = instructions.begin();
 		     instruction != instructions.end(); ++instruction) {
-			if (!locallySinkable(*instruction))
+			if (!locallySinkable(function, *instruction))
 				continue;
 			VReg definition = 0;
 			bool singleDefinition = true;
@@ -819,27 +912,11 @@ bool MachineSSALocalSink::run(MachineFunction &function) const {
 }
 
 bool SinglePredecessorMaterializationSink::run(
-    MachineFunction &function) const {
+    MachineFunction &function) {
 	if (function.hasProperty(MachineProperty::HasPHIs))
 		return false;
 
 	bool changed = false;
-	auto sinkableOpcode = [](Opcode opcode) {
-		switch (opcode) {
-		case Opcode::MOVi32:
-		case Opcode::MOVi64:
-		case Opcode::MOVIv4Zero:
-		case Opcode::FMOVWS:
-		case Opcode::FMOVSW:
-		case Opcode::COPYXtoW:
-		case Opcode::SXTW:
-		case Opcode::UXTW:
-			return true;
-		default:
-			return false;
-		}
-	};
-
 	// Sink a single-use, side-effect-free materialization through a
 	// single-predecessor edge.  This is deliberately narrower than
 	// general code sinking: the edge proves availability and prevents a
@@ -899,33 +976,31 @@ bool SinglePredecessorMaterializationSink::run(
 					continue;
 
 				auto &destinationInstructions = destination->instructions();
-				auto insertion = std::find_if(
-				    destinationInstructions.begin(),
-				    destinationInstructions.end(),
-				    [&](const MachineInstr &candidate) {
-					    return &candidate == useInstruction[definition];
-				    });
+				auto insertion = destinationInstructions.begin();
+				while (insertion != destinationInstructions.end() &&
+				       &*insertion != useInstruction[definition])
+					++insertion;
 				if (insertion == destinationInstructions.end())
 					continue;
 
 				// PHI elimination may place new definitions on the edge.
 				// Preserve the reaching definitions seen by the instruction at
 				// its original site.
-				auto redefinesInput = [&](const MachineInstr &candidate) {
-					return std::any_of(
-					    candidate.operands().begin(),
-					    candidate.operands().end(),
-					    [&](const MachineOperand &operand) {
-						    return operand.isVirtualRegister() &&
-						           operand.isDef &&
-						           inputs.find(operand.virtualRegister()) !=
-						               inputs.end();
-					    });
-				};
-				if (std::any_of(std::next(instruction),
-				                sourceInstructions.end(), redefinesInput) ||
-				    std::any_of(destinationInstructions.begin(), insertion,
-				                redefinesInput))
+				bool redefined = false;
+				for (auto scan = std::next(instruction);
+				     scan != sourceInstructions.end(); ++scan)
+					if (redefinesInput(*scan, inputs)) {
+						redefined = true;
+						break;
+					}
+				if (!redefined)
+					for (auto scan = destinationInstructions.begin();
+					     scan != insertion; ++scan)
+						if (redefinesInput(*scan, inputs)) {
+							redefined = true;
+							break;
+						}
+				if (redefined)
 					continue;
 
 				destinationInstructions.splice(insertion, sourceInstructions,
@@ -942,9 +1017,7 @@ bool SinglePredecessorMaterializationSink::run(
 	return changed;
 }
 
-bool DeadMachineInstructionElimination::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::IsSSA))
-		return false;
+bool DeadMachineInstructionElimination::run(MachineFunction &function) {
 
 	MachineRegisterIndex registers(function);
 	std::unordered_map<VReg, unsigned> uses;
@@ -1018,10 +1091,8 @@ bool DeadMachineInstructionElimination::run(MachineFunction &function) const {
 	return true;
 }
 
-bool PostPhiConstantHoisting::run(MachineFunction &function) const {
-	if (function.hasProperty(MachineProperty::IsSSA) ||
-	    function.hasProperty(MachineProperty::HasPHIs) ||
-	    function.blocks().empty())
+bool PostPhiConstantHoisting::run(MachineFunction &function) {
+	if (function.blocks().empty())
 		return false;
 
 	std::vector<MachineBasicBlock *> blocks;
@@ -1052,9 +1123,12 @@ bool PostPhiConstantHoisting::run(MachineFunction &function) const {
 		if (loop.preheader)
 			loops.push_back(std::move(loop));
 	}
-	std::sort(loops.begin(), loops.end(), [](const Loop &lhs, const Loop &rhs) {
-		return lhs.blocks.size() < rhs.blocks.size();
-	});
+	struct LoopSizeLess {
+		bool operator()(const Loop &lhs, const Loop &rhs) const {
+			return lhs.blocks.size() < rhs.blocks.size();
+		}
+	};
+	std::sort(loops.begin(), loops.end(), LoopSizeLess());
 
 	MachineRegisterIndex registers(function);
 	std::unordered_map<VReg, MachineBasicBlock *> definitionBlock;
@@ -1064,31 +1138,16 @@ bool PostPhiConstantHoisting::run(MachineFunction &function) const {
 			definitionBlock.emplace(reg, block);
 	}
 
-	auto hoistableOpcode = [](Opcode opcode) {
-		switch (opcode) {
-		case Opcode::MOVi32:
-		case Opcode::MOVi64:
-			// Scalar immediates rematerialize cheaply, so lengthening their
-			// live ranges is fine.  Encoded NEON immediates (including
-			// movi #0) must stay near their uses: hoisting them occupies a
-			// vector register across nested loops and invites spill churn.
-			return true;
-		default:
-			return false;
-		}
-	};
-
 	bool changed = false;
 	std::unordered_set<MachineInstr *> hoistedThisRun;
 	std::unordered_set<MachineBasicBlock *> nestedPreheaders;
 	for (const Loop &loop : loops)
 		nestedPreheaders.insert(loop.preheader);
 	for (Loop &loop : loops) {
-		auto insertion = std::find_if(loop.preheader->instructions().begin(),
-		                              loop.preheader->instructions().end(),
-		                              [](const MachineInstr &instruction) {
-			                              return instruction.isTerminator();
-		                              });
+		auto insertion = loop.preheader->instructions().begin();
+		while (insertion != loop.preheader->instructions().end() &&
+		       !insertion->isTerminator())
+			++insertion;
 		bool localChange = true;
 		while (localChange) {
 			localChange = false;
@@ -1146,9 +1205,7 @@ bool PostPhiConstantHoisting::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64ConditionOptimizer::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::IsSSA))
-		return false;
+bool AArch64ConditionOptimizer::run(MachineFunction &function) {
 	MachineRegisterIndex registers(function);
 
 	bool changed = false;
@@ -1181,18 +1238,8 @@ bool AArch64ConditionOptimizer::run(MachineFunction &function) const {
 			}
 
 			auto booleanCompare = std::next(set);
-			auto isBooleanCompare = [&](const MachineInstr &instruction) {
-				return instruction.opcode() == Opcode::CMPWri &&
-				       instruction.operands().size() >= 2 &&
-				       instruction.operands()[0].isVirtualRegister() &&
-				       instruction.operands()[0].virtualRegister() ==
-				           conditionReg &&
-				       instruction.operands()[1].kind() ==
-				           MachineOperand::Kind::Immediate &&
-				       instruction.operands()[1].immediate() == 0;
-			};
 			while (booleanCompare != instructions.end()) {
-				if (isBooleanCompare(*booleanCompare))
+				if (isBooleanCompare(*booleanCompare, conditionReg))
 					break;
 				const InstrDesc &descriptor =
 				    InstrInfo::get(booleanCompare->opcode());
@@ -1207,7 +1254,7 @@ bool AArch64ConditionOptimizer::run(MachineFunction &function) const {
 				++booleanCompare;
 			}
 			if (booleanCompare == instructions.end() ||
-			    !isBooleanCompare(*booleanCompare)) {
+			    !isBooleanCompare(*booleanCompare, conditionReg)) {
 				++set;
 				continue;
 			}
@@ -1319,54 +1366,9 @@ bool AArch64ConditionOptimizer::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64BranchFolding::run(MachineFunction &function) const {
-	if (function.hasProperty(MachineProperty::NoVRegs))
-		return false;
-
-	auto sameVReg = [](const MachineOperand &lhs, const MachineOperand &rhs) {
-		return lhs.isVirtualRegister() && rhs.isVirtualRegister() &&
-		       lhs.virtualRegister() == rhs.virtualRegister();
-	};
+bool AArch64BranchFolding::run(MachineFunction &function) {
 
 	bool changed = false;
-
-	struct MaterializedI32 {
-		MachineInstr *instruction = nullptr;
-		VReg reg = 0;
-		std::uint32_t value = 0;
-	};
-	auto materializedI32 =
-	    [&](const MachineOperand &operand) -> std::optional<MaterializedI32> {
-		if (!operand.isVirtualRegister() ||
-		    !function.registerInfo().contains(operand.virtualRegister()))
-			return std::nullopt;
-		const VRegInfo &info =
-		    function.registerInfo().get(operand.virtualRegister());
-		MachineInstr *definition = info.definition;
-		if (!definition || definition->opcode() != Opcode::MOVi32 ||
-		    definition->operands().size() != 2 ||
-		    !sameVReg(definition->operands()[0], operand) ||
-		    definition->operands()[1].kind() != MachineOperand::Kind::Immediate)
-			return std::nullopt;
-		return MaterializedI32{
-		    definition, operand.virtualRegister(),
-		    static_cast<std::uint32_t>(definition->operands()[1].immediate())};
-	};
-	auto eraseInstruction = [&](MachineInstr *target) {
-		if (!target)
-			return;
-		for (auto &owned : function.blocks()) {
-			auto &instructions = owned->instructions();
-			auto found = std::find_if(instructions.begin(), instructions.end(),
-			                          [&](const MachineInstr &instruction) {
-				                          return &instruction == target;
-			                          });
-			if (found != instructions.end()) {
-				instructions.erase(found);
-				return;
-			}
-		}
-	};
 
 	// Fold an AND whose result only feeds an equality-to-zero branch.
 	// One-bit masks use TBZ/TBNZ; encodable constants use TST-immediate;
@@ -1435,8 +1437,10 @@ bool AArch64BranchFolding::run(MachineFunction &function) const {
 					                    static_cast<std::uint32_t>(
 					                        bitAnd->operands()[2].immediate())};
 				} else {
-					auto rhsConstant = materializedI32(bitAnd->operands()[2]);
-					auto lhsConstant = materializedI32(bitAnd->operands()[1]);
+					auto rhsConstant =
+					    materializedI32(function, bitAnd->operands()[2]);
+					auto lhsConstant =
+					    materializedI32(function, bitAnd->operands()[1]);
 					if (rhsConstant) {
 						source = bitAnd->operands()[1];
 						maskOperand = bitAnd->operands()[2];
@@ -1497,7 +1501,7 @@ bool AArch64BranchFolding::run(MachineFunction &function) const {
 				if (constantMask && constantMask->instruction &&
 				    useCount[constantMask->reg] == 1 &&
 				    (oneBitMask || immediateTest)) {
-					eraseInstruction(constantMask->instruction);
+					eraseInstruction(function, constantMask->instruction);
 					function.registerInfo().eraseVirtualRegister(
 					    constantMask->reg);
 				}
@@ -1561,14 +1565,7 @@ bool AArch64BranchFolding::run(MachineFunction &function) const {
 	return changed;
 }
 
-bool AArch64ExactHalvingLoopOptimizer::run(MachineFunction &function) const {
-	if (function.hasProperty(MachineProperty::NoVRegs))
-		return false;
-
-	auto sameVReg = [](const MachineOperand &lhs, const MachineOperand &rhs) {
-		return lhs.isVirtualRegister() && rhs.isVirtualRegister() &&
-		       lhs.virtualRegister() == rhs.virtualRegister();
-	};
+bool AArch64ExactHalvingLoopOptimizer::run(MachineFunction &function) {
 
 	bool changed = false;
 

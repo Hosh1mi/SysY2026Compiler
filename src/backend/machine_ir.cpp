@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64 {
 
@@ -111,15 +111,12 @@ bool MachineOperand::isSameRegisterAs(const MachineOperand &other) const {
 
 void MachineOperand::replaceVirtualRegister(VReg reg) {
 	if (!isVirtualRegister() || reg == 0)
-		throw std::logic_error("virtual-register replacement requires a vreg");
+		std::abort();
 	vreg_ = reg;
 }
 
 void MachineOperand::replacePhysicalRegister(PhysReg reg) {
-    if (!isPhysicalRegister() || reg == PhysReg::NoReg)
-        throw std::logic_error(
-            "physical-register replacement requires a physical register");
-    physReg_ = reg;
+	physReg_ = reg;
 }
 
 MachineInstr &MachineInstr::addOperand(MachineOperand operand) {
@@ -217,14 +214,14 @@ bool MachineRegisterInfo::contains(VReg reg) const {
 VRegInfo &MachineRegisterInfo::get(VReg reg) {
 	auto it = virtualRegisters_.find(reg);
 	if (it == virtualRegisters_.end())
-		throw std::out_of_range("unknown virtual register");
+		std::abort();
 	return it->second;
 }
 
 const VRegInfo &MachineRegisterInfo::get(VReg reg) const {
 	auto it = virtualRegisters_.find(reg);
 	if (it == virtualRegisters_.end())
-		throw std::out_of_range("unknown virtual register");
+		std::abort();
 	return it->second;
 }
 
@@ -255,13 +252,13 @@ int MachineFrameInfo::createFixedObject(unsigned size, int offset,
 
 StackObject &MachineFrameInfo::getObject(int index) {
 	if (index < 0 || static_cast<std::size_t>(index) >= objects_.size())
-		throw std::out_of_range("unknown stack object");
+		std::abort();
 	return objects_[index];
 }
 
 const StackObject &MachineFrameInfo::getObject(int index) const {
 	if (index < 0 || static_cast<std::size_t>(index) >= objects_.size())
-		throw std::out_of_range("unknown stack object");
+		std::abort();
 	return objects_[index];
 }
 
@@ -295,11 +292,6 @@ const std::string &MachineFunction::getOrCreateVectorConstant(
 
 bool MachineFunction::hasProperty(MachineProperty property) const {
 	return properties_ & static_cast<std::uint32_t>(property);
-}
-
-bool MachineFunction::hasAllProperties(MachineProperty properties) const {
-	const std::uint32_t mask = static_cast<std::uint32_t>(properties);
-	return (properties_ & mask) == mask;
 }
 
 void MachineFunction::setProperty(MachineProperty property) {

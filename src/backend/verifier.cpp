@@ -2,8 +2,9 @@
 #include "backend/machine_analysis.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <iostream>
 #include <sstream>
-#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -81,6 +82,15 @@ bool isGlobalMemoryOpcode(Opcode opcode) {
 	}
 }
 
+void appendVerificationError(std::vector<VerificationError> &errors,
+                             const MachineFunction &function,
+                             const MachineBasicBlock *block, unsigned index,
+                             std::string message) {
+	errors.push_back(VerificationError{
+	    function.name(), block ? block->name() : std::string(), index,
+	    std::move(message)});
+}
+
 } // namespace
 
 std::vector<VerificationError>
@@ -90,25 +100,18 @@ MachineVerifier::verify(const MachineFunction &function) const {
 	for (const auto &block : function.blocks())
 		blocks.insert(block.get());
 
-	auto report = [&](const MachineBasicBlock *block, unsigned index,
-	                  std::string message) {
-		errors.push_back(VerificationError{
-		    function.name(), block ? block->name() : std::string(), index,
-		    std::move(message)});
-	};
-
 	if (!function.entryBlock())
-		report(nullptr, 0, "function has no entry block");
+		appendVerificationError(errors, function, nullptr, 0, "function has no entry block");
 	if (function.hasProperty(MachineProperty::NoVRegs) &&
 	    !function.hasProperty(MachineProperty::Selected))
-		report(nullptr, 0,
+		appendVerificationError(errors, function, nullptr, 0,
 		       "allocated function was not produced by instruction selection");
 	if (function.hasProperty(MachineProperty::FrameFinalized) &&
 	    !function.hasProperty(MachineProperty::NoVRegs))
-		report(nullptr, 0, "frame was finalized before register allocation");
+		appendVerificationError(errors, function, nullptr, 0, "frame was finalized before register allocation");
 	if (function.hasProperty(MachineProperty::BranchesRelaxed) &&
 	    !function.hasProperty(MachineProperty::FrameFinalized))
-		report(nullptr, 0, "branches were relaxed before frame finalization");
+		appendVerificationError(errors, function, nullptr, 0, "branches were relaxed before frame finalization");
 
 	std::unordered_map<VReg, const MachineInstr *> definitions;
 	std::unordered_set<const MachineInstr *> instructions;
@@ -121,23 +124,23 @@ MachineVerifier::verify(const MachineFunction &function) const {
 		const auto &block = function.blocks()[blockIndex];
 		for (const auto *successor : block->successors()) {
 			if (!successor || !blocks.count(successor)) {
-				report(block.get(), 0, "successor is not owned by function");
+				appendVerificationError(errors, function, block.get(), 0, "successor is not owned by function");
 				continue;
 			}
 			if (std::find(successor->predecessors().begin(),
 			              successor->predecessors().end(),
 			              block.get()) == successor->predecessors().end())
-				report(block.get(), 0, "CFG successor/predecessor mismatch");
+				appendVerificationError(errors, function, block.get(), 0, "CFG successor/predecessor mismatch");
 		}
 		for (const auto *predecessor : block->predecessors()) {
 			if (!predecessor || !blocks.count(predecessor)) {
-				report(block.get(), 0, "predecessor is not owned by function");
+				appendVerificationError(errors, function, block.get(), 0, "predecessor is not owned by function");
 				continue;
 			}
 			if (std::find(predecessor->successors().begin(),
 			              predecessor->successors().end(),
 			              block.get()) == predecessor->successors().end())
-				report(block.get(), 0, "CFG predecessor/successor mismatch");
+				appendVerificationError(errors, function, block.get(), 0, "CFG predecessor/successor mismatch");
 		}
 
 		bool sawNonPhi = false;
@@ -149,25 +152,25 @@ MachineVerifier::verify(const MachineFunction &function) const {
 			instructionIndices[&instruction] = instructionIndex;
 			const InstrDesc &descriptor = InstrInfo::get(instruction.opcode());
 			if (descriptor.opcode == Opcode::Invalid)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "instruction has invalid or undescribed opcode");
 			if (function.hasProperty(MachineProperty::FrameFinalized) &&
 			    descriptor.pseudo)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "pseudo instruction remains after frame finalization");
 			if (function.hasProperty(MachineProperty::FrameFinalized) &&
 			    instruction.parallelCopyGroup)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "parallel-copy marker remains in final MIR");
 
 			if (instruction.opcode() == Opcode::PHI) {
 				containsPHI = true;
 				if (sawNonPhi)
-					report(block.get(), instructionIndex,
+					appendVerificationError(errors, function, block.get(), instructionIndex,
 					       "PHI appears after a non-PHI instruction");
 				if (instruction.operands().size() < 3 ||
 				    instruction.operands().size() % 2 == 0) {
-					report(block.get(), instructionIndex,
+					appendVerificationError(errors, function, block.get(), instructionIndex,
 					       "PHI has malformed incoming operands");
 				} else {
 					std::unordered_set<const MachineBasicBlock *> incoming;
@@ -179,20 +182,20 @@ MachineVerifier::verify(const MachineFunction &function) const {
 						    MachineOperand::Kind::BasicBlock)
 							continue;
 						if (!incoming.insert(incomingBlock.basicBlock()).second)
-							report(block.get(), instructionIndex,
+							appendVerificationError(errors, function, block.get(), instructionIndex,
 							       "PHI has duplicate incoming block");
 						if (std::find(block->predecessors().begin(),
 						              block->predecessors().end(),
 						              incomingBlock.basicBlock()) ==
 						    block->predecessors().end())
-							report(block.get(), instructionIndex,
+							appendVerificationError(errors, function, block.get(), instructionIndex,
 							       "PHI incoming block is not a CFG "
 							       "predecessor");
 					}
 					for (const MachineBasicBlock *predecessor :
 					     block->predecessors())
 						if (!incoming.count(predecessor))
-							report(block.get(), instructionIndex,
+							appendVerificationError(errors, function, block.get(), instructionIndex,
 							       "PHI is missing a CFG predecessor");
 				}
 			} else {
@@ -200,13 +203,13 @@ MachineVerifier::verify(const MachineFunction &function) const {
 			}
 
 			if (sawTerminator && !instruction.isTerminator())
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "instruction appears after terminator");
 			sawTerminator |= instruction.isTerminator();
 
 			if (descriptor.explicitOperands != 0 &&
 			    instruction.operands().size() < descriptor.explicitOperands)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "instruction has too few operands");
 
 			const OperandConstraint &constraint = descriptor.operands;
@@ -216,7 +219,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 				const MachineOperand &use =
 				    instruction.operands()[constraint.tiedUse];
 				if (use.tiedTo != constraint.tiedDef)
-					report(block.get(), instructionIndex,
+					appendVerificationError(errors, function, block.get(), instructionIndex,
 					       "opcode-required tied operand is missing");
 			}
 			if (constraint.earlyClobberDef >= 0 &&
@@ -224,7 +227,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 			        instruction.operands().size() &&
 			    !instruction.operands()[constraint.earlyClobberDef]
 			         .isEarlyClobber)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "opcode-required early-clobber is missing");
 
 			unsigned operandIndex = 0;
@@ -232,19 +235,19 @@ MachineVerifier::verify(const MachineFunction &function) const {
 				if (operand.isVirtualRegister()) {
 					VReg reg = operand.virtualRegister();
 					if (!reg || !function.registerInfo().contains(reg)) {
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "operand references unknown virtual register");
 					} else {
 						const VRegInfo &info = function.registerInfo().get(reg);
 						if (info.regClass != operand.regClass())
-							report(block.get(), instructionIndex,
+							appendVerificationError(errors, function, block.get(), instructionIndex,
 							       "virtual register class mismatch");
 						if (operand.isDef) {
 							auto [it, inserted] =
 							    definitions.emplace(reg, &instruction);
 							if (!inserted &&
 							    function.hasProperty(MachineProperty::IsSSA))
-								report(block.get(), instructionIndex,
+								appendVerificationError(errors, function, block.get(), instructionIndex,
 								       "virtual register has multiple "
 								       "definitions");
 						}
@@ -252,58 +255,58 @@ MachineVerifier::verify(const MachineFunction &function) const {
 				} else if (operand.isPhysicalRegister()) {
 					if (!classCompatible(operand.regClass(),
 					                     operand.physicalRegister()))
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "physical register class mismatch");
 				} else if (operand.kind() == MachineOperand::Kind::BasicBlock) {
 					if (!operand.basicBlock() ||
 					    !blocks.count(operand.basicBlock()))
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "block operand is not owned by function");
 				} else if (operand.kind() == MachineOperand::Kind::FrameIndex) {
 					int frameIndex = operand.frameIndex();
 					if (frameIndex < 0 ||
 					    static_cast<std::size_t>(frameIndex) >=
 					        function.frameInfo().objects().size())
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "frame-index operand is out of range");
 					if (function.hasProperty(MachineProperty::FrameFinalized))
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "frame index remains after frame finalization");
 				}
 
 				if (operand.tiedTo >= 0) {
 					if (static_cast<std::size_t>(operand.tiedTo) >=
 					    instruction.operands().size())
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "tied operand index is out of range");
 					else if (!instruction.operands()[operand.tiedTo].isDef)
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "operand is tied to a non-def operand");
 					if (constraint.tiedUse != static_cast<int>(operandIndex) ||
 					    constraint.tiedDef != operand.tiedTo)
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "operand tie does not match opcode contract");
 				}
 				if (operand.isEarlyClobber &&
 				    constraint.earlyClobberDef !=
 				        static_cast<int>(operandIndex))
-					report(block.get(), instructionIndex,
+					appendVerificationError(errors, function, block.get(), instructionIndex,
 					       "early-clobber does not match opcode contract");
 				++operandIndex;
 			}
 
 			if (instruction.mayLoad() && instruction.memoryOperands().empty())
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "load has no machine memory operand");
 			if (instruction.mayStore() && instruction.memoryOperands().empty())
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "store has no machine memory operand");
 			if (isGlobalMemoryOpcode(instruction.opcode()) &&
 			    (instruction.operands().size() != 3 ||
 			     !instruction.operands()[1].isRegister() ||
 			     instruction.operands()[2].kind() !=
 			         MachineOperand::Kind::GlobalSymbol))
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "malformed global memory addressing mode");
 
 			if (function.hasProperty(MachineProperty::FrameFinalized)) {
@@ -314,7 +317,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 					    offset.immediate() < 0 ||
 					    offset.immediate() % width != 0 ||
 					    offset.immediate() / width > 4095)
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "scaled memory offset is not encodable");
 				}
 				unsigned pairWidth = pairMemoryWidth(instruction.opcode());
@@ -324,7 +327,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 					    offset.immediate() % pairWidth != 0 ||
 					    offset.immediate() / pairWidth < -64 ||
 					    offset.immediate() / pairWidth > 63)
-						report(block.get(), instructionIndex,
+						appendVerificationError(errors, function, block.get(), instructionIndex,
 						       "pair memory offset is not encodable");
 				}
 			}
@@ -345,13 +348,13 @@ MachineVerifier::verify(const MachineFunction &function) const {
 			              block->successors().end(),
 			              layoutSuccessor) != block->successors().end();
 			if (!hasTerminator && !hasFallthrough)
-				report(block.get(), instructionIndex,
+				appendVerificationError(errors, function, block.get(), instructionIndex,
 				       "block with successors has no terminator");
 		}
 	}
 
 	if (containsPHI != function.hasProperty(MachineProperty::HasPHIs))
-		report(nullptr, 0,
+		appendVerificationError(errors, function, nullptr, 0,
 		       containsPHI
 		           ? "MIR contains PHIs without the HasPHIs property"
 		           : "HasPHIs property is set but MIR contains no PHIs");
@@ -361,13 +364,13 @@ MachineVerifier::verify(const MachineFunction &function) const {
 		     function.registerInfo().virtualRegisters()) {
 			auto definition = definitions.find(reg);
 			if (definition == definitions.end())
-				report(nullptr, 0, "SSA virtual register has no definition");
+				appendVerificationError(errors, function, nullptr, 0, "SSA virtual register has no definition");
 			if (info.definition && definition != definitions.end() &&
 			    info.definition != definition->second)
-				report(nullptr, 0,
+				appendVerificationError(errors, function, nullptr, 0,
 				       "MachineRegisterInfo definition does not match MIR");
 			if (info.definition && !instructions.count(info.definition))
-				report(nullptr, 0,
+				appendVerificationError(errors, function, nullptr, 0,
 				       "MachineRegisterInfo definition for vreg %" +
 				           std::to_string(reg) + " is not in MIR");
 		}
@@ -403,19 +406,19 @@ MachineVerifier::verify(const MachineFunction &function) const {
 						        .basicBlock();
 						if (!dominators.dominates(definitionBlock,
 						                          incomingBlock))
-							report(block.get(), useInstructionIndex,
+							appendVerificationError(errors, function, block.get(), useInstructionIndex,
 							       "SSA definition does not dominate PHI "
 							       "incoming edge");
 						continue;
 					}
 
 					if (!dominators.dominates(definitionBlock, block.get())) {
-						report(block.get(), useInstructionIndex,
+						appendVerificationError(errors, function, block.get(), useInstructionIndex,
 						       "SSA definition does not dominate use");
 					} else if (definitionBlock == block.get() &&
 					           instructionIndices.at(definitionInstruction) >=
 					               useInstructionIndex) {
-						report(block.get(), useInstructionIndex,
+						appendVerificationError(errors, function, block.get(), useInstructionIndex,
 						       "SSA virtual register is used before its "
 						       "definition");
 					}
@@ -430,7 +433,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 			for (const auto &instruction : block->instructions())
 				for (const auto &operand : instruction.operands())
 					if (operand.isVirtualRegister())
-						report(block.get(), 0,
+						appendVerificationError(errors, function, block.get(), 0,
 						       "virtual register remains in NoVRegs function");
 	}
 
@@ -491,7 +494,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 				    instructionOffsets.at(&instruction);
 				if (displacement < -range || displacement > range - 4 ||
 				    displacement % 4 != 0)
-					report(block.get(), instructionIndex,
+					appendVerificationError(errors, function, block.get(), instructionIndex,
 					       "conditional branch remains out of range");
 				++instructionIndex;
 			}
@@ -501,7 +504,7 @@ MachineVerifier::verify(const MachineFunction &function) const {
 	return errors;
 }
 
-void MachineVerifier::verifyOrThrow(const MachineFunction &function,
+void MachineVerifier::verifyOrAbort(const MachineFunction &function,
                                     const std::string &stage) const {
 	auto errors = verify(function);
 	if (errors.empty())
@@ -515,7 +518,8 @@ void MachineVerifier::verifyOrThrow(const MachineFunction &function,
 			message << ':' << error.block << ':' << error.instructionIndex;
 		message << ": " << error.message << '\n';
 	}
-	throw std::logic_error(message.str());
+	std::cerr << message.str();
+	std::abort();
 }
 
 } // namespace backend::aarch64

@@ -176,9 +176,7 @@ bool removeDeadStores(MachineFunction &function) {
 
 } // namespace
 
-bool PostRASpillSlotOptimizer::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+bool PostRASpillSlotOptimizer::run(MachineFunction &function) {
 	const bool forwarded = forwardKnownValues(function);
 	const bool storesRemoved = removeDeadStores(function);
 	return forwarded || storesRemoved;

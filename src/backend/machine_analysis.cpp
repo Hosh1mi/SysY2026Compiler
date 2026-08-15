@@ -64,10 +64,10 @@ bool MachineRegisterIndex::allUsesHaveOpcode(VReg reg, Opcode opcode) const {
 	const auto &references = uses(reg);
 	if (references.empty())
 		return false;
-	return std::all_of(references.begin(), references.end(),
-	                   [opcode](const MachineRegisterReference &reference) {
-		                   return reference.instruction->opcode() == opcode;
-	                   });
+	for (const MachineRegisterReference &reference : references)
+		if (reference.instruction->opcode() != opcode)
+			return false;
+	return true;
 }
 
 unsigned MachineRegisterIndex::replaceUses(VReg from, VReg to) {

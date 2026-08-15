@@ -1170,7 +1170,7 @@ def emit_isel_source(
 
 #include <array>
 #include <cstddef>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64::generated {{
 namespace {{
@@ -1261,14 +1261,14 @@ CondCode integerCondition(int predicate) {{
     switch (static_cast<ICmpInst::ICmpOp>(predicate)) {{
 {chr(10).join(condition_cases['integer'])}
     }}
-    throw std::logic_error("unknown integer predicate");
+    std::abort();
 }}
 
 CondCode floatingCondition(int predicate) {{
     switch (static_cast<FCmpInst::FCmpOp>(predicate)) {{
 {chr(10).join(condition_cases['floating'])}
     }}
-    throw std::logic_error("unknown floating predicate");
+    std::abort();
 }}
 
 }} // namespace backend::aarch64::generated

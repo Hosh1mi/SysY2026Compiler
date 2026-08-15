@@ -3,7 +3,7 @@
 #include "backend/live_range_edit.hpp"
 
 #include <algorithm>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64 {
 namespace {
@@ -23,11 +23,11 @@ MachineOperand replacementRegister(const MachineOperand &old, VReg reg,
 
 MachineBasicBlock::InstrList::iterator
 findInstruction(MachineBasicBlock &block, MachineInstr *instruction) {
-	return std::find_if(block.instructions().begin(),
-	                    block.instructions().end(),
-	                    [instruction](MachineInstr &candidate) {
-		                    return &candidate == instruction;
-	                    });
+	MachineBasicBlock::InstrList::iterator it = block.instructions().begin();
+	for (; it != block.instructions().end(); ++it)
+		if (&*it == instruction)
+			break;
+	return it;
 }
 
 int getOrCreateSpillSlot(MachineFunction &function, VReg reg, RegClass regClass,
@@ -97,13 +97,12 @@ bool LiveRangeEdit::splitLocalGap(
 			continue;
 		MachineOperand &operand = reference.operand();
 		if (operand.isDef)
-			throw std::logic_error(
-			    "local live-range split crossed a definition");
+			std::abort();
 		operand = replacementRegister(operand, sibling, parentInfo.regClass);
 		rewroteUse = true;
 	}
 	if (!rewroteUse)
-		throw std::logic_error("local live-range split rewrote no uses");
+		std::abort();
 
 	if (plan.rematerialization.definition) {
 		MachineInstr materialized = plan.rematerialization.clone(sibling);

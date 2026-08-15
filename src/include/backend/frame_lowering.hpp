@@ -6,13 +6,13 @@ namespace backend::aarch64 {
 
 class AArch64FrameLowering {
 public:
-    void run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 
 private:
-    void determineCalleeSaves(MachineFunction &function) const;
-    void layoutFrame(MachineFunction &function) const;
-    void eliminateFrameIndices(MachineFunction &function) const;
-    void insertPrologueEpilogues(MachineFunction &function) const;
+    static void determineCalleeSaves(MachineFunction &function);
+    static void layoutFrame(MachineFunction &function);
+    static void eliminateFrameIndices(MachineFunction &function);
+    static void insertPrologueEpilogues(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

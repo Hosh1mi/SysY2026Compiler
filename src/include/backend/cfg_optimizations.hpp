@@ -7,17 +7,17 @@ namespace backend::aarch64 {
 
 class UnreachableMachineBlockElimination {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class MachineBlockPlacement {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64BranchRelaxation {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

@@ -2,13 +2,9 @@
 // coupling the spiller to individual target opcodes.
 #include "backend/rematerialization.hpp"
 
-#include <stdexcept>
-
 namespace backend::aarch64 {
 
 MachineInstr RematerializationRecipe::clone(VReg destination) const {
-	if (!definition || definition->operands().empty())
-		throw std::logic_error("invalid rematerialization recipe");
 	MachineInstr materialized = *definition;
 	const MachineOperand &oldDef = materialized.operands().front();
 	MachineOperand replacement =

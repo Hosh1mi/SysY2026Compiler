@@ -244,6 +244,233 @@ bool schedulingBarrier(const MachineInstr &instruction) {
 	return false;
 }
 
+struct RegionScheduleContext {
+	MachineFunction &function;
+	std::vector<Node> &nodes;
+	const std::set<VReg> *regionLiveOut;
+	RegisterPressure capacity;
+
+	std::unordered_map<VReg, unsigned> initialUseCounts() const {
+		std::unordered_map<VReg, unsigned> counts;
+		for (const Node &node : nodes)
+			for (VReg reg : node.virtualUses)
+				++counts[reg];
+		return counts;
+	}
+
+	std::set<VReg> regionLiveIn() const {
+		std::set<VReg> live =
+		    regionLiveOut ? *regionLiveOut : std::set<VReg>();
+		for (auto node = nodes.rbegin(); node != nodes.rend(); ++node) {
+			for (VReg reg : node->virtualDefs)
+				live.erase(reg);
+			live.insert(node->virtualUses.begin(), node->virtualUses.end());
+		}
+		return live;
+	}
+
+	void applyNode(unsigned index, std::set<VReg> &live,
+	               std::unordered_map<VReg, unsigned> &remainingUses) const {
+		const Node &node = nodes[index];
+		for (VReg reg : node.virtualUses) {
+			auto found = remainingUses.find(reg);
+			if (found != remainingUses.end() && found->second > 0)
+				--found->second;
+			if ((found == remainingUses.end() || found->second == 0) &&
+			    (!regionLiveOut || !regionLiveOut->count(reg)))
+				live.erase(reg);
+		}
+		for (VReg reg : node.virtualDefs) {
+			live.erase(reg);
+			auto found = remainingUses.find(reg);
+			const bool usedLater =
+			    found != remainingUses.end() && found->second != 0;
+			if (usedLater || (regionLiveOut && regionLiveOut->count(reg)))
+				live.insert(reg);
+		}
+	}
+
+	RegisterPressure projectedPressure(
+	    unsigned index, const RegisterPressure &current,
+	    const std::set<VReg> &live,
+	    const std::unordered_map<VReg, unsigned> &remainingUses) const {
+		RegisterPressure projected = current;
+		const Node &node = nodes[index];
+		for (VReg reg : node.virtualUses) {
+			auto found = remainingUses.find(reg);
+			const unsigned remaining =
+			    found == remainingUses.end()
+			        ? 0
+			        : (found->second > 1 ? found->second - 1 : 0);
+			if (!node.virtualDefs.count(reg) && live.count(reg) &&
+			    remaining == 0 &&
+			    (!regionLiveOut || !regionLiveOut->count(reg)))
+				adjust(projected, function, reg, -1);
+		}
+		for (VReg reg : node.virtualDefs) {
+			const bool wasLive = live.count(reg) != 0;
+			auto found = remainingUses.find(reg);
+			const unsigned consumed = node.virtualUses.count(reg) ? 1 : 0;
+			const unsigned remaining =
+			    found == remainingUses.end()
+			        ? 0
+			        : (found->second > consumed ? found->second - consumed : 0);
+			const bool willBeLive =
+			    remaining != 0 || (regionLiveOut && regionLiveOut->count(reg));
+			if (wasLive != willBeLive)
+				adjust(projected, function, reg, willBeLive ? 1 : -1);
+		}
+		return projected;
+	}
+
+	static void adjust(RegisterPressure &pressure, const MachineFunction &function,
+	                   VReg reg, int delta) {
+		switch (bankOf(function, reg)) {
+		case Bank::Vector:
+			pressure.vector = static_cast<unsigned>(
+			    static_cast<int>(pressure.vector) + delta);
+			break;
+		case Bank::GPR:
+			pressure.gpr = static_cast<unsigned>(
+			    static_cast<int>(pressure.gpr) + delta);
+			break;
+		case Bank::None:
+			break;
+		}
+	}
+
+	RegisterPressure projectedPressure(
+	    unsigned index, const RegisterPressure &current,
+	    const std::set<VReg> &live,
+	    const std::unordered_map<VReg, unsigned> &remainingUses,
+	    int) const {
+	RegisterPressure result = current;
+	const Node &node = nodes[index];
+	for (VReg reg : node.virtualUses) {
+		auto found = remainingUses.find(reg);
+		const unsigned remaining = found == remainingUses.end()
+		                               ? 0
+		                               : (found->second > 1 ? found->second - 1 : 0);
+		if (!node.virtualDefs.count(reg) && live.count(reg) && remaining == 0 &&
+		    (!regionLiveOut || !regionLiveOut->count(reg)))
+			adjust(result, function, reg, -1);
+	}
+	for (VReg reg : node.virtualDefs) {
+		const bool wasLive = live.count(reg) != 0;
+		auto found = remainingUses.find(reg);
+		const unsigned consumed = node.virtualUses.count(reg) ? 1 : 0;
+		const unsigned remaining =
+		    found == remainingUses.end()
+		        ? 0
+		        : (found->second > consumed ? found->second - consumed : 0);
+		const bool willBeLive =
+		    remaining != 0 || (regionLiveOut && regionLiveOut->count(reg));
+		if (wasLive != willBeLive)
+			adjust(result, function, reg, willBeLive ? 1 : -1);
+	}
+	return result;
+	}
+
+	long score(unsigned index, SchedResource previousResource) const {
+		long value = static_cast<long>(nodes[index].height) * 16;
+		if (nodes[index].load)
+			value += 8;
+		if (nodes[index].resource != previousResource)
+			value += 2;
+		return value - static_cast<long>(index) / 64;
+	}
+
+	std::vector<unsigned> buildOrder(bool pressureAware) const {
+		std::vector<unsigned> remainingPredecessors;
+		remainingPredecessors.reserve(nodes.size());
+		std::vector<unsigned> ready;
+		for (unsigned i = 0; i < nodes.size(); ++i) {
+			remainingPredecessors.push_back(nodes[i].predecessors);
+			if (!nodes[i].predecessors)
+				ready.push_back(i);
+		}
+		std::set<VReg> live = regionLiveIn();
+		std::unordered_map<VReg, unsigned> remainingUses = initialUseCounts();
+		std::vector<unsigned> order;
+		order.reserve(nodes.size());
+		SchedResource previousResource = SchedResource::None;
+		RegisterPressure current;
+		if (pressureAware)
+			current = pressureOf(function, live);
+		while (!ready.empty()) {
+			bool pressureRelevant = false;
+			if (pressureAware) {
+				pressureRelevant = current.gpr > capacity.gpr ||
+				                   current.vector > capacity.vector;
+				if (!pressureRelevant)
+					for (unsigned index : ready) {
+						RegisterPressure projected = projectedPressure(
+						    index, current, live, remainingUses, 0);
+						pressureRelevant |= projected.gpr > capacity.gpr ||
+						                   projected.vector > capacity.vector;
+					}
+			}
+			unsigned bestIndex = 0;
+			std::pair<unsigned, unsigned> bestExcess(0, 0);
+			long bestScore = 0;
+			bool first = true;
+			for (unsigned candidate : ready) {
+				std::pair<unsigned, unsigned> excess(0, 0);
+				if (pressureAware && pressureRelevant) {
+					RegisterPressure projected = projectedPressure(
+					    candidate, current, live, remainingUses, 0);
+					unsigned gpr = projected.gpr > capacity.gpr
+					                     ? projected.gpr - capacity.gpr
+					                     : 0;
+					unsigned vector = projected.vector > capacity.vector
+					                     ? projected.vector - capacity.vector
+					                     : 0;
+					excess = std::make_pair(gpr + vector, std::max(gpr, vector));
+				}
+				long candidateScore = score(candidate, previousResource);
+				if (first || excess > bestExcess ||
+				    (excess == bestExcess &&
+				     (candidateScore > bestScore ||
+				      (candidateScore == bestScore && candidate > bestIndex)))) {
+					first = false;
+					bestIndex = candidate;
+					bestExcess = excess;
+					bestScore = candidateScore;
+				}
+			}
+			for (auto it = ready.begin(); it != ready.end(); ++it)
+				if (*it == bestIndex) {
+					ready.erase(it);
+					break;
+				}
+			order.push_back(bestIndex);
+			if (pressureAware)
+				current = projectedPressure(bestIndex, current, live,
+				                            remainingUses, 0);
+			applyNode(bestIndex, live, remainingUses);
+			previousResource = nodes[bestIndex].resource;
+			for (unsigned successor : nodes[bestIndex].successors)
+				if (--remainingPredecessors[successor] == 0)
+					ready.push_back(successor);
+		}
+		return order;
+	}
+
+	PressureMetric metricForOrder(const std::vector<unsigned> &order) const {
+		PressureMetric metric;
+		std::set<VReg> live = regionLiveIn();
+		std::unordered_map<VReg, unsigned> remainingUses = initialUseCounts();
+		RegisterPressure pressure = pressureOf(function, live);
+		updateMetric(metric, pressure, capacity);
+		for (unsigned index : order) {
+			pressure = projectedPressure(index, pressure, live, remainingUses, 0);
+			applyNode(index, live, remainingUses);
+			updateMetric(metric, pressure, capacity);
+		}
+		return metric;
+	}
+};
+
 bool scheduleRegion(MachineFunction &function,
                     MachineBasicBlock::InstrList &instructions,
                     MachineBasicBlock::InstrList::iterator begin,
@@ -312,205 +539,21 @@ bool scheduleRegion(MachineFunction &function,
 	    allocatableRegisterCount(RegClass::GPR64),
 	    allocatableRegisterCount(RegClass::NEON128)};
 
-	auto initialUseCounts = [&]() {
-		std::unordered_map<VReg, unsigned> counts;
-		for (const Node &node : nodes)
-			for (VReg reg : node.virtualUses)
-				++counts[reg];
-		return counts;
-	};
-	auto regionLiveIn = [&]() {
-		std::set<VReg> live = regionLiveOut ? *regionLiveOut : std::set<VReg>{};
-		for (auto node = nodes.rbegin(); node != nodes.rend(); ++node) {
-			for (VReg reg : node->virtualDefs)
-				live.erase(reg);
-			live.insert(node->virtualUses.begin(), node->virtualUses.end());
-		}
-		return live;
-	};
-	auto applyNode = [&](unsigned index, std::set<VReg> &live,
-	                     std::unordered_map<VReg, unsigned> &remainingUses) {
-		const Node &node = nodes[index];
-		for (VReg reg : node.virtualUses) {
-			auto found = remainingUses.find(reg);
-			if (found != remainingUses.end() && found->second > 0)
-				--found->second;
-			if ((found == remainingUses.end() || found->second == 0) &&
-			    (!regionLiveOut || !regionLiveOut->count(reg)))
-				live.erase(reg);
-		}
-		for (VReg reg : node.virtualDefs) {
-			live.erase(reg);
-			auto found = remainingUses.find(reg);
-			const bool usedLater =
-			    found != remainingUses.end() && found->second != 0;
-			if (usedLater || (regionLiveOut && regionLiveOut->count(reg)))
-				live.insert(reg);
-		}
-	};
-	// Pressure after scheduling `index`, computed as a delta against the
-	// current pressure instead of rebuilding the live set.  This mirrors
-	// applyNode exactly: a use dies when it has no remaining later use and
-	// is not live-out, and a def occupies a register only when it is used
-	// later or live-out.
-	auto projectedPressure =
-	    [&](unsigned index, const RegisterPressure &current,
-	        const std::set<VReg> &live,
-	        const std::unordered_map<VReg, unsigned> &remainingUses) {
-		    RegisterPressure projected = current;
-		    auto adjust = [&](VReg reg, int delta) {
-			    switch (bankOf(function, reg)) {
-			    case Bank::Vector:
-				    projected.vector = static_cast<unsigned>(
-				        static_cast<int>(projected.vector) + delta);
-				    break;
-			    case Bank::GPR:
-				    projected.gpr = static_cast<unsigned>(
-				        static_cast<int>(projected.gpr) + delta);
-				    break;
-			    case Bank::None:
-				    break;
-			    }
-		    };
-		    const Node &node = nodes[index];
-		    auto finalIn = [&](VReg reg, unsigned consumed) {
-			    auto found = remainingUses.find(reg);
-			    const unsigned remaining =
-			        found == remainingUses.end()
-			            ? 0
-			            : (found->second > consumed ? found->second - consumed
-			                                        : 0);
-			    return remaining != 0 ||
-			           (regionLiveOut && regionLiveOut->count(reg));
-		    };
-		    for (VReg reg : node.virtualUses)
-			    if (!node.virtualDefs.count(reg) && live.count(reg) &&
-			        !finalIn(reg, 1))
-				    adjust(reg, -1);
-		    for (VReg reg : node.virtualDefs) {
-			    const bool wasLive = live.count(reg) != 0;
-			    const bool willBeLive =
-			        finalIn(reg, node.virtualUses.count(reg) ? 1 : 0);
-			    if (wasLive != willBeLive)
-				    adjust(reg, willBeLive ? 1 : -1);
-		    }
-		    return projected;
-	    };
-
-	auto buildOrder = [&](bool pressureAware) {
-		std::vector<unsigned> remainingPredecessors;
-		remainingPredecessors.reserve(nodes.size());
-		std::vector<unsigned> ready;
-		for (unsigned i = 0; i < nodes.size(); ++i) {
-			remainingPredecessors.push_back(nodes[i].predecessors);
-			if (!nodes[i].predecessors)
-				ready.push_back(i);
-		}
-
-		std::set<VReg> live = regionLiveIn();
-		auto remainingUses = initialUseCounts();
-		std::vector<unsigned> order;
-		order.reserve(nodes.size());
-		SchedResource previousResource = SchedResource::None;
-		RegisterPressure current;
-		if (pressureAware)
-			current = pressureOf(function, live);
-		while (!ready.empty()) {
-			auto score = [&](unsigned index) {
-				long value = static_cast<long>(nodes[index].height) * 16;
-				if (nodes[index].load)
-					value += 8;
-				if (nodes[index].resource != previousResource)
-					value += 2;
-				value -= static_cast<long>(index) / 64;
-				return value;
-			};
-
-			bool pressureRelevant = false;
-			if (pressureAware) {
-				pressureRelevant = current.gpr > capacity.gpr ||
-				                   current.vector > capacity.vector;
-				if (!pressureRelevant)
-					for (unsigned index : ready) {
-						RegisterPressure projected = projectedPressure(
-						    index, current, live, remainingUses);
-						pressureRelevant |= projected.gpr > capacity.gpr ||
-						                    projected.vector > capacity.vector;
-					}
-			}
-
-			auto best = std::max_element(
-			    ready.begin(), ready.end(), [&](unsigned lhs, unsigned rhs) {
-				    if (pressureAware && pressureRelevant) {
-					    RegisterPressure lhsPressure = projectedPressure(
-					        lhs, current, live, remainingUses);
-					    RegisterPressure rhsPressure = projectedPressure(
-					        rhs, current, live, remainingUses);
-					    auto excess = [&](RegisterPressure pressure) {
-						    const unsigned gpr =
-						        pressure.gpr > capacity.gpr
-						            ? pressure.gpr - capacity.gpr
-						            : 0;
-						    const unsigned vector =
-						        pressure.vector > capacity.vector
-						            ? pressure.vector - capacity.vector
-						            : 0;
-						    return std::pair<unsigned, unsigned>{
-						        gpr + vector, std::max(gpr, vector)};
-					    };
-					    auto lhsExcess = excess(lhsPressure);
-					    auto rhsExcess = excess(rhsPressure);
-					    if (lhsExcess != rhsExcess)
-						    return lhsExcess > rhsExcess;
-				    }
-				    long lhsScore = score(lhs);
-				    long rhsScore = score(rhs);
-				    return lhsScore != rhsScore ? lhsScore < rhsScore
-				                                : lhs > rhs;
-			    });
-			unsigned selected = *best;
-			ready.erase(best);
-			order.push_back(selected);
-			if (pressureAware)
-				current =
-				    projectedPressure(selected, current, live, remainingUses);
-			applyNode(selected, live, remainingUses);
-			previousResource = nodes[selected].resource;
-			for (unsigned successor : nodes[selected].successors)
-				if (--remainingPredecessors[successor] == 0)
-					ready.push_back(successor);
-		}
-		return order;
-	};
-
-	auto metricForOrder = [&](const std::vector<unsigned> &order) {
-		PressureMetric metric;
-		std::set<VReg> live = regionLiveIn();
-		auto remainingUses = initialUseCounts();
-		RegisterPressure pressure = pressureOf(function, live);
-		updateMetric(metric, pressure, capacity);
-		for (unsigned index : order) {
-			pressure = projectedPressure(index, pressure, live, remainingUses);
-			applyNode(index, live, remainingUses);
-			updateMetric(metric, pressure, capacity);
-		}
-		return metric;
-	};
-
+	RegionScheduleContext scheduling{function, nodes, regionLiveOut, capacity};
 	// Preserve the latency-oriented scheduler as the baseline.  A second
 	// order may replace it only when both register banks have a provably
 	// non-worse pressure profile.
-	std::vector<unsigned> order = buildOrder(false);
+	std::vector<unsigned> order = scheduling.buildOrder(false);
 	if (regionLiveOut) {
 		// Excess pressure is clamped at zero, so a baseline order that
 		// already fits both banks can never be improved upon.  Skip the
 		// quadratic candidate search entirely for such regions.
-		const PressureMetric baselineMetric = metricForOrder(order);
+		const PressureMetric baselineMetric = scheduling.metricForOrder(order);
 		const bool baselineFits = baselineMetric.peakGPRExcess == 0 &&
 		                          baselineMetric.peakVectorExcess == 0;
 		if (!baselineFits) {
-			std::vector<unsigned> pressureOrder = buildOrder(true);
-			if (pressureMetricStrictlyBetter(metricForOrder(pressureOrder),
+			std::vector<unsigned> pressureOrder = scheduling.buildOrder(true);
+			if (pressureMetricStrictlyBetter(scheduling.metricForOrder(pressureOrder),
 			                                 baselineMetric))
 				order = std::move(pressureOrder);
 		}
@@ -532,7 +575,7 @@ bool scheduleRegion(MachineFunction &function,
 
 } // namespace
 
-bool A53MachineScheduler::run(MachineFunction &function) const {
+bool A53MachineScheduler::run(MachineFunction &function) {
 	const bool preRegAlloc = !function.hasProperty(MachineProperty::NoVRegs);
 	LivenessResult liveness;
 	if (preRegAlloc)
@@ -565,23 +608,27 @@ bool A53MachineScheduler::run(MachineFunction &function) const {
 			// copies, and other barriers are part of the following live set
 			// even though they are not themselves rescheduled.
 			std::set<VReg> live = liveness.blockLiveOut[block.get()];
-			auto updateLive = [&](const MachineInstr &instruction) {
-				for (const MachineOperand &operand : instruction.operands())
-					if (operand.isVirtualRegister() && operand.isDef)
-						live.erase(operand.virtualRegister());
-				for (const MachineOperand &operand : instruction.operands())
-					if (operand.isVirtualRegister() && !operand.isDef)
-						live.insert(operand.virtualRegister());
-			};
 			for (std::size_t index = regions.size(); index-- > 0;) {
 				Region &region = regions[index];
 				region.liveOut = live;
 				for (auto it = region.end; it != region.begin;) {
 					--it;
-					updateLive(*it);
+					for (const MachineOperand &operand : it->operands())
+						if (operand.isVirtualRegister() && operand.isDef)
+							live.erase(operand.virtualRegister());
+					for (const MachineOperand &operand : it->operands())
+						if (operand.isVirtualRegister() && !operand.isDef)
+							live.insert(operand.virtualRegister());
 				}
-				if (index != 0)
-					updateLive(*regions[index - 1].end);
+				if (index != 0) {
+					const MachineInstr &boundary = *regions[index - 1].end;
+					for (const MachineOperand &operand : boundary.operands())
+						if (operand.isVirtualRegister() && operand.isDef)
+							live.erase(operand.virtualRegister());
+					for (const MachineOperand &operand : boundary.operands())
+						if (operand.isVirtualRegister() && !operand.isDef)
+							live.insert(operand.virtualRegister());
+				}
 			}
 		}
 

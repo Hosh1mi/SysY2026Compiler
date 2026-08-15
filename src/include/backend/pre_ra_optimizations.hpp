@@ -8,70 +8,70 @@ namespace backend::aarch64 {
 
 class MachineConstantCSE {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class MachineExpressionCSE {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64VectorImmediateSelection {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64PreRAPeephole {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64LoadStoreOptimization {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 // Shorten local SSA live ranges without crossing a control-flow edge.
 class MachineSSALocalSink {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 // Move a single-use materialization across a proven single-predecessor edge.
 class SinglePredecessorMaterializationSink {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class PreRAAddressingFolder {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64ConditionOptimizer {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class DeadMachineInstructionElimination {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 // Hoist scalar constants into preheaders created during PHI elimination.
 class PostPhiConstantHoisting {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64BranchFolding {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 class AArch64ExactHalvingLoopOptimizer {
 public:
-    bool run(MachineFunction &function) const;
+    static bool run(MachineFunction &function);
 };
 
 } // namespace backend::aarch64

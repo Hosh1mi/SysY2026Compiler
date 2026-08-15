@@ -7,7 +7,7 @@
 
 #include <array>
 #include <cstddef>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64::generated {
 namespace {
@@ -1955,7 +1955,7 @@ CondCode integerCondition(int predicate) {
 	case ICmpInst::ICMP_SLE:
 		return CondCode::LE;
 	}
-	throw std::logic_error("unknown integer predicate");
+	std::abort();
 }
 
 CondCode floatingCondition(int predicate) {
@@ -1993,7 +1993,7 @@ CondCode floatingCondition(int predicate) {
 	case FCmpInst::FCMP_TRUE:
 		return CondCode::AL;
 	}
-	throw std::logic_error("unknown floating predicate");
+	std::abort();
 }
 
 } // namespace backend::aarch64::generated

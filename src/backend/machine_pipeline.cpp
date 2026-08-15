@@ -1,252 +1,105 @@
-// Assemble the staged AArch64 MachineFunction pipeline.
-// Pass selection follows optimization level only — there are no per-pass
-// disable switches; optional transforms are either in the O≥1 sequence or not.
+// Assemble the native MachineFunction pass list.  The order here is the
+// backend contract; keep it linear so phase transitions stay visible.
 #include "backend/machine_pipeline.hpp"
 
+#include "backend/cfg_optimizations.hpp"
 #include "backend/codegen.hpp"
+#include "backend/frame_lowering.hpp"
+#include "backend/post_ra_optimizations.hpp"
+#include "backend/pre_ra_optimizations.hpp"
+#include "backend/regalloc.hpp"
+#include "backend/scheduler.hpp"
+#include "backend/spill_optimization.hpp"
 
 namespace backend::aarch64 {
 namespace {
 
-void addPass(MachineFunctionPassManager &pipeline, std::string name,
-             MachinePassStage stage, MachineProperty required,
-             MachineProperty forbidden,
-             MachineFunctionPassManager::PassRunner runner) {
-	pipeline.addPass(std::move(name), stage, {required, forbidden},
-	                 std::move(runner));
+bool runPhysicalCleanup(MachineFunction &function) {
+	bool changed = false;
+	for (;;) {
+		bool roundChanged = false;
+		roundChanged |= PostRASpillSlotOptimizer::run(function);
+		roundChanged |= PostRACopyPropagation::run(function);
+		roundChanged |= PostRARedundantCopyElimination::run(function);
+		if (!roundChanged)
+			return changed;
+		changed = true;
+	}
 }
 
 } // namespace
 
-// To isolate a pass, remove or restore its addPass registration below.
 void buildMachinePipeline(MachineFunctionPassManager &pipeline,
-                          MachinePipelineServices &services,
                           const BackendOptions &options) {
-	const MachineProperty selected = MachineProperty::Selected;
-	const MachineProperty selectedSSA =
-	    MachineProperty::Selected | MachineProperty::IsSSA;
-	const MachineProperty allocated =
-	    MachineProperty::Selected | MachineProperty::NoVRegs;
-	const MachineProperty finalized =
-	    allocated | MachineProperty::FrameFinalized;
 	const bool optimize = options.optimizationLevel >= 1;
 
 	if (optimize) {
-		addPass(pipeline, "MachineConstantCSE", MachinePassStage::MachineSSA,
-		        selectedSSA, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.constantCSE.run(function);
-		        });
-		addPass(pipeline, "AArch64VectorImmediateSelection",
-		        MachinePassStage::MachineSSA, selectedSSA,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.vectorImmediateSelection.run(function);
-		        });
-		addPass(pipeline, "AArch64PreRAPeephole", MachinePassStage::MachineSSA,
-		        selectedSSA, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.preRAPeephole.run(function);
-		        });
-		addPass(pipeline, "AArch64LoadStoreOptimization",
-		        MachinePassStage::MachineSSA, selectedSSA,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.loadStoreOptimization.run(function);
-		        });
-		addPass(pipeline, "MachineSSALocalSink", MachinePassStage::MachineSSA,
-		        selectedSSA, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.machineSSALocalSink.run(function);
-		        });
-		addPass(pipeline, "SinglePredecessorMaterializationSink",
-		        MachinePassStage::MachineSSA, selectedSSA,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.materializationSink.run(function);
-		        });
-		addPass(pipeline, "AArch64PreRAAddressingFolder",
-		        MachinePassStage::MachineSSA, selectedSSA,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.addressingFolder.run(function);
-		        });
-		addPass(pipeline, "AArch64ConditionOptimizer",
-		        MachinePassStage::MachineSSA, selectedSSA,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.conditionOptimizer.run(function);
-		        });
-		addPass(pipeline, "MachineExpressionCSE", MachinePassStage::MachineSSA,
-		        selectedSSA, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.expressionCSE.run(function);
-		        });
-		addPass(pipeline, "MachineDCE", MachinePassStage::MachineSSA,
-		        selectedSSA, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.machineDCE.run(function);
-		        });
+		pipeline.addPass("MachineConstantCSE", &MachineConstantCSE::run);
+		pipeline.addPass("AArch64VectorImmediateSelection",
+		                 &AArch64VectorImmediateSelection::run);
+		pipeline.addPass("AArch64PreRAPeephole",
+		                 &AArch64PreRAPeephole::run);
+		pipeline.addPass("AArch64LoadStoreOptimization",
+		                 &AArch64LoadStoreOptimization::run);
+		pipeline.addPass("MachineSSALocalSink", &MachineSSALocalSink::run);
+		pipeline.addPass("SinglePredecessorMaterializationSink",
+		                 &SinglePredecessorMaterializationSink::run);
+		pipeline.addPass("AArch64PreRAAddressingFolder",
+		                 &PreRAAddressingFolder::run);
+		pipeline.addPass("AArch64ConditionOptimizer",
+		                 &AArch64ConditionOptimizer::run);
+		pipeline.addPass("MachineExpressionCSE", &MachineExpressionCSE::run);
+		pipeline.addPass("MachineDCE", &DeadMachineInstructionElimination::run);
 	}
 
-	addPass(pipeline, "PHIElimination", MachinePassStage::SSAElimination,
-	        selectedSSA, MachineProperty::NoVRegs,
-	        [&services](MachineFunction &function) {
-		        return services.phiElimination.run(function);
-	        });
+	pipeline.addPass("PHIElimination", &PhiElimination::run);
 
 	if (optimize) {
-		addPass(pipeline, "PostPhiMaterializationSink",
-		        MachinePassStage::PreRegAlloc, selected,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.materializationSink.run(function);
-		        });
+		pipeline.addPass("PostPhiMaterializationSink",
+		                 &SinglePredecessorMaterializationSink::run);
+		pipeline.addPass("PostPhiConstantHoisting", &PostPhiConstantHoisting::run);
 
-		// PHI elimination creates edge blocks that act as preheaders for this
-		// narrow constant-only transform.  General LICM belongs in Machine SSA
-		// once loop canonicalization can provide preheaders there.
-		addPass(pipeline, "PostPhiConstantHoisting",
-		        MachinePassStage::PreRegAlloc, selected,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.postPhiConstantHoisting.run(function);
-		        });
-
-		addPass(pipeline, "MachineConstantCSEAfterHoisting",
-		        MachinePassStage::PreRegAlloc, selected,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.constantCSE.run(function);
-		        });
-		addPass(pipeline, "PostPhiMaterializationSinkAfterHoisting",
-		        MachinePassStage::PreRegAlloc, selected,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.materializationSink.run(function);
-		        });
-		addPass(pipeline, "AArch64BranchFolding", MachinePassStage::PreRegAlloc,
-		        selected, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.branchFolding.run(function);
-		        });
-		addPass(pipeline, "AArch64ExactHalvingLoopOptimizer",
-		        MachinePassStage::PreRegAlloc, selected,
-		        MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.exactHalvingLoopOptimizer.run(function);
-		        });
+		pipeline.addPass("MachineConstantCSEAfterHoisting",
+		                 &MachineConstantCSE::run);
+		pipeline.addPass("PostPhiMaterializationSinkAfterHoisting",
+		                 &SinglePredecessorMaterializationSink::run);
+		pipeline.addPass("AArch64BranchFolding", &AArch64BranchFolding::run);
+		pipeline.addPass("AArch64ExactHalvingLoopOptimizer",
+		                 &AArch64ExactHalvingLoopOptimizer::run);
 	}
 
-	addPass(pipeline, "UnreachableMachineBlockElimination",
-	        MachinePassStage::PreRegAlloc, selected, MachineProperty::NoVRegs,
-	        [&services](MachineFunction &function) {
-		        return services.unreachableBlockElimination.run(function);
-	        });
+	pipeline.addPass("UnreachableMachineBlockElimination",
+	                 &UnreachableMachineBlockElimination::run);
 
 	if (optimize)
-		addPass(pipeline, "A53PreRAScheduler", MachinePassStage::PreRegAlloc,
-		        selected, MachineProperty::NoVRegs,
-		        [&services](MachineFunction &function) {
-			        return services.scheduler.run(function);
-		        });
+		pipeline.addPass("A53PreRAScheduler", &A53MachineScheduler::run);
 
-	addPass(pipeline, "GraphColoringRegisterAllocator",
-	        MachinePassStage::RegAlloc, selected, MachineProperty::NoVRegs,
-	        [&services](MachineFunction &function) {
-		        services.registerAllocator.run(function);
-		        return true;
-	        });
-	addPass(pipeline, "PostRAParallelCopyResolver",
-	        MachinePassStage::PostRegAlloc, allocated,
-	        MachineProperty::FrameFinalized,
-	        [&services](MachineFunction &function) {
-		        return services.parallelCopyResolver.run(function);
-	        });
-	addPass(pipeline, "AArch64FinalizeTiedOperands",
-	        MachinePassStage::PostRegAlloc, allocated,
-	        MachineProperty::FrameFinalized,
-	        [&services](MachineFunction &function) {
-		        return services.instructionExpansion.run(function);
-	        });
-	addPass(pipeline, "PostRARedundantCopyElimination",
-	        MachinePassStage::PostRegAlloc, allocated,
-	        MachineProperty::FrameFinalized,
-	        [&services](MachineFunction &function) {
-		        return services.redundantCopyElimination.run(function);
-	        });
-	if (optimize)
-		addPass(pipeline, "PostRASpillSlotOptimizer",
-		        MachinePassStage::PostRegAlloc, allocated,
-		        MachineProperty::FrameFinalized,
-		        [&services](MachineFunction &function) {
-			        return services.spillSlotOptimizer.run(function);
-		        });
+	pipeline.addPass("GraphColoringRegisterAllocator",
+	                 &GraphColoringRegisterAllocator::run);
+	pipeline.addPass("PostRAParallelCopyResolver",
+	                 &PostRAParallelCopyResolver::run);
+	pipeline.addPass("AArch64FinalizeTiedOperands",
+	                 &PostRAInstructionExpansion::run);
 	if (optimize) {
-		addPass(pipeline, "PostRACopyPropagation",
-		        MachinePassStage::PostRegAlloc, allocated,
-		        MachineProperty::FrameFinalized,
-		        [&services](MachineFunction &function) {
-			        return services.copyPropagation.run(function);
-		        });
-  if (optimize)
-    addPass(pipeline, "A53FPRegisterBalancing",
-            MachinePassStage::PostRegAlloc, allocated,
-            MachineProperty::FrameFinalized,
-            [&services](MachineFunction &function) {
-              return services.fpRegisterBalancing.run(function);
-            });
-		addPass(pipeline, "PostRAFinalCopyCleanup",
-		        MachinePassStage::PostRegAlloc, allocated,
-		        MachineProperty::FrameFinalized,
-		        [&services](MachineFunction &function) {
-			        return services.redundantCopyElimination.run(function);
-		        });
+		pipeline.addPass("PostRAPhysicalCleanup", &runPhysicalCleanup);
+		pipeline.addPass("A53FPRegisterBalancing",
+		                 &A53FPRegisterBalancing::run);
+	} else {
+		pipeline.addPass("PostRARedundantCopyElimination",
+		                 &PostRARedundantCopyElimination::run);
 	}
 
-	addPass(pipeline, "AArch64FrameLowering",
-	        MachinePassStage::FrameFinalization, allocated,
-	        MachineProperty::FrameFinalized,
-	        [&services](MachineFunction &function) {
-		        services.frameLowering.run(function);
-		        return true;
-	        });
+	pipeline.addPass("AArch64FrameLowering", &AArch64FrameLowering::run);
 	if (optimize) {
-		addPass(pipeline, "PostFrameCopyPropagation",
-		        MachinePassStage::FrameFinalization, finalized,
-		        MachineProperty::None, [&services](MachineFunction &function) {
-			        return services.copyPropagation.run(function);
-		        });
-		addPass(pipeline, "AArch64PostRAAddressingOptimizer",
-		        MachinePassStage::FrameFinalization, finalized,
-		        MachineProperty::None, [&services](MachineFunction &function) {
-			        return services.addressingOptimizer.run(function);
-		        });
-		addPass(pipeline, "MachineBlockPlacement",
-		        MachinePassStage::FrameFinalization, finalized,
-		        MachineProperty::None, [&services](MachineFunction &function) {
-			        return services.blockPlacement.run(function);
-		        });
+		pipeline.addPass("AArch64PostRAAddressingOptimizer",
+		                 &PostRAAddressingOptimizer::run);
+		pipeline.addPass("MachineBlockPlacement", &MachineBlockPlacement::run);
 	}
-	addPass(
-	    pipeline, "AArch64ExpandConstantMaterialization",
-	    MachinePassStage::PreEmit, finalized, MachineProperty::None,
-	    [&services](MachineFunction &function) {
-		    return services.instructionExpansion.expandConstantMaterializations(
-		        function, /*enableMovn=*/true,
-		        /*enableLogicalImmediate=*/true);
-	    });
+	pipeline.addPass("AArch64ExpandConstantMaterialization",
+	                 &PostRAInstructionExpansion::expandConstantMaterializations);
 	if (optimize)
-		addPass(pipeline, "A53PostRAScheduler", MachinePassStage::PreEmit,
-		        finalized, MachineProperty::None,
-		        [&services](MachineFunction &function) {
-			        return services.scheduler.run(function);
-		        });
-	addPass(pipeline, "AArch64BranchRelaxation", MachinePassStage::PreEmit,
-	        finalized, MachineProperty::BranchesRelaxed,
-	        [&services](MachineFunction &function) {
-		        return services.branchRelaxation.run(function);
-	        });
+		pipeline.addPass("A53PostRAScheduler", &A53MachineScheduler::run);
+	pipeline.addPass("AArch64BranchRelaxation", &AArch64BranchRelaxation::run);
 }
 
 } // namespace backend::aarch64

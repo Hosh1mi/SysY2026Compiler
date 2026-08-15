@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_set>
 #include <vector>
 
@@ -95,50 +95,60 @@ struct SavedRegisterGroup {
 	bool vector;
 };
 
+void appendSavedRegisterGroup(const MachineFrameInfo &frame,
+                              std::vector<SavedRegisterGroup> &groups,
+                              std::size_t firstIndex,
+                              std::optional<std::size_t> secondIndex) {
+	const PhysReg first = frame.savedRegisters[firstIndex];
+	const int offset = frame.savedRegisterOffsets.at(first);
+	const bool vector = isVectorRegister(first);
+	std::optional<PhysReg> second;
+	if (secondIndex)
+		second = frame.savedRegisters[*secondIndex];
+	groups.push_back(SavedRegisterGroup{first, second, offset, vector});
+}
+
+bool canPairSavedRegisters(const MachineFrameInfo &frame,
+                           std::size_t firstIndex,
+                           std::size_t secondIndex) {
+	const PhysReg first = frame.savedRegisters[firstIndex];
+	const PhysReg second = frame.savedRegisters[secondIndex];
+	const std::int64_t offset = frame.savedRegisterOffsets.at(first);
+	if (isVectorRegister(first) != isVectorRegister(second) ||
+	    frame.savedRegisterOffsets.at(second) != offset + 8)
+		return false;
+	return isPairOffsetEncodable(offset, 8) ||
+	       !isScaledOffsetEncodable(offset, 8) ||
+	       !isScaledOffsetEncodable(offset + 8, 8);
+}
+
+bool physicalRegisterLess(PhysReg lhs, PhysReg rhs) {
+	return static_cast<unsigned>(lhs) < static_cast<unsigned>(rhs);
+}
+
 std::vector<SavedRegisterGroup>
 groupSavedRegisters(const MachineFrameInfo &frame, SavedRegisterOrder order) {
 	std::vector<SavedRegisterGroup> groups;
-	auto makeGroup = [&](std::size_t firstIndex,
-	                     std::optional<std::size_t> secondIndex) {
-		const PhysReg first = frame.savedRegisters[firstIndex];
-		const int offset = frame.savedRegisterOffsets.at(first);
-		const bool vector = isVectorRegister(first);
-		std::optional<PhysReg> second;
-		if (secondIndex)
-			second = frame.savedRegisters[*secondIndex];
-		groups.push_back(SavedRegisterGroup{first, second, offset, vector});
-	};
-	auto canPair = [&](std::size_t firstIndex, std::size_t secondIndex) {
-		const PhysReg first = frame.savedRegisters[firstIndex];
-		const PhysReg second = frame.savedRegisters[secondIndex];
-		const std::int64_t offset = frame.savedRegisterOffsets.at(first);
-		if (isVectorRegister(first) != isVectorRegister(second) ||
-		    frame.savedRegisterOffsets.at(second) != offset + 8)
-			return false;
-		// Prefer two direct scalar accesses once a pair offset is out of range.
-		// A far pair is kept together so one SP adjustment serves both
-		// registers.
-		return isPairOffsetEncodable(offset, 8) ||
-		       !isScaledOffsetEncodable(offset, 8) ||
-		       !isScaledOffsetEncodable(offset + 8, 8);
-	};
 
 	if (order == SavedRegisterOrder::Save) {
 		for (std::size_t i = 0; i < frame.savedRegisters.size();) {
 			const bool pair =
-			    i + 1 < frame.savedRegisters.size() && canPair(i, i + 1);
-			makeGroup(i,
-			          pair ? std::optional<std::size_t>(i + 1) : std::nullopt);
+			    i + 1 < frame.savedRegisters.size() &&
+			        canPairSavedRegisters(frame, i, i + 1);
+			appendSavedRegisterGroup(
+			    frame, groups, i,
+			    pair ? std::optional<std::size_t>(i + 1) : std::nullopt);
 			i += pair ? 2 : 1;
 		}
 	} else {
 		for (std::size_t i = frame.savedRegisters.size(); i > 0;) {
-			const bool pair = i >= 2 && canPair(i - 2, i - 1);
+			const bool pair = i >= 2 &&
+			                  canPairSavedRegisters(frame, i - 2, i - 1);
 			if (pair) {
-				makeGroup(i - 2, i - 1);
+				appendSavedRegisterGroup(frame, groups, i - 2, i - 1);
 				i -= 2;
 			} else {
-				makeGroup(i - 1, std::nullopt);
+				appendSavedRegisterGroup(frame, groups, i - 1, std::nullopt);
 				--i;
 			}
 		}
@@ -157,7 +167,7 @@ void insertSavedRegisterAccess(InstrList &instructions, InstrPosition position,
 	std::int64_t memoryOffset = group.offset;
 	if (!encodable) {
 		if (group.offset < 0)
-			throw std::logic_error("negative callee-save offset");
+			std::abort();
 		adjustment = static_cast<std::uint64_t>(group.offset) /
 		             kStackAlignment * kStackAlignment;
 		memoryOffset -= static_cast<std::int64_t>(adjustment);
@@ -192,7 +202,7 @@ void insertSavedRegisterAccess(InstrList &instructions, InstrPosition position,
 } // namespace
 
 void AArch64FrameLowering::determineCalleeSaves(
-    MachineFunction &function) const {
+    MachineFunction &function) {
 	std::unordered_set<PhysReg> used;
 	for (const auto &block : function.blocks())
 		for (const MachineInstr &instruction : block->instructions())
@@ -203,12 +213,10 @@ void AArch64FrameLowering::determineCalleeSaves(
 
 	auto &saved = function.frameInfo().savedRegisters;
 	saved.assign(used.begin(), used.end());
-	std::sort(saved.begin(), saved.end(), [](PhysReg lhs, PhysReg rhs) {
-		return static_cast<unsigned>(lhs) < static_cast<unsigned>(rhs);
-	});
+	std::sort(saved.begin(), saved.end(), physicalRegisterLess);
 }
 
-void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
+void AArch64FrameLowering::layoutFrame(MachineFunction &function) {
 	MachineFrameInfo &frame = function.frameInfo();
 	// Reserve a stable outgoing-argument area at the bottom of the frame.
 	// SP therefore never moves around a call, so spill and local frame
@@ -221,7 +229,8 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
 		frame.savedRegisterOffsets[reg] = static_cast<int>(cursor);
 		cursor += size;
 	}
-	auto layoutObjects = [&](bool spills) {
+	for (int pass = 0; pass < 2; ++pass) {
+		const bool spills = pass == 0;
 		for (StackObject &object : frame.objects()) {
 			if (object.fixed || object.spill != spills)
 				continue;
@@ -229,17 +238,15 @@ void AArch64FrameLowering::layoutFrame(MachineFunction &function) const {
 			object.offset = static_cast<int>(cursor);
 			cursor += object.size;
 		}
-	};
+	}
 	// Keep allocator spill slots in the low, directly encodable SP window.
 	// Large local arrays are addressed through LEA_FRAME values and can sit
 	// above them without adding work to each dynamic spill/reload.
-	layoutObjects(true);
-	layoutObjects(false);
 	frame.stackSize = alignTo(cursor, kStackAlignment);
 }
 
 void AArch64FrameLowering::eliminateFrameIndices(
-    MachineFunction &function) const {
+    MachineFunction &function) {
 	MachineFrameInfo &frame = function.frameInfo();
 	for (auto &owned : function.blocks()) {
 		auto &instructions = owned->instructions();
@@ -248,7 +255,7 @@ void AArch64FrameLowering::eliminateFrameIndices(
 			    it->opcode() == Opcode::ADJCALLSTACKUP) {
 				if (it->operands().size() != 1 ||
 				    it->operands()[0].kind() != MachineOperand::Kind::Immediate)
-					throw std::logic_error("malformed call-stack adjustment");
+					std::abort();
 				it = instructions.erase(it);
 				continue;
 			}
@@ -257,15 +264,14 @@ void AArch64FrameLowering::eliminateFrameIndices(
 				    !it->operands()[0].isPhysicalRegister() ||
 				    it->operands()[1].kind() !=
 				        MachineOperand::Kind::FrameIndex)
-					throw std::logic_error("malformed LEA_FRAME");
+					std::abort();
 				const StackObject &object =
 				    frame.getObject(it->operands()[1].frameIndex());
 				const PhysReg base = PhysReg::SP;
 				std::int64_t offset = resolvedFrameOffset(frame, object);
 				MachineOperand destination = it->operands()[0];
 				if (offset < 0)
-					throw std::logic_error(
-					    "negative frame address is unsupported");
+					std::abort();
 				std::uint64_t amount =
 				    nextAddSubImmediate(static_cast<std::uint64_t>(offset));
 				it->operands().clear();
@@ -305,7 +311,7 @@ void AArch64FrameLowering::eliminateFrameIndices(
 				    !it->operands()[0].isPhysicalRegister() ||
 				    it->operands()[1].kind() !=
 				        MachineOperand::Kind::FrameIndex)
-					throw std::logic_error("malformed spill pseudo");
+					std::abort();
 				int frameIndex = it->operands()[1].frameIndex();
 				const StackObject &object = frame.getObject(frameIndex);
 				RegClass regClass = it->operands()[0].regClass();
@@ -362,14 +368,14 @@ void AArch64FrameLowering::eliminateFrameIndices(
 }
 
 void AArch64FrameLowering::insertPrologueEpilogues(
-    MachineFunction &function) const {
+    MachineFunction &function) {
 	MachineFrameInfo &frame = function.frameInfo();
 	if (frame.stackSize == 0 && !frame.hasCalls)
 		return;
 
 	MachineBasicBlock *entry = function.entryBlock();
 	if (!entry)
-		throw std::logic_error("cannot insert prologue without entry");
+		std::abort();
 	auto insertion = entry->instructions().begin();
 
 	if (frame.hasCalls) {
@@ -417,14 +423,13 @@ void AArch64FrameLowering::insertPrologueEpilogues(
 	}
 }
 
-void AArch64FrameLowering::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		throw std::logic_error("frame lowering requires NoVRegs");
+bool AArch64FrameLowering::run(MachineFunction &function) {
 	determineCalleeSaves(function);
 	layoutFrame(function);
 	eliminateFrameIndices(function);
 	insertPrologueEpilogues(function);
 	function.setProperty(MachineProperty::FrameFinalized);
+	return true;
 }
 
 } // namespace backend::aarch64

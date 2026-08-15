@@ -288,7 +288,6 @@ public:
     }
 
     bool hasProperty(MachineProperty property) const;
-    bool hasAllProperties(MachineProperty properties) const;
     void setProperty(MachineProperty property);
     void clearProperty(MachineProperty property);
 

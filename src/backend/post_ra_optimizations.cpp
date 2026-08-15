@@ -5,9 +5,9 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <optional>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace backend::aarch64 {
@@ -15,6 +15,37 @@ namespace {
 
 using PhysSet = std::unordered_set<PhysReg>;
 using BlockPhysSets = std::unordered_map<MachineBasicBlock *, PhysSet>;
+
+void addPhysicalUse(BlockPhysSets &physicalUses,
+                    const BlockPhysSets &physicalDefs,
+                    MachineBasicBlock *block, PhysReg reg) {
+	BlockPhysSets::const_iterator found = physicalDefs.find(block);
+	if (found == physicalDefs.end() || !found->second.count(reg))
+		physicalUses[block].insert(reg);
+}
+
+std::uint64_t moveWidePiece(std::uint64_t value, unsigned index) {
+	return (value >> (index * 16)) & 0xffffU;
+}
+
+void insertMoveWide(MachineBasicBlock::InstrList &instructions,
+                    MachineBasicBlock::InstrList::iterator position,
+                    Opcode opcode, PhysReg reg, RegClass regClass,
+                    unsigned slice, std::uint64_t immediate, bool tied) {
+	MachineInstr move(opcode);
+	move.addOperand(MachineOperand::physReg(reg, regClass, true));
+	if (tied) {
+		MachineOperand use = MachineOperand::physReg(reg, regClass);
+		use.tiedTo = 0;
+		use.isKill = true;
+		move.addOperand(std::move(use));
+	}
+	move.addOperand(MachineOperand::immediate(
+	                   static_cast<std::int64_t>(immediate)))
+	    .addOperand(MachineOperand::immediate(
+	                   static_cast<std::int64_t>(slice * 16)));
+	instructions.insert(position, std::move(move));
+}
 
 bool readsPhysicalRegister(const MachineInstr &instruction, PhysReg reg) {
 	if (instruction.readsRegister(reg))
@@ -30,27 +61,24 @@ BlockPhysSets computePhysicalLiveOut(MachineFunction &function) {
 	BlockPhysSets physicalDefs;
 	BlockPhysSets physicalLiveIn;
 	BlockPhysSets physicalLiveOut;
-	auto addUse = [&](MachineBasicBlock *block, PhysReg reg) {
-		if (!physicalDefs[block].count(reg))
-			physicalUses[block].insert(reg);
-	};
-
 	for (auto &owned : function.blocks()) {
 		MachineBasicBlock *block = owned.get();
 		for (const MachineInstr &instruction : block->instructions()) {
 			for (const MachineOperand &operand : instruction.operands())
 				if (operand.isPhysicalRegister() && !operand.isDef)
-					addUse(block, operand.physicalRegister());
+					addPhysicalUse(physicalUses, physicalDefs, block,
+					               operand.physicalRegister());
 			if (instruction.isCall()) {
 				for (unsigned index = 0; index < 8; ++index) {
-					addUse(block,
-					       RegisterInfo::integerArgumentRegister(index));
-					addUse(block, RegisterInfo::vectorArgumentRegister(index));
+					addPhysicalUse(physicalUses, physicalDefs, block,
+					               RegisterInfo::integerArgumentRegister(index));
+					addPhysicalUse(physicalUses, physicalDefs, block,
+					               RegisterInfo::vectorArgumentRegister(index));
 				}
 			} else if (instruction.opcode() == Opcode::RET) {
-				addUse(block, PhysReg::X0);
-				addUse(block, PhysReg::V0);
-				addUse(block, PhysReg::X30);
+				addPhysicalUse(physicalUses, physicalDefs, block, PhysReg::X0);
+				addPhysicalUse(physicalUses, physicalDefs, block, PhysReg::V0);
+				addPhysicalUse(physicalUses, physicalDefs, block, PhysReg::X30);
 			}
 
 			// Uses precede definitions for read/modify/write instructions.
@@ -107,9 +135,7 @@ bool isRegisterLiveAfter(MachineBasicBlock::InstrList::const_iterator scan,
 
 } // namespace
 
-bool PostRACopyPropagation::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+bool PostRACopyPropagation::run(MachineFunction &function) {
 
 	const BlockPhysSets physicalLiveOut = computePhysicalLiveOut(function);
 	bool changed = false;
@@ -199,25 +225,6 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
 			++instruction;
 		}
 	}
-    for (auto &block : function.blocks()) {
-        auto &instructions = block->instructions();
-        for (auto instruction = instructions.begin();
-             instruction != instructions.end();) {
-            if (instruction->opcode() == Opcode::COPY &&
-                instruction->operands().size() == 2 &&
-                instruction->operands()[0].isPhysicalRegister() &&
-                instruction->operands()[1].isPhysicalRegister() &&
-                instruction->operands()[0].isSameRegisterAs(
-                    instruction->operands()[1])) {
-                instruction = instructions.erase(instruction);
-                changed = true;
-                continue;
-            }
-            ++instruction;
-        }
-    }
-
-    MachinePhysicalRegisterLiveness physicalLiveness(function);
 
 	// Forward a physical copy through its local uses until the copied value
 	// is provably killed.  This handles call results such as
@@ -282,49 +289,6 @@ bool PostRACopyPropagation::run(MachineFunction &function) const {
 						blocked = true;
 					break;
 				}
-            bool sourceAvailable = true;
-            bool killed = false;
-            bool blocked = false;
-            std::vector<MachineOperand *> rewrites;
-            for (auto scan = std::next(copy);
-                 scan != instructions.end(); ++scan) {
-                if (scan->isCall()) {
-                    if (RegisterInfo::isArgumentRegister(destination)) {
-                        blocked = true;
-                    } else if (
-                        RegisterInfo::isCallerSaved(destination)) {
-                        killed = true;
-                    }
-                    break;
-                }
-                if (scan->isTerminator()) {
-                    bool terminatorUsesDestination = false;
-                    for (const MachineOperand &operand :
-                         scan->operands())
-                        if (operand.isPhysicalRegister() &&
-                            !operand.isDef &&
-                            RegisterInfo::aliases(
-                                operand.physicalRegister(),
-                                destination)) {
-                            terminatorUsesDestination = true;
-                            break;
-                        }
-                    // A value consumed by the terminator is not necessarily
-                    // live-out: conditional branches use it on the current
-                    // block's outgoing edge.  Keep the copy in that case.
-                    if (terminatorUsesDestination) {
-                        blocked = true;
-                    } else if (!physicalLiveness.liveOut(block.get()).count(
-                            destination) &&
-                        (scan->opcode() != Opcode::RET ||
-                         (!RegisterInfo::isReturnRegister(destination) &&
-                          destination != PhysReg::X30)))
-                        killed = true;
-                    else
-                        blocked = true;
-                    break;
-                }
-
 				bool definesDestination = false;
 				bool definesSource = false;
 				for (MachineOperand &operand : scan->operands()) {
@@ -519,10 +483,7 @@ FPValueChain findFPValueChain(
 
 } // namespace
 
-bool A53FPRegisterBalancing::run(MachineFunction &function) const {
-    if (!function.hasProperty(MachineProperty::NoVRegs))
-        return false;
-
+bool A53FPRegisterBalancing::run(MachineFunction &function) {
     MachinePhysicalRegisterLiveness liveness(function);
     bool changed = false;
     for (auto &owned : function.blocks()) {
@@ -608,11 +569,7 @@ bool A53FPRegisterBalancing::run(MachineFunction &function) const {
     return changed;
 }
 
-bool PostRARedundantCopyElimination::run(
-    MachineFunction &function) const {
-    if (!function.hasProperty(MachineProperty::NoVRegs))
-        return false;
-
+bool PostRARedundantCopyElimination::run(MachineFunction &function) {
 	bool changed = false;
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -636,9 +593,7 @@ bool PostRARedundantCopyElimination::run(
 	return changed;
 }
 
-bool PostRAInstructionExpansion::run(MachineFunction &function) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+bool PostRAInstructionExpansion::run(MachineFunction &function) {
 	bool changed = false;
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -658,8 +613,7 @@ bool PostRAInstructionExpansion::run(MachineFunction &function) const {
 			    !insert->operands()[0].isPhysicalRegister() ||
 			    !insert->operands()[0].isDef ||
 			    !insert->operands()[1].isPhysicalRegister())
-				throw std::logic_error(
-				    "malformed tied vector instruction after allocation");
+				std::abort();
 			MachineOperand &destination = insert->operands()[0];
 			MachineOperand &source = insert->operands()[1];
 			if (!destination.isSameRegisterAs(source)) {
@@ -670,12 +624,19 @@ bool PostRAInstructionExpansion::run(MachineFunction &function) const {
 				    .addOperand(MachineOperand::physReg(
 				        source.physicalRegister(), RegClass::NEON128));
 				instructions.insert(insert, std::move(copy));
+				changed = true;
 			}
-			MachineOperand tiedUse = MachineOperand::physReg(
-			    destination.physicalRegister(), RegClass::NEON128);
-			tiedUse.tiedTo = 0;
-			source = std::move(tiedUse);
-			changed = true;
+		const bool needsTie =
+			    !source.isSameRegisterAs(destination) ||
+			    source.regClass() != RegClass::NEON128 || source.isDef ||
+			    source.tiedTo != 0 || source.isKill;
+			if (needsTie) {
+				MachineOperand tiedUse = MachineOperand::physReg(
+				    destination.physicalRegister(), RegClass::NEON128);
+				tiedUse.tiedTo = 0;
+				source = std::move(tiedUse);
+				changed = true;
+			}
 		}
 	}
 	return changed;
@@ -728,8 +689,7 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 	    !materialize->operands()[0].isPhysicalRegister() ||
 	    !materialize->operands()[0].isDef ||
 	    materialize->operands()[1].kind() != MachineOperand::Kind::Immediate)
-		throw std::logic_error(
-		    "malformed integer materialization after register allocation");
+		std::abort();
 
 	const MachineOperand &destination = materialize->operands()[0];
 	const PhysReg reg = destination.physicalRegister();
@@ -737,8 +697,7 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 	const bool wide = materialize->opcode() == Opcode::MOVi64;
 	if ((wide && regClass != RegClass::GPR64) ||
 	    (!wide && regClass != RegClass::GPR32))
-		throw std::logic_error(
-		    "integer materialization register class mismatch");
+		std::abort();
 
 	const std::uint64_t value =
 	    wide
@@ -747,14 +706,11 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 	              materialize->operands()[1].immediate());
 	const unsigned pieces = wide ? 4U : 2U;
 
-	auto piece = [&](unsigned index) {
-		return (value >> (index * 16)) & 0xffffU;
-	};
 	unsigned nonzeroPieces = 0;
 	unsigned nonOnesPieces = 0;
 	for (unsigned index = 0; index < pieces; ++index) {
-		nonzeroPieces += piece(index) != 0;
-		nonOnesPieces += piece(index) != 0xffffU;
+		nonzeroPieces += moveWidePiece(value, index) != 0;
+		nonOnesPieces += moveWidePiece(value, index) != 0xffffU;
 	}
 	const unsigned movzCost = std::max(1U, nonzeroPieces);
 	const unsigned movnCost = std::max(1U, nonOnesPieces);
@@ -777,56 +733,28 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 	unsigned first = 0;
 	for (unsigned index = 0; index < pieces; ++index) {
 		const bool needsSeed =
-		    useMovn ? piece(index) != 0xffffU : piece(index) != 0;
+		    useMovn ? moveWidePiece(value, index) != 0xffffU
+		            : moveWidePiece(value, index) != 0;
 		if (needsSeed) {
 			first = index;
 			break;
 		}
 	}
 
-	auto emitMovz = [&](unsigned slice, std::uint64_t imm) {
-		MachineInstr movz(Opcode::MOVZ);
-		movz.addOperand(MachineOperand::physReg(reg, regClass, true));
-		movz.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(imm)));
-		movz.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
-		instructions.insert(materialize, std::move(movz));
-	};
-	auto emitMovn = [&](unsigned slice, std::uint64_t imm) {
-		MachineInstr movn(Opcode::MOVN);
-		movn.addOperand(MachineOperand::physReg(reg, regClass, true));
-		movn.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(imm)));
-		movn.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
-		instructions.insert(materialize, std::move(movn));
-	};
-	auto emitMovk = [&](unsigned slice, std::uint64_t imm) {
-		MachineInstr movk(Opcode::MOVK);
-		movk.addOperand(MachineOperand::physReg(reg, regClass, true));
-		MachineOperand use = MachineOperand::physReg(reg, regClass);
-		use.tiedTo = 0;
-		use.isKill = true;
-		movk.addOperand(std::move(use));
-		movk.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(imm)));
-		movk.addOperand(
-		    MachineOperand::immediate(static_cast<std::int64_t>(slice * 16)));
-		instructions.insert(materialize, std::move(movk));
-	};
-
 	if (useMovn)
-		emitMovn(first, (~piece(first)) & 0xffffU);
+		insertMoveWide(instructions, materialize, Opcode::MOVN, reg, regClass,
+		               first, (~moveWidePiece(value, first)) & 0xffffU, false);
 	else
-		emitMovz(first, piece(first));
+		insertMoveWide(instructions, materialize, Opcode::MOVZ, reg, regClass,
+		               first, moveWidePiece(value, first), false);
 	for (unsigned index = 0; index < pieces; ++index) {
 		if (index == first)
 			continue;
-		const std::uint64_t current = piece(index);
+		const std::uint64_t current = moveWidePiece(value, index);
 		if ((useMovn && current == 0xffffU) || (!useMovn && current == 0))
 			continue;
-		emitMovk(index, current);
+		insertMoveWide(instructions, materialize, Opcode::MOVK, reg, regClass,
+		               index, current, true);
 	}
 	instructions.erase(materialize);
 }
@@ -834,10 +762,7 @@ void expandIntegerImmediate(MachineBasicBlock::InstrList &instructions,
 } // namespace
 
 bool PostRAInstructionExpansion::expandConstantMaterializations(
-    MachineFunction &function, bool enableMovn,
-    bool enableLogicalImmediate) const {
-	if (!function.hasProperty(MachineProperty::NoVRegs))
-		return false;
+    MachineFunction &function) {
 	bool changed = false;
 	for (auto &block : function.blocks()) {
 		auto &instructions = block->instructions();
@@ -846,8 +771,7 @@ bool PostRAInstructionExpansion::expandConstantMaterializations(
 			if (current->opcode() != Opcode::MOVi32 &&
 			    current->opcode() != Opcode::MOVi64)
 				continue;
-			expandIntegerImmediate(instructions, current, enableMovn,
-			                       enableLogicalImmediate);
+			expandIntegerImmediate(instructions, current, true, true);
 			changed = true;
 		}
 	}

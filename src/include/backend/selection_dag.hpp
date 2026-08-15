@@ -90,8 +90,6 @@ public:
 
     static ValueType valueType(Type *type);
     static unsigned typeSize(Type *type);
-
-private:
     SDValue getValue(FunctionDAG &functionDAG, SelectionDAG &dag,
                      Value *value) const;
 };

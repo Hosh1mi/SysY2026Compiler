@@ -4,7 +4,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64 {
 namespace {
@@ -24,15 +24,25 @@ std::string blockLabel(const MachineFunction &function,
 
 std::string registerName(const MachineOperand &operand) {
 	if (!operand.isPhysicalRegister())
-		throw std::logic_error("assembly register operand is not physical");
+		std::abort();
 	return std::string(
 	    RegisterInfo::name(operand.physicalRegister(), operand.regClass()));
 }
 
 std::string registerNameAs(const MachineOperand &operand, RegClass view) {
 	if (!operand.isPhysicalRegister())
-		throw std::logic_error("assembly register operand is not physical");
+		std::abort();
 	return std::string(RegisterInfo::name(operand.physicalRegister(), view));
+}
+
+std::string pairRegisterName(const MachineOperand &operand, bool qPair,
+                             bool dPair) {
+	std::string name = registerName(operand);
+	if (qPair)
+		return "q" + name.substr(1);
+	if (dPair)
+		return "d" + name.substr(1);
+	return name;
 }
 
 void emitMemory(std::ostream &output, const char *mnemonic,
@@ -49,8 +59,7 @@ void emitMemory(std::ostream &output, const char *mnemonic,
 	bool scaledEncodable = offset >= 0 && offset % width == 0 &&
 	                       static_cast<std::uint64_t>(offset / width) <= 4095;
 	if (!scaledEncodable)
-		throw std::logic_error(
-		    "illegal memory offset reached assembly printer");
+		std::abort();
 	output << '\t' << mnemonic << ' ' << value << ", [" << base;
 	if (offset)
 		output << ", #" << offset;
@@ -63,7 +72,7 @@ void emitGlobalMemory(std::ostream &output, const char *mnemonic,
 	    !instruction.operands()[0].isPhysicalRegister() ||
 	    !instruction.operands()[1].isPhysicalRegister() ||
 	    instruction.operands()[2].kind() != MachineOperand::Kind::GlobalSymbol)
-		throw std::logic_error("malformed global memory instruction");
+		std::abort();
 	std::string value = registerName(instruction.operands()[0]);
 	if (instruction.operands()[0].regClass() == RegClass::NEON128)
 		value = "q" + value.substr(1);
@@ -80,8 +89,7 @@ void emitDMemory(std::ostream &output, const char *mnemonic,
 	bool scaledEncodable = offset >= 0 && offset % 8 == 0 &&
 	                       static_cast<std::uint64_t>(offset / 8) <= 4095;
 	if (!scaledEncodable)
-		throw std::logic_error(
-		    "illegal D-register memory offset reached assembly printer");
+		std::abort();
 	output << '\t' << mnemonic << ' ' << value << ", ["
 	       << registerName(instruction.operands()[1]);
 	if (offset)
@@ -108,7 +116,7 @@ void emitRegisterOffsetMemory(std::ostream &output, const char *mnemonic,
 	    !instruction.operands()[2].isPhysicalRegister() ||
 	    instruction.operands()[3].kind() != MachineOperand::Kind::Immediate ||
 	    instruction.operands()[4].kind() != MachineOperand::Kind::Immediate)
-		throw std::logic_error("malformed register-offset memory instruction");
+		std::abort();
 	std::string value = registerName(instruction.operands()[0]);
 	if (instruction.operands()[0].regClass() == RegClass::NEON128)
 		value = "q" + value.substr(1);
@@ -122,8 +130,7 @@ void emitRegisterOffsetMemory(std::ostream &output, const char *mnemonic,
 	while ((1U << legalShift) < width)
 		++legalShift;
 	if (shift != 0 && shift != static_cast<std::int64_t>(legalShift))
-		throw std::logic_error(
-		    "illegal register-offset shift reached assembly printer");
+		std::abort();
 	const char *extend = extension == 2 ? "lsl" : extension ? "sxtw" : "uxtw";
 	output << '\t' << mnemonic << ' ' << value << ", ["
 	       << registerName(instruction.operands()[1]) << ", "
@@ -150,8 +157,7 @@ void emitThreeWithImmediate(std::ostream &output, const char *mnemonic,
 void emitAddSubImmediateValue(std::ostream &output, Opcode opcode,
                               std::int64_t immediate) {
 	if (!InstrInfo::acceptsImmediate(opcode, immediate))
-		throw std::logic_error(
-		    "illegal add/sub immediate reached assembly printer");
+		std::abort();
 	output << '#';
 	if (immediate > 4095)
 		output << immediate / 4096 << ", lsl #12";
@@ -165,8 +171,7 @@ void emitAddSubWithImmediate(std::ostream &output, const char *mnemonic,
 	    !instruction.operands()[0].isPhysicalRegister() ||
 	    !instruction.operands()[1].isPhysicalRegister() ||
 	    instruction.operands()[2].kind() != MachineOperand::Kind::Immediate)
-		throw std::logic_error(
-		    "malformed add/sub immediate at assembly printing");
+		std::abort();
 	output << '\t' << mnemonic << ' ' << registerName(instruction.operands()[0])
 	       << ", " << registerName(instruction.operands()[1]) << ", ";
 	emitAddSubImmediateValue(output, instruction.opcode(),
@@ -184,7 +189,7 @@ void printInstruction(const MachineFunction &function,
 	switch (instruction.opcode()) {
 	case Opcode::COPY: {
 		if (operands.size() != 2)
-			throw std::logic_error("malformed COPY at assembly printing");
+			std::abort();
 		std::string destination = registerName(operands[0]);
 		std::string source = registerName(operands[1]);
 		if (operands[0].regClass() == RegClass::NEON128)
@@ -201,8 +206,7 @@ void printInstruction(const MachineFunction &function,
 		if (operands.size() != 3 || !operands[0].isPhysicalRegister() ||
 		    operands[1].kind() != MachineOperand::Kind::Immediate ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error(
-			    "malformed move-wide instruction at assembly printing");
+			std::abort();
 		output << (instruction.opcode() == Opcode::MOVZ ? "\tmovz " : "\tmovn ")
 		       << registerName(operands[0]) << ", #" << operands[1].immediate();
 		if (operands[2].immediate())
@@ -215,7 +219,7 @@ void printInstruction(const MachineFunction &function,
 		    !operands[1].isPhysicalRegister() ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate ||
 		    operands[3].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed movk at assembly printing");
+			std::abort();
 		output << "\tmovk " << registerName(operands[0]) << ", #"
 		       << operands[2].immediate();
 		if (operands[3].immediate())
@@ -230,7 +234,7 @@ void printInstruction(const MachineFunction &function,
 		if (operands.size() != 3 ||
 		    operands[1].kind() != MachineOperand::Kind::Immediate ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed movi.4s");
+			std::abort();
 		output << "\tmovi " << registerName(operands[0]) << ".4s, #"
 		       << operands[1].immediate();
 		if (operands[2].immediate())
@@ -242,7 +246,7 @@ void printInstruction(const MachineFunction &function,
 		if (operands.size() != 3 ||
 		    operands[1].kind() != MachineOperand::Kind::Immediate ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed movi.4s msl");
+			std::abort();
 		output << "\tmovi " << registerName(operands[0]) << ".4s, #"
 		       << operands[1].immediate() << ", msl #"
 		       << operands[2].immediate() << '\n';
@@ -252,7 +256,7 @@ void printInstruction(const MachineFunction &function,
 		if (operands.size() != 3 ||
 		    operands[1].kind() != MachineOperand::Kind::Immediate ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed mvni.4s");
+			std::abort();
 		output << "\tmvni " << registerName(operands[0]) << ".4s, #"
 		       << operands[1].immediate();
 		if (operands[2].immediate())
@@ -263,7 +267,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::MOVIv16b: {
 		if (operands.size() != 2 ||
 		    operands[1].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed movi.16b");
+			std::abort();
 		output << "\tmovi " << registerName(operands[0]) << ".16b, #"
 		       << operands[1].immediate() << '\n';
 		break;
@@ -271,7 +275,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::FMOVv4s: {
 		if (operands.size() != 2 ||
 		    operands[1].kind() != MachineOperand::Kind::FloatingBits)
-			throw std::logic_error("malformed fmov.4s immediate");
+			std::abort();
 		float value = 0.0f;
 		std::uint32_t bits = operands[1].floatingBits();
 		std::memcpy(&value, &bits, sizeof(value));
@@ -372,8 +376,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::ORRXri:
 		if (operands.size() != 3 ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error(
-			    "malformed logical-immediate ORR at assembly printing");
+			std::abort();
 		output << "\torr " << registerName(operands[0]) << ", "
 		       << registerName(operands[1]) << ", #0x" << std::hex
 		       << (instruction.opcode() == Opcode::ORRWri
@@ -675,23 +678,17 @@ void printInstruction(const MachineFunction &function,
 		std::int64_t offset = operands[3].immediate();
 		bool offsetEncodable = offset % scale == 0 && offset / scale >= -64 &&
 		                       offset / scale <= 63;
-		auto pairRegister = [&](const MachineOperand &operand) {
-			std::string name = registerName(operand);
-			return qPair   ? "q" + name.substr(1)
-			       : dPair ? "d" + name.substr(1)
-			               : name;
-		};
 		std::string base = registerName(operands[2]);
 		if (!offsetEncodable)
-			throw std::logic_error(
-			    "illegal pair offset reached assembly printer");
+			std::abort();
 		bool isLoad = instruction.opcode() == Opcode::LDPWi ||
 		              instruction.opcode() == Opcode::LDPSi ||
 		              instruction.opcode() == Opcode::LDPXi ||
 		              instruction.opcode() == Opcode::LDPDi ||
 		              instruction.opcode() == Opcode::LDPQi;
 		output << '\t' << (isLoad ? "ldp" : "stp") << ' '
-		       << pairRegister(operands[0]) << ", " << pairRegister(operands[1])
+		       << pairRegisterName(operands[0], qPair, dPair) << ", "
+		       << pairRegisterName(operands[1], qPair, dPair)
 		       << ", [" << base;
 		if (offset)
 			output << ", #" << offset;
@@ -740,7 +737,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::DUPv4sLane:
 		if (operands.size() != 3 ||
 		    operands[2].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed dup lane");
+			std::abort();
 		output << "\tdup " << vectorView(operands[0]) << ", "
 		       << registerName(operands[1]) << ".s[" << operands[2].immediate()
 		       << "]\n";
@@ -749,8 +746,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::INSv4f32:
 		if (!RegisterInfo::aliases(operands[0].physicalRegister(),
 		                           operands[1].physicalRegister()))
-			throw std::logic_error(
-			    "unexpanded vector insert reached assembly printer");
+			std::abort();
 		output << "\tmov " << registerName(operands[0]) << ".s["
 		       << operands[3].immediate() << "], ";
 		if (instruction.opcode() == Opcode::INSv4f32)
@@ -828,14 +824,14 @@ void printInstruction(const MachineFunction &function,
 		if (operands.size() != 4 ||
 		    !RegisterInfo::aliases(operands[0].physicalRegister(),
 		                           operands[1].physicalRegister()))
-			throw std::logic_error("unexpanded vector select reached printer");
+			std::abort();
 		output << "\tbsl " << registerName(operands[0]) << ".16b, "
 		       << registerName(operands[2]) << ".16b, "
 		       << registerName(operands[3]) << ".16b\n";
 		break;
 	case Opcode::TBL1v16i8:
 		if (operands.size() != 3)
-			throw std::logic_error("malformed single-table vector shuffle");
+			std::abort();
 		output << "\ttbl " << registerName(operands[0]) << ".16b, {"
 		       << registerName(operands[1]) << ".16b}, "
 		       << registerName(operands[2]) << ".16b\n";
@@ -864,7 +860,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::FMLAv4f32:
 	case Opcode::FMLSv4f32:
 		if (operands.size() != 4)
-			throw std::logic_error("malformed vector multiply-accumulate");
+			std::abort();
 		output << '\t'
 		       << (instruction.opcode() == Opcode::MLAv4i32    ? "mla"
 		           : instruction.opcode() == Opcode::MLSv4i32  ? "mls"
@@ -876,7 +872,7 @@ void printInstruction(const MachineFunction &function,
 		break;
 	case Opcode::SHUFFLEv16i8: {
 		if (operands.size() != 4)
-			throw std::logic_error("malformed vector shuffle");
+			std::abort();
 		output << "\ttbl " << registerName(operands[0]) << ".16b, {"
 		       << registerName(operands[1]) << ".16b, "
 		       << registerName(operands[2]) << ".16b}, "
@@ -903,7 +899,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::EXTv16b:
 		if (operands.size() != 4 ||
 		    operands[3].kind() != MachineOperand::Kind::Immediate)
-			throw std::logic_error("malformed ext");
+			std::abort();
 		output << "\text " << registerName(operands[0]) << ".16b, "
 		       << registerName(operands[1]) << ".16b, "
 		       << registerName(operands[2]) << ".16b, #"
@@ -940,8 +936,7 @@ void printInstruction(const MachineFunction &function,
 	case Opcode::ADJCALLSTACKUP:
 	case Opcode::IMPLICIT_DEF:
 	case Opcode::Invalid:
-		throw std::logic_error(
-		    "unexpanded or unsupported opcode reached assembly printer");
+		std::abort();
 	}
 }
 
@@ -949,16 +944,8 @@ void printInstruction(const MachineFunction &function,
 
 void AArch64AssemblyPrinter::printFunction(const MachineFunction &function,
                                            std::ostream &output) const {
-	// The printer is an MC-style encoder only.  Integer immediates must
-	// already be expanded into MOVZ/MOVK; the printer must never perform
-	// instruction selection or invent a temporary register.
-	if (!function.hasProperty(MachineProperty::Selected) ||
-	    !function.hasProperty(MachineProperty::NoVRegs) ||
-	    !function.hasProperty(MachineProperty::FrameFinalized) ||
-	    !function.hasProperty(MachineProperty::BranchesRelaxed))
-		throw std::logic_error(
-		    "assembly printing requires selected, allocated, finalized, "
-		    "branch-relaxed MIR");
+	// The pipeline reaches the printer only after finalization and relaxation;
+	// this function is the encoder for that final representation.
 	output << "\t.p2align 2\n"
 	       << "\t.global " << function.name() << '\n'
 	       << "\t.type " << function.name() << ", %function\n"

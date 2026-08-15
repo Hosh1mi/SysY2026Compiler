@@ -12,7 +12,7 @@
 #include <functional>
 #include <iostream>
 #include <sstream>
-#include <stdexcept>
+#include <cstdlib>
 
 namespace backend::aarch64 {
 namespace {
@@ -37,24 +37,95 @@ unsigned log2Alignment(unsigned alignment) {
 	return result;
 }
 
+Function *calledFunction(Instruction *instruction) {
+	auto *call = dynamic_cast<CallInst *>(instruction);
+	if (!call || call->num_ops() == 0)
+		return nullptr;
+	return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
+}
+
+bool isAllZeroConstant(Constant *constant) {
+	if (dynamic_cast<ConstantZero *>(constant))
+		return true;
+	if (auto *integer = dynamic_cast<ConstantInt *>(constant))
+		return integer->value_ == 0;
+	if (auto *floating = dynamic_cast<ConstantFloat *>(constant)) {
+		std::uint32_t bits = 0;
+		float value = floating->value_;
+		std::memcpy(&bits, &value, sizeof(bits));
+		return bits == 0;
+	}
+	if (auto *array = dynamic_cast<ConstantArray *>(constant)) {
+		for (Constant *element : array->const_array)
+			if (!isAllZeroConstant(element))
+				return false;
+		return true;
+	}
+	if (auto *vector = dynamic_cast<ConstantVector *>(constant)) {
+		for (Constant *element : vector->elements_)
+			if (!isAllZeroConstant(element))
+				return false;
+		return true;
+	}
+	return false;
+}
+
+void emitFloatConstant(std::ostream &output, float value) {
+	std::uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	output << "\t.word 0x" << std::hex << bits << std::dec << '\n';
+}
+
+void emitConstantValue(std::ostream &output, Constant *constant, Type *type) {
+	if (isAllZeroConstant(constant)) {
+		output << "\t.zero " << globalTypeSize(type) << '\n';
+		return;
+	}
+	if (auto *integer = dynamic_cast<ConstantInt *>(constant)) {
+		auto *integerType = dynamic_cast<IntegerType *>(type);
+		if (integerType->num_bits_ == 8)
+			output << "\t.byte " << integer->value_ << '\n';
+		else if (integerType->num_bits_ == 64)
+			output << "\t.quad " << integer->value_ << '\n';
+		else
+			output << "\t.word " << integer->value_ << '\n';
+		return;
+	}
+	if (auto *floating = dynamic_cast<ConstantFloat *>(constant)) {
+		emitFloatConstant(output, floating->value_);
+		return;
+	}
+	if (auto *array = dynamic_cast<ConstantArray *>(constant)) {
+		auto *arrayType = dynamic_cast<ArrayType *>(type);
+		for (Constant *element : array->const_array)
+			emitConstantValue(output, element, arrayType->contained_);
+		return;
+	}
+	if (auto *vector = dynamic_cast<ConstantVector *>(constant)) {
+		auto *vectorType = dynamic_cast<VectorType *>(type);
+		for (Constant *element : vector->elements_)
+			emitConstantValue(output, element, vectorType->contained_);
+		return;
+	}
+}
+
 } // namespace
 
 void AArch64Backend::generate() {
 	if (!module_)
-		throw std::invalid_argument("AArch64Backend requires a module");
+		std::abort();
 
 	SelectionDAGBuilder dagBuilder;
 	DAGLegalizer legalizer;
 	DAGCombiner combiner;
 	AArch64InstructionSelector selector;
 	MachineVerifier verifier;
-	MachinePipelineServices services;
 	AArch64AssemblyPrinter printer;
 
 	MachineFunctionPassManager machinePipeline(&verifier,
 	                                           options_.verifyMachineIR);
 	machinePipeline.setDump(options_.dumpMachineIR);
-	buildMachinePipeline(machinePipeline, services, options_);
+	buildMachinePipeline(machinePipeline, options_);
 
 	output_ << "\t.arch armv8-a\n\t.text\n";
 	for (Function *function : module_->function_list_) {
@@ -69,10 +140,10 @@ void AArch64Backend::generate() {
 
 		auto machineFunction = selector.select(*dag);
 		if (options_.verifyMachineIR)
-			verifier.verifyOrThrow(*machineFunction, "instruction-select");
+			verifier.verifyOrAbort(*machineFunction, "instruction-select");
 		machinePipeline.run(*machineFunction);
 		if (options_.verifyMachineIR)
-			verifier.verifyOrThrow(*machineFunction, "pre-emit");
+			verifier.verifyOrAbort(*machineFunction, "pre-emit");
 		printer.printFunction(*machineFunction, output_);
 	}
 
@@ -88,28 +159,25 @@ void AArch64Backend::generate() {
 		else
 			bss.push_back(global);
 	}
-	auto emitGroup = [&](const char *section,
-	                     const std::vector<GlobalVariable *> &globals) {
-		if (globals.empty())
-			return;
-		output_ << section << '\n';
-		for (GlobalVariable *global : globals)
+	if (!data.empty()) {
+		output_ << "\t.data\n";
+		for (GlobalVariable *global : data)
 			emitGlobal(global);
-	};
-	emitGroup("\t.data", data);
-	emitGroup("\t.bss", bss);
-	emitGroup("\t.section .rodata", rodata);
+	}
+	if (!bss.empty()) {
+		output_ << "\t.bss\n";
+		for (GlobalVariable *global : bss)
+			emitGlobal(global);
+	}
+	if (!rodata.empty()) {
+		output_ << "\t.section .rodata\n";
+		for (GlobalVariable *global : rodata)
+			emitGlobal(global);
+	}
 	emitParallelRuntime();
 }
 
 void AArch64Backend::emitParallelRuntime() {
-	auto calledFunction = [](Instruction *instruction) -> Function * {
-		auto *call = dynamic_cast<CallInst *>(instruction);
-		if (!call || call->num_ops() == 0)
-			return nullptr;
-		return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
-	};
-
 	bool hasParallelFor = false;
 	for (Function *function : module_->function_list_) {
 		if (function->is_declaration())
@@ -130,10 +198,15 @@ void AArch64Backend::emitParallelRuntime() {
 		if (function->name_.rfind(prefix, 0) != 0)
 			continue;
 		const std::string suffix = function->name_.substr(prefix.size());
-		if (suffix.empty() ||
-		    !std::all_of(suffix.begin(), suffix.end(), [](char character) {
-			    return std::isdigit(static_cast<unsigned char>(character));
-		    }))
+		if (suffix.empty())
+			continue;
+		bool numeric = true;
+		for (char character : suffix)
+			if (!std::isdigit(static_cast<unsigned char>(character))) {
+				numeric = false;
+				break;
+			}
+		if (!numeric)
 			continue;
 		bodyIds.push_back(std::stoi(suffix));
 	}
@@ -157,81 +230,14 @@ void AArch64Backend::emitParallelRuntime() {
 
 void AArch64Backend::emitGlobal(GlobalVariable *global) {
 	auto *pointerType = dynamic_cast<PointerType *>(global->type_);
-	if (!pointerType)
-		throw std::logic_error("global value is not a pointer");
 	Type *valueType = pointerType->contained_;
 	output_ << "\t.global " << global->name_ << '\n'
 	        << "\t.p2align " << log2Alignment(globalTypeAlignment(valueType))
 	        << '\n'
 	        << global->name_ << ":\n";
 
-	auto emitFloat = [&](float value) {
-		std::uint32_t bits = 0;
-		std::memcpy(&bits, &value, sizeof(bits));
-		output_ << "\t.word 0x" << std::hex << bits << std::dec << '\n';
-	};
-	std::function<bool(Constant *)> isAllZero = [&](Constant *constant) {
-		if (dynamic_cast<ConstantZero *>(constant))
-			return true;
-		if (auto *integer = dynamic_cast<ConstantInt *>(constant))
-			return integer->value_ == 0;
-		if (auto *floating = dynamic_cast<ConstantFloat *>(constant)) {
-			std::uint32_t bits = 0;
-			float value = floating->value_;
-			std::memcpy(&bits, &value, sizeof(bits));
-			return bits == 0;
-		}
-		if (auto *array = dynamic_cast<ConstantArray *>(constant))
-			return std::all_of(
-			    array->const_array.begin(), array->const_array.end(),
-			    [&](Constant *element) { return isAllZero(element); });
-		if (auto *vector = dynamic_cast<ConstantVector *>(constant))
-			return std::all_of(
-			    vector->elements_.begin(), vector->elements_.end(),
-			    [&](Constant *element) { return isAllZero(element); });
-		return false;
-	};
-	std::function<void(Constant *, Type *)> emitConstant =
-	    [&](Constant *constant, Type *type) {
-		    if (isAllZero(constant)) {
-			    output_ << "\t.zero " << globalTypeSize(type) << '\n';
-		    } else if (auto *integer = dynamic_cast<ConstantInt *>(constant)) {
-			    auto *integerType = dynamic_cast<IntegerType *>(type);
-			    if (!integerType)
-				    throw std::logic_error(
-				        "integer constant has non-integer type");
-			    if (integerType->num_bits_ == 8)
-				    output_ << "\t.byte " << integer->value_ << '\n';
-			    else if (integerType->num_bits_ == 64)
-				    output_ << "\t.quad " << integer->value_ << '\n';
-			    else
-				    output_ << "\t.word " << integer->value_ << '\n';
-		    } else if (auto *floating =
-		                   dynamic_cast<ConstantFloat *>(constant)) {
-			    emitFloat(floating->value_);
-		    } else if (auto *array = dynamic_cast<ConstantArray *>(constant)) {
-			    auto *arrayType = dynamic_cast<ArrayType *>(type);
-			    if (!arrayType)
-				    throw std::logic_error("constant array has non-array type");
-			    for (Constant *element : array->const_array)
-				    emitConstant(element, arrayType->contained_);
-		    } else if (auto *vector =
-		                   dynamic_cast<ConstantVector *>(constant)) {
-			    auto *vectorType = dynamic_cast<VectorType *>(type);
-			    if (!vectorType ||
-			        vector->elements_.size() != vectorType->num_elements_)
-				    throw std::logic_error(
-				        "constant vector has incompatible vector type");
-			    for (Constant *element : vector->elements_)
-				    emitConstant(element, vectorType->contained_);
-		    } else if (dynamic_cast<ConstantZero *>(constant)) {
-			    output_ << "\t.zero " << globalTypeSize(type) << '\n';
-		    } else {
-			    throw std::logic_error("unsupported SysY global initializer");
-		    }
-	    };
 	if (global->init_val_)
-		emitConstant(global->init_val_, valueType);
+		emitConstantValue(output_, global->init_val_, valueType);
 	else
 		output_ << "\t.zero " << globalTypeSize(valueType) << '\n';
 }

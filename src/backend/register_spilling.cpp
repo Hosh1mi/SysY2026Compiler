@@ -27,7 +27,7 @@ MachineOperand replacementRegister(const MachineOperand &old, VReg reg,
 
 void GraphColoringRegisterAllocator::insertSpills(
     MachineFunction &function, const std::vector<VReg> &spills,
-    std::unordered_map<VReg, int> &spillSlots) const {
+    std::unordered_map<VReg, int> &spillSlots) {
 	std::unordered_set<VReg> spilled(spills.begin(), spills.end());
 	MachineRegisterIndex registers(function);
 	RematerializationAnalysis rematerializationAnalysis;

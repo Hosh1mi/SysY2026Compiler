@@ -7,7 +7,7 @@
 #include <functional>
 #include <set>
 #include <sstream>
-#include <stdexcept>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -128,6 +128,68 @@ struct FullSplatMatch {
 	std::vector<SDNode *> redundantScalars;
 };
 
+struct VectorAddCollector {
+	const std::unordered_map<SDNode *, unsigned> &useCount;
+	SDNode *&vector;
+	std::set<int> &lanes;
+	std::vector<SDNode *> &consumed;
+
+	unsigned uses(SDNode *node) const {
+		auto found = useCount.find(node);
+		return found == useCount.end() ? 0 : found->second;
+	}
+
+	bool collect(SDNode *node, bool isRoot) {
+		if (!node)
+			return false;
+		if (node->opcode() == SDOpcode::Add) {
+			if (!isRoot && uses(node) != 1)
+				return false;
+			if (node->operands().size() != 2)
+				return false;
+			consumed.push_back(node);
+			return collect(node->operands()[0].node, false) &&
+			       collect(node->operands()[1].node, false);
+		}
+		if (node->opcode() != SDOpcode::ExtractElement ||
+		    node->operands().size() != 2 || uses(node) != 1)
+			return false;
+		SDNode *index = node->operands()[1].node;
+		if (!index || index->opcode() != SDOpcode::Constant ||
+		    index->integer < 0 || index->integer >= 4)
+			return false;
+		SDNode *source = node->operands()[0].node;
+		if (!source || source->resultTypes().front() != ValueType::V4I32 ||
+		    (vector && vector != source))
+			return false;
+		vector = source;
+		lanes.insert(static_cast<int>(index->integer));
+		consumed.push_back(node);
+		return true;
+	}
+};
+
+void visitSelectionBlocks(
+    BasicBlock *block, std::unordered_set<BasicBlock *> &visited,
+    std::vector<BasicBlock *> &postOrder) {
+	if (!block || !visited.insert(block).second)
+		return;
+	for (BasicBlock *successor : block->succ_bbs_)
+		visitSelectionBlocks(successor, visited, postOrder);
+	postOrder.push_back(block);
+}
+
+struct SelectionOperandGetter {
+	const SelectionDAGBuilder *builder;
+	FunctionDAG *result;
+	SelectionDAG *dag;
+	Instruction *instruction;
+
+	SDValue operator()(unsigned index) const {
+		return builder->getValue(*result, *dag, instruction->get_operand(index));
+	}
+};
+
 bool matchFullSplat(SDNode &root,
                     const std::unordered_map<SDNode *, unsigned> &useCount,
                     FullSplatMatch &match) {
@@ -136,11 +198,6 @@ bool matchFullSplat(SDNode &root,
 	    (root.resultTypes().front() != ValueType::V4I32 &&
 	     root.resultTypes().front() != ValueType::V4F32))
 		return false;
-
-	auto hasOneUse = [&](SDNode *node) {
-		auto found = useCount.find(node);
-		return found != useCount.end() && found->second == 1;
-	};
 
 	SDNode *current = &root;
 	unsigned laneMask = 0;
@@ -170,7 +227,10 @@ bool matchFullSplat(SDNode &root,
 		match.indices.push_back(index);
 
 		SDNode *previous = current->operands()[0].node;
-		if (depth != 3 && (!previous || !hasOneUse(previous)))
+		auto previousUses = previous ? useCount.find(previous) : useCount.end();
+		if (depth != 3 &&
+		    (!previous || previousUses == useCount.end() ||
+		     previousUses->second != 1))
 			return false;
 		current = previous;
 	}
@@ -318,26 +378,19 @@ SDValue SelectionDAGBuilder::getValue(FunctionDAG &functionDAG,
 		return result;
 	}
 
-	throw std::logic_error("SelectionDAG use has no available definition");
+	std::abort();
 }
 
 std::unique_ptr<FunctionDAG>
 SelectionDAGBuilder::build(Function *function) const {
 	if (!function || function->is_declaration())
-		throw std::invalid_argument("cannot build a DAG for a declaration");
+		std::abort();
 
 	auto result = std::make_unique<FunctionDAG>(function);
 	std::unordered_set<BasicBlock *> visited;
 	std::vector<BasicBlock *> postOrder;
-	std::function<void(BasicBlock *)> visit = [&](BasicBlock *block) {
-		if (!block || !visited.insert(block).second)
-			return;
-		for (BasicBlock *successor : block->succ_bbs_)
-			visit(successor);
-		postOrder.push_back(block);
-	};
 	if (!function->basic_blocks_.empty())
-		visit(function->basic_blocks_.front());
+		visitSelectionBlocks(function->basic_blocks_.front(), visited, postOrder);
 	std::reverse(postOrder.begin(), postOrder.end());
 	result->blockOrder = std::move(postOrder);
 	for (BasicBlock *block : function->basic_blocks_)
@@ -405,9 +458,7 @@ SelectionDAGBuilder::build(Function *function) const {
 			if (dynamic_cast<AllocaInst *>(instruction))
 				continue;
 
-			auto operand = [&](unsigned index) {
-				return getValue(*result, dag, instruction->get_operand(index));
-			};
+			SelectionOperandGetter operand{this, result.get(), &dag, instruction};
 			SDNode *created = nullptr;
 			SDOpcode binary = binaryOpcode(instruction->op_id_);
 			if (binary != SDOpcode::Invalid) {
@@ -547,8 +598,7 @@ SelectionDAGBuilder::build(Function *function) const {
 					SignedMinMaxIntrinsic minMaxKind;
 					if (isSignedMinMaxIntrinsic(callee, &minMaxKind)) {
 						if (instruction->num_ops() != 3)
-							throw std::logic_error("signed min/max intrinsic "
-							                       "must have two operands");
+							std::abort();
 						created = &dag.createNode(
 						    minMaxKind == SignedMinMaxIntrinsic::SMin
 						        ? SDOpcode::SMin
@@ -559,8 +609,7 @@ SelectionDAGBuilder::build(Function *function) const {
 					}
 					if (isMulModIntrinsic(callee)) {
 						if (instruction->num_ops() != 4)
-							throw std::logic_error(
-							    "mulmod intrinsic must have three operands");
+							std::abort();
 						created = &dag.createNode(
 						    SDOpcode::MulMod, {valueType(instruction->type_)},
 						    {operand(0), operand(1), operand(2)});
@@ -634,8 +683,7 @@ SelectionDAGBuilder::build(Function *function) const {
 					break;
 				}
 				default:
-					throw std::logic_error(
-					    "SelectionDAGBuilder does not cover an IR opcode");
+					std::abort();
 				}
 			}
 
@@ -680,8 +728,7 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
 		for (const auto &node : dag.nodes()) {
 			for (ValueType type : node->resultTypes()) {
 				if (type != ValueType::Invalid && !isSupportedValueType(type))
-					throw std::logic_error(
-					    "DAG contains a type outside the SysY backend scope");
+					std::abort();
 			}
 			if ((node->opcode() == SDOpcode::InsertElement ||
 			     node->opcode() == SDOpcode::ExtractElement ||
@@ -689,19 +736,22 @@ void DAGLegalizer::run(FunctionDAG &functionDAG) const {
 			    node->resultTypes().front() != ValueType::V4I32 &&
 			    node->resultTypes().front() != ValueType::V4F32 &&
 			    node->opcode() != SDOpcode::ExtractElement)
-				throw std::logic_error("unsupported vector legalization");
+				std::abort();
 			if (node->opcode() == SDOpcode::ShuffleVector) {
-				if (node->shuffleMask.size() != 4 ||
-				    std::any_of(node->shuffleMask.begin(),
-				                node->shuffleMask.end(),
-				                [](int lane) { return lane < 0 || lane >= 8; }))
-					throw std::logic_error("invalid four-lane shuffle mask");
+				bool invalidLane = false;
+				for (int lane : node->shuffleMask)
+					if (lane < 0 || lane >= 8) {
+						invalidLane = true;
+						break;
+					}
+				if (node->shuffleMask.size() != 4 || invalidLane)
+					std::abort();
 			}
 			if ((node->opcode() == SDOpcode::SMin ||
 			     node->opcode() == SDOpcode::SMax) &&
 			    node->resultTypes().front() != ValueType::I32 &&
 			    node->resultTypes().front() != ValueType::V4I32)
-				throw std::logic_error("unsupported signed min/max type");
+				std::abort();
 		}
 	}
 	functionDAG.legalized = true;
@@ -836,35 +886,8 @@ bool DAGCombiner::run(FunctionDAG &functionDAG,
 			SDNode *vector = nullptr;
 			std::set<int> lanes;
 			std::vector<SDNode *> consumed;
-			std::function<bool(SDNode *, bool)> collect = [&](SDNode *node,
-			                                                  bool isRoot) {
-				if (!node)
-					return false;
-				if (node->opcode() == SDOpcode::Add) {
-					if (!isRoot && useCount[node] != 1)
-						return false;
-					consumed.push_back(node);
-					return collect(node->operands()[0].node, false) &&
-					       collect(node->operands()[1].node, false);
-				}
-				if (node->opcode() != SDOpcode::ExtractElement ||
-				    node->operands().size() != 2 || useCount[node] != 1)
-					return false;
-				SDNode *index = node->operands()[1].node;
-				if (!index || index->opcode() != SDOpcode::Constant ||
-				    index->integer < 0 || index->integer >= 4)
-					return false;
-				SDNode *source = node->operands()[0].node;
-				if (!source ||
-				    source->resultTypes().front() != ValueType::V4I32 ||
-				    (vector && vector != source))
-					return false;
-				vector = source;
-				lanes.insert(static_cast<int>(index->integer));
-				consumed.push_back(node);
-				return true;
-			};
-			if (!collect(&root, true) || lanes.size() != 4 ||
+			VectorAddCollector collector{useCount, vector, lanes, consumed};
+			if (!collector.collect(&root, true) || lanes.size() != 4 ||
 			    consumed.size() != 7)
 				continue;
 			root.setOpcode(SDOpcode::VectorReduceAdd);
