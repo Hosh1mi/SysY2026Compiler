@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -43,22 +44,11 @@ bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
     return init && latchValue && latchBlock;
 }
 
-int typeSize(Type *type) {
-    if (!type) return -1;
-    switch (type->tid_) {
-    case Type::IntegerTyID:
-    case Type::FloatTyID:
-        return 4;
-    case Type::PointerTyID:
-        return 8;
-    case Type::ArrayTyID: {
-        auto *array = static_cast<ArrayType *>(type);
-        int element = typeSize(array->contained_);
-        return element < 0 ? -1 : element * static_cast<int>(array->num_elements_);
-    }
-    default:
-        return -1;
-    }
+bool typeStorageBytesAsInt(Type *type, int &bytes) {
+    const long long size = typeStorageBytes(type);
+    if (size <= 0 || size > std::numeric_limits<int>::max()) return false;
+    bytes = static_cast<int>(size);
+    return true;
 }
 
 bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
@@ -97,11 +87,11 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep, unsigned varyingIn
         return false;
     Type *current =
         static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     for (unsigned i = 1; i < gep->num_ops(); ++i) {
-        int indexBytes = typeSize(current);
+        const long long indexBytes = typeStorageBytes(current);
         if (i == varyingIndex)
             return indexBytes == scalarBytes;
         if (current->tid_ == Type::ArrayTyID)
@@ -222,8 +212,8 @@ bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
                              MemsetMatch &match) {
     Value *pointer = store->get_operand(1);
     Type *scalarType = store->get_operand(0)->type_;
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     for (auto *inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
@@ -280,8 +270,8 @@ bool classifyStoreAddressAlloca(const Loop &loop, AllocaInst *ivAlloca,
                                 StoreInst *store, MemsetMatch &match) {
     Value *pointer = store->get_operand(1);
     Type *scalarType = store->get_operand(0)->type_;
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     auto *gep = dynamic_cast<GetElementPtrInst *>(pointer);
     if (!gep) return false;
@@ -432,8 +422,8 @@ bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
                             MemsetMatch &match) {
     Value *pointer = store->get_operand(1);
     Type *scalarType = store->get_operand(0)->type_;
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     auto *gep = dynamic_cast<GetElementPtrInst *>(pointer);
     if (!gep) return false;
@@ -473,8 +463,8 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
                            GetElementPtrInst *&inductionGeep,
                            unsigned &inductionIndex, int &elementStrideBytes,
                            int *inductionOffset = nullptr) {
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     for (auto *inst : loop.header->instr_list_) {
         if (!inst->is_phi()) break;
@@ -537,8 +527,8 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
                            StoreInst *store, MemcpyMatch &match) {
     if (store->get_operand(0) != load) return false;
     Type *scalarType = store->get_operand(0)->type_;
-    int scalarBytes = typeSize(scalarType);
-    if (scalarBytes <= 0) return false;
+    int scalarBytes = 0;
+    if (!typeStorageBytesAsInt(scalarType, scalarBytes)) return false;
 
     Value *destBase = nullptr;
     Value *srcBase = nullptr;
@@ -659,12 +649,12 @@ bool constantByteOffset(Value *value, long long &offset) {
     for (unsigned i = 1; i < gep->num_ops(); ++i) {
         auto *idx = dynamic_cast<ConstantInt *>(gep->get_operand(i));
         if (!idx) return false;
-        int elemBytes = typeSize(current);
+        const long long elemBytes = typeStorageBytes(current);
         if (elemBytes <= 0) return false;
         long long add = 0;
         if (!RecurrenceAnalysis::checkedMul(idx->value_, elemBytes, add))
             return false;
-        total += add;
+        if (!RecurrenceAnalysis::checkedAdd(total, add, total)) return false;
         if (current->tid_ == Type::ArrayTyID)
             current = static_cast<ArrayType *>(current)->contained_;
         else if (current->tid_ == Type::PointerTyID)
@@ -991,6 +981,8 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
     match.srcGeep = local.srcGeep;
     match.destIndex = local.destIndex;
     match.srcIndex = local.srcIndex;
+    match.destIndexOffset = local.destIndexOffset;
+    match.srcIndexOffset = local.srcIndexOffset;
     match.elementCount = iv.bound;
     match.elementStrideBytes = local.elementStrideBytes;
     match.copyKind = copySelection == CopySelection::Memmove

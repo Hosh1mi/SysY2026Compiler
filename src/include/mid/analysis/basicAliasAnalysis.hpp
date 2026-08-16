@@ -96,7 +96,6 @@ private:
     };
 
     PointerInfo getPointerInfo(Value *ptr) const;
-    long long typeSize(Type *ty) const;
     void addLocationEffect(FunctionSummary &summary, MemoryLocation loc,
                            ModRefInfo effect) const;
     FunctionSummary computeFunctionSummary(Function *func) const;

@@ -59,35 +59,17 @@ bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     return false;
 }
 
-int typeSize(Type *type) {
-    if (!type) return -1;
-    switch (type->tid_) {
-    case Type::IntegerTyID:
-    case Type::FloatTyID:
-        return 4;
-    case Type::PointerTyID:
-        return 8;
-    case Type::ArrayTyID: {
-        auto *array = static_cast<ArrayType *>(type);
-        int element = typeSize(array->contained_);
-        return element < 0 ? -1 : element * static_cast<int>(array->num_elements_);
-    }
-    default:
-        return -1;
-    }
-}
-
 bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
                                       unsigned varyingIndex,
                                       Type *scalarType) {
     if (!gep || gep->get_operand(0)->type_->tid_ != Type::PointerTyID)
         return false;
     Type *current = static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
-    int scalarBytes = typeSize(scalarType);
+    const long long scalarBytes = typeStorageBytes(scalarType);
     if (scalarBytes <= 0) return false;
 
     for (unsigned i = 1; i < gep->num_ops(); ++i) {
-        int indexBytes = typeSize(current);
+        const long long indexBytes = typeStorageBytes(current);
         if (i == varyingIndex)
             return indexBytes == scalarBytes;
         if (current->tid_ == Type::ArrayTyID)
@@ -154,11 +136,11 @@ std::optional<long long> constantByteOffset(
                                              offset) ||
             object != access.underlyingObject)
             return std::nullopt;
-        const int elementBytes = typeSize(access.scalarType);
+        const long long elementBytes = typeStorageBytes(access.scalarType);
         long long displacement = 0;
         if (elementBytes <= 0 || __builtin_mul_overflow(
                 static_cast<long long>(access.pointerOffset),
-                static_cast<long long>(elementBytes), &displacement) ||
+                elementBytes, &displacement) ||
             __builtin_add_overflow(offset, displacement, &offset))
             return std::nullopt;
         return offset;
@@ -195,10 +177,10 @@ std::optional<long long> constantByteOffset(
             index = constant->value_;
         }
 
-        const int stride = typeSize(current);
+        const long long stride = typeStorageBytes(current);
         long long displacement = 0;
         if (stride <= 0 || __builtin_mul_overflow(
-                index, static_cast<long long>(stride), &displacement) ||
+                index, stride, &displacement) ||
             __builtin_add_overflow(offset, displacement, &offset))
             return std::nullopt;
 
@@ -250,8 +232,8 @@ bool minimumVectorRangesOverlap(
         constantByteOffset(a, plan, BAA, inductionValue);
     const std::optional<long long> bStart =
         constantByteOffset(b, plan, BAA, inductionValue);
-    const int aBytes = typeSize(a.scalarType);
-    const int bBytes = typeSize(b.scalarType);
+    const long long aBytes = typeStorageBytes(a.scalarType);
+    const long long bBytes = typeStorageBytes(b.scalarType);
     if (!aStart || !bStart || aBytes <= 0 || bBytes <= 0)
         return false;
 
@@ -287,8 +269,8 @@ std::optional<bool> constantIterationRangesOverlap(
         constantInitialByteOffset(a, plan, BAA);
     const std::optional<long long> bStart =
         constantInitialByteOffset(b, plan, BAA);
-    const int aBytes = typeSize(a.scalarType);
-    const int bBytes = typeSize(b.scalarType);
+    const long long aBytes = typeStorageBytes(a.scalarType);
+    const long long bBytes = typeStorageBytes(b.scalarType);
     if (!aStart || !bStart || aBytes <= 0 || bBytes <= 0)
         return std::nullopt;
 

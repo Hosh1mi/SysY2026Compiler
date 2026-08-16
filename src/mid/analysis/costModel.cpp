@@ -3,14 +3,6 @@
 
 #include <cstdlib>
 
-// 标量元素字节数：i32/float=4，pointer=8
-static long bytesOfElement(Type *ty) {
-    if (auto *it = dynamic_cast<IntegerType *>(ty)) return (it->num_bits_ + 7) / 8;
-    if (ty->tid_ == Type::FloatTyID)               return 4;
-    if (ty->tid_ == Type::PointerTyID)             return 8;
-    return -1;
-}
-
 long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
     if (!gep || !iv) return -1;
 
@@ -24,7 +16,7 @@ long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
         dims.push_back((long)arr->num_elements_);
         cur = arr->contained_;
     }
-    long elem_bytes = bytesOfElement(cur);
+    long elem_bytes = typeStorageBytes(cur);
     if (elem_bytes < 0) return -1;
 
     unsigned n_idx = gep->num_ops() - 1;

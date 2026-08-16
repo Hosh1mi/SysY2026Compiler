@@ -47,30 +47,6 @@ void BasicAliasAnalysis::analyze(Module *module) {
     }
 }
 
-long long BasicAliasAnalysis::typeSize(Type *ty) const {
-    if (!ty) return -1;
-    switch (ty->tid_) {
-    case Type::IntegerTyID:
-        return static_cast<IntegerType *>(ty)->num_bits_ <= 1 ? 1 : 4;
-    case Type::FloatTyID:
-        return 4;
-    case Type::PointerTyID:
-        return 8;
-    case Type::ArrayTyID: {
-        auto *arr = static_cast<ArrayType *>(ty);
-        long long elem = typeSize(arr->contained_);
-        return elem < 0 ? -1 : elem * arr->num_elements_;
-    }
-    case Type::VectorTyID: {
-        auto *vec = static_cast<VectorType *>(ty);
-        long long elem = typeSize(vec->contained_);
-        return elem < 0 ? -1 : elem * vec->num_elements_;
-    }
-    default:
-        return -1;
-    }
-}
-
 BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) const {
     PointerInfo info;
     info.base = ptr;
@@ -87,8 +63,10 @@ BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) c
         Value *base = gep->get_operand(0);
         PointerInfo baseInfo = getPointerInfo(base);
         info.base = baseInfo.base;
-        info.hasConstantOffset = info.hasConstantOffset && baseInfo.hasConstantOffset;
-        info.offsetBytes += baseInfo.offsetBytes;
+        if (!info.hasConstantOffset || !baseInfo.hasConstantOffset ||
+            __builtin_add_overflow(info.offsetBytes, baseInfo.offsetBytes,
+                                   &info.offsetBytes))
+            info.hasConstantOffset = false;
 
         Type *curTy = static_cast<PointerType *>(base->type_)->contained_;
         for (unsigned i = 1; i < gep->num_ops(); i++) {
@@ -96,11 +74,15 @@ BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) c
             if (!ci) {
                 info.hasConstantOffset = false;
             } else {
-                long long elemSize = typeSize(curTy);
-                if (elemSize < 0) {
+                const long long elemSize = typeStorageBytes(curTy);
+                long long displacement = 0;
+                if (elemSize < 0 ||
+                    __builtin_mul_overflow(
+                        static_cast<long long>(ci->value_), elemSize,
+                        &displacement) ||
+                    __builtin_add_overflow(info.offsetBytes, displacement,
+                                           &info.offsetBytes)) {
                     info.hasConstantOffset = false;
-                } else {
-                    info.offsetBytes += static_cast<long long>(ci->value_) * elemSize;
                 }
             }
 
@@ -128,7 +110,7 @@ MemoryLocation BasicAliasAnalysis::getMemoryLocation(Value *ptr) const {
     auto *ptrTy = ptr ? dynamic_cast<PointerType *>(ptr->type_) : nullptr;
     if (!ptrTy) return loc;
     loc.elemType = ptrTy->contained_;
-    loc.sizeBytes = typeSize(ptrTy->contained_);
+    loc.sizeBytes = typeStorageBytes(ptrTy->contained_);
     return loc;
 }
 
@@ -166,8 +148,10 @@ AliasResult BasicAliasAnalysis::alias(const MemoryLocation &a,
             if (sameRange) {
                 result = AliasResult::MustAlias;
             } else if (knownRanges) {
-                long long aEnd = pa.offsetBytes + a.sizeBytes;
-                long long bEnd = pb.offsetBytes + b.sizeBytes;
+                const __int128 aEnd = static_cast<__int128>(pa.offsetBytes) +
+                                      static_cast<__int128>(a.sizeBytes);
+                const __int128 bEnd = static_cast<__int128>(pb.offsetBytes) +
+                                      static_cast<__int128>(b.sizeBytes);
                 result = (aEnd <= pb.offsetBytes || bEnd <= pa.offsetBytes)
                              ? AliasResult::NoAlias
                              : AliasResult::MayAlias;

@@ -2,7 +2,39 @@
 
 #include "../../include/mid/ir/type.hpp"
 
+#include <limits>
 #include <string>
+
+long long typeStorageBytes(Type *type) {
+    if (!type) return -1;
+
+    if (auto *integer = dynamic_cast<IntegerType *>(type)) {
+        const unsigned bits = integer->num_bits_;
+        if (bits == 0) return -1;
+        return static_cast<long long>(bits / 8 + (bits % 8 != 0));
+    }
+    if (type->tid_ == Type::FloatTyID) return 4;
+    if (type->tid_ == Type::PointerTyID) return 8;
+
+    Type *elementType = nullptr;
+    unsigned elementCount = 0;
+    if (auto *array = dynamic_cast<ArrayType *>(type)) {
+        elementType = array->contained_;
+        elementCount = array->num_elements_;
+    } else if (auto *vector = dynamic_cast<VectorType *>(type)) {
+        elementType = vector->contained_;
+        elementCount = vector->num_elements_;
+    } else {
+        return -1;
+    }
+
+    const long long elementBytes = typeStorageBytes(elementType);
+    if (elementBytes < 0 ||
+        (elementCount != 0 &&
+         elementBytes > std::numeric_limits<long long>::max() / elementCount))
+        return -1;
+    return elementBytes * static_cast<long long>(elementCount);
+}
 
 std::string Type::print() {
     std::string type_ir;
