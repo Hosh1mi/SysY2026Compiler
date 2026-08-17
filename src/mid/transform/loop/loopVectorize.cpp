@@ -103,33 +103,21 @@ static bool matchIVPlusConstant(Value *val, PhiInst *ivPhi, int &offset) {
     return false;
 }
 
-static int scalarTypeSizeInBytes(Type *ty) {
-    switch (ty->tid_) {
-    case Type::IntegerTyID: return 4;
-    case Type::FloatTyID: return 4;
-    case Type::PointerTyID: return 8;
-    case Type::ArrayTyID:
-        return static_cast<ArrayType*>(ty)->num_elements_ *
-               scalarTypeSizeInBytes(static_cast<ArrayType*>(ty)->contained_);
-    case Type::VectorTyID:
-        return static_cast<VectorType*>(ty)->num_elements_ *
-               scalarTypeSizeInBytes(static_cast<VectorType*>(ty)->contained_);
-    default:
-        return 8;
-    }
-}
-
 static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
                                   Type *scalarTy, int &laneStride) {
     Type *curTy = static_cast<PointerType*>(gep->get_operand(0)->type_)->contained_;
-    int scalarSize = scalarTypeSizeInBytes(scalarTy);
+    const long long scalarSize = typeStorageBytes(scalarTy);
+    if (scalarSize <= 0) return false;
 
     for (unsigned i = 1; i < gep->num_ops(); ++i) {
-        int elemBytes = scalarTypeSizeInBytes(curTy);
+        const long long elemBytes = typeStorageBytes(curTy);
+        if (elemBytes <= 0) return false;
         if (i == varyPos) {
             if (elemBytes % scalarSize != 0) return false;
-            laneStride = elemBytes / scalarSize;
-            return laneStride > 0;
+            const long long stride = elemBytes / scalarSize;
+            if (stride <= 0 || stride > INT_MAX) return false;
+            laneStride = static_cast<int>(stride);
+            return true;
         }
 
         if (curTy->tid_ == Type::ArrayTyID) {

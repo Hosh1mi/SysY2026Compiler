@@ -252,21 +252,10 @@ bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
     return true;
 }
 
-long long typeBytes(Type *ty) {
-    if (dynamic_cast<IntegerType *>(ty)) return 4;
-    if (ty && ty->tid_ == Type::FloatTyID) return 4;
-    if (auto *arr = dynamic_cast<ArrayType *>(ty)) {
-        long long elem = typeBytes(arr->contained_);
-        return elem < 0 ? -1 : elem * arr->num_elements_;
-    }
-    if (dynamic_cast<PointerType *>(ty)) return 8;
-    return -1;
-}
-
 long long scratchBytes(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     if (!alloca) return -1;
-    return typeBytes(alloca->allocated_type());
+    return typeStorageBytes(alloca->allocated_type());
 }
 
 Type *scratchAllocaType(Value *root) {
