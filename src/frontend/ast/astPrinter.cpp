@@ -64,6 +64,7 @@ const char *binaryName(BinaryOp op) {
       case BinaryOp::NotEqual: return "!=";
       case BinaryOp::LogicalAnd: return "&&";
       case BinaryOp::LogicalOr: return "||";
+      case BinaryOp::Matmul: return "@";
     }
     return "?";
 }
@@ -109,7 +110,8 @@ public:
 
     void visit(DeclAST &ast) override {
         line("Decl type=" + typeName(ast.type) +
-             " const=" + (ast.isConst ? "true" : "false"));
+             " const=" + (ast.isConst ? "true" : "false") +
+             " tensor=" + (ast.));
         nested([&] {
             for (auto &object : ast.objects) object->accept(*this);
         });

@@ -3,7 +3,7 @@
 // Edit the target description or generator, not this file.
 #pragma once
 
-#include "backend/target.hpp"
+#include "target.hpp"
 
 #include <cstdint>
 

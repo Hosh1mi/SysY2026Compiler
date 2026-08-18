@@ -83,6 +83,7 @@ std::string Type::print() {
             type_ir += static_cast<VectorType*>(this)->contained_->print();
             type_ir += ">";
             break;
+        
         default:
             break;
     }

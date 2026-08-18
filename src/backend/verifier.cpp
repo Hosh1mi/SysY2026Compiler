@@ -1,5 +1,5 @@
-#include "backend/verifier.hpp"
-#include "backend/machine_analysis.hpp"
+#include "../include/backend/verifier.hpp"
+#include "../include/backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cstdlib>

@@ -22,6 +22,7 @@ struct TypeSpec {
     VECTOR_EXTENT extent = VECTOR_EXTENT::SCALAR;
     unsigned lanes = 1;
     std::string laneConstant;
+    bool is_tensor = false;
 
     TypeSpec() = default;
     TypeSpec(TYPE scalar) : element(scalar) {}
@@ -48,15 +49,22 @@ struct TypeSpec {
         return result;
     }
 
+    static TypeSpec tensorType(TYPE element) {
+        TypeSpec result(element);
+        result.is_tensor = true;
+        return result;
+    }
+
     bool isScalar() const { return extent == VECTOR_EXTENT::SCALAR; }
     bool isFixedVector() const { return extent == VECTOR_EXTENT::FIXED; }
     bool isDynamicVector() const { return extent == VECTOR_EXTENT::DYNAMIC; }
     bool isVector() const { return !isScalar(); }
+    bool isTensor() const { return is_tensor;}
 
     bool operator==(TYPE rhs) const { return isScalar() && element == rhs; }
     bool operator!=(TYPE rhs) const { return !(*this == rhs); }
     bool operator==(const TypeSpec &rhs) const {
-        return element == rhs.element && extent == rhs.extent &&
+        return element == rhs.element && extent == rhs.extent && is_tensor == rhs.is_tensor &&
                lanes == rhs.lanes && laneConstant == rhs.laneConstant;
     }
     bool operator!=(const TypeSpec &rhs) const { return !(*this == rhs); }
@@ -79,7 +87,8 @@ enum class BinaryOp {
     Equal,
     NotEqual,
     LogicalAnd,
-    LogicalOr
+    LogicalOr,
+    Matmul
 };
 
 class Visitor;

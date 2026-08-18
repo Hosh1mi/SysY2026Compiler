@@ -225,7 +225,7 @@
 %type <callArg> FuncCParam
 %type <callArgList> FuncCParamList
 
-%type <type_spec> BType VoidType VecType VecWidth
+%type <type_spec> BType VoidType VecType VecWidth TensorType
 %type <unaryOp> UnaryOp
 
 // %token 定义终结符的语义值类型
@@ -235,10 +235,10 @@
 %token GTE LTE GT LT EQ NEQ    // 关系运算
 %token <int_val> BASICTYPE
 %token VOID INVALID
-%token CONST RETURN IF ELSE WHILE BREAK CONTINUE
+%token CONST RETURN IF ELSE WHILE BREAK CONTINUE TENSOR
 %token LP RP LB RB LC RC COMMA SEMICOLON
 // 用bison对该文件编译时，带参数-d，生成的exp.tab.h中给这些单词进行编码，可在lex.l中包含parser.tab.h使用这些单词种类码
-%token NOT ASSIGN MINUS ADD MUL DIV MOD AND OR
+%token NOT ASSIGN MINUS ADD MUL DIV MOD AND OR MATMUL
 // Unused tokens
 /* %token POS NEG */
 
@@ -299,7 +299,16 @@ BType:
     }|
     VecType {
         $$ = $1;
+    }|
+    TensorType{
+        $$ = $1;
     };
+
+TensorType:
+    TENSOR BASICTYPE{
+        $$ = new TypeSpec(TypeSpec::tensorType(static_cast<TYPE>($2)));
+    };
+
 
 // === DECISION-DAY VecType EDIT AREA ====================================
 // Replace or extend only this block when the official VecType production is
@@ -706,6 +715,11 @@ NonBraceMulExp:
         $$ = make_node<BinaryExprAST>(BinaryOp::Remainder,
                                       unique_ptr<ExprAST>($1),
                                       unique_ptr<ExprAST>($3));
+    }|
+    NonBraceMulExp MATMUL UnaryExp {
+        $$ = make_node<BinaryExprAST>(BinaryOp::Matmul,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
     };
 
 NonBraceUnaryExp:
@@ -848,6 +862,11 @@ MulExp:
     }|
     MulExp MOD UnaryExp {
         $$ = make_node<BinaryExprAST>(BinaryOp::Remainder,
+                                      unique_ptr<ExprAST>($1),
+                                      unique_ptr<ExprAST>($3));
+    }|
+    MulExp MATMUL UnaryExp{
+        $$ = make_node<BinaryExprAST>(BinaryOp::Matmul,
                                       unique_ptr<ExprAST>($1),
                                       unique_ptr<ExprAST>($3));
     };

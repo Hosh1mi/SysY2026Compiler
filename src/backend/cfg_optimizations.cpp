@@ -1,6 +1,6 @@
 // Control-flow cleanup, block layout, and branch relaxation operate on the
 // final machine CFG independently from local instruction optimizations.
-#include "backend/cfg_optimizations.hpp"
+#include "../include/backend/cfg_optimizations.hpp"
 
 #include <algorithm>
 #include <cstdint>

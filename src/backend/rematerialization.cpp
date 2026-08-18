@@ -1,6 +1,6 @@
 // This file validates and clones rematerializable Machine definitions without
 // coupling the spiller to individual target opcodes.
-#include "backend/rematerialization.hpp"
+#include "../include/backend/rematerialization.hpp"
 
 namespace backend::aarch64 {
 

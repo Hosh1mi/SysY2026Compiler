@@ -1,7 +1,7 @@
 // Shared AArch64 NEON splat-immediate classification and emission.
 // See vector_immediate.hpp for the architectural role of this module.
 
-#include "backend/vector_immediate.hpp"
+#include "../include/backend/vector_immediate.hpp"
 
 namespace backend::aarch64 {
 namespace {

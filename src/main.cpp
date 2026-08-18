@@ -8,7 +8,7 @@
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
-#include "backend/codegen.hpp"
+#include "include/backend/codegen.hpp"
 
 #include <algorithm>
 #include <cctype>

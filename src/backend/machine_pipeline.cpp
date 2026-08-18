@@ -1,15 +1,15 @@
 // Assemble the native MachineFunction pass list.  The order here is the
 // backend contract; keep it linear so phase transitions stay visible.
-#include "backend/machine_pipeline.hpp"
+#include "../include/backend/machine_pipeline.hpp"
 
-#include "backend/cfg_optimizations.hpp"
-#include "backend/codegen.hpp"
-#include "backend/frame_lowering.hpp"
-#include "backend/post_ra_optimizations.hpp"
-#include "backend/pre_ra_optimizations.hpp"
-#include "backend/regalloc.hpp"
-#include "backend/scheduler.hpp"
-#include "backend/spill_optimization.hpp"
+#include "../include/backend/cfg_optimizations.hpp"
+#include "../include/backend/codegen.hpp"
+#include "../include/backend/frame_lowering.hpp"
+#include "../include/backend/post_ra_optimizations.hpp"
+#include "../include/backend/pre_ra_optimizations.hpp"
+#include "../include/backend/regalloc.hpp"
+#include "../include/backend/scheduler.hpp"
+#include "../include/backend/spill_optimization.hpp"
 
 namespace backend::aarch64 {
 namespace {

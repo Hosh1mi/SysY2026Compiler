@@ -1,7 +1,7 @@
 // Post-register-allocation optimizations operate on physical registers and
 // lower remaining machine pseudos before final scheduling.
-#include "backend/post_ra_optimizations.hpp"
-#include "backend/machine_analysis.hpp"
+#include "../include/backend/post_ra_optimizations.hpp"
+#include "../include/backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cstdint>

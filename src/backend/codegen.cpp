@@ -1,10 +1,10 @@
-#include "backend/codegen.hpp"
+#include "../include/backend/codegen.hpp"
 
-#include "backend/asm_printer.hpp"
-#include "backend/isel.hpp"
-#include "backend/machine_pipeline.hpp"
-#include "backend/parallelRuntime.hpp"
-#include "backend/verifier.hpp"
+#include "../include/backend/asm_printer.hpp"
+#include "../include/backend/isel.hpp"
+#include "../include/backend/machine_pipeline.hpp"
+#include "../include/backend/parallelRuntime.hpp"
+#include "../include/backend/verifier.hpp"
 
 #include <algorithm>
 #include <cstring>

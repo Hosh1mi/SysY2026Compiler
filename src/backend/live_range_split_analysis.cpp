@@ -1,9 +1,9 @@
 // This file selects profitable local live-range cuts from failed graph-
 // coloring decisions, using target costs rather than size heuristics.
-#include "backend/live_range_split_analysis.hpp"
+#include "../include/backend/live_range_split_analysis.hpp"
 
-#include "backend/machine_analysis.hpp"
-#include "backend/rematerialization.hpp"
+#include "../include/backend/machine_analysis.hpp"
+#include "../include/backend/rematerialization.hpp"
 
 #include <algorithm>
 #include <cmath>

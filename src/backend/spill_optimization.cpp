@@ -1,6 +1,6 @@
 // This file forwards values already resident in physical registers across
 // allocator spill slots and removes stores proven dead by CFG dataflow.
-#include "backend/spill_optimization.hpp"
+#include "../include/backend/spill_optimization.hpp"
 
 #include <optional>
 #include <set>

@@ -1,7 +1,7 @@
 // This file defines generated AArch64 instruction metadata.
 // Generated from aarch64.td by generate.py.
 // Edit the target description or generator, not this file.
-#include "backend/aarch64_instruction_info.hpp"
+#include "../include/backend/aarch64_instruction_info.hpp"
 
 #include <array>
 #include <cstddef>

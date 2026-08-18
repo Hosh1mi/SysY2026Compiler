@@ -1,8 +1,8 @@
 // This file folds address calculations before allocation and selects physical
 // pre/post-indexed addressing forms after frame finalization.
-#include "backend/post_ra_optimizations.hpp"
-#include "backend/pre_ra_optimizations.hpp"
-#include "backend/machine_analysis.hpp"
+#include "../include/backend/post_ra_optimizations.hpp"
+#include "../include/backend/pre_ra_optimizations.hpp"
+#include "../include/backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cstdint>

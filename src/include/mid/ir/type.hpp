@@ -18,6 +18,7 @@ public:
         ArrayTyID,     // 数组类型
         VectorTyID,    // 向量（<4 x i32> / <4 x float>）
         PointerTyID,   // 指针类型
+        TensorTyID,
     };
     // 构造一个给定类别的类型；派生类负责补充位宽、元素类型等参数。
     explicit Type(TypeID tid) : tid_(tid) {}
@@ -82,6 +83,10 @@ public:
     std::vector<Type*> args_;  // 形参类型列表
     bool is_variadic_ = false;
 };
+
+// class TensorType : public Type {
+//     TensorType(Type* contained, )
+// }
 
 // 返回该 IR 类型采用紧凑布局时的存储字节数。无存储表示或大小溢出时返回 -1。
 long long typeStorageBytes(Type *type);

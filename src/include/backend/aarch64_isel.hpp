@@ -3,7 +3,7 @@
 // Edit the target description or generator, not this file.
 #pragma once
 
-#include "backend/selection_dag.hpp"
+#include "selection_dag.hpp"
 
 #include <array>
 #include <cstdint>

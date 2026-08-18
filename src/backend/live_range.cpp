@@ -1,8 +1,8 @@
 // This file numbers Machine instructions and computes precise live-range
 // segments and operand positions for register-allocation transformations.
-#include "backend/live_range.hpp"
+#include "../include/backend/live_range.hpp"
 
-#include "backend/machine_analysis.hpp"
+#include "../include/backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -55,6 +55,7 @@ StringLiteral \"([^\\\"\n]|\\.)*\"
 
 "int"           { yylval.int_val = TYPE_INT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
 "float"         { yylval.int_val = TYPE_FLOAT; LEXER_DEBUG_TOKEN("BASICTYPE"); return BASICTYPE; }
+"tensor"        { LEXER_DEBUG_TOKEN("TENSOR"); return TENSOR; }
 "void"          { LEXER_DEBUG_TOKEN("VOID"); return VOID; }
 "const"         { LEXER_DEBUG_TOKEN("CONST"); return CONST; }
 "return"        { LEXER_DEBUG_TOKEN("RETURN"); return RETURN; }
@@ -91,6 +92,7 @@ StringLiteral \"([^\\\"\n]|\\.)*\"
 "%"             { LEXER_DEBUG_TOKEN("MOD"); return MOD; }
 "&&"            { LEXER_DEBUG_TOKEN("AND"); return AND; }
 "||"            { LEXER_DEBUG_TOKEN("OR"); return OR; }
+"@"             { LEXER_DEBUG_TOKEN("MATMUL"); return MATMUL;}
 
 \n              { yycolumn = 1; }
 [ \r\t\f\v]+    { /* Ignore whitespace. */ }

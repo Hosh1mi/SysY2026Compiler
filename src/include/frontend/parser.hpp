@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YY_WORKSPACE_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
-# define YY_YY_WORKSPACE_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+#ifndef YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+# define YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -45,7 +45,7 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 5 "/workspace/src/frontend/parser.y"
+#line 5 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
 
     #include "ast/ast.hpp"
     #include <string>
@@ -65,7 +65,7 @@ extern int yydebug;
     using BlockItemList = std::vector<BlockItemAST>;
     using CallArgList = std::vector<CallArgumentAST>;
 
-#line 69 "/workspace/src/include/frontend/parser.hpp"
+#line 69 "/home/valdez/pre-csc-compiler/src/include/frontend/parser.hpp"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -96,24 +96,26 @@ extern int yydebug;
     WHILE = 275,                   /* WHILE  */
     BREAK = 276,                   /* BREAK  */
     CONTINUE = 277,                /* CONTINUE  */
-    LP = 278,                      /* LP  */
-    RP = 279,                      /* RP  */
-    LB = 280,                      /* LB  */
-    RB = 281,                      /* RB  */
-    LC = 282,                      /* LC  */
-    RC = 283,                      /* RC  */
-    COMMA = 284,                   /* COMMA  */
-    SEMICOLON = 285,               /* SEMICOLON  */
-    NOT = 286,                     /* NOT  */
-    ASSIGN = 287,                  /* ASSIGN  */
-    MINUS = 288,                   /* MINUS  */
-    ADD = 289,                     /* ADD  */
-    MUL = 290,                     /* MUL  */
-    DIV = 291,                     /* DIV  */
-    MOD = 292,                     /* MOD  */
-    AND = 293,                     /* AND  */
-    OR = 294,                      /* OR  */
-    LOWER_THEN_ELSE = 295          /* LOWER_THEN_ELSE  */
+    TENSOR = 278,                  /* TENSOR  */
+    LP = 279,                      /* LP  */
+    RP = 280,                      /* RP  */
+    LB = 281,                      /* LB  */
+    RB = 282,                      /* RB  */
+    LC = 283,                      /* LC  */
+    RC = 284,                      /* RC  */
+    COMMA = 285,                   /* COMMA  */
+    SEMICOLON = 286,               /* SEMICOLON  */
+    NOT = 287,                     /* NOT  */
+    ASSIGN = 288,                  /* ASSIGN  */
+    MINUS = 289,                   /* MINUS  */
+    ADD = 290,                     /* ADD  */
+    MUL = 291,                     /* MUL  */
+    DIV = 292,                     /* DIV  */
+    MOD = 293,                     /* MOD  */
+    AND = 294,                     /* AND  */
+    OR = 295,                      /* OR  */
+    MATMUL = 296,                  /* MATMUL  */
+    LOWER_THEN_ELSE = 297          /* LOWER_THEN_ELSE  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -122,7 +124,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 177 "/workspace/src/frontend/parser.y"
+#line 177 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     TopLevelItem* topLevel;
@@ -150,7 +152,7 @@ union YYSTYPE
     int int_val;
     float float_val;
 
-#line 154 "/workspace/src/include/frontend/parser.hpp"
+#line 156 "/home/valdez/pre-csc-compiler/src/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -179,4 +181,4 @@ extern YYLTYPE yylloc;
 int yyparse (void);
 
 
-#endif /* !YY_YY_WORKSPACE_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */
+#endif /* !YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */

@@ -1,8 +1,8 @@
 // This file executes the linear MachineFunction pass list and provides the
 // common diagnostics used by the code-generation driver.
-#include "backend/machine_pass_manager.hpp"
+#include "../include/backend/machine_pass_manager.hpp"
 
-#include "backend/verifier.hpp"
+#include "../include/backend/verifier.hpp"
 
 #include <cstdlib>
 #include <iostream>

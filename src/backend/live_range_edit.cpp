@@ -1,6 +1,6 @@
 // This file applies validated local split plans by placing a spill/reload or
 // rematerialization at the gap boundaries and rewriting the resumed sibling.
-#include "backend/live_range_edit.hpp"
+#include "../include/backend/live_range_edit.hpp"
 
 #include <algorithm>
 #include <cstdlib>

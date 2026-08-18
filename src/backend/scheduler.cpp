@@ -1,6 +1,6 @@
-#include "backend/scheduler.hpp"
+#include "../include/backend/scheduler.hpp"
 
-#include "backend/live_range.hpp"
+#include "../include/backend/live_range.hpp"
 
 #include <algorithm>
 #include <cstdint>

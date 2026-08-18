@@ -1,6 +1,6 @@
 // This file lowers SSA PHIs to parallel virtual copies and resolves their
 // remaining physical-register groups after register allocation.
-#include "backend/regalloc.hpp"
+#include "../include/backend/regalloc.hpp"
 
 #include <algorithm>
 #include <cstdlib>

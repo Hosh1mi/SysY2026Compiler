@@ -1,9 +1,9 @@
 // This file implements target queries that require executable logic.  Static
 // instruction facts live in target_desc/aarch64.td and are generated at build
 // time.
-#include "backend/target.hpp"
+#include "../include/backend/target.hpp"
 
-#include "backend/aarch64_instruction_info.hpp"
+#include "../include/backend/aarch64_instruction_info.hpp"
 
 namespace backend::aarch64 {
 namespace {

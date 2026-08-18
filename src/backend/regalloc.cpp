@@ -1,6 +1,6 @@
-#include "backend/regalloc.hpp"
-#include "backend/interference_graph.hpp"
-#include "backend/live_range_split_analysis.hpp"
+#include "../include/backend/regalloc.hpp"
+#include "../include/backend/interference_graph.hpp"
+#include "../include/backend/live_range_split_analysis.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>

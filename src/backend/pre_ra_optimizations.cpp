@@ -1,8 +1,8 @@
 // Pre-register-allocation machine optimizations preserve virtual-register
 // structure and run before graph coloring.
-#include "backend/pre_ra_optimizations.hpp"
-#include "backend/machine_analysis.hpp"
-#include "backend/vector_immediate.hpp"
+#include "../include/backend/pre_ra_optimizations.hpp"
+#include "../include/backend/machine_analysis.hpp"
+#include "../include/backend/vector_immediate.hpp"
 
 #include <algorithm>
 #include <deque>

@@ -1,9 +1,9 @@
 // This file defines generated AArch64 selection tables and matchers.
 // Generated from aarch64.td by generate.py.
 // Edit the target description or generator, not this file.
-#include "backend/aarch64_isel.hpp"
+#include "../include/backend/aarch64_isel.hpp"
 
-#include "mid/ir/instruction.hpp"
+#include "../include/mid/ir/instruction.hpp"
 
 #include <array>
 #include <cstddef>

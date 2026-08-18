@@ -1,9 +1,9 @@
 // This file performs final virtual-register spilling after splitting and
 // recoloring have failed, including target-aware rematerialization.
-#include "backend/regalloc.hpp"
+#include "../include/backend/regalloc.hpp"
 
-#include "backend/machine_analysis.hpp"
-#include "backend/rematerialization.hpp"
+#include "../include/backend/machine_analysis.hpp"
+#include "../include/backend/rematerialization.hpp"
 
 #include <unordered_set>
 

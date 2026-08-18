@@ -1,7 +1,7 @@
 // This file computes MachineFunction dominance and natural-loop information
 // once in a reusable form instead of embedding subtly different algorithms in
 // individual transformations.
-#include "backend/machine_analysis.hpp"
+#include "../include/backend/machine_analysis.hpp"
 
 #include <algorithm>
 #include <utility>

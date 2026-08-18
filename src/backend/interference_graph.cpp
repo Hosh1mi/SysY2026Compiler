@@ -1,6 +1,6 @@
 // This file implements the compact interference graph used by allocation
 // and live-range repair without allocating objects for individual edges.
-#include "backend/interference_graph.hpp"
+#include "../include/backend/interference_graph.hpp"
 
 #include <algorithm>
 
