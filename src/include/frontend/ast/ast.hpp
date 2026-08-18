@@ -12,62 +12,9 @@
 
 enum TYPE { TYPE_VOID, TYPE_INT, TYPE_FLOAT };
 
-enum class VECTOR_EXTENT { SCALAR, FIXED, DYNAMIC };
-
-// All accepted vector spellings lower to this single representation.  If the
-// official grammar changes, the parser normally only needs to construct a
-// different TypeSpec; AST consumers continue to see element type and extent.
-struct TypeSpec {
-    TYPE element = TYPE_VOID;
-    VECTOR_EXTENT extent = VECTOR_EXTENT::SCALAR;
-    unsigned lanes = 1;
-    std::string laneConstant;
-    bool is_tensor = false;
-
-    TypeSpec() = default;
-    TypeSpec(TYPE scalar) : element(scalar) {}
-
-    static TypeSpec fixed(TYPE element, unsigned lanes) {
-        TypeSpec result(element);
-        result.extent = VECTOR_EXTENT::FIXED;
-        result.lanes = lanes;
-        return result;
-    }
-
-    static TypeSpec fixed(TYPE element, std::string laneConstant) {
-        TypeSpec result(element);
-        result.extent = VECTOR_EXTENT::FIXED;
-        result.lanes = 0;
-        result.laneConstant = std::move(laneConstant);
-        return result;
-    }
-
-    static TypeSpec dynamic(TYPE element) {
-        TypeSpec result(element);
-        result.extent = VECTOR_EXTENT::DYNAMIC;
-        result.lanes = 0;
-        return result;
-    }
-
-    static TypeSpec tensorType(TYPE element) {
-        TypeSpec result(element);
-        result.is_tensor = true;
-        return result;
-    }
-
-    bool isScalar() const { return extent == VECTOR_EXTENT::SCALAR; }
-    bool isFixedVector() const { return extent == VECTOR_EXTENT::FIXED; }
-    bool isDynamicVector() const { return extent == VECTOR_EXTENT::DYNAMIC; }
-    bool isVector() const { return !isScalar(); }
-    bool isTensor() const { return is_tensor;}
-
-    bool operator==(TYPE rhs) const { return isScalar() && element == rhs; }
-    bool operator!=(TYPE rhs) const { return !(*this == rhs); }
-    bool operator==(const TypeSpec &rhs) const {
-        return element == rhs.element && extent == rhs.extent && is_tensor == rhs.is_tensor &&
-               lanes == rhs.lanes && laneConstant == rhs.laneConstant;
-    }
-    bool operator!=(const TypeSpec &rhs) const { return !(*this == rhs); }
+struct ParsedType {
+    TYPE type = TYPE_VOID;
+    bool tensor = false;
 };
 
 enum class UnaryOp { Plus, Minus, LogicalNot };
@@ -180,12 +127,13 @@ public:
 
 class DeclAST final : public BaseAST {
 public:
-    DeclAST(TypeSpec type, bool isConst,
+    DeclAST(TYPE type, bool tensor, bool isConst,
             std::vector<std::unique_ptr<ObjectDefAST>> objects)
-        : type(std::move(type)), isConst(isConst),
+        : type(type), tensor(tensor), isConst(isConst),
           objects(std::move(objects)) {}
 
-    TypeSpec type;
+    TYPE type;
+    bool tensor = false;
     bool isConst = false;
     std::vector<std::unique_ptr<ObjectDefAST>> objects;
     void accept(Visitor &visitor) override;
@@ -193,12 +141,13 @@ public:
 
 class FuncParamAST final : public BaseAST {
 public:
-    FuncParamAST(TypeSpec type, std::string name, bool isArray = false,
+    FuncParamAST(TYPE type, bool tensor, std::string name, bool isArray = false,
                  std::vector<std::unique_ptr<ExprAST>> dimensions = {})
-        : type(std::move(type)), name(std::move(name)), isArray(isArray),
+        : type(type), tensor(tensor), name(std::move(name)), isArray(isArray),
           trailingDimensions(std::move(dimensions)) {}
 
-    TypeSpec type;
+    TYPE type;
+    bool tensor = false;
     std::string name;
     // true denotes the omitted first dimension in `T name[][N]`.
     bool isArray = false;
@@ -208,13 +157,14 @@ public:
 
 class FuncDefAST final : public BaseAST {
 public:
-    FuncDefAST(TypeSpec returnType, std::string name,
+    FuncDefAST(TYPE returnType, bool tensorReturn, std::string name,
                std::vector<std::unique_ptr<FuncParamAST>> parameters,
                std::unique_ptr<BlockAST> body)
-        : returnType(std::move(returnType)), name(std::move(name)),
+        : returnType(returnType), tensorReturn(tensorReturn), name(std::move(name)),
           parameters(std::move(parameters)), body(std::move(body)) {}
 
-    TypeSpec returnType;
+    TYPE returnType;
+    bool tensorReturn = false;
     std::string name;
     std::vector<std::unique_ptr<FuncParamAST>> parameters;
     std::unique_ptr<BlockAST> body;
@@ -378,8 +328,7 @@ public:
     void accept(Visitor &visitor) override;
 };
 
-// This node is only needed for indexing a computed vector value.  Indexing an
-// identifier remains inside LValueAST so array addressing stays explicit.
+// This node represents indexing a computed aggregate value.
 class SubscriptExprAST final : public ExprAST {
 public:
     SubscriptExprAST(std::unique_ptr<ExprAST> base,

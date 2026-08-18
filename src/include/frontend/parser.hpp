@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
-# define YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+#ifndef YY_YY_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
+# define YY_YY_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -45,7 +45,7 @@
 extern int yydebug;
 #endif
 /* "%code requires" blocks.  */
-#line 5 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
+#line 5 "src/frontend/parser.y"
 
     #include "ast/ast.hpp"
     #include <string>
@@ -65,7 +65,7 @@ extern int yydebug;
     using BlockItemList = std::vector<BlockItemAST>;
     using CallArgList = std::vector<CallArgumentAST>;
 
-#line 69 "/home/valdez/pre-csc-compiler/src/include/frontend/parser.hpp"
+#line 69 "src/include/frontend/parser.hpp"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -124,7 +124,7 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 177 "/home/valdez/pre-csc-compiler/src/frontend/parser.y"
+#line 105 "src/frontend/parser.y"
 
     CompUnitAST* compUnit;
     TopLevelItem* topLevel;
@@ -146,13 +146,13 @@ union YYSTYPE
     CallExprAST* callExpr;
     CallArgumentAST* callArg;
     CallArgList* callArgList;
-    TypeSpec* type_spec;
+    ParsedType* type_spec;
     UnaryOp unaryOp;
     std::string* token;
     int int_val;
     float float_val;
 
-#line 156 "/home/valdez/pre-csc-compiler/src/include/frontend/parser.hpp"
+#line 156 "src/include/frontend/parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -181,4 +181,4 @@ extern YYLTYPE yylloc;
 int yyparse (void);
 
 
-#endif /* !YY_YY_HOME_VALDEZ_PRE_CSC_COMPILER_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */
+#endif /* !YY_YY_SRC_INCLUDE_FRONTEND_PARSER_HPP_INCLUDED  */

@@ -24,20 +24,8 @@ const char *elementName(TYPE type) {
     return "<unknown>";
 }
 
-std::string typeName(const TypeSpec &type) {
-    if (type.isScalar()) return elementName(type.element);
-
-    std::ostringstream out;
-    out << "vector<" << elementName(type.element);
-    if (type.isFixedVector()) {
-        out << ", ";
-        if (!type.laneConstant.empty())
-            out << type.laneConstant;
-        else
-            out << type.lanes;
-    }
-    out << '>';
-    return out.str();
+std::string typeName(TYPE type, bool tensor = false) {
+    return std::string(tensor ? "tensor " : "") + elementName(type);
 }
 
 const char *unaryName(UnaryOp op) {
@@ -109,9 +97,8 @@ public:
     }
 
     void visit(DeclAST &ast) override {
-        line("Decl type=" + typeName(ast.type) +
-             " const=" + (ast.isConst ? "true" : "false") +
-             " tensor=" + (ast.));
+        line("Decl type=" + typeName(ast.type, ast.tensor) +
+             " const=" + (ast.isConst ? "true" : "false"));
         nested([&] {
             for (auto &object : ast.objects) object->accept(*this);
         });
@@ -148,7 +135,7 @@ public:
 
     void visit(FuncDefAST &ast) override {
         line("FuncDef name=" + quoteText(ast.name) +
-             " return=" + typeName(ast.returnType));
+             " return=" + typeName(ast.returnType, ast.tensorReturn));
         nested([&] {
             if (ast.parameters.empty()) {
                 line("Parameters []");
@@ -166,7 +153,7 @@ public:
 
     void visit(FuncParamAST &ast) override {
         line("Param name=" + quoteText(ast.name) + " type=" +
-             typeName(ast.type) + " array=" +
+             typeName(ast.type, ast.tensor) + " array=" +
              (ast.isArray ? "true" : "false"));
         nested([&] { printNodeList("TrailingDimensions",
                                     ast.trailingDimensions); });

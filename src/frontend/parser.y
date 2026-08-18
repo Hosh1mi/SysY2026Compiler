@@ -27,7 +27,6 @@
     #include <cstdlib>
     #include <cctype>
     #include <iostream>
-    #include <optional>
     #include <string>
     #include <utility>
     #include "../include/frontend/ast/ast.hpp"
@@ -46,77 +45,6 @@
     template <typename T, typename... Args>
     T *make_node(Args &&...args) {
       return new T(std::forward<Args>(args)...);
-    }
-
-    // ------------------------------------------------------------------
-    // Unpublished type-extension compatibility layer.
-    //
-    // The official VecType production is intentionally still unspecified.
-    // Keep every guessed spelling in these helpers and in the marked VecType
-    // grammar below.  The lexer returns all of these words as ordinary IDs,
-    // so extensions never reserve identifiers outside a type position.
-    // ------------------------------------------------------------------
-    static bool decimalSuffix(const string &text, size_t begin,
-                              unsigned &value) {
-      if (begin == text.size()) return false;
-      unsigned result = 0;
-      for (size_t i = begin; i < text.size(); ++i) {
-        if (!std::isdigit(static_cast<unsigned char>(text[i]))) return false;
-        result = result * 10 + static_cast<unsigned>(text[i] - '0');
-      }
-      value = result;
-      return true;
-    }
-
-    static std::optional<TypeSpec> simpleVectorType(const string &name) {
-      if (name == "intvec" || name == "ivec")
-        return TypeSpec::dynamic(TYPE_INT);
-      if (name == "floatvec" || name == "fvec")
-        return TypeSpec::dynamic(TYPE_FLOAT);
-      if (name == "i32x4" || name == "int32x4" || name == "v4i32")
-        return TypeSpec::fixed(TYPE_INT, 4);
-      if (name == "f32x4" || name == "float32x4" || name == "v4f32")
-        return TypeSpec::fixed(TYPE_FLOAT, 4);
-
-      unsigned lanes = 0;
-      if (name.rfind("int", 0) == 0 && decimalSuffix(name, 3, lanes))
-        return TypeSpec::fixed(TYPE_INT, lanes);
-      if (name.rfind("float", 0) == 0 && decimalSuffix(name, 5, lanes))
-        return TypeSpec::fixed(TYPE_FLOAT, lanes);
-      if (name.rfind("ivec", 0) == 0 && decimalSuffix(name, 4, lanes))
-        return TypeSpec::fixed(TYPE_INT, lanes);
-      if (name.rfind("fvec", 0) == 0 && decimalSuffix(name, 4, lanes))
-        return TypeSpec::fixed(TYPE_FLOAT, lanes);
-
-      auto suffixed = [&](const string &prefix, char suffix,
-                          TYPE element) -> std::optional<TypeSpec> {
-        if (name.size() <= prefix.size() + 1 ||
-            name.rfind(prefix, 0) != 0 || name.back() != suffix)
-          return std::nullopt;
-        unsigned count = 0;
-        if (!decimalSuffix(name.substr(0, name.size() - 1), prefix.size(),
-                           count))
-          return std::nullopt;
-        return TypeSpec::fixed(element, count);
-      };
-      if (auto type = suffixed("vec", 'i', TYPE_INT)) return type;
-      if (auto type = suffixed("vec", 'f', TYPE_FLOAT)) return type;
-      if (auto type = suffixed("vector", 'i', TYPE_INT)) return type;
-      if (auto type = suffixed("vector", 'f', TYPE_FLOAT)) return type;
-      return std::nullopt;
-    }
-
-    static bool isVectorConstructor(const string &name) {
-      return name == "vector" || name == "vec";
-    }
-
-    static std::optional<unsigned> vectorWidthAlias(const string &name) {
-      unsigned lanes = 0;
-      if (name.rfind("vec", 0) == 0 && decimalSuffix(name, 3, lanes))
-        return lanes;
-      if (name.rfind("vector", 0) == 0 && decimalSuffix(name, 6, lanes))
-        return lanes;
-      return std::nullopt;
     }
 
     static bool decodeStringLiteral(const string &raw, string &decoded) {
@@ -195,7 +123,7 @@
     CallExprAST* callExpr;
     CallArgumentAST* callArg;
     CallArgList* callArgList;
-    TypeSpec* type_spec;
+    ParsedType* type_spec;
     UnaryOp unaryOp;
     std::string* token;
     int int_val;
@@ -225,7 +153,7 @@
 %type <callArg> FuncCParam
 %type <callArgList> FuncCParamList
 
-%type <type_spec> BType VoidType VecType VecWidth TensorType
+%type <type_spec> BType VoidType TensorType
 %type <unaryOp> UnaryOp
 
 // %token 定义终结符的语义值类型
@@ -284,21 +212,18 @@ DeclDef:
 // 变量或常量声明
 Decl:
     CONST BType ConstDefList SEMICOLON {
-        $$ = make_node<DeclAST>(*$2, true, std::move($3->values));
+        $$ = make_node<DeclAST>($2->type, $2->tensor, true, std::move($3->values));
         delete $2; delete $3;
     }|
     BType VarDefList SEMICOLON {
-        $$ = make_node<DeclAST>(*$1, false, std::move($2->values));
+        $$ = make_node<DeclAST>($1->type, $1->tensor, false, std::move($2->values));
         delete $1; delete $2;
     };
 
 // 基本类型
 BType:
     BASICTYPE {
-        $$ = new TypeSpec(static_cast<TYPE>($1));
-    }|
-    VecType {
-        $$ = $1;
+        $$ = new ParsedType{static_cast<TYPE>($1), false};
     }|
     TensorType{
         $$ = $1;
@@ -306,112 +231,13 @@ BType:
 
 TensorType:
     TENSOR BASICTYPE{
-        $$ = new TypeSpec(TypeSpec::tensorType(static_cast<TYPE>($2)));
-    };
-
-
-// === DECISION-DAY VecType EDIT AREA ====================================
-// Replace or extend only this block when the official VecType production is
-// published.  Word-like spellings arrive as ID and are checked here so none of
-// the guessed spellings become global lexer keywords.
-VecType:
-    ID {
-        auto type = simpleVectorType(*$1);
-        if (!type) {
-            yyerror(("unknown type spelling '" + *$1 + "'").c_str());
-            delete $1;
-            YYERROR;
-        }
-        $$ = new TypeSpec(*type);
-        delete $1;
-    }|
-    ID LT BASICTYPE COMMA VecWidth GT {
-        if (!isVectorConstructor(*$1)) {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; delete $5; YYERROR;
-        }
-        $5->element = static_cast<TYPE>($3);
-        $$ = $5;
-        delete $1;
-    }|
-    ID LT VecWidth COMMA BASICTYPE GT {
-        if (!isVectorConstructor(*$1)) {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; delete $3; YYERROR;
-        }
-        $3->element = static_cast<TYPE>($5);
-        $$ = $3;
-        delete $1;
-    }|
-    ID LP BASICTYPE COMMA VecWidth RP {
-        if (!isVectorConstructor(*$1)) {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; delete $5; YYERROR;
-        }
-        $5->element = static_cast<TYPE>($3);
-        $$ = $5;
-        delete $1;
-    }|
-    ID LB BASICTYPE COMMA VecWidth RB {
-        if (!isVectorConstructor(*$1)) {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; delete $5; YYERROR;
-        }
-        $5->element = static_cast<TYPE>($3);
-        $$ = $5;
-        delete $1;
-    }|
-    BASICTYPE LT VecWidth GT {
-        $3->element = static_cast<TYPE>($1);
-        $$ = $3;
-    }|
-    BASICTYPE LB VecWidth RB {
-        $3->element = static_cast<TYPE>($1);
-        $$ = $3;
-    }|
-    ID LT BASICTYPE GT {
-        if (isVectorConstructor(*$1))
-            $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($3)));
-        else if (auto width = vectorWidthAlias(*$1))
-            $$ = new TypeSpec(TypeSpec::fixed(static_cast<TYPE>($3), *width));
-        else {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; YYERROR;
-        }
-        delete $1;
-    }|
-    ID LP BASICTYPE RP {
-        if (!isVectorConstructor(*$1)) {
-            yyerror(("unknown vector constructor '" + *$1 + "'").c_str());
-            delete $1; YYERROR;
-        }
-        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($3)));
-        delete $1;
-    }|
-    BASICTYPE LT GT {
-        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($1)));
-    }|
-    BASICTYPE LB RB {
-        $$ = new TypeSpec(TypeSpec::dynamic(static_cast<TYPE>($1)));
-    };
-// === END DECISION-DAY VecType EDIT AREA ================================
-
-VecWidth:
-    INT {
-        $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, $1));
-    }|
-    ID {
-        if (auto width = vectorWidthAlias(*$1))
-            $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *width));
-        else
-            $$ = new TypeSpec(TypeSpec::fixed(TYPE_VOID, *$1));
-        delete $1;
+        $$ = new ParsedType{static_cast<TYPE>($2), true};
     };
 
 // 空类型
 VoidType:
     VOID {
-        $$ = new TypeSpec(TYPE_VOID);
+        $$ = new ParsedType{TYPE_VOID, false};
     };
 
 // 定义列表
@@ -486,7 +312,7 @@ Arrays:
     };
 
 // Define blocks before braced expressions.  In the statement-start parser
-// state, an empty pair of braces can otherwise be reduced as an empty vector
+// state, an empty pair of braces can otherwise be reduced as an empty aggregate
 // literal even though no expression terminator follows it.  Initializer and
 // assignment states do not admit Block, so `int4 value = {}` remains
 // unambiguous there.
@@ -502,7 +328,7 @@ Block:
 
 
 // 变量或常量初值
-// Aggregate braces are listed first so array-of-vector initializers keep the
+// Aggregate braces are listed first so nested initializers keep the
 // nested InitVal shape instead of collapsing into expression brace primaries.
 InitVal:
     LC RC {
@@ -528,7 +354,7 @@ ConstInitVal:
         $$ = make_node<InitValAST>(unique_ptr<ExprAST>($1));
     };
 
-// Braced initializer used on the right-hand side of a whole-vector assignment.
+// Braced initializer used on the right-hand side of a whole-aggregate assignment.
 BraceInitVal:
     LC RC {
         $$ = make_node<InitValAST>();
@@ -552,12 +378,12 @@ InitValList:
 // 函数定义
 FuncDef:
     BType ID LP OptFuncFParamList RP Block {
-        $$ = make_node<FuncDefAST>(*$1, std::move(*$2),
+        $$ = make_node<FuncDefAST>($1->type, $1->tensor, std::move(*$2),
             std::move($4->values), unique_ptr<BlockAST>($6));
         delete $1; delete $2; delete $4;
     }|
     VoidType ID LP OptFuncFParamList RP Block {
-        $$ = make_node<FuncDefAST>(*$1, std::move(*$2),
+        $$ = make_node<FuncDefAST>($1->type, $1->tensor, std::move(*$2),
             std::move($4->values), unique_ptr<BlockAST>($6));
         delete $1; delete $2; delete $4;
     };
@@ -584,15 +410,15 @@ FuncFParamList:
 // 函数形参
 FuncFParam:
     BType ID {
-        $$ = make_node<FuncParamAST>(*$1, std::move(*$2));
+        $$ = make_node<FuncParamAST>($1->type, $1->tensor, std::move(*$2));
         delete $1; delete $2;
     }|
     BType ID LB RB {
-        $$ = make_node<FuncParamAST>(*$1, std::move(*$2), true);
+        $$ = make_node<FuncParamAST>($1->type, $1->tensor, std::move(*$2), true);
         delete $1; delete $2;
     }|
     BType ID LB RB Arrays {
-        $$ = make_node<FuncParamAST>(*$1, std::move(*$2), true,
+        $$ = make_node<FuncParamAST>($1->type, $1->tensor, std::move(*$2), true,
                                      std::move($5->values));
         delete $1; delete $2; delete $5;
     };
@@ -681,7 +507,7 @@ Exp:
 
 // An expression statement cannot start with a raw brace literal: at statement
 // start that spelling is a block.  Other contexts still use Exp and retain all
-// existing vector-literal expressions.  This small split removes the genuine
+// existing aggregate-literal expressions.  This small split removes the genuine
 // Block-vs-literal ambiguity without duplicating the complete expression tree.
 NonBraceExp:
     NonBraceAddExp { $$ = $1; };
