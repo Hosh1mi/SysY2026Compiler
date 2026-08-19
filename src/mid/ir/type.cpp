@@ -24,7 +24,11 @@ long long typeStorageBytes(Type *type) {
     } else if (auto *vector = dynamic_cast<VectorType *>(type)) {
         elementType = vector->contained_;
         elementCount = vector->num_elements_;
-    } else {
+    // } else if (auto *tensor = dynamic_cast<TensorType *>(type)){
+    //     elementType = tensor->contained_;
+    //     elementCount = tensor->num_elements_;
+    }
+    else {
         return -1;
     }
 
@@ -83,7 +87,6 @@ std::string Type::print() {
             type_ir += static_cast<VectorType*>(this)->contained_->print();
             type_ir += ">";
             break;
-        
         default:
             break;
     }

@@ -2,6 +2,7 @@
 #include "../../include/mid/ir/irGen.hpp"
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using std::cout;
@@ -19,6 +20,10 @@ using std::vector;
 #define INT32PTR_T (module->get_pointer_type(module->int32_ty_))
 #define FLOATPTR_T (module->get_pointer_type(module->float32_ty_))
 
+ArrayType* expectedTensorType = nullptr;
+Value* expectedTensorTarget = nullptr;
+bool currentTensorReturn = false;
+Value* returnTensorPointer = nullptr;
 Type* curType;                          // 当前 decl 类型
 TypeSpec curSourceType;                 // 当前 decl 的源级向量形态
 bool isConst;                           // 当前 decl 是否是 const
@@ -64,6 +69,9 @@ public:
     std::vector<Value *> lanes_;
 };
 
+static ArrayType* tensorType(Value* val){
+    return dynamic_cast<ArrayType*>(static_cast<PointerType*>(val->type_)->contained_);
+}
 static Type *scalarType(Module *module, TYPE element) {
     return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
 }
@@ -1323,61 +1331,81 @@ void GenIR::visit(BlockAST &ast) {
 void GenIR::visit(EmptyStmtAST &) {}
 
 void GenIR::visit(AssignStmtAST &ast) {
-            is_single_exp = true;
-            vectorLaneBase = nullptr;
-            vectorLaneIndex = nullptr;
-            requireLVal = true;  
-            ast.target->accept(*this);
-            auto var = recentVal;
-            ScalarizedVectorType *scalarizedType = nullptr;
-            if (var && var->type_->tid_ == Type::PointerTyID)
-                scalarizedType = dynamic_cast<ScalarizedVectorType *>(
-                    static_cast<PointerType *>(var->type_)->contained_);
-            if (scalarizedType) {
-                ScalarizedVectorValue *initializer = nullptr;
-                ScalarizedVectorType *saved = expectedScalarizedVectorType;
-                expectedScalarizedVectorType = scalarizedType;
-                ast.value->accept(*this);
-                expectedScalarizedVectorType = saved;
-                initializer = asScalarizedVector(recentVal);
-                storeScalarizedVector(this, var, initializer, scalarizedType);
-                return;
-            }
-            {
-                VectorType *savedExpected = expectedVectorType;
-                if (var && var->type_->tid_ == Type::PointerTyID)
-                    expectedVectorType = dynamic_cast<VectorType *>(
-                        static_cast<PointerType *>(var->type_)->contained_);
-                ast.value->accept(*this);
-                expectedVectorType = savedExpected;
-            }
-            auto expval = recentVal;
-            if (vectorLaneBase) {
-                auto *vectorType = static_cast<VectorType *>(
-                    static_cast<PointerType *>(vectorLaneBase->type_)->contained_);
-                expval = coerceScalar(builder, module.get(), expval,
-                                      vectorType->contained_);
-                auto *oldVector = builder->create_load(vectorLaneBase);
-                auto *newVector = new InsertElementInst(oldVector, expval,
-                                                        vectorLaneIndex,
-                                                        builder->BB_);
-                builder->create_store(newVector, vectorLaneBase);
-                vectorLaneBase = nullptr;
-                vectorLaneIndex = nullptr;
-                return;
-            }
-            Type* varElemType = static_cast<PointerType*>(var->type_)->contained_;
-            if (varElemType == FLOAT_T && expval->type_ == INT32_T) {
-                expval = builder->create_sitofp(expval, FLOAT_T);
-            } else if (varElemType == INT32_T && expval->type_ == FLOAT_T) {
-                expval = builder->create_fptosi(expval, INT32_T);
-            }
-            builder->create_store(expval, var);
+    is_single_exp = true;
+    vectorLaneBase = nullptr;
+    vectorLaneIndex = nullptr;
+    requireLVal = true;  
+    ast.target->accept(*this);
+    auto var = recentVal;
+    if(var->hasSemFlag(SemFlag::SrcTensor)){
+        ArrayType* type = staticTensorType(var);
+        ArrayType* savedExpected = expectedTensorType;
+        Value* savedTarget = expectedTensorTarget;
+        expectedTensorType = type ? type : savedExpected;
+        bool directTarget = !containsCall(ast.value.get()) || dynamic_cast<CallExprAST*>(ast.value.get());
+        expectedTensorTarget = directTarget ? var : nullptr;
+        ast.value->accept(*this);
+        expectedTensorType = savedExpected;
+        expectedTensorTarget = savedTarget;
+        if(!type){
+            type = staticTensorType(recentVal);
+        }
+        if(recentVal != var){
+            copyTensor(this, var, recentVal, type);
+            releaseTensor(this, recentVal);
+        }
+        return;
+    }
+    ScalarizedVectorType *scalarizedType = nullptr;
+    if (var && var->type_->tid_ == Type::PointerTyID)
+        scalarizedType = dynamic_cast<ScalarizedVectorType *>(
+            static_cast<PointerType *>(var->type_)->contained_);
+    if (scalarizedType) {
+        ScalarizedVectorValue *initializer = nullptr;
+        ScalarizedVectorType *saved = expectedScalarizedVectorType;
+        expectedScalarizedVectorType = scalarizedType;
+        ast.value->accept(*this);
+        expectedScalarizedVectorType = saved;
+        initializer = asScalarizedVector(recentVal);
+        storeScalarizedVector(this, var, initializer, scalarizedType);
+        return;
+    }
+    {
+        VectorType *savedExpected = expectedVectorType;
+        if (var && var->type_->tid_ == Type::PointerTyID)
+            expectedVectorType = dynamic_cast<VectorType *>(
+                static_cast<PointerType *>(var->type_)->contained_);
+        ast.value->accept(*this);
+        expectedVectorType = savedExpected;
+    }
+    auto expval = recentVal;
+    if (vectorLaneBase) {
+        auto *vectorType = static_cast<VectorType *>(
+            static_cast<PointerType *>(vectorLaneBase->type_)->contained_);
+        expval = coerceScalar(builder, module.get(), expval,
+                                vectorType->contained_);
+        auto *oldVector = builder->create_load(vectorLaneBase);
+        auto *newVector = new InsertElementInst(oldVector, expval,
+                                                vectorLaneIndex,
+                                                builder->BB_);
+        builder->create_store(newVector, vectorLaneBase);
+        vectorLaneBase = nullptr;
+        vectorLaneIndex = nullptr;
+        return;
+    }
+    Type* varElemType = static_cast<PointerType*>(var->type_)->contained_;
+    if (varElemType == FLOAT_T && expval->type_ == INT32_T) {
+        expval = builder->create_sitofp(expval, FLOAT_T);
+    } else if (varElemType == INT32_T && expval->type_ == FLOAT_T) {
+        expval = builder->create_fptosi(expval, INT32_T);
+    }
+    builder->create_store(expval, var);
 }
 
 void GenIR::visit(ExprStmtAST &ast) {
     is_single_exp = true;
     ast.expression->accept(*this);
+    releaseTensor(this, recentVal);
     is_single_exp = false;
 }
 
@@ -1394,6 +1422,37 @@ void GenIR::visit(BreakStmtAST &) {
 void GenIR::visit(BlockStmtAST &ast) { ast.block->accept(*this); }
 
 void GenIR::visit(ReturnStmtAST &ast) {
+    if(currentTensorReturn){
+        if(ast.value){
+            Value* savedTarget = expectedTensorTarget;
+            ArrayType* directReturnType = nullptr;
+            auto *call = dynamic_cast<CallExprAST*>(ast.value.get());
+            if(call){
+                expectedTensorTarget = tensorReturnPointer;
+                auto* callee =static_cast<Function*>(scope.find(call->callee));
+                auto info = functionLoweringInfo.find(callee);
+                if(info != functionLoweringInfo.end()){
+                    directReturnType = info->second.tensorReturnType;
+                }
+            }
+            ast.value->accept(*this);
+            expectedTensorTarget = savedTarget;
+            ArrayType* type = staticTensorType(recentVal);
+            if(!type){
+                type = directReturnType;
+            }
+            if(type){
+                functionLoweringInfo[currentFunction].tensorReturnType = type;
+            }
+            if(recentVal != tensorReturnPointer){
+                copyTensor(this, tensorReturnPointer, recentVal, type);
+            }
+            releaseTensor(this, recentVal);
+        }
+        recentVal = builder->create_br(retBB);
+        has_br = true;
+        return;
+    }
     if (currentScalarizedReturnType) {
         if (ast.value) {
             ScalarizedVectorType *saved = expectedScalarizedVectorType;
@@ -1576,6 +1635,10 @@ void GenIR::checkCalType(Value* val[]) {
 }
 
 void GenIR::visit(BinaryExprAST &ast) {
+    if(isTensorElementwise(ast.op) && containsTensorValue(this, &ast) && !containsCall(&ast)){
+        recentVal = lowerFusedTensorExpression(this,&ast);
+        return;
+    }
     if (ast.op == BinaryOp::LogicalAnd) {
         auto savedTrue = trueBB;
         trueBB = createNamedBB(module.get(), currentFunction, "land.rhs");
@@ -1607,7 +1670,7 @@ void GenIR::visit(BinaryExprAST &ast) {
         return;
     }
     if (ast.op == BinaryOp::Multiply || ast.op == BinaryOp::Divide ||
-        ast.op == BinaryOp::Remainder) {
+        ast.op == BinaryOp::Remainder || ast.op == BinaryOp::Matmul) {
         lowerMultiplicative(ast);
         return;
     }
@@ -1705,7 +1768,7 @@ void GenIR::visit(BinaryExprAST &ast) {
         auto *rhs = dynamic_cast<ConstantVector *>(val[1]);
         Instruction::OpID op = ast.op == BinaryOp::Add ? Instruction::Add
                                                         : Instruction::Sub;
-        if (lhs && lhs->type_->tid_ == Type::VectorTyID &&
+        if (lhs && (lhs->type_->tid_ == Type::VectorTyID) &&
             static_cast<VectorType *>(lhs->type_)->contained_ == FLOAT_T)
             op = ast.op == BinaryOp::Add ? Instruction::FAdd
                                           : Instruction::FSub;
@@ -1738,6 +1801,12 @@ void GenIR::visit(BinaryExprAST &ast) {
 
 void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     Value* val[2]; //lVal, rVal
+    ArrayType* savedTensorExpected = expectedTensorType;
+    Value* savedTensorTarget = expectedTensorTarget;
+    if(ast.op == BinaryOp::Matmul){
+        expectedTensorType = nullptr;
+        expectedTensorTarget = nullptr;
+    }
     ast.left->accept(*this);
     val[0] = recentVal;
     VectorType *savedExpected = expectedVectorType;
@@ -1751,7 +1820,15 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     ast.right->accept(*this);
     expectedVectorType = savedExpected;
     expectedScalarizedVectorType = savedScalarizedExpected;
+    if(ast.op == BinaryOp::Matmul){
+        expectedTensorType = savedTensorExpected;
+        expectedTensorTarget = savedTensorTarget;
+    }
     val[1] = recentVal;
+    if(ast.op == BinaryOp::Matmul){
+        recentVal = lowerTensorMatmul(this, val[0], val[1]);
+        return;
+    }
 
     if (asScalarizedVector(val[0]) || asScalarizedVector(val[1])) {
         Instruction::OpID integerOp = Instruction::Mul;
@@ -1858,7 +1935,19 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
 }
 
 void GenIR::visit(UnaryExprAST &ast) {
+    if((ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus) && !containsCall(&ast) && containsTensorValue(this, &ast)){
+        recentVal = lowerFusedTensorExpression(this, &ast);
+        return;
+    }
     ast.operand->accept(*this);
+    if(recentVal->hasSemFlag(SemFlag::SrcTensor)&&(ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus)){
+        if(ast.op == UnaryOp::Minus){
+            ArrayType* type =expectedVectorType ? expectedTensorType : tensorType(recentVal);
+            Value* zero = zeroScalar(module.get(),tensorElementType(type));
+            recentVal = lowerTensorBinar(this, zero, recentVal, BinaryOp::Subtract);
+        }
+        return;
+    }
     if (auto *vector = asScalarizedVector(recentVal)) {
         recentVal = scalarizedVectorUnary(this, vector, ast.op);
         return;
@@ -1922,6 +2011,37 @@ void GenIR::visit(UnaryExprAST &ast) {
 void GenIR::visit(SubscriptExprAST &ast) {
     ast.base->accept(*this);
     Value *base = recentVal;
+    if(base->hasSemFlag(SemFlag::SrcTensor)){
+        ArrayType* type = tensorType(base);
+        ast.index->accept(*this);
+        auto dynamicDimension = tensorFirstDimensions.find(base);
+        if(dynamicDimension != tensorFirstDimensions.end()){
+            Value* element = builder->create_gep(base,{recentVal});
+            if(type){
+                element->setSemFlag(SemFlag::SrcTensor);
+                moveTensorStorage(base,element);
+                tensorFirstDimensions.erase(dynamicDimension);
+                recentVal = element;
+            }
+            else{
+                recentVal = builder->create_load(element);
+                releaseTensor(this, base);
+            }
+            return;
+        }
+        // not found
+        Value* element = builder->create_gep(base, {CONST_INT(0), recentVal});
+        if(type->contained_ == Type::ArrayTyID){
+            element->setSemFlag(SemFlag::SrcTensor);
+            moveTensorStorage(base, element);
+            recentVal = element;
+        }
+        else{
+            recentVal = builder->create_load(element);
+            releaseTensor(this, base);
+        }
+        return;
+    }
     if (auto *vector = asScalarizedVector(base)) {
         auto *type = static_cast<ScalarizedVectorType *>(vector->type_);
         ast.index->accept(*this);
@@ -2132,6 +2252,15 @@ void GenIR::visit(LValueAST &ast) {
     }
     // 不是常量那么var一定是指针类型
     Type* varType = static_cast<PointerType*>(var->type_)->contained_; //所指的类型
+    if(var->hasSemFlag(SemFlag::SrcTensor) && ast.indicies.empty()){
+        recentVal = varType->tid_ == Type::PointerTyID ? (Value *)builder->create_load(var) : var;
+        recentVal->setSemFlag(SemFlag::SrcTensor);
+        auto dimension = tensorFirstDimensions.find(var);
+        if(dimension != tensorFirstDimensions.end()){
+            tensorFirstDimensions[recentVal] = dimension.second();
+        }
+        return;
+    }
     if (auto *type = dynamic_cast<ScalarizedVectorType *>(varType)) {
         if (ast.indices.empty()) {
             recentVal = isTrueLVal ? var
