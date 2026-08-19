@@ -23,7 +23,7 @@ using std::vector;
 ArrayType* expectedTensorType = nullptr;
 Value* expectedTensorTarget = nullptr;
 bool currentTensorReturn = false;
-Value* returnTensorPointer = nullptr;
+Value* tensorReturnPointer = nullptr;
 Type* curType;                          // 当前 decl 类型
 TypeSpec curSourceType;                 // 当前 decl 的源级向量形态
 bool isConst;                           // 当前 decl 是否是 const
@@ -54,6 +54,455 @@ struct ScalarizedFunctionInfo {
     std::vector<ScalarizedVectorType *> valueParameters;
 };
 
+struct FunctionLoweringInfo {
+    ScalarizedVectorType* returnType;
+    bool tensorReturn = false;
+    ArrayType* tensorReturnType = nullptr;
+    vector<ScalarizedVectorType> valueParameters;
+    vector<bool> tensorParameters;
+};
+
+static std::unordered_map<Function *, FunctionLoweringInfo>
+    functionLoweringInfo;
+static std::unordered_set<std::string> pendingTensorParameters;
+static std::unordered_map<Value*, Value*> tensorFirstDimensions;
+static std::unordered_map<Value*, Value*> heapTensorStorage;
+static Function* tensorMalloc = nullptr;
+static Function* tensorFree = nullptr;
+static BasicBlock* createNamedBB(Module* m, Function* func, const std::string &base);
+
+static ArrayType* tensorType(Value *val){
+    return dynamic_cast<ArrayType *>(static_cast<PointerType *>(val->type_)->contained_);
+}
+
+static ArrayType* staticTensorType(Value *val){
+    if(tensorFirstDimensions.find(val) != tensorFirstDimensions.end()){
+        return nullptr;
+    }
+    return tensorType(val);
+}
+
+static Type* tensorElementType(Type *type){
+    while(type->tid_==Type::ArrayTyID){
+        type = static_cast<ArrayType *>(type)->contained_;
+    }
+    return type;
+}
+
+static unsigned tensorElementCount(ArrayType *type){
+    unsigned count = 1;
+    Type *current = type;
+    while(current->tid_==Type::ArrayTyID){
+        auto *array = static_cast<ArrayType *>(current);
+        count = array->num_elements_;
+        current = array->contained_;
+    }
+    return count;
+}
+
+static Value* tensorElementCount(GenIR *gen, Value *value){
+    auto found = tensorFirstDimensions.find(value);
+    if(found == tensorFirstDimensions.end()) 
+        return new ConstantInt(gen->module->int32_ty_, tensorElementCount(tensorType(value)));
+    ArrayType* trailing = tensorType(value);
+    if(!trailing) return found->second;
+    unsigned cnt = tensorElementCount(trailing);
+    if(cnt == 1) return found->second;
+    return gen->builder->create_imul(found->second, new ConstantInt(gen->module->int32_ty_, cnt));
+}
+
+static Value* tensorFirstDimension(GenIR *gen, Value *value){
+    auto found = tensorFirstDimensions.find(value);
+    if(found == tensorFirstDimensions.end())
+        return found->second;
+    return new ConstantInt(gen->module->int32_ty_, tensorType(value) -> num_elements_);
+}
+
+static Constant *zeroScalar(Module *module, Type *type) {
+    if (type == module->float32_ty_)
+        return new ConstantFloat(module->float32_ty_, 0.0f);
+    return new ConstantInt(module->int32_ty_, 0);
+}
+
+static Value* tensorData(GenIR *gen, Value *value, Type *elementType){
+    Type* pointerType = gen->module->get_pointer_type(elementType);
+    if(value->type_ == pointerType) 
+        return value;
+    return gen->builder->create_bitcast(value, pointerType);
+}
+
+static Value* createDynamicTensor(GenIR *gen, Value *model, Value *count, Type *pointerType = nullptr){
+    if(!tensorMalloc){
+        Type* bytePointer = gen->module->get_pointer_type(gen->module->int8_ty_);//?
+        tensorMalloc = new Function(new FunctionType(bytePointer, {gen->module->int32_ty_}), "malloc", gen->module.get());
+        tensorFree = new Function(new FunctionType(gen->module->void_ty_, {bytePointer}), "free", gen->module.get());
+    }
+    Value *bytes = gen->builder->create_imul(count, new ConstantInt(gen->module->int32_ty_, 4));
+    Value *storage = gen->builder->create_call(tensorMalloc, {bytes});
+    Value *result = gen->builder->create_bitcast(storage, pointerType ? pointerType : model->type_);
+    result -> setSemFlag(SemFlag::SrcTensor);
+    tensorFirstDimensions[result] = tensorFirstDimension(gen, model);
+    heapTensorStorage[result] = storage;
+    return result;
+}
+
+static void releaseTensor(GenIR *gen, Value *value){
+    auto found = heapTensorStorage.find(value);
+    if(found == heapTensorStorage.end()) return;
+    gen->builder->create_call(tensorFree, {found->second});
+    heapTensorStorage.erase(found), tensorFirstDimensions.erase(value);
+}
+
+static void moveTensorStorage(Value* from, Value* to){
+    auto found = heapTensorStorage.find(from);
+    if(found == heapTensorStorage.end()) return;
+    heapTensorStorage[to] = found->second;
+    heapTensorStorage.erase(found);
+}
+
+static void copyTensor(GenIR *gen, Value* target, Value* source, ArrayType* type){
+    Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *>(source->type_)->contained_);
+    Value *targetData = tensorData(gen, target, elementType);
+    Value *sourceData = tensorData(gen, source, elementType);
+    Value *count = type ? (Value *) new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)) : tensorElementCount(gen, source);
+    Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
+    BasicBlock *cond = createNamedBB(gen->module.get(), currentFunction, "tensor.copy.cond");
+    BasicBlock *body = createNamedBB(gen->module.get(), currentFunction, "tensor.copy.body");
+    BasicBlock *end = createNamedBB(gen->module.get(), currentFunction, "tensor.copy.end");
+    gen->builder->create_br(cond);
+    gen->builder->BB_ = cond;
+    Value *index = gen->builder->create_load(indexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(index, count), body, end);
+    gen->builder->BB_ = body;
+    index = gen->builder->create_load(indexSlot);
+    Value *value = gen->builder->create_load(gen->builder->create_gep(sourceData, {index}));
+    gen->builder->create_store(value, gen->builder->create_gep(targetData, {index}));
+    index = gen->builder->create_iadd(index, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(index, indexSlot);
+    gen->builder->create_br(cond);
+    gen->builder->BB_ = end;
+}
+
+static Value* lowerTensorElement(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op, Type *type){
+    if(type == gen->module->int32_ty_){
+        if(op == BinaryOp::Add) return gen->builder->create_iadd(lhs, rhs);
+        if(op == BinaryOp::Subtract) return gen->builder->create_isub(lhs, rhs);
+        if(op == BinaryOp::Multiply) return gen->builder->create_imul(lhs, rhs);
+        if(op == BinaryOp::Divide) return gen->builder->create_isdiv(lhs, rhs);
+        return gen->builder->create_isrem(lhs, rhs);
+    }
+    if(op == BinaryOp::Add) return gen->builder->create_fadd(lhs, rhs);
+    if(op == BinaryOp::Subtract) return gen->builder->create_fsub(lhs, rhs);
+    if(op == BinaryOp::Multiply) return gen->builder->create_fmul(lhs, rhs);
+    return gen->builder->create_fdiv(lhs, rhs);
+}
+
+static Value* lowerTensorBinary(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op){
+    bool lhsTensor = lhs->hasSemFlag(SemFlag::SrcTensor);
+    bool rhsTensor = rhs->hasSemFlag(SemFlag::SrcTensor);
+    Value *model = lhsTensor ? lhs : rhs;
+    ArrayType *type = expectedTensorType;
+    if(!type && lhsTensor) type = staticTensorType(lhs);
+    if(!type && rhsTensor) type = staticTensorType(rhs);
+    Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *>(model->type_)->contained_);
+    Value *count = type ? (Value *)new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)) : tensorElementCount(gen, model);
+    Value *result;
+    if(type){
+        result = gen->builder->create_alloca(type);
+        result->setSemFlag(SemFlag::SrcTensor);
+    }
+    else {
+        result = createDynamicTensor(gen, model, count);
+    }
+    Value *resultData = tensorData(gen, result, elementType);
+    Value *lhsData = lhsTensor ? tensorData(gen, lhs, elementType): nullptr;
+    Value *rhsData = rhsTensor ? tensorData(gen, rhs, elementType): nullptr;
+    Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
+    BasicBlock *cond = createNamedBB(gen->module.get(), currentFunction, "tensor.op.cond");
+    BasicBlock *body = createNamedBB(gen->module.get(), currentFunction, "tensor.op.body");
+    BasicBlock *end = createNamedBB(gen->module.get(), currentFunction, "tensor.op.end");
+    gen->builder->create_br(cond);
+    gen->builder->BB_ = cond;
+    Value *index = gen->builder->create_load(indexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(index, count), body, end);
+    gen->builder->BB_ = body;
+    index = gen->builder->create_load(indexSlot);
+    Value *left = lhsData ? (Value *)gen->builder->create_load(gen->builder->create_gep(lhsData, {index})) : lhs;
+    Value *right = rhsData ? (Value *)gen->builder->create_load(gen->builder->create_gep(rhsData, {index})) : rhs;
+    Value *value = lowerTensorElement(gen, left, right, op, elementType);
+    gen->builder->create_store(value, gen->builder->create_gep(resultData, {index}));
+    index = gen->builder->create_iadd(index, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(index, indexSlot);
+    gen->builder->create_br(cond);
+    gen->builder->BB_ = end;
+    releaseTensor(gen, lhs);
+    releaseTensor(gen, rhs);
+    return result;
+}
+
+static bool containsTensorValue(GenIR *gen, ExprAST *expression)
+{
+    if(auto *lvalue = dynamic_cast<LValueAST*>(expression)){
+        Value *value = gen->scope.find(lvalue->name);
+        return lvalue->indices.empty() && value && value->hasSemFlag(SemFlag::SrcTensor);
+    }
+    if(auto *call = dynamic_cast<CallExprAST*>(expression)){
+        auto *function = dynamic_cast<Function*>(gen->scope.find(call->callee));
+        auto info = functionLoweringInfo.find(function);
+        return info != functionLoweringInfo.end() && info->second.tensorReturn;
+    }
+    if(auto *unary = dynamic_cast<UnaryExprAST*>(expression))
+        return containsTensorValue(gen,unary->operand.get());
+    if(auto *binary = dynamic_cast<BinaryExprAST*>(expression))
+        return containsTensorValue(gen,binary->left.get()) || containsTensorValue(gen,binary->right.get());
+    return false;
+
+}
+
+static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
+    ArrayType *leftType = tensorType(lhs);
+    ArrayType *rightType = tensorType(rhs);
+    ArrayType *leftRowType = dynamic_cast<ArrayType *>(leftType->contained_);
+    ArrayType *rightRowType = dynamic_cast<ArrayType *>(rightType->contained_);
+    ArrayType *resultType = expectedTensorType;
+    Value *rows = resultType ? (Value *)new ConstantInt(gen->module->int32_ty_, resultType->num_elements_) : tensorFirstDimension(gen, lhs);
+    unsigned common = leftRowType ? leftRowType->num_elements_ : leftType->num_elements_;
+    unsigned columns;
+    Type *elementType;
+    if(resultType){
+        auto *resultRowType = static_cast<ArrayType *>(resultType->contained_);
+        columns = resultRowType->num_elements_;
+        elementType = resultRowType->contained_;
+    }else{
+        columns = rightRowType ? rightRowType -> num_elements_ : rightType -> num_elements_;
+        elementType = leftRowType ? leftRowType -> contained_ : leftType -> contained_;
+        auto *constantRows = dynamic_cast<ConstantInt *> (rows);
+        if(constantRows){
+            ArrayType *resultRowType = gen->module->get_array_type(elementType, columns);
+            resultType = gen->module->get_array_type(resultRowType, constantRows->value_);
+        }
+    }
+    Value * resultCount = gen->builder->create_imul(rows, new ConstantInt(gen->module->int32_ty_, columns));
+    Value * result;
+    if(resultType){
+        result = gen->builder->create_alloca(resultType);
+        result->setSemFlag(SemFlag::SrcTensor);
+    }else{
+        ArrayType * rowType = rightRowType ? rightRowType: rightType;
+        result = createDynamicTensor(gen, lhs, resultCount, gen->module->get_pointer_type(rowType));
+        tensorFirstDimensions[result] = rows;
+    }
+    Value *leftData = tensorData(gen, lhs, elementType);
+    Value *rightData = tensorData(gen, rhs, elementType);
+    Value *resultData = tensorData(gen, result, elementType);
+    Value *rowIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    Value *columnIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    Value *commonIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    Value *sumSlot = gen->builder->create_alloca(elementType);
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), rowIndexSlot);
+    BasicBlock *rowCond = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.row.cond");
+    BasicBlock *rowBody = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.row.body");
+    BasicBlock *rowEnd = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.row.end");
+    BasicBlock *columnCond = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.column.cond");
+    BasicBlock *columnBody = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.column.body");
+    BasicBlock *commonCond = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.common.cond");
+    BasicBlock *commonBody = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.common.body");
+    BasicBlock *commonEnd = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.common.end");
+    BasicBlock *end = createNamedBB(gen->module.get(), currentFunction, "tensor.matmul.end");
+    gen->builder->create_br(rowCond);
+    gen->builder->BB_ = rowCond;
+    Value *rowIndex = gen->builder->create_load(rowIndexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(rowIndex, rows), rowBody, end);
+    gen->builder->BB_ = rowBody;
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), columnIndexSlot);
+
+    gen->builder->create_br(columnCond);
+    gen->builder->BB_ = columnCond;
+    Value *columnIndex = gen->builder->create_load(columnIndexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(columnIndex, new ConstantInt(gen->module->int32_ty_, columns)), columnBody, rowEnd);
+    gen->builder->BB_ = columnBody;
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), commonIndexSlot);
+    gen->builder->create_store(zeroScalar(gen->module.get(), elementType), sumSlot);
+
+    gen->builder->BB_ = commonCond;
+    Value *commonIndex = gen->builder->create_load(commonIndexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(commonIndex, new ConstantInt(gen->module->int32_ty_, common)), commonBody, commonEnd);
+    gen->builder->BB_ = commonBody;
+    rowIndex = gen->builder->create_load(rowIndexSlot);
+    columnIndex = gen->builder->create_load(columnIndexSlot);
+    commonIndex = gen->builder->create_load(commonIndexSlot);
+    Value* leftIndex = gen->builder->create_iadd(gen->builder->create_imul(rowIndex, new ConstantInt(gen->module->int32_ty_, common)), commonIndex);
+    Value* rightIndex = gen->builder->create_iadd(gen->builder->create_imul(commonIndex, new ConstantInt(gen->module->int32_ty_, columns)), columnIndex);
+    Value* left = gen->builder->create_load(gen->builder->create_gep(leftData, {leftIndex}));
+    Value* right = gen->builder->create_load(gen->builder->create_gep(rightData, {rightIndex}));
+    Value* product = elementType == gen->module->int32_ty_ ? (Value*) gen->builder->create_imul(left, right) : (Value*) gen->builder->create_fmul(left, right);
+    Value* sum = gen->builder->create_load(sumSlot);
+    sum = elementType == gen->module->int32_ty_ ? (Value*) gen->builder->create_iadd(sum, product) : (Value*) gen->builder->create_fadd(sum, product);
+    gen->builder->create_store(sum, sumSlot);
+    
+    commonIndex = gen->builder->create_iadd(commonIndex, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(commonIndex, commonIndexSlot);
+    gen->builder->create_br(commonCond);
+    gen->builder->BB_ = commonEnd;
+    
+    rowIndex = gen->builder->create_load(rowIndexSlot);
+    columnIndex = gen->builder->create_load(columnIndexSlot);
+    Value *resultIndex = gen->builder->create_iadd(gen->builder->create_imul(rowIndex, new ConstantInt(gen->module->int32_ty_, columns)), columnIndex);
+    gen->builder->create_store(gen->builder->create_load(sumSlot), gen->builder->create_gep(resultData, {resultIndex}));
+    
+    columnIndex = gen->builder->create_iadd(columnIndex, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(columnIndex, columnIndexSlot);
+    gen->builder->create_br(columnCond);
+    gen->builder->BB_ = rowEnd;
+    rowIndex = gen->builder->create_load(rowIndexSlot);
+    rowIndex = gen->builder->create_iadd(rowIndex, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(rowIndex, rowIndexSlot);
+    gen->builder->create_br(rowCond);
+    gen->builder->BB_ = end;
+
+    releaseTensor(gen, lhs);
+    releaseTensor(gen, rhs);
+    return result;
+}
+
+static bool containsCall(ExprAST *expression)
+{
+    if(dynamic_cast<CallExprAST *>(expression)) return true;
+    if(auto *unary = dynamic_cast<UnaryExprAST*>(expression))
+        return containsCall(unary->operand.get());
+    if(auto *binary = dynamic_cast<BinaryExprAST*>(expression))
+        return containsCall(binary->left.get()) || containsCall(binary->right.get());
+    if(auto *subscript = dynamic_cast<SubscriptExprAST*>(expression))
+        return containsCall(subscript->base.get()) || (subscript->index.get());
+    if(auto *lvalue = dynamic_cast<LValueAST*>(expression)){
+        for(auto &index: lvalue->indices)
+            if(containsCall(index.get()))
+                return true;
+    }
+    return false;
+}
+
+// 529
+struct TensorExpression {
+    enum Kind { Leaf, Unary, Binary} kind;
+    Value *value = nullptr;
+    bool tensor = false;
+    UnaryOp unaryOp = UnaryOp::Plus;
+    BinaryOp binaryOp = BinaryOp::Add;
+    std::unique_ptr<TensorExpression> left;
+    std::unique_ptr<TensorExpression> right;
+
+    TensorExpression(Value *value, bool tensor):kind(Leaf),value(value),tensor(tensor) {}
+    TensorExpression(UnaryOp op, std::unique_ptr<TensorExpression> operand): kind(Unary), unaryOp(op), left (std::move(operand)) {}
+    TensorExpression(BinaryOp op, std::unique_ptr<TensorExpression> lhs, std::unique_ptr<TensorExpression> rhs): kind(Binary), binaryOp(op), left(std::move(lhs)), right(std::move(rhs)) {}
+};
+
+// 548
+static bool isTensorElementwise(BinaryOp op){
+    return op == BinaryOp::Add || op == BinaryOp::Subtract ||
+           op == BinaryOp::Multiply || op == BinaryOp::Divide ||
+           op == BinaryOp::Remainder;
+}
+
+
+// 620
+static Value *tensorExpressionModel(TensorExpression *expression){
+    if(expression -> kind == TensorExpression::Leaf)
+        return expression->tensor ? expression -> value : nullptr;
+
+    Value *model = tensorExpressionModel(expression -> left.get());
+    if(!model && expression -> right)
+        model = tensorExpressionModel(expression -> right.get());
+    return model;
+}
+
+static std::unique_ptr<TensorExpression> buildTensorExpression(GenIR *gen, ExprAST *expression)
+{
+    if(containsTensorValue(gen, expression)){
+        if(auto *unary = dynamic_cast<UnaryExprAST*>(expression)){
+            if(unary->op == UnaryOp::Plus || unary->op == UnaryOp::Minus)
+                return std::unique_ptr<TensorExpression>(new TensorExpression(unary->op, buildTensorExpression(gen,unary->operand.get())));
+        }
+        if(auto *binary = dynamic_cast<BinaryExprAST*>(expression)){
+            if(isTensorElementwise(binary->op)){
+                std::unique_ptr<TensorExpression>left = buildTensorExpression(gen, binary->left.get());
+                std::unique_ptr<TensorExpression>right = buildTensorExpression(gen, binary->right.get());
+                return std::unique_ptr<TensorExpression>(new TensorExpression(binary->op, std::move(left), std::move(right)));
+            }
+        }
+    }
+    Value *savedTarget = expectedTensorTarget;
+    expectedTensorTarget = nullptr;
+    expression->accept(*gen);
+    expectedTensorTarget = savedTarget;
+    return std::unique_ptr<TensorExpression>(new TensorExpression(recentVal, recentVal->hasSemFlag(SemFlag::SrcTensor)));
+}
+
+
+
+static Value* emitTensorExpression(GenIR *gen, TensorExpression *expression, Value *index, Type *elementType){
+    if(expression->kind == TensorExpression::Leaf){
+        if(!expression ->tensor) return expression ->value;
+        Value *data = tensorData(gen, expression->value, elementType);
+        return gen->builder->create_load(gen->builder->create_gep(data, {index}));
+    }
+    Value *left = emitTensorExpression(gen, expression->left.get(), index, elementType);
+    if(expression->kind == TensorExpression::Unary){
+        if(expression -> unaryOp == UnaryOp::Plus) return left;
+        return lowerTensorElement(gen, zeroScalar(gen->module.get(), elementType), left, BinaryOp::Subtract, elementType);
+    }
+    Value *right = emitTensorExpression(gen, expression->right.get(), index, elementType);
+        return lowerTensorElement(gen, left, right, expression->binaryOp, elementType);
+}
+
+static void releaseTensorExpression(GenIR *gen, TensorExpression *expression){
+    if(expression -> kind == TensorExpression::Leaf){
+        if(expression -> tensor) releaseTensor(gen, expression->value);
+        return;
+    }
+    releaseTensorExpression(gen, expression->left.get());
+    if(expression->right) releaseTensorExpression(gen, expression->right.get());
+}
+
+static Value *lowerFusedTensorExpression(GenIR *gen, ExprAST *expression){
+    std::unique_ptr<TensorExpression> tree = buildTensorExpression(gen, expression);
+    Value *model = tensorExpressionModel(tree.get());
+    ArrayType *type = expectedTensorType;
+    if(!type) type = staticTensorType(model);
+    Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *> (model -> type_) -> contained_);
+    Value * count = type ? (Value *) new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)):tensorElementCount(gen, model);
+    Value *result = expectedTensorTarget;
+    if(!result && type) {
+        result = gen->builder->create_alloca(type);
+        result->setSemFlag(SemFlag::SrcTensor);
+    }
+    else if(!result){
+        result = createDynamicTensor(gen, model, count);
+    }
+    Value *resultData = tensorData(gen, result, elementType);
+    Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
+    gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
+    BasicBlock * cond = createNamedBB(gen->module.get(), currentFunction, "tensor.fused.cond");
+    BasicBlock * body = createNamedBB(gen->module.get(), currentFunction, "tensor.fused.body");
+    BasicBlock * end = createNamedBB(gen->module.get(), currentFunction, "tensor.fused.end");
+    gen->builder->create_br(cond);
+    gen->builder->BB_= cond;
+    Value *index = gen->builder->create_load(indexSlot);
+    gen->builder->create_cond_br(gen->builder->create_icmp_lt(index, count), body, end);
+    gen->builder->BB_ = body;
+    index = gen->builder->create_load(indexSlot);
+    Value *value = emitTensorExpression(gen, tree.get(), index, elementType);
+    gen->builder->create_store(value, gen->builder->create_gep(resultData, {index}));
+    index = gen->builder->create_iadd(index, new ConstantInt(gen->module->int32_ty_, 1));
+    gen->builder->create_store(index, indexSlot);
+    gen->builder->create_br(cond);
+    gen->builder->BB_ = end;
+    releaseTensorExpression(gen, tree.get());
+    return result;
+}
+
 static std::unordered_map<Function *, ScalarizedFunctionInfo>
     scalarizedFunctionInfo;
 static std::vector<ScalarizedVectorType *> pendingScalarizedParameters;
@@ -69,9 +518,8 @@ public:
     std::vector<Value *> lanes_;
 };
 
-static ArrayType* tensorType(Value* val){
-    return dynamic_cast<ArrayType*>(static_cast<PointerType*>(val->type_)->contained_);
-}
+
+
 static Type *scalarType(Module *module, TYPE element) {
     return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
 }
@@ -113,11 +561,6 @@ static bool isIntegerValueType(Type *type) {
     return vector && vector->contained_->tid_ == Type::IntegerTyID;
 }
 
-static Constant *zeroScalar(Module *module, Type *type) {
-    if (type == module->float32_ty_)
-        return new ConstantFloat(module->float32_ty_, 0.0f);
-    return new ConstantInt(module->int32_ty_, 0);
-}
 
 static Value *coerceScalar(IRStmtBuilder *builder, Module *module, Value *value,
                            Type *target) {
@@ -901,6 +1344,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 auto init = new ConstantZero(arrayTys[0]);
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
+                if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             } else {
                 useConst = true; //全局数组量的初始值必为常量
@@ -909,6 +1353,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 useConst = false;
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
+                if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             }
         }
@@ -989,7 +1434,22 @@ void GenIR::visit(ObjectDefAST &ast) {
         // 源级 const 数组：内容初始化后不再改写，打上不变性标记供后续优化消费。
         if (isConst)
             arrayAlloc->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
+        if (curSourceType.isTensor()) arrayAlloc->setSemFlag(SemFlag::SrcTensor);
         scope.push(varName, arrayAlloc);
+        if (curSourceType.isTensor() && ast.initializer != nullptr && ast.initializer->isExpression()){
+            ArrayType* savedExpected = expectedTensorType;
+            Value *savedTarget = expectedTensorTarget;
+            expectedTensorType = arrayTy;
+            expectedTensorTarget = arrayAlloc;
+            ast.initializer->expression()->accept(*this);
+            expectedTensorType = savedExpected;
+            expectedTensorTarget = savedTarget;
+            if(recentVal != arrayAlloc){
+                copyTensor(this, arrayAlloc, recentVal, arrayTy);
+                releaseTensor(this, recentVal);
+            }
+            return;
+        }
         if (ast.initializer == nullptr) { //无初始化
             if (isConst) cout << "no initVal when define const!" << endl;   //无初始化局部常量报错
             return; //无初始化变量数组无需再做处理
@@ -1041,7 +1501,7 @@ void GenIR::visit(ObjectDefAST &ast) {
             idxs[i] = CONST_INT(0);
         }
         Value* ptr = builder->create_gep(arrayAlloc, idxs); //获取数组开头地址
-        localInit(ptr, ast.initializer->elements(), dimensionsCnt, 1);
+        localInit(ptr, ast.initializer->elements(), dimensionsCnt, 0);
     }
 }
 
@@ -1127,7 +1587,7 @@ ConstantArray* GenIR::globalInit(vector<int> &dimensions, vector<ArrayType*> &ar
 
 //根据初始化的量决定嵌套数组的维度
 int GenIR::getNextDim(vector<int> &dimensionsCnt, int up, int cnt) {
-    for (int i = up; i < dimensionsCnt.size(); i++) {
+    for (int i = up + 1; i < dimensionsCnt.size(); i++) {
         if (cnt % dimensionsCnt[i] == 0) return i;
     }
     return 0;
@@ -1167,12 +1627,20 @@ void GenIR::visit(FuncDefAST &ast) {
     params.clear();
     paramNames.clear();
     pendingScalarizedParameters.clear();
+    pendingTensorParameters.clear();
+    currentTensorReturn = ast.returnType.isTensor();
+    tensorReturnPointer = nullptr;
     currentScalarizedReturnType = nullptr;
     scalarizedReturnPointer = nullptr;
     Type *retType;
     if (ast.returnType.isDynamicVector()) {
         std::cerr << "dynamic vectors are non-owning views and cannot be returned by value\n";
         std::exit(1);
+    }else if(currentTensorReturn){
+        retType = VOID_T;
+        params.push_back(module->get_pointer_type(scalarType(module.get(), ast.returnType.element)));
+        paramNames.push_back("$tensor.return");
+        pendingScalarizedParameters.push_back(nullptr);
     } else if (ast.returnType == TYPE_VOID) {
         retType = VOID_T;
     } else {
@@ -1195,13 +1663,16 @@ void GenIR::visit(FuncDefAST &ast) {
     auto funTy = new FunctionType(retType, params);
     auto func = new Function(funTy, ast.name, module.get());
     currentFunction = func;
-    ScalarizedFunctionInfo info;
+    FunctionLoweringInfo info;
     info.returnType = currentScalarizedReturnType;
-    unsigned hiddenParameters = currentScalarizedReturnType ? 1U : 0U;
-    info.valueParameters.assign(
-        pendingScalarizedParameters.begin() + hiddenParameters,
-        pendingScalarizedParameters.end());
-    scalarizedFunctionInfo[func] = std::move(info);
+    info.tensorReturn = currentTensorReturn;
+    for(auto &p: ast.parameters)
+        info.tensorParameters.push_back(p->type.isTensor());
+    unsigned hiddenParameters = currentScalarizedReturnType || currentTensorReturn ? 1U : 0U;
+    // info.valueParameters.assign(
+    //     pendingScalarizedParameters.begin() + hiddenParameters,
+    //     pendingScalarizedParameters.end());
+    functionLoweringInfo[func] = std::move(info);
     scope.push(ast.name, func);
     scope.enter();
 
@@ -1214,6 +1685,10 @@ void GenIR::visit(FuncDefAST &ast) {
 
     // 标量和原生向量形参保存在局部槽中；展开向量先复制各 lane，保持按值语义。
     for (int i = 0; i < (int)paramNames.size(); i++) {
+        if(currentTensorReturn && i == 0){
+            tensorReturnPointer = args[i];
+            continue;
+        }
         if (currentScalarizedReturnType && i == 0) {
             scalarizedReturnPointer = args[i];
             Value *zero = zeroScalar(module.get(),
@@ -1239,6 +1714,10 @@ void GenIR::visit(FuncDefAST &ast) {
         }
         auto *alloc = builder->create_alloca(params[i]);
         alloc->name_ = paramNames[i];
+        if(pendingTensorParameters.find(paramNames[i])!=pendingTensorParameters.end()){
+            alloc->setSemFlag(SemFlag::SrcTensor);
+            tensorFirstDimensions[alloc] = args[i + 1];
+        }
         scope.push(paramNames[i], alloc);
         builder->create_store(args[i], alloc);
     }
@@ -1275,6 +1754,8 @@ void GenIR::visit(FuncDefAST &ast) {
     retAlloca = nullptr;
     currentScalarizedReturnType = nullptr;
     scalarizedReturnPointer = nullptr;
+    currentTensorReturn = false;
+    tensorReturnPointer = nullptr;
 }
 
 void GenIR::visit(FuncParamAST &ast) {
@@ -1309,6 +1790,12 @@ void GenIR::visit(FuncParamAST &ast) {
     params.push_back(paramType);
     paramNames.push_back(ast.name);
     pendingScalarizedParameters.push_back(scalarizedValueParameter);
+    if(ast.type.isTensor()){
+        pendingTensorParameters.insert(ast.name);
+        params.push_back(INT32_T);
+        paramNames.push_back("$" + ast.name + ".dim0");
+        pendingScalarizedParameters.push_back(nullptr);
+    }
 }
 
 void GenIR::visit(BlockAST &ast) {
@@ -1826,7 +2313,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     }
     val[1] = recentVal;
     if(ast.op == BinaryOp::Matmul){
-        recentVal = lowerTensorMatmul(this, val[0], val[1]);
+        recentVal = lowerTensorMatMul(this, val[0], val[1]);
         return;
     }
 
@@ -1944,7 +2431,7 @@ void GenIR::visit(UnaryExprAST &ast) {
         if(ast.op == UnaryOp::Minus){
             ArrayType* type =expectedVectorType ? expectedTensorType : tensorType(recentVal);
             Value* zero = zeroScalar(module.get(),tensorElementType(type));
-            recentVal = lowerTensorBinar(this, zero, recentVal, BinaryOp::Subtract);
+            recentVal = lowerTensorBinary(this, zero, recentVal, BinaryOp::Subtract);
         }
         return;
     }
@@ -2031,7 +2518,7 @@ void GenIR::visit(SubscriptExprAST &ast) {
         }
         // not found
         Value* element = builder->create_gep(base, {CONST_INT(0), recentVal});
-        if(type->contained_ == Type::ArrayTyID){
+        if(type->contained_->tid_ == Type::ArrayTyID){
             element->setSemFlag(SemFlag::SrcTensor);
             moveTensorStorage(base, element);
             recentVal = element;
@@ -2252,12 +2739,12 @@ void GenIR::visit(LValueAST &ast) {
     }
     // 不是常量那么var一定是指针类型
     Type* varType = static_cast<PointerType*>(var->type_)->contained_; //所指的类型
-    if(var->hasSemFlag(SemFlag::SrcTensor) && ast.indicies.empty()){
+    if(var->hasSemFlag(SemFlag::SrcTensor) && ast.indices.empty()){
         recentVal = varType->tid_ == Type::PointerTyID ? (Value *)builder->create_load(var) : var;
         recentVal->setSemFlag(SemFlag::SrcTensor);
         auto dimension = tensorFirstDimensions.find(var);
         if(dimension != tensorFirstDimensions.end()){
-            tensorFirstDimensions[recentVal] = dimension.second();
+            tensorFirstDimensions[recentVal] = dimension->second;
         }
         return;
     }
@@ -2467,21 +2954,33 @@ void GenIR::visit(CallExprAST &ast) {
     }
     is_single_exp = false;
     vector<Value *> args;
-    auto infoIt = scalarizedFunctionInfo.find(fun);
-    ScalarizedFunctionInfo *info =
-        infoIt == scalarizedFunctionInfo.end() ? nullptr : &infoIt->second;
+    vector<Value *> tensorArgumentsToRelease;
+    auto *functionType = static_cast<FunctionType *>(fun->type_);
+    auto infoIt = functionLoweringInfo.find(fun);
+    FunctionLoweringInfo *info = infoIt == functionLoweringInfo.end() ? nullptr : &infoIt -> second;
+    Value *tensorResultSlot = nullptr;
     Value *scalarizedResultSlot = nullptr;
     unsigned argumentOffset = 0;
     if (info && info->returnType) {
         scalarizedResultSlot = builder->create_alloca(info->returnType);
         args.push_back(scalarizedResultSlot);
         argumentOffset = 1;
+    }else if(info && info->tensorReturn){
+        ArrayType *type = info ->tensorReturnType ? info -> tensorReturnType : expectedTensorType;
+        tensorResultSlot = expectedTensorTarget ? expectedTensorTarget : (Value *)builder->create_alloca(type);
+        tensorResultSlot->setSemFlag(SemFlag::SrcTensor);
+        Type *elementType = static_cast<PointerType *>(functionType->args_[0])->contained_;
+        args.push_back(tensorData(this, tensorResultSlot, elementType));
+        argumentOffset = 1;
     }
-    auto *functionType = static_cast<FunctionType *>(fun->type_);
     const unsigned fixedArgumentCount = functionType->args_.size();
+    unsigned fixedIndex = argumentOffset;
+    ArrayType *savedTensorExpected = expectedTensorType;
+    Value *savedTensorTarget = expectedTensorTarget;
+    expectedTensorType = nullptr;
+    expectedTensorTarget = nullptr;
     for (int i = 0; i < ast.arguments.size(); i++) {
         auto &argument = ast.arguments[i];
-        const unsigned fixedIndex = static_cast<unsigned>(i) + argumentOffset;
         if (const auto *text = std::get_if<std::string>(&argument)) {
             if (fixedIndex >= fixedArgumentCount ||
                 functionType->args_[fixedIndex]->tid_ != Type::PointerTyID ||
@@ -2491,15 +2990,15 @@ void GenIR::visit(CallExprAST &ast) {
                 std::exit(1);
             }
             args.push_back(lowerRuntimeString(this, *text));
+            ++fixedIndex;
             continue;
         }
         VectorType *savedExpected = expectedVectorType;
         ScalarizedVectorType *savedScalarizedExpected =
             expectedScalarizedVectorType;
-        ScalarizedVectorType *scalarizedParameter =
-            info && static_cast<unsigned>(i) < info->valueParameters.size()
-                ? info->valueParameters[i] : nullptr;
-        expectedScalarizedVectorType = scalarizedParameter;
+        // ScalarizedVectorType *scalarizedParameter = info && static_cast<unsigned>(i) < info->valueParameters.size() ? info->valueParameters[i] : nullptr;
+        bool tensorParameter = info && static_cast<unsigned>(i) < info -> tensorParameters.size() && info -> tensorParameters[i];
+        // expectedScalarizedVectorType = scalarizedParameter;
         Type *fixedParameterType =
             fixedIndex < fixedArgumentCount
                 ? functionType->args_[fixedIndex]
@@ -2508,12 +3007,20 @@ void GenIR::visit(CallExprAST &ast) {
         std::get<std::unique_ptr<ExprAST>>(argument)->accept(*this);
         expectedVectorType = savedExpected;
         expectedScalarizedVectorType = savedScalarizedExpected;
-        if (scalarizedParameter) {
-            auto *value = asScalarizedVector(recentVal);
-            auto *slot = builder->create_alloca(scalarizedParameter);
-            storeScalarizedVector(this, slot, value, scalarizedParameter);
-            args.push_back(slot);
-            continue;
+        if (heapTensorStorage.find(recentVal) != heapTensorStorage.end()) 
+            tensorArgumentsToRelease.push_back(recentVal);
+        // if (scalarizedParameter) {
+        //     auto *value = asScalarizedVector(recentVal);
+        //     auto *slot = builder->create_alloca(scalarizedParameter);
+        //     storeScalarizedVector(this, slot, value, scalarizedParameter);
+        //     args.push_back(slot);
+        //     ++fixedIndex;
+        //     continue;
+        // }
+        Value *firstDim = tensorParameter ? tensorFirstDimension(this, recentVal) : nullptr;
+        if(fixedParameterType && fixedParameterType->tid_ == Type::PointerTyID && recentVal ->type_->tid_==Type::PointerTyID && recentVal -> type_ != fixedParameterType && recentVal ->hasSemFlag(SemFlag::SrcTensor)){
+            recentVal = builder->create_bitcast(recentVal, fixedParameterType);
+            recentVal->setSemFlag(SemFlag::SrcTensor);
         }
         //检查函数形参与实参类型是否匹配
         if (fixedParameterType && recentVal->type_ == INT32_T &&
@@ -2524,14 +3031,23 @@ void GenIR::visit(CallExprAST &ast) {
             recentVal = builder->create_fptosi(recentVal, INT32_T);
         }
         args.push_back(recentVal);
-    }
+        ++fixedIndex;
+        if(tensorParameter){
+            args.push_back(firstDim);
+            ++fixedIndex;
+        }
+    }   
+    expectedTensorType = savedTensorExpected;
+    expectedTensorTarget = savedTensorTarget;
     // starttime/stoptime 在源码中无实参，但运行时函数需要一个行号参数
     if (ast.arguments.empty() &&
         (ast.callee == "_sysy_starttime" || ast.callee == "_sysy_stoptime")) {
         args.push_back(new ConstantInt(INT32_T, ast.line));
     }
     recentVal = builder->create_call(fun, args);
-    if (info && info->returnType)
+    for(auto *arg : tensorArgumentsToRelease) releaseTensor(this, arg);
+    if(tensorResultSlot) recentVal = tensorResultSlot;
+    else if(info && info -> returnType)
         recentVal = loadScalarizedVector(this, scalarizedResultSlot,
                                          info->returnType);
 }
