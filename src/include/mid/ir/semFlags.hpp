@@ -36,7 +36,7 @@ enum class SemFlag : uint32_t {
         // BasicBlock：标量展开后、依赖已由 scratch 分离的计算循环
     WavefrontCoincident = 1u << 17,
         // BasicBlock：wavefront 调度已证明该循环维度内不存在跨迭代依赖
-    SrcTensor = 1u << 18,
+    SrcTensor = 1u << 18, // Value：源级 tensor；IR 仍用数组/指针表示，需走 tensor lowering
 };
 
 // 合并两个独立语义位，允许一次向 Value::setSemFlag 传入多个标记。

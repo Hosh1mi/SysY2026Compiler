@@ -24,6 +24,7 @@ long long typeStorageBytes(Type *type) {
     } else if (auto *vector = dynamic_cast<VectorType *>(type)) {
         elementType = vector->contained_;
         elementCount = vector->num_elements_;
+    // 独立 TensorType 尚未启用；当前 tensor 复用 ArrayType，已由上面的分支计算布局。
     // } else if (auto *tensor = dynamic_cast<TensorType *>(type)){
     //     elementType = tensor->contained_;
     //     elementCount = tensor->num_elements_;

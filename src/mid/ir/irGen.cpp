@@ -20,10 +20,10 @@ using std::vector;
 #define INT32PTR_T (module->get_pointer_type(module->int32_ty_))
 #define FLOATPTR_T (module->get_pointer_type(module->float32_ty_))
 
-ArrayType* expectedTensorType = nullptr;
-Value* expectedTensorTarget = nullptr;
-bool currentTensorReturn = false;
-Value* tensorReturnPointer = nullptr;
+ArrayType* expectedTensorType = nullptr; // 上下文给出的静态结果形状
+Value* expectedTensorTarget = nullptr;   // 可供表达式直接写入的目标存储
+bool currentTensorReturn = false;        // 当前函数是否采用 tensor 隐式返回参数
+Value* tensorReturnPointer = nullptr;    // 调用者传入的 tensor 返回缓冲区
 Type* curType;                          // 当前 decl 类型
 TypeSpec curSourceType;                 // 当前 decl 的源级向量形态
 bool isConst;                           // 当前 decl 是否是 const
@@ -55,26 +55,29 @@ struct ScalarizedFunctionInfo {
 };
 
 struct FunctionLoweringInfo {
-    ScalarizedVectorType* returnType = nullptr;
-    bool tensorReturn = false;
-    ArrayType* tensorReturnType = nullptr;
+    ScalarizedVectorType* returnType = nullptr; // 展开向量的返回形状
+    bool tensorReturn = false;                  // 是否通过隐藏指针返回 tensor
+    ArrayType* tensorReturnType = nullptr;      // 已推导出的静态 tensor 返回形状
     vector<ScalarizedVectorType *> valueParameters;
-    vector<bool> tensorParameters;
+    vector<bool> tensorParameters;              // 与源级形参一一对应
 };
 
+// 保存函数 ABI 扩展信息，以及动态 tensor 的形状和堆存储所有权。
 static std::unordered_map<Function *, FunctionLoweringInfo>
     functionLoweringInfo;
 static std::unordered_set<std::string> pendingTensorParameters;
-static std::unordered_map<Value*, Value*> tensorFirstDimensions;
-static std::unordered_map<Value*, Value*> heapTensorStorage;
+static std::unordered_map<Value*, Value*> tensorFirstDimensions; // Value -> 运行时首维
+static std::unordered_map<Value*, Value*> heapTensorStorage;     // tensor/view -> malloc 原始指针
 static Function* tensorMalloc = nullptr;
 static Function* tensorFree = nullptr;
 static BasicBlock* createNamedBB(Module* m, Function* func, const std::string &base);
 
+// 功能：从 tensor 指针的 pointee 中取得当前仍然静态可见的数组尾部类型。
 static ArrayType* tensorType(Value *val){
     return dynamic_cast<ArrayType *>(static_cast<PointerType *>(val->type_)->contained_);
 }
 
+// 功能：仅为所有维度都静态的 tensor 返回完整数组类型；动态首维返回 nullptr。
 static ArrayType* staticTensorType(Value *val){
     if(tensorFirstDimensions.find(val) != tensorFirstDimensions.end()){
         return nullptr;
@@ -82,6 +85,7 @@ static ArrayType* staticTensorType(Value *val){
     return tensorType(val);
 }
 
+// 功能：剥离全部数组维度，得到 tensor 的 i32 或 float 标量元素类型。
 static Type* tensorElementType(Type *type){
     while(type->tid_==Type::ArrayTyID){
         type = static_cast<ArrayType *>(type)->contained_;
@@ -89,6 +93,7 @@ static Type* tensorElementType(Type *type){
     return type;
 }
 
+// 功能：计算静态 tensor 形状中各维长度的乘积。
 static unsigned tensorElementCount(ArrayType *type){
     unsigned count = 1;
     Type *current = type;
@@ -100,6 +105,7 @@ static unsigned tensorElementCount(ArrayType *type){
     return count;
 }
 
+// 功能：生成 tensor 的总元素数；动态首维与静态尾部长度在 IR 中相乘。
 static Value* tensorElementCount(GenIR *gen, Value *value){
     auto found = tensorFirstDimensions.find(value);
     if(found == tensorFirstDimensions.end()) 
@@ -111,6 +117,7 @@ static Value* tensorElementCount(GenIR *gen, Value *value){
     return gen->builder->create_imul(found->second, new ConstantInt(gen->module->int32_ty_, cnt));
 }
 
+// 功能：优先返回记录的运行时首维，否则使用静态数组的最外层长度。
 static Value* tensorFirstDimension(GenIR *gen, Value *value){
     auto found = tensorFirstDimensions.find(value);
     if(found != tensorFirstDimensions.end())
@@ -118,12 +125,14 @@ static Value* tensorFirstDimension(GenIR *gen, Value *value){
     return new ConstantInt(gen->module->int32_ty_, tensorType(value) -> num_elements_);
 }
 
+// 功能：按 tensor 元素类型构造零值，供点积归约和一元负号 lowering 使用。
 static Constant *zeroScalar(Module *module, Type *type) {
     if (type == module->float32_ty_)
         return new ConstantFloat(module->float32_ty_, 0.0f);
     return new ConstantInt(module->int32_ty_, 0);
 }
 
+// 功能：把 tensor 存储统一视作一维标量指针，供线性下标访问。
 static Value* tensorData(GenIR *gen, Value *value, Type *elementType){
     Type* pointerType = gen->module->get_pointer_type(elementType);
     if(value->type_ == pointerType) 
@@ -131,12 +140,14 @@ static Value* tensorData(GenIR *gen, Value *value, Type *elementType){
     return gen->builder->create_bitcast(value, pointerType);
 }
 
+// 功能：为动态形状 tensor 发射 malloc，并登记首维和所有权供后续释放。
 static Value* createDynamicTensor(GenIR *gen, Value *model, Value *count, Type *pointerType = nullptr){
     if(!tensorMalloc){
         Type* bytePointer = gen->module->get_pointer_type(gen->module->int8_ty_);//?
         tensorMalloc = new Function(new FunctionType(bytePointer, {gen->module->int32_ty_}), "malloc", gen->module.get());
         tensorFree = new Function(new FunctionType(gen->module->void_ty_, {bytePointer}), "free", gen->module.get());
     }
+    // 当前 tensor 元素仅支持 i32/float，二者均占 4 字节。
     Value *bytes = gen->builder->create_imul(count, new ConstantInt(gen->module->int32_ty_, 4));
     Value *storage = gen->builder->create_call(tensorMalloc, {bytes});
     Value *result = gen->builder->create_bitcast(storage, pointerType ? pointerType : model->type_);
@@ -146,6 +157,7 @@ static Value* createDynamicTensor(GenIR *gen, Value *model, Value *count, Type *
     return result;
 }
 
+// 功能：仅释放本 lowering 创建且仍由该 Value 持有的动态 tensor。
 static void releaseTensor(GenIR *gen, Value *value){
     auto found = heapTensorStorage.find(value);
     if(found == heapTensorStorage.end()) return;
@@ -153,6 +165,7 @@ static void releaseTensor(GenIR *gen, Value *value){
     heapTensorStorage.erase(found), tensorFirstDimensions.erase(value);
 }
 
+// 功能：tensor 下标产生子视图时，把堆存储所有权从旧 Value 转交给新 Value。
 static void moveTensorStorage(Value* from, Value* to){
     auto found = heapTensorStorage.find(from);
     if(found == heapTensorStorage.end()) return;
@@ -160,11 +173,13 @@ static void moveTensorStorage(Value* from, Value* to){
     heapTensorStorage.erase(found);
 }
 
+// 功能：发射一个线性循环，将 source 的全部 tensor 元素复制到 target。
 static void copyTensor(GenIR *gen, Value* target, Value* source, ArrayType* type){
     Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *>(source->type_)->contained_);
     Value *targetData = tensorData(gen, target, elementType);
     Value *sourceData = tensorData(gen, source, elementType);
     Value *count = type ? (Value *) new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)) : tensorElementCount(gen, source);
+    // 意图：统一展平静态和动态形状，避免为每个维度分别构造嵌套循环。
     Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
     gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
     BasicBlock *cond = createNamedBB(gen->module.get(), currentFunction, "tensor.copy.cond");
@@ -184,6 +199,7 @@ static void copyTensor(GenIR *gen, Value* target, Value* source, ArrayType* type
     gen->builder->BB_ = end;
 }
 
+// 功能：根据元素类型为一次 tensor 标量运算选择整数或浮点 IR 指令。
 static Value* lowerTensorElement(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op, Type *type){
     if(type == gen->module->int32_ty_){
         if(op == BinaryOp::Add) return gen->builder->create_iadd(lhs, rhs);
@@ -198,6 +214,7 @@ static Value* lowerTensorElement(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op
     return gen->builder->create_fdiv(lhs, rhs);
 }
 
+// 功能：将 tensor-tensor 或 tensor-scalar 二元运算降低为逐元素线性循环。
 static Value* lowerTensorBinary(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op){
     bool lhsTensor = lhs->hasSemFlag(SemFlag::SrcTensor);
     bool rhsTensor = rhs->hasSemFlag(SemFlag::SrcTensor);
@@ -207,6 +224,7 @@ static Value* lowerTensorBinary(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op)
     if(!type && rhsTensor) type = staticTensorType(rhs);
     Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *>(model->type_)->contained_);
     Value *count = type ? (Value *)new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)) : tensorElementCount(gen, model);
+    // 意图：静态形状使用栈上数组；动态首维使用带所有权记录的堆存储。
     Value *result;
     if(type){
         result = gen->builder->create_alloca(type);
@@ -218,6 +236,7 @@ static Value* lowerTensorBinary(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op)
     Value *resultData = tensorData(gen, result, elementType);
     Value *lhsData = lhsTensor ? tensorData(gen, lhs, elementType): nullptr;
     Value *rhsData = rhsTensor ? tensorData(gen, rhs, elementType): nullptr;
+    // 意图：标量操作数在每次迭代复用，tensor 操作数按同一线性下标加载。
     Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
     gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
     BasicBlock *cond = createNamedBB(gen->module.get(), currentFunction, "tensor.op.cond");
@@ -242,6 +261,7 @@ static Value* lowerTensorBinary(GenIR *gen, Value *lhs, Value *rhs, BinaryOp op)
     return result;
 }
 
+// 功能：只检查 AST 是否含完整 tensor 值，不发射 IR；下标后的标量不算 tensor 值。
 static bool containsTensorValue(GenIR *gen, ExprAST *expression)
 {
     if(auto *lvalue = dynamic_cast<LValueAST*>(expression)){
@@ -261,11 +281,13 @@ static bool containsTensorValue(GenIR *gen, ExprAST *expression)
 
 }
 
+// 功能：把二维 tensor 矩阵乘法 MxK @ KxN 降低为三重循环。
 static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     ArrayType *leftType = tensorType(lhs);
     ArrayType *rightType = tensorType(rhs);
     ArrayType *leftRowType = dynamic_cast<ArrayType *>(leftType->contained_);
     ArrayType *rightRowType = dynamic_cast<ArrayType *>(rightType->contained_);
+    // 意图：优先采用赋值/返回上下文给出的结果形状，否则从两侧操作数推导。
     ArrayType *resultType = expectedTensorType;
     Value *rows = resultType ? (Value *)new ConstantInt(gen->module->int32_ty_, resultType->num_elements_) : tensorFirstDimension(gen, lhs);
     unsigned common = leftRowType ? leftRowType->num_elements_ : leftType->num_elements_;
@@ -285,6 +307,7 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
         }
     }
     Value * resultCount = gen->builder->create_imul(rows, new ConstantInt(gen->module->int32_ty_, columns));
+    // 意图：行数静态可知时保留完整数组类型，否则分配动态结果并记录运行时首维。
     Value * result;
     if(resultType){
         result = gen->builder->create_alloca(resultType);
@@ -297,6 +320,7 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     Value *leftData = tensorData(gen, lhs, elementType);
     Value *rightData = tensorData(gen, rhs, elementType);
     Value *resultData = tensorData(gen, result, elementType);
+    // 意图：显式构造 row/column/common 三层 CFG，common 层计算一个输出元素的点积。
     Value *rowIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
     Value *columnIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
     Value *commonIndexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
@@ -333,6 +357,7 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     rowIndex = gen->builder->create_load(rowIndexSlot);
     columnIndex = gen->builder->create_load(columnIndexSlot);
     commonIndex = gen->builder->create_load(commonIndexSlot);
+    // 意图：两侧均按行主序展平，分别访问 lhs[row][k] 与 rhs[k][column]。
     Value* leftIndex = gen->builder->create_iadd(gen->builder->create_imul(rowIndex, new ConstantInt(gen->module->int32_ty_, common)), commonIndex);
     Value* rightIndex = gen->builder->create_iadd(gen->builder->create_imul(commonIndex, new ConstantInt(gen->module->int32_ty_, columns)), columnIndex);
     Value* left = gen->builder->create_load(gen->builder->create_gep(leftData, {leftIndex}));
@@ -362,11 +387,13 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     gen->builder->create_br(rowCond);
     gen->builder->BB_ = end;
 
+    // 操作数若是本表达式产生的动态临时量，其最后一次使用在此结束。
     releaseTensor(gen, lhs);
     releaseTensor(gen, rhs);
     return result;
 }
 
+// 功能：检测表达式内的调用，避免跨调用把外层目标缓冲区错误地下传给子表达式。
 static bool containsCall(ExprAST *expression)
 {
     if(dynamic_cast<CallExprAST *>(expression)) return true;
@@ -384,7 +411,7 @@ static bool containsCall(ExprAST *expression)
     return false;
 }
 
-// 529
+// 用轻量表达式树暂存已求值叶子，使整段逐元素表达式只生成一个遍历循环。
 struct TensorExpression {
     enum Kind { Leaf, Unary, Binary} kind;
     Value *value = nullptr;
@@ -399,7 +426,7 @@ struct TensorExpression {
     TensorExpression(BinaryOp op, std::unique_ptr<TensorExpression> lhs, std::unique_ptr<TensorExpression> rhs): kind(Binary), binaryOp(op), left(std::move(lhs)), right(std::move(rhs)) {}
 };
 
-// 548
+// 功能：判断运算符能否在 tensor 的每个元素上独立执行。
 static bool isTensorElementwise(BinaryOp op){
     return op == BinaryOp::Add || op == BinaryOp::Subtract ||
            op == BinaryOp::Multiply || op == BinaryOp::Divide ||
@@ -407,7 +434,7 @@ static bool isTensorElementwise(BinaryOp op){
 }
 
 
-// 620
+// 功能：从融合表达式中选择一个 tensor 叶子，作为动态形状和布局的模型。
 static Value *tensorExpressionModel(TensorExpression *expression){
     if(expression -> kind == TensorExpression::Leaf)
         return expression->tensor ? expression -> value : nullptr;
@@ -418,6 +445,7 @@ static Value *tensorExpressionModel(TensorExpression *expression){
     return model;
 }
 
+// 功能：递归收集可融合的逐元素运算；不可融合的子表达式立即求值并成为叶子。
 static std::unique_ptr<TensorExpression> buildTensorExpression(GenIR *gen, ExprAST *expression)
 {
     if(containsTensorValue(gen, expression)){
@@ -433,6 +461,7 @@ static std::unique_ptr<TensorExpression> buildTensorExpression(GenIR *gen, ExprA
             }
         }
     }
+    // 意图：叶子求值不能直接占用外层结果缓冲区，否则会覆盖尚未消费的操作数。
     Value *savedTarget = expectedTensorTarget;
     expectedTensorTarget = nullptr;
     expression->accept(*gen);
@@ -442,6 +471,7 @@ static std::unique_ptr<TensorExpression> buildTensorExpression(GenIR *gen, ExprA
 
 
 
+// 功能：为给定线性下标递归发射融合表达式的一次标量计算。
 static Value* emitTensorExpression(GenIR *gen, TensorExpression *expression, Value *index, Type *elementType){
     if(expression->kind == TensorExpression::Leaf){
         if(!expression ->tensor) return expression ->value;
@@ -457,6 +487,7 @@ static Value* emitTensorExpression(GenIR *gen, TensorExpression *expression, Val
         return lowerTensorElement(gen, left, right, expression->binaryOp, elementType);
 }
 
+// 功能：融合循环完成后，释放树中由子表达式产生的动态 tensor 临时量。
 static void releaseTensorExpression(GenIR *gen, TensorExpression *expression){
     if(expression -> kind == TensorExpression::Leaf){
         if(expression -> tensor) releaseTensor(gen, expression->value);
@@ -466,6 +497,7 @@ static void releaseTensorExpression(GenIR *gen, TensorExpression *expression){
     if(expression->right) releaseTensorExpression(gen, expression->right.get());
 }
 
+// 功能：把整棵逐元素 tensor 表达式降低为单个线性循环并返回结果存储。
 static Value *lowerFusedTensorExpression(GenIR *gen, ExprAST *expression){
     std::unique_ptr<TensorExpression> tree = buildTensorExpression(gen, expression);
     Value *model = tensorExpressionModel(tree.get());
@@ -473,6 +505,7 @@ static Value *lowerFusedTensorExpression(GenIR *gen, ExprAST *expression){
     if(!type) type = staticTensorType(model);
     Type *elementType = type ? tensorElementType(type) : tensorElementType(static_cast<PointerType *> (model -> type_) -> contained_);
     Value * count = type ? (Value *) new ConstantInt(gen->module->int32_ty_, tensorElementCount(type)):tensorElementCount(gen, model);
+    // 意图：赋值或返回上下文可提供目标缓冲区，从而省去中间结果和最终复制。
     Value *result = expectedTensorTarget;
     if(!result && type) {
         result = gen->builder->create_alloca(type);
@@ -482,6 +515,7 @@ static Value *lowerFusedTensorExpression(GenIR *gen, ExprAST *expression){
         result = createDynamicTensor(gen, model, count);
     }
     Value *resultData = tensorData(gen, result, elementType);
+    // 意图：每个元素只遍历一次，在循环体内递归计算完整标量表达式。
     Value *indexSlot = gen->builder->create_alloca(gen->module->int32_ty_);
     gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), indexSlot);
     BasicBlock * cond = createNamedBB(gen->module.get(), currentFunction, "tensor.fused.cond");
@@ -1344,6 +1378,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 auto init = new ConstantZero(arrayTys[0]);
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
+                // tensor 与普通数组共享 IR 类型，用语义位保留源级身份供表达式 lowering 识别。
                 if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             } else {
@@ -1353,6 +1388,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 useConst = false;
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
+                // 带初始化的全局 tensor 同样沿用嵌套 ArrayType 表示。
                 if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             }
@@ -1434,8 +1470,10 @@ void GenIR::visit(ObjectDefAST &ast) {
         // 源级 const 数组：内容初始化后不再改写，打上不变性标记供后续优化消费。
         if (isConst)
             arrayAlloc->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
+        // 标记局部存储，使后续赋值、下标和调用走 tensor 专用路径。
         if (curSourceType.isTensor()) arrayAlloc->setSemFlag(SemFlag::SrcTensor);
         scope.push(varName, arrayAlloc);
+        // tensor 表达式初始化优先直接写入声明的数组；未直写时再复制并回收临时量。
         if (curSourceType.isTensor() && ast.initializer != nullptr && ast.initializer->isExpression()){
             ArrayType* savedExpected = expectedTensorType;
             Value *savedTarget = expectedTensorTarget;
@@ -1501,6 +1539,7 @@ void GenIR::visit(ObjectDefAST &ast) {
             idxs[i] = CONST_INT(0);
         }
         Value* ptr = builder->create_gep(arrayAlloc, idxs); //获取数组开头地址
+        // 从最外层开始解析大括号对齐；递归时 getNextDim 再进入下一层。
         localInit(ptr, ast.initializer->elements(), dimensionsCnt, 0);
     }
 }
@@ -1587,6 +1626,7 @@ ConstantArray* GenIR::globalInit(vector<int> &dimensions, vector<ArrayType*> &ar
 
 //根据初始化的量决定嵌套数组的维度
 int GenIR::getNextDim(vector<int> &dimensionsCnt, int up, int cnt) {
+    // 当前层 up 已被占用，只在更深层中寻找与已初始化元素数对齐的维度。
     for (int i = up + 1; i < dimensionsCnt.size(); i++) {
         if (cnt % dimensionsCnt[i] == 0) return i;
     }
@@ -1628,6 +1668,7 @@ void GenIR::visit(FuncDefAST &ast) {
     paramNames.clear();
     pendingScalarizedParameters.clear();
     pendingTensorParameters.clear();
+    // 功能：记录当前函数的 tensor ABI 状态，函数结束时统一清空，避免污染下一函数。
     currentTensorReturn = ast.returnType.isTensor();
     tensorReturnPointer = nullptr;
     currentScalarizedReturnType = nullptr;
@@ -1637,6 +1678,7 @@ void GenIR::visit(FuncDefAST &ast) {
         std::cerr << "dynamic vectors are non-owning views and cannot be returned by value\n";
         std::exit(1);
     }else if(currentTensorReturn){
+        // tensor 按值返回降低为 void，并把调用者提供的元素缓冲区放在第一个隐藏形参。
         retType = VOID_T;
         params.push_back(module->get_pointer_type(scalarType(module.get(), ast.returnType.element)));
         paramNames.push_back("$tensor.return");
@@ -1663,6 +1705,7 @@ void GenIR::visit(FuncDefAST &ast) {
     auto funTy = new FunctionType(retType, params);
     auto func = new Function(funTy, ast.name, module.get());
     currentFunction = func;
+    // 保存源级签名中 IR FunctionType 无法表达的 tensor 返回值和 tensor 形参信息。
     FunctionLoweringInfo info;
     info.returnType = currentScalarizedReturnType;
     info.tensorReturn = currentTensorReturn;
@@ -1686,6 +1729,7 @@ void GenIR::visit(FuncDefAST &ast) {
     // 标量和原生向量形参保存在局部槽中；展开向量先复制各 lane，保持按值语义。
     for (int i = 0; i < (int)paramNames.size(); i++) {
         if(currentTensorReturn && i == 0){
+            // 隐藏返回指针由 return lowering 直接使用，不为它创建普通局部槽。
             tensorReturnPointer = args[i];
             continue;
         }
@@ -1715,6 +1759,7 @@ void GenIR::visit(FuncDefAST &ast) {
         auto *alloc = builder->create_alloca(params[i]);
         alloc->name_ = paramNames[i];
         if(pendingTensorParameters.find(paramNames[i])!=pendingTensorParameters.end()){
+            // tensor 参数的指针仍存入局部槽，额外隐藏参数携带无法编码在类型中的首维。
             alloc->setSemFlag(SemFlag::SrcTensor);
             tensorFirstDimensions[alloc] = args[i + 1];
         }
@@ -1791,6 +1836,7 @@ void GenIR::visit(FuncParamAST &ast) {
     paramNames.push_back(ast.name);
     pendingScalarizedParameters.push_back(scalarizedValueParameter);
     if(ast.type.isTensor()){
+        // 每个 tensor 形参后紧跟一个 i32 隐藏形参，传递其运行时第一维长度。
         pendingTensorParameters.insert(ast.name);
         params.push_back(INT32_T);
         paramNames.push_back("$" + ast.name + ".dim0");
@@ -1825,6 +1871,7 @@ void GenIR::visit(AssignStmtAST &ast) {
     ast.target->accept(*this);
     auto var = recentVal;
     if(var->hasSemFlag(SemFlag::SrcTensor)){
+        // tensor 赋值下传目标形状和存储，允许无嵌套调用的表达式直接写入左值。
         ArrayType* type = staticTensorType(var);
         ArrayType* savedExpected = expectedTensorType;
         Value* savedTarget = expectedTensorTarget;
@@ -1837,6 +1884,7 @@ void GenIR::visit(AssignStmtAST &ast) {
         if(!type){
             type = staticTensorType(recentVal);
         }
+        // 不能直写目标时保留按值语义：复制结果，再释放可能的动态临时量。
         if(recentVal != var){
             copyTensor(this, var, recentVal, type);
             releaseTensor(this, recentVal);
@@ -1892,6 +1940,7 @@ void GenIR::visit(AssignStmtAST &ast) {
 void GenIR::visit(ExprStmtAST &ast) {
     is_single_exp = true;
     ast.expression->accept(*this);
+    // 独立表达式无人接收其结果，及时释放动态 tensor 临时量。
     releaseTensor(this, recentVal);
     is_single_exp = false;
 }
@@ -1910,6 +1959,7 @@ void GenIR::visit(BlockStmtAST &ast) { ast.block->accept(*this); }
 
 void GenIR::visit(ReturnStmtAST &ast) {
     if(currentTensorReturn){
+        // tensor 返回值写入调用者的隐藏缓冲区；顶层调用可直接复用该缓冲区。
         if(ast.value){
             Value* savedTarget = expectedTensorTarget;
             ArrayType* directReturnType = nullptr;
@@ -1928,9 +1978,11 @@ void GenIR::visit(ReturnStmtAST &ast) {
             if(!type){
                 type = directReturnType;
             }
+            // 记录可推导的静态返回形状，供后续调用点选择栈上结果槽。
             if(type){
                 functionLoweringInfo[currentFunction].tensorReturnType = type;
             }
+            // 非直写表达式在返回前复制到 ABI 缓冲区，并结束临时量生命周期。
             if(recentVal != tensorReturnPointer){
                 copyTensor(this, tensorReturnPointer, recentVal, type);
             }
@@ -2122,6 +2174,7 @@ void GenIR::checkCalType(Value* val[]) {
 }
 
 void GenIR::visit(BinaryExprAST &ast) {
+    // 无调用的逐元素 tensor 表达式整体融合，避免每个二元节点各生成一次遍历和临时量。
     if(isTensorElementwise(ast.op) && containsTensorValue(this, &ast) && !containsCall(&ast)){
         recentVal = lowerFusedTensorExpression(this,&ast);
         return;
@@ -2291,6 +2344,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     ArrayType* savedTensorExpected = expectedTensorType;
     Value* savedTensorTarget = expectedTensorTarget;
     if(ast.op == BinaryOp::Matmul){
+        // 矩阵乘的目标形状只约束最终结果，不能传给左右操作数的求值过程。
         expectedTensorType = nullptr;
         expectedTensorTarget = nullptr;
     }
@@ -2313,6 +2367,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     }
     val[1] = recentVal;
     if(ast.op == BinaryOp::Matmul){
+        // 两个操作数就绪后恢复外层上下文，由专用 lowering 推导 M、K、N 并写结果。
         recentVal = lowerTensorMatMul(this, val[0], val[1]);
         return;
     }
@@ -2425,12 +2480,14 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
 }
 
 void GenIR::visit(UnaryExprAST &ast) {
+    // tensor 正负号可并入逐元素融合循环；含调用时退回顺序求值以保留副作用次序。
     if((ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus) && !containsCall(&ast) && containsTensorValue(this, &ast)){
         recentVal = lowerFusedTensorExpression(this, &ast);
         return;
     }
     ast.operand->accept(*this);
     if(recentVal->hasSemFlag(SemFlag::SrcTensor)&&(ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus)){
+        // 非融合路径把 -tensor 视为 0 - tensor；一元加直接保留原值。
         if(ast.op == UnaryOp::Minus){
             ArrayType* type =expectedVectorType ? expectedTensorType : tensorType(recentVal);
             Value* zero = zeroScalar(module.get(),tensorElementType(type));
@@ -2502,24 +2559,27 @@ void GenIR::visit(SubscriptExprAST &ast) {
     ast.base->accept(*this);
     Value *base = recentVal;
     if(base->hasSemFlag(SemFlag::SrcTensor)){
+        // 动态首维 tensor 本身已是首元素指针，下标时无需静态数组 GEP 的前导零。
         ArrayType* type = tensorType(base);
         ast.index->accept(*this);
         auto dynamicDimension = tensorFirstDimensions.find(base);
         if(dynamicDimension != tensorFirstDimensions.end()){
             Value* element = builder->create_gep(base,{recentVal});
             if(type){
+                // 去掉运行时首维后仍有静态尾部，结果是继续携带 tensor 语义的子视图。
                 element->setSemFlag(SemFlag::SrcTensor);
                 moveTensorStorage(base,element);
                 tensorFirstDimensions.erase(dynamicDimension);
                 recentVal = element;
             }
             else{
+                // 无尾部数组说明已落到标量；加载后结束动态临时 tensor 的生命周期。
                 recentVal = builder->create_load(element);
                 releaseTensor(this, base);
             }
             return;
         }
-        // not found
+        // 静态数组下标采用 {0, index}；若仍有维度则返回子 tensor，否则加载标量。
         Value* element = builder->create_gep(base, {CONST_INT(0), recentVal});
         if(type->contained_->tid_ == Type::ArrayTyID){
             element->setSemFlag(SemFlag::SrcTensor);
@@ -2743,6 +2803,7 @@ void GenIR::visit(LValueAST &ast) {
     // 不是常量那么var一定是指针类型
     Type* varType = static_cast<PointerType*>(var->type_)->contained_; //所指的类型
     if(var->hasSemFlag(SemFlag::SrcTensor) && ast.indices.empty()){
+        // 完整 tensor 作为右值时保留地址；参数槽需先 load，并把运行时首维元数据传给该地址。
         recentVal = varType->tid_ == Type::PointerTyID ? (Value *)builder->create_load(var) : var;
         recentVal->setSemFlag(SemFlag::SrcTensor);
         auto dimension = tensorFirstDimensions.find(var);
@@ -2957,6 +3018,7 @@ void GenIR::visit(CallExprAST &ast) {
     }
     is_single_exp = false;
     vector<Value *> args;
+    // 动态 tensor 实参必须活到 call 之后，再统一释放其临时存储。
     vector<Value *> tensorArgumentsToRelease;
     auto *functionType = static_cast<FunctionType *>(fun->type_);
     auto infoIt = functionLoweringInfo.find(fun);
@@ -2969,6 +3031,7 @@ void GenIR::visit(CallExprAST &ast) {
         args.push_back(scalarizedResultSlot);
         argumentOffset = 1;
     }else if(info && info->tensorReturn){
+        // tensor 返回调用采用 sret 风格：选择上下文目标或新结果槽，并作为第一个实参传入。
         ArrayType *type = info ->tensorReturnType ? info -> tensorReturnType : expectedTensorType;
         tensorResultSlot = expectedTensorTarget ? expectedTensorTarget : (Value *)builder->create_alloca(type);
         tensorResultSlot->setSemFlag(SemFlag::SrcTensor);
@@ -2980,6 +3043,7 @@ void GenIR::visit(CallExprAST &ast) {
     unsigned fixedIndex = argumentOffset;
     ArrayType *savedTensorExpected = expectedTensorType;
     Value *savedTensorTarget = expectedTensorTarget;
+    // 外层结果提示不应影响实参表达式；各实参按形参类型独立求值。
     expectedTensorType = nullptr;
     expectedTensorTarget = nullptr;
     for (int i = 0; i < ast.arguments.size(); i++) {
@@ -3020,6 +3084,7 @@ void GenIR::visit(CallExprAST &ast) {
         //     ++fixedIndex;
         //     continue;
         // }
+        // tensor 形参在数据指针之后追加运行时首维；必要时先统一指针类型。
         Value *firstDim = tensorParameter ? tensorFirstDimension(this, recentVal) : nullptr;
         if(fixedParameterType && fixedParameterType->tid_ == Type::PointerTyID && recentVal ->type_->tid_==Type::PointerTyID && recentVal -> type_ != fixedParameterType && recentVal ->hasSemFlag(SemFlag::SrcTensor)){
             recentVal = builder->create_bitcast(recentVal, fixedParameterType);
@@ -3048,6 +3113,7 @@ void GenIR::visit(CallExprAST &ast) {
         args.push_back(new ConstantInt(INT32_T, ast.line));
     }
     recentVal = builder->create_call(fun, args);
+    // call 已消费所有实参，释放临时 tensor，并把隐藏返回槽作为调用表达式的值。
     for(auto *arg : tensorArgumentsToRelease) releaseTensor(this, arg);
     if(tensorResultSlot) recentVal = tensorResultSlot;
     else if(info && info -> returnType)

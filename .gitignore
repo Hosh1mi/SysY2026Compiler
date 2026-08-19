@@ -16,6 +16,7 @@ docs/*
 !test
 test/*
 !test/v_*
+.proto/
 
 src/backend/riscv_deprecated/
 src/mid/hira*

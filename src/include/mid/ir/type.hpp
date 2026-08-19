@@ -84,7 +84,9 @@ public:
     bool is_variadic_ = false;
 };
 
-// // {3 x {2 x i32}}
+// Tensor 当前复用嵌套 ArrayType 表示，源级身份由 SemFlag::SrcTensor 保留。
+// 下列草案记录独立 TensorType 的预期形状，待类型系统完整支持 tensor 后启用。
+// {3 x {2 x i32}}
 // class TensorType : public Type {
 // public:
 //     TensorType(Type* contained, unsigned num_elements) : Type(Type::TensorTyID), num_elements_(num_elements), contained_(contained) {}
