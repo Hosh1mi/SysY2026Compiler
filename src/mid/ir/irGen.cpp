@@ -58,7 +58,7 @@ struct FunctionLoweringInfo {
     ScalarizedVectorType* returnType;
     bool tensorReturn = false;
     ArrayType* tensorReturnType = nullptr;
-    vector<ScalarizedVectorType> valueParameters;
+    vector<ScalarizedVectorType *> valueParameters;
     vector<bool> tensorParameters;
 };
 
@@ -113,7 +113,7 @@ static Value* tensorElementCount(GenIR *gen, Value *value){
 
 static Value* tensorFirstDimension(GenIR *gen, Value *value){
     auto found = tensorFirstDimensions.find(value);
-    if(found == tensorFirstDimensions.end())
+    if(found != tensorFirstDimensions.end())
         return found->second;
     return new ConstantInt(gen->module->int32_ty_, tensorType(value) -> num_elements_);
 }
