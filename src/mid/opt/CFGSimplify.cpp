@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：br i1 true, label %then, label %else
+//   优化后：br label %then
+// 常量条件确定了唯一后继，未选分支及其 PHI 入边随后可被清理。
+
 #include "../../include/mid/opt/CFGSimplify.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/analysis/dominanceAnalysis.hpp"
@@ -12,6 +17,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// CFG 简化负责清理控制流图中的冗余结构，并在每次改写后同步维护 PHI 入边。
+// 主要动作包括折叠常量分支、合并空块和线性块、外提循环不变量分支，以及
+// 将收益明确的菱形分支改写为 select。各动作反复执行，直到本轮不再改变 CFG。
 
 // 辅助函数：在 succ 的所有 phi 中删除 deadBlock 对应的入边
 static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {

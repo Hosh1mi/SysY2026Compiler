@@ -1,5 +1,7 @@
 #include "../../include/mid/opt/libFunc.hpp"
 
+// 获取或创建 memset/memcpy/memmove 声明。若同名符号已有函数体，则拒绝复用，
+// 避免把用户定义函数误当成具有标准库语义的内建函数。
 Function *getOrInsertLibFunc(Module *module, LibFunc kind) {
     const char *name = "memcpy";
     if (kind == LibFunc::Memset)

@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：循环每轮都 load @counter、加一、再 store @counter。
+//   优化后：函数内使用局部 SSA 值累加，只在必要的调用边界和出口回写。
+// 这会减少对全局地址的重复访存，同时维持外部可观察的全局状态。
+
 #include "../../include/mid/opt/globalScalarPromotion.hpp"
 #include "../../include/mid/analysis/basicAliasAnalysis.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -7,10 +12,12 @@
 #include <unordered_set>
 #include <vector>
 
-// A scalar global is a GlobalVariable whose pointee is an integer type.
-// Float globals and array globals are deliberately excluded — array globals
-// have non-trivial aliasing through GEP, and float globals are rare enough
-// in SysY that the extra type dispatch isn't worth the added surface area.
+// 全局标量提升在单个函数内缓存整数全局变量：首次访问时装入局部 SSA 值，
+// 后续 load 直接复用缓存，必要时在可能观察该全局的调用前回写，在函数出口
+// 完成最终回写。逃逸分析和 BasicAA 保证缓存不会越过未知别名写入。
+
+// 标量全局限定为“指向整数”的 GlobalVariable。数组经 GEP 后别名关系复杂，
+// 浮点全局的收益有限，因此两者均不进入本优化。
 static bool isScalarIntGlobal(GlobalVariable *gv) {
     auto *pt = dynamic_cast<PointerType *>(gv->type_);
     if (!pt) return false;
@@ -35,6 +42,7 @@ static bool scalarGlobalAddressEscapes(GlobalVariable *gv) {
     return false;
 }
 
+// 根据调用的 ModRef 信息判断调用是否可能读取或改写指定全局。
 static bool callMayTouchGlobal(CallInst *call, GlobalVariable *gv,
                                BasicAliasAnalysis &BAA) {
     auto *callee = dynamic_cast<Function *>(
@@ -52,6 +60,7 @@ static bool callMayTouchGlobal(CallInst *call, GlobalVariable *gv,
     return BAA.getCallModRef(call, gv) != ModRefInfo::NoModRef;
 }
 
+// 查找会迫使缓存值回写或失效的调用，提前排除无法稳定获益的函数。
 static bool hasBlockingCallForGlobal(Function *func, GlobalVariable *gv,
                                      BasicAliasAnalysis &BAA) {
     for (auto *bb : func->basic_blocks_) {
@@ -65,6 +74,7 @@ static bool hasBlockingCallForGlobal(Function *func, GlobalVariable *gv,
     return false;
 }
 
+// 在一个函数内完成 load/store 转发，并在调用边界与出口维护全局可见性。
 static void promoteInFunction(Function *func, BasicAliasAnalysis &BAA) {
     // Phase 1: collect scalar globals in *first-seen* IR order, and snapshot
     // pre-existing load/store instructions for later redirection.
@@ -172,6 +182,7 @@ static void promoteInFunction(Function *func, BasicAliasAnalysis &BAA) {
         store->set_operand(1, gvAlloca[gv]);
 }
 
+// 为每个函数取得 BasicAA，并独立尝试提升其中可安全缓存的整数全局。
 void GlobalScalarPromotion::execute(Module *module) {
     BasicAliasAnalysis BAA;
     BAA.analyze(module);

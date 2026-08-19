@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：%r = call i32 @inc(i32 %x)，其中 inc 只执行 x + 1。
+//   优化后：调用点直接生成 %r = add %x, 1。
+// 展开消除调用开销，并让常量传播和公共子表达式消除看到函数体内部计算。
+
 #include "../../include/mid/opt/inlineExpand.hpp"
 #include <algorithm>
 #include <cassert>
@@ -9,6 +14,11 @@
 
 using namespace std;
 
+// 内联展开以调用点工作队列驱动：先按指令权重、调用热度和递归预算筛选，
+// 再切分调用块，按逆后序克隆被调函数 CFG，并建立参数、基本块和 SSA 值映射。
+// 多个 return 汇入续接块的 PHI；新出现的调用点会重新加入队列继续评估。
+
+// 扫描模块中的调用点并逐个尝试内联，递归调用使用独立预算防止代码量失控。
 void InlineExpand::execute(Module *module) {
     struct WorkItem {
         CallInst *call;
@@ -74,6 +84,7 @@ void InlineExpand::execute(Module *module) {
     }
 }
 
+// 统计函数体规模，作为最基础的内联成本指标。
 unsigned InlineExpand::countInstructions(Function *func) {
     unsigned cnt = 0;
     for (auto bb : func->basic_blocks_)
@@ -81,6 +92,7 @@ unsigned InlineExpand::countInstructions(Function *func) {
     return cnt;
 }
 
+// 按指令的执行代价和代码膨胀风险赋予权重。
 int InlineExpand::weighInstruction(Instruction *inst) {
     switch (inst->op_id_) {
         case Instruction::Ret:
@@ -139,6 +151,7 @@ int InlineExpand::weighInstruction(Instruction *inst) {
     }
 }
 
+// 汇总被调函数全部指令的加权成本。
 int InlineExpand::estimateInlineCost(Function *func) {
     int cost = 0;
     for (auto bb : func->basic_blocks_)
@@ -147,6 +160,7 @@ int InlineExpand::estimateInlineCost(Function *func) {
     return cost;
 }
 
+// 检查函数体内是否存在直接自调用。
 bool InlineExpand::isSelfRecursive(Function *func) {
     for (auto bb : func->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
@@ -159,6 +173,7 @@ bool InlineExpand::isSelfRecursive(Function *func) {
     return false;
 }
 
+// 检查函数是否还调用其它函数，用于控制递归内联的扩张速度。
 bool InlineExpand::hasNonSelfCalls(Function *func) {
     for (auto bb : func->basic_blocks_) {
         for (auto inst : bb->instr_list_) {
@@ -171,6 +186,7 @@ bool InlineExpand::hasNonSelfCalls(Function *func) {
     return false;
 }
 
+// 估算实参常量进入函数体后可触发的折叠收益，用于抵扣内联成本。
 int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) {
     // Phase A: seed known-constant set from constant actual arguments
     std::unordered_set<Value*> knownConst;
@@ -306,6 +322,7 @@ int InlineExpand::estimateConstantFoldBenefit(CallInst *call, Function *callee) 
     return foldBenefit;
 }
 
+// 根据函数成本与调用环境分配递归展开次数，始终受硬上限约束。
 int InlineExpand::estimateRecursiveInlineBudget(int weightedCost,
                                                 bool callInLoop,
                                                 int foldBenefit) {
@@ -328,6 +345,7 @@ int InlineExpand::estimateRecursiveInlineBudget(int weightedCost,
     return std::min(budget, INLINE_COST_BUDGET);
 }
 
+// 综合合法性、代码量、循环位置、调用次数和递归预算决定是否内联。
 bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
                              int recursiveBudget) {
     if (callee->is_declaration() || callee == caller)
@@ -403,6 +421,7 @@ bool InlineExpand::canInline(CallInst *call, Function *callee, Function *caller,
     return false;
 }
 
+// 统计模块内指向 callee 的直接调用点。
 unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
     unsigned count = 0;
     for (auto func : module->function_list_) {
@@ -420,6 +439,7 @@ unsigned InlineExpand::countCallSites(Function *callee, Module *module) {
     return count;
 }
 
+// 判断目标函数是否从 main 可达，避免为死函数投入内联预算。
 bool InlineExpand::isReachableFromEntry(Function *target, Module *module) {
     Function *entry = nullptr;
     for (auto *func : module->function_list_) {
@@ -435,6 +455,7 @@ bool InlineExpand::isReachableFromEntry(Function *target, Module *module) {
     return reaches(entry, target, visited);
 }
 
+// 在调用图中查询 from 能否到达 target，并以 visited 截断递归环。
 bool InlineExpand::reaches(Function *from, Function *target,
                            std::unordered_set<Function *> &visited) {
     if (from == target)
@@ -457,6 +478,7 @@ bool InlineExpand::reaches(Function *from, Function *target,
     return false;
 }
 
+// 通过调用块所在的 CFG 环判断调用是否处于循环热路径。
 bool InlineExpand::isCallInLoop(CallInst *call) {
     auto *bb = call->parent_;
     auto *func = bb->parent_;
@@ -482,6 +504,7 @@ bool InlineExpand::isCallInLoop(CallInst *call) {
 }
 
 // 获取函数的逆后序（RPO）
+// 返回函数 CFG 的逆后序，保证克隆时前驱通常先于后继建立映射。
 vector<BasicBlock*> InlineExpand::getRPO(Function *func) {
     vector<BasicBlock*> rpo;
     unordered_set<BasicBlock*> visited;
@@ -505,6 +528,7 @@ vector<BasicBlock*> InlineExpand::getRPO(Function *func) {
 }
 
 // 返回内联过程中新产生的所有 call 指令
+// 执行一次完整内联，并返回克隆体中新产生的调用点供工作队列继续处理。
 vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     BasicBlock *callBB = callInst->parent_;
     Function *caller = callBB->parent_;
@@ -585,6 +609,7 @@ vector<CallInst*> InlineExpand::performInline(CallInst *callInst) {
     return newCalls;
 }
 
+// 在调用后切分基本块，续接块承接原调用之后的指令和原有后继边。
 BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *callInst) {
     Module *module = callBB->parent_->parent_;
     Function *func = callBB->parent_;
@@ -641,6 +666,7 @@ BasicBlock* InlineExpand::splitBlockAfterCall(BasicBlock *callBB, CallInst *call
     return contBB;
 }
 
+// 将被调函数中的操作数映射到调用者；常量和全局值可直接复用。
 static Value* mapValue(Value *val,
                        const unordered_map<Value*, Value*> &valMap,
                        const unordered_map<BasicBlock*, BasicBlock*> &bbMap) {
@@ -654,6 +680,7 @@ static Value* mapValue(Value *val,
     return val;
 }
 
+// 克隆被调函数的块和指令，修复分支、PHI 与返回值，并接入调用者 CFG。
 void InlineExpand::cloneCalleeIntoCaller(Function *callee, Function *caller,
                                          vector<Value*> &args,
                                          unordered_map<Value*, Value*> &valMap,

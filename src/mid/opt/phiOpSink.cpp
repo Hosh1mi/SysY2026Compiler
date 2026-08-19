@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：phi [add %a, %c, %left], [add %b, %c, %right]。
+//   优化后：%p = phi [%a, %left], [%b, %right]；%r = add %p, %c。
+// 将各前驱上的同构运算合并到汇合块，可减少指令数量并缩短分支路径。
+
 #include "../../include/mid/opt/phiOpSink.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -7,11 +12,16 @@
 #include <iostream>
 #include <vector>
 
+// PhiOpSink 识别 `phi(op(a,b), op(a,b), ...)`，将重复二元运算合并到 PHI 所在块。
+// 所有入边表达式必须等价，公共操作数也必须在合并块可用。
+
+// 兼容旧式入口。
 void PhiOpSink::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+// 逐函数运行到局部固定点；变换只调整指令序列，因此保留 CFG 分析。
 PreservedAnalyses PhiOpSink::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -22,6 +32,7 @@ PreservedAnalyses PhiOpSink::execute(Module *module, AnalysisManager &AM) {
                    : PreservedAnalyses::all();
 }
 
+// 判断交换左右操作数后语义保持不变的 opcode。
 static bool isCommutative(Instruction::OpID op) {
     return op == Instruction::Add ||
            op == Instruction::Mul ||
@@ -32,6 +43,7 @@ static bool isCommutative(Instruction::OpID op) {
            op == Instruction::FMul;
 }
 
+// 比较 SSA 身份或同类型常量内容。
 static bool sameValue(Value *a, Value *b) {
     if (a == b)
         return true;
@@ -46,6 +58,7 @@ static bool sameValue(Value *a, Value *b) {
     return false;
 }
 
+// 验证候选二元指令与公共表达式一致，可交换运算允许左右互换。
 static bool sameOperands(BinaryInst *inst, Instruction::OpID op,
                          Value *lhs, Value *rhs) {
     if (!inst || inst->op_id_ != op)
@@ -57,6 +70,7 @@ static bool sameOperands(BinaryInst *inst, Instruction::OpID op,
     return isCommutative(op) && sameValue(a, rhs) && sameValue(b, lhs);
 }
 
+// 常量和参数天然可用；指令定义必须支配目标块。
 static bool valueDominatesBlock(Value *value,
                                 const DominatorTreeAnalysis &DT,
                                 BasicBlock *bb) {
@@ -68,6 +82,7 @@ static bool valueDominatesBlock(Value *value,
     return DT.dominates(inst->parent_, bb);
 }
 
+// 尝试用一条公共二元指令替换 PHI，并拒绝跨循环边界或支配关系不成立的候选。
 bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
                            const DominatorTreeAnalysis &DT) {
     if (!phi || phi->num_ops() < 2)
@@ -119,6 +134,7 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
         sinkCount++;
     }
 
+    // 公共指令放在 PHI 区之后、第一条普通指令之前，保持基本块布局约束。
     auto *common = new BinaryInst(ty, op, lhs, rhs, phi->parent_, true);
     Instruction *insertBefore = nullptr;
     for (auto *inst : phi->parent_->instr_list_) {
@@ -146,12 +162,13 @@ bool PhiOpSink::trySinkPhi(PhiInst *phi, Function *func, LoopInfo &LI,
     return true;
 }
 
+// 每次成功后重新扫描，避免继续使用已删除 PHI 的快照。
 bool PhiOpSink::runOnFunction(Function *func, AnalysisManager &AM) {
     bool changed = false;
     bool localChanged = true;
     while (localChanged) {
         localChanged = false;
-        // sink 不改 CFG,LoopInfo 在 while 轮间仍有效;每轮重建求稳
+        // sink 不改 CFG，LoopInfo 在轮次之间仍有效；每轮重新查询以保持接口一致。
         LoopInfo &LI = AM.getLoopInfo(func);
         DominatorTreeAnalysis &DT = AM.getDominatorTree(func);
         for (auto *bb : func->basic_blocks_) {

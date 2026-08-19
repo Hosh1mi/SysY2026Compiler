@@ -1,11 +1,20 @@
+// 典型示例：
+//   优化前：汇合块含 phi [%x, %left], [%x, %right]，随后又重复计算 add %x, 1。
+//   优化后：PHI 折叠为 %x，重复表达式复用支配位置已有的结果。
+// 它清理后期 CFG 和循环变换遗留的局部 SSA 冗余。
+
 #include "../../include/mid/opt/lateValueCleanup.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <vector>
 
+// LateValueCleanup 收集 CFG 变换后相邻块产生的重复纯表达式。
+// 范围刻意限制在单前驱边，前驱中的候选天然支配当前块，因而无需重建完整 GVN 状态。
+
 namespace {
 
+// 比较 SSA 身份或常量内容，使独立创建但数值相同的常量也可匹配。
 bool sameValue(Value *a, Value *b) {
     if (a == b)
         return true;
@@ -20,6 +29,7 @@ bool sameValue(Value *a, Value *b) {
     return dynamic_cast<ConstantZero *>(a) && dynamic_cast<ConstantZero *>(b);
 }
 
+// 筛选无内存副作用且可用既有结果替换的值指令。
 bool isPureValueInst(Instruction *inst) {
     switch (inst->op_id_) {
         case Instruction::Add:
@@ -53,6 +63,7 @@ bool isPureValueInst(Instruction *inst) {
     }
 }
 
+// 比较 opcode、比较谓词与全部操作数，确认两条指令计算同一表达式。
 bool sameExpression(Instruction *a, Instruction *b) {
     if (!a || !b || a->op_id_ != b->op_id_ || a->num_ops() != b->num_ops())
         return false;
@@ -73,6 +84,7 @@ bool sameExpression(Instruction *a, Instruction *b) {
     return true;
 }
 
+// 从前驱末尾向前搜索等价表达式，优先复用离分支最近的可用值。
 Instruction *findEquivalentInPred(Instruction *inst, BasicBlock *pred) {
     for (auto it = pred->instr_list_.rbegin(); it != pred->instr_list_.rend(); ++it) {
         auto *cand = *it;
@@ -84,6 +96,7 @@ Instruction *findEquivalentInPred(Instruction *inst, BasicBlock *pred) {
     return nullptr;
 }
 
+// 处理单前驱块：用前驱中的等价值替换当前指令，并在无 use 后删除旧指令。
 bool cleanupFunction(Function *func) {
     bool changed = false;
     for (auto *bb : func->basic_blocks_) {
@@ -111,6 +124,7 @@ bool cleanupFunction(Function *func) {
 
 } // namespace
 
+// 旧式入口，逐函数执行相邻块表达式清理。
 void LateValueCleanup::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
@@ -118,6 +132,7 @@ void LateValueCleanup::execute(Module *module) {
     }
 }
 
+// 分析管理器入口；发生替换时保守失效全部分析。
 PreservedAnalyses LateValueCleanup::execute(Module *module, AnalysisManager &) {
     bool changed = false;
     for (auto *func : module->function_list_) {

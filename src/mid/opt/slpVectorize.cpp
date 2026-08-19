@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：连续加载 a[0..3] 和 b[0..3]，逐元素相加后连续写回 c[0..3]。
+//   优化后：一次向量 load 读取每组元素，一条向量 add 计算，再向量 store 写回。
+// 只有四条标量链同构、相邻且不存在冲突内存依赖时才会成包。
+
 #include "../../include/mid/opt/slpVectorize.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -11,9 +16,11 @@
 #include <set>
 #include <vector>
 
-// =====================================================================
-// Entry points
-// =====================================================================
+// SLP 向量化从同一基本块中相邻的标量 load/store 出发，以固定向量宽度构造
+// pack，再沿数据依赖扩展到同构算术指令。pack 合并、依赖调度和成本模型共同
+// 决定是否生成向量 load/store/binary；BasicAA 用于排除中间内存冲突。
+
+// Pass 入口：逐函数发现、扩展并发射有收益的向量包。
 
 void SLPVectorize::execute(Module *module) {
     AnalysisManager AM;
@@ -31,6 +38,7 @@ PreservedAnalyses SLPVectorize::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+// 按基本块建立初始内存包，扩展依赖并在确认有收益后统一发射。
 bool SLPVectorize::runOnFunction(Function *func, Module *module,
                                  const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return false;
@@ -77,6 +85,7 @@ bool SLPVectorize::PackSet::contains(Instruction *s) const {
     return false;
 }
 
+// 判断候选指令集合是否与已有 pack 相交，防止一条标量指令重复向量化。
 bool SLPVectorize::PackSet::containsAny(const std::vector<Instruction*> &cands) const {
     for (auto &p : packs)
         for (auto *inst : p.instrs)
@@ -85,6 +94,7 @@ bool SLPVectorize::PackSet::containsAny(const std::vector<Instruction*> &cands) 
     return false;
 }
 
+// 加入新 pack，并维护“标量指令到所属 pack”的快速索引。
 void SLPVectorize::PackSet::add(Pack p) {
     packs.push_back(std::move(p));
 }
@@ -763,6 +773,7 @@ bool SLPVectorize::isIsomorphic(Instruction *a, Instruction *b) {
     return true;
 }
 
+// 检查两条指令之间是否不存在直接 SSA 依赖。
 bool SLPVectorize::isIndependent(Instruction *a, Instruction *b) {
     for (auto &use : a->use_list_)
         if (use.user_ == b) return false;
@@ -775,6 +786,7 @@ bool SLPVectorize::isIndependent(Instruction *a, Instruction *b) {
     return true;
 }
 
+// 限定可进入 pack 的标量操作码和元素类型。
 bool SLPVectorize::isVectorizable(Instruction *inst) {
     if (inst->is_load() || inst->is_store()) return true;
     if (auto *bi = dynamic_cast<BinaryInst*>(inst)) {
@@ -790,6 +802,7 @@ bool SLPVectorize::isVectorizable(Instruction *inst) {
     return false;
 }
 
+// 借助别名分析检查两次内存访问之间是否存在可能冲突的读写。
 bool SLPVectorize::hasInterveningMemoryEffect(
     BasicBlock *bb, const std::vector<Instruction*> &instructions,
     const BasicAliasAnalysis &BAA) {
@@ -832,6 +845,7 @@ bool SLPVectorize::hasInterveningMemoryEffect(
     return true;
 }
 
+// 汇总标量成本、向量成本和打包开销，判断整个 pack 集是否值得发射。
 bool SLPVectorize::isProfitable(const PackSet &P) const {
     VectorizationCostModel costs;
     int scalarCost = 0;
@@ -907,6 +921,7 @@ bool SLPVectorize::isProfitable(const PackSet &P) const {
     return hasVectorStore && vectorCost < scalarCost;
 }
 
+// 判断两个 store 是否访问同一基址上的相邻元素。
 bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,
                                     Module *module)
 {
@@ -937,6 +952,7 @@ bool SLPVectorize::isAdjacentStore(Instruction *a, Instruction *b,
     return (ciB->value_ - ciA->value_) == 1;
 }
 
+// 判断两个 load 是否访问同一基址上的相邻元素。
 bool SLPVectorize::isAdjacentLoad(Instruction *a, Instruction *b,
                                    Module *module)
 {
@@ -967,10 +983,12 @@ bool SLPVectorize::isAdjacentLoad(Instruction *a, Instruction *b,
     return (ciB->value_ - ciA->value_) == 1;
 }
 
+// 读取 store 的数据操作数。
 Value *SLPVectorize::getStoredValue(Instruction *store) {
     return store->is_store() ? store->get_operand(0) : nullptr;
 }
 
+// 读取 store 的地址操作数。
 Value *SLPVectorize::getStorePointer(Instruction *store) {
     return store->is_store() ? store->get_operand(1) : nullptr;
 }

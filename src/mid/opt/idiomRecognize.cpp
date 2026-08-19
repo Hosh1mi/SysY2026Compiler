@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：循环按连续地址逐元素写入同一个字节值。
+//   优化后：用一次 memset 调用替代循环。
+// Pass 会证明循环边界、步长、地址连续性和副作用集合均符合库函数语义。
+
 #include "../../include/mid/opt/idiomRecognize.hpp"
 
 #include "../../include/mid/analysis/recurrenceAnalysis.hpp"
@@ -14,8 +19,12 @@
 #include <string>
 #include <vector>
 
+// IdiomRecognize 将满足严格形状约束的连续填充/复制循环替换为 libc 内存调用。
+// 匹配阶段验证归纳变量、步长、地址基址、访问范围和循环 CFG；任一证明缺失都会保留原循环。
+
 namespace {
 
+// 判断值是否定义在循环外，可作为循环不变量使用。
 bool isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
     if (dynamic_cast<Constant *>(val) || dynamic_cast<Argument *>(val) ||
         dynamic_cast<GlobalVariable *>(val))
@@ -24,6 +33,7 @@ bool isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
     return inst && !blocks.count(inst->parent_);
 }
 
+// 从循环 PHI 中分离初值与回边值，并验证 incoming 块属于预期边。
 bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
                         Value *&latchValue, BasicBlock *&latchBlock) {
     init = nullptr;
@@ -44,6 +54,7 @@ bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
     return init && latchValue && latchBlock;
 }
 
+// 将类型存储大小安全收窄为 int，拒绝未知大小和溢出。
 bool typeStorageBytesAsInt(Type *type, int &bytes) {
     const long long size = typeStorageBytes(type);
     if (size <= 0 || size > std::numeric_limits<int>::max()) return false;
@@ -51,6 +62,7 @@ bool typeStorageBytesAsInt(Type *type, int &bytes) {
     return true;
 }
 
+// 匹配 `iv` 或 `iv + 常量`，返回相对归纳变量的元素偏移。
 bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     if (value == iv) {
         offset = 0;
@@ -81,6 +93,7 @@ bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     return false;
 }
 
+// 验证 GEP 唯一变化下标对应连续一个元素的字节步长。
 bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep, unsigned varyingIndex,
                                       Type *scalarType) {
     if (!gep || gep->get_operand(0)->type_->tid_ != Type::PointerTyID)
@@ -102,6 +115,7 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep, unsigned varyingIn
     return false;
 }
 
+// 从指针表达式中恢复相对 PHI 归纳变量的常量元素偏移。
 bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     offset = 0;
     Value *cursor = pointer;
@@ -116,6 +130,7 @@ bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     return true;
 }
 
+// 判断整数填充值能否表示为 memset 的单字节重复模式。
 bool isMemsetFillConstant(ConstantInt *ci, int &fillByte) {
     int v = ci->value_;
     fillByte = v & 0xFF;
@@ -126,11 +141,13 @@ bool isMemsetFillConstant(ConstantInt *ci, int &fillByte) {
     return true;
 }
 
+// 查询 idiom 匹配调试开关。
 bool idiomDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_IDIOM") != nullptr;
     return enabled;
 }
 
+// 在调试模式下输出拒绝原因或命中信息。
 void debugIdiom(const std::string &message) {
     if (idiomDebugEnabled())
         std::cerr << "[IdiomRecognize] " << message << "\n";
@@ -165,6 +182,7 @@ struct MemcpyMatch {
     LibFunc copyKind = LibFunc::Memcpy;
 };
 
+// 检查当前循环内部是否还包含子循环，防止一维匹配跨越嵌套结构。
 bool hasNestedChildLoop(const Loop &loop, LoopInfo &LI) {
     for (auto &other : LI.allLoops()) {
         if (other.get() == &loop) continue;
@@ -180,6 +198,7 @@ struct IVDesc {
     Value *bound = nullptr;
 };
 
+// 识别保证 bound 大于零的入口比较。
 bool isPositiveGuard(ICmpInst *cmp, Value *bound) {
     if (!cmp) return false;
     auto *one = dynamic_cast<ConstantInt *>(cmp->get_operand(1));
@@ -199,6 +218,7 @@ bool isPositiveGuard(ICmpInst *cmp, Value *bound) {
     return false;
 }
 
+// 检查 preheader 是否通过条件分支保护了正迭代次数。
 bool preheaderHasPositiveGuard(BasicBlock *preheader, Value *bound) {
     if (!preheader || preheader->pre_bbs_.size() != 1) return false;
     auto *pred = preheader->pre_bbs_.front();
@@ -208,6 +228,7 @@ bool preheaderHasPositiveGuard(BasicBlock *preheader, Value *bound) {
     return isPositiveGuard(dynamic_cast<ICmpInst *>(term->get_operand(0)), bound);
 }
 
+// 识别以 PHI 为 IV 的 store 地址，并提取基址、变化维和常量偏移。
 bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
                              MemsetMatch &match) {
     Value *pointer = store->get_operand(1);
@@ -266,6 +287,7 @@ bool classifyStoreAddressPhi(const Loop &loop, PhiInst *ivPhi, StoreInst *store,
     return true;
 }
 
+// 识别以 alloca/load/store 表示的 IV 地址模式。
 bool classifyStoreAddressAlloca(const Loop &loop, AllocaInst *ivAlloca,
                                 StoreInst *store, MemsetMatch &match) {
     Value *pointer = store->get_operand(1);
@@ -297,6 +319,7 @@ bool classifyStoreAddressAlloca(const Loop &loop, AllocaInst *ivAlloca,
     return true;
 }
 
+// 判断一个值是否等价于已识别 IV 的当前迭代值。
 bool ivValueMatches(Value *value, const IVDesc &iv) {
     if (iv.phi && value == iv.phi) return true;
     if (iv.alloca) {
@@ -306,6 +329,7 @@ bool ivValueMatches(Value *value, const IVDesc &iv) {
     return false;
 }
 
+// 从 header PHI、latch 更新和退出比较中恢复计数归纳变量。
 bool findCountingIV(Loop &loop, BasicBlock *latch, ICmpInst *compare, IVDesc &iv) {
     if (!compare || compare->icmp_op_ != ICmpInst::ICMP_SLT) return false;
     Value *bound = compare->get_operand(1);
@@ -379,6 +403,7 @@ bool findCountingIV(Loop &loop, BasicBlock *latch, ICmpInst *compare, IVDesc &iv
     return true;
 }
 
+// 限制循环体允许出现的指令集合，并确认恰有待替换的内存写。
 bool isAllowedLoopInst(Instruction *inst, const IVDesc &iv, bool &sawStore) {
     if (inst->is_phi() || inst->isTerminator()) return true;
     if (inst->is_call() || inst->is_alloca()) return false;
@@ -397,6 +422,7 @@ bool isAllowedLoopInst(Instruction *inst, const IVDesc &iv, bool &sawStore) {
            dynamic_cast<ICmpInst *>(inst);
 }
 
+// 统一调度 PHI-IV 与 alloca-IV 两种 store 地址分类器。
 bool classifyStoreAddress(const Loop &loop, const IVDesc &iv, StoreInst *store,
                           MemsetMatch &match) {
     if (iv.phi) return classifyStoreAddressPhi(loop, iv.phi, store, match);
@@ -404,6 +430,7 @@ bool classifyStoreAddress(const Loop &loop, const IVDesc &iv, StoreInst *store,
     return false;
 }
 
+// 匹配 IV 当前值或带常量偏移的形式。
 bool ivOperandMatches(Value *value, const IVDesc &iv, int &offset) {
     if (iv.phi && matchIVPlusConstant(value, iv.phi, offset)) return true;
     if (iv.alloca) {
@@ -417,6 +444,7 @@ bool ivOperandMatches(Value *value, const IVDesc &iv, int &offset) {
     return false;
 }
 
+// 为嵌套二维 memset 同时恢复外层行索引和内层列索引。
 bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
                             const IVDesc &innerIV, StoreInst *store,
                             MemsetMatch &match) {
@@ -458,6 +486,7 @@ bool classifyStoreAddress2D(const Loop &outer, const IVDesc &outerIV,
     return true;
 }
 
+// 识别 load/store 指针中的 PHI-IV 变化维，用于 memcpy 两侧形状比较。
 bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
                            Type *scalarType, Value *&base,
                            GetElementPtrInst *&inductionGeep,
@@ -523,6 +552,7 @@ bool classifyMemAddressPhi(const Loop &loop, PhiInst *ivPhi, Value *pointer,
     return true;
 }
 
+// 识别 memcpy 一侧地址，返回基址、变化下标、偏移和元素大小。
 bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
                            StoreInst *store, MemcpyMatch &match) {
     if (store->get_operand(0) != load) return false;
@@ -610,6 +640,7 @@ bool classifyMemcpyAddress(const Loop &loop, const IVDesc &iv, LoadInst *load,
     return true;
 }
 
+// 穿透 GEP 与 bitcast，取得底层内存对象。
 Value *underlyingObject(Value *value) {
     Value *cursor = value;
     while (cursor) {
@@ -624,11 +655,13 @@ Value *underlyingObject(Value *value) {
     return cursor;
 }
 
+// 判断底层对象是否拥有编译期稳定的静态存储范围。
 bool isStaticMemoryObject(Value *value) {
     return dynamic_cast<GlobalVariable *>(value) ||
            dynamic_cast<AllocaInst *>(value);
 }
 
+// 计算只含常量 GEP/bitcast 链的字节偏移。
 bool constantByteOffset(Value *value, long long &offset) {
     if (auto *cast = dynamic_cast<Bitcast *>(value))
         return constantByteOffset(cast->get_operand(0), offset);
@@ -664,6 +697,7 @@ bool constantByteOffset(Value *value, long long &offset) {
     return true;
 }
 
+// 在元素数和元素大小均静态时计算 memcpy 总字节数。
 bool constantCopyBytes(const MemcpyMatch &match, long long &bytes) {
     auto *count = dynamic_cast<ConstantInt *>(match.elementCount);
     if (!count) return false;
@@ -671,6 +705,7 @@ bool constantCopyBytes(const MemcpyMatch &match, long long &bytes) {
                                           match.elementStrideBytes, bytes);
 }
 
+// 验证源和目标的变化 GEP 具有相同维度、步长与迭代方向。
 bool sameVaryingGEPShape(const MemcpyMatch &match) {
     if (!match.destGeep || !match.srcGeep) return false;
     if (match.destGeep->num_ops() != match.srcGeep->num_ops())
@@ -693,6 +728,7 @@ enum class CopySelection {
     Memmove,
 };
 
+// 根据底层对象与区间关系选择 memcpy、memmove 或拒绝转换。
 CopySelection selectCopyLibFunc(const MemcpyMatch &match) {
     Value *destPtr = match.destBase ? match.destBase : match.destGeep;
     Value *srcPtr = match.srcBase ? match.srcBase : match.srcGeep;
@@ -731,6 +767,7 @@ CopySelection selectCopyLibFunc(const MemcpyMatch &match) {
     return CopySelection::Reject;
 }
 
+// 验证单循环的 header/body/latch/exit 连接方式，并返回核心块和比较。
 bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
                                 ICmpInst *&compare) {
     if (!loop.preheader || !loop.singleLatch() || !loop.singleExit())
@@ -785,6 +822,7 @@ bool validateCanonicalLoopShape(Loop &loop, BasicBlock *&bodyEntry,
     return compare != nullptr;
 }
 
+// 验证二维填充的外层循环只负责行推进并规范地包围内层循环。
 bool validateOuterLoopShape(Loop &outer, Loop &inner, ICmpInst *&compare) {
     if (!outer.preheader || !outer.singleLatch() || !outer.singleExit())
         return false;
@@ -814,6 +852,7 @@ bool validateOuterLoopShape(Loop &outer, Loop &inner, ICmpInst *&compare) {
     return compare != nullptr;
 }
 
+// 匹配二维连续填充，组合外层与内层 IV 得到完整字节范围。
 bool tryMatchNestedMemset2D(Loop &outer, Loop &inner, MemsetMatch &match) {
     if (outer.children.size() != 1 || outer.children[0] != &inner) return false;
     if (!inner.children.empty()) return false;
@@ -908,6 +947,7 @@ bool tryMatchNestedMemset2D(Loop &outer, Loop &inner, MemsetMatch &match) {
     return true;
 }
 
+// 匹配一维连续复制循环，验证唯一 load/store、地址同构和固定复制长度。
 bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
     BasicBlock *bodyEntry = nullptr;
     ICmpInst *compare = nullptr;
@@ -991,6 +1031,7 @@ bool tryMatchMemcpyLoop(Loop &loop, MemcpyMatch &match) {
     return true;
 }
 
+// 匹配一维连续填充循环，验证常量填充值与单位元素步长。
 bool tryMatchMemsetLoop(Loop &loop, MemsetMatch &match) {
     BasicBlock *bodyEntry = nullptr;
     ICmpInst *compare = nullptr;
@@ -1078,6 +1119,7 @@ Value *buildMemBase(Value *base, GetElementPtrInst *geep,
     return base;
 }
 
+// 在 preheader 发射 memcpy/memmove，绕过原循环并修复退出 PHI 与 CFG 边。
 bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
                      Function *memcpyDecl, Function *func) {
     if (!memcpyDecl) return false;
@@ -1163,6 +1205,7 @@ bool lowerMemcpyLoop(Loop &loop, const MemcpyMatch &match, Module *module,
     return true;
 }
 
+// 在 preheader 发射 memset，绕过原循环并修复退出 PHI 与 CFG 边。
 bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
                      Function *memsetDecl, Function *func) {
     if (!memsetDecl) return false;
@@ -1285,11 +1328,13 @@ bool lowerMemsetLoop(Loop &loop, const MemsetMatch &match, Module *module,
 
 } // namespace
 
+// 兼容旧式入口。
 void IdiomRecognize::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+// 使用共享分析逐函数运行，CFG 改写后保守失效相关缓存。
 PreservedAnalyses IdiomRecognize::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -1299,6 +1344,7 @@ PreservedAnalyses IdiomRecognize::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+// 先收集匹配结果，再执行 lowering，避免遍历 LoopInfo 时直接破坏循环结构。
 bool IdiomRecognize::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return false;
 

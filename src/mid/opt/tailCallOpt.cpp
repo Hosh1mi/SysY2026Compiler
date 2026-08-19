@@ -1,9 +1,19 @@
+// 典型示例：
+//   优化前：%r = call @callee(%x)；ret %r。
+//   优化后：call 被标记为 tail，后端可复用当前函数的返回路径生成尾跳转。
+// 调用必须紧邻返回位置，且返回值关系需要精确匹配。
+
 #include "../../include/mid/opt/tailCallOpt.hpp"
 #include "../../include/mid/opt/cfgUtils.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <vector>
 
+// 尾调用标记识别两类结尾：call 后直接 return，以及 call 后跳到仅负责返回的
+// 公共出口块。第二类先被规范化为本块 return，再标记 call 为 tail，供后端
+// 生成无需保留当前栈帧的尾跳转。
+
+// 确认 call 与 terminator 之间没有其它指令，保证其结果可直接作为返回值。
 static bool isFinalNonTerminator(CallInst *call, BasicBlock *block) {
     if (!call || !block)
         return false;
@@ -53,6 +63,7 @@ static bool isPattern2TailCall(CallInst *call, BasicBlock *target,
     return true;
 }
 
+// 从基本块末尾向前找到紧邻 terminator 的调用。
 static CallInst *findTrailingCall(BasicBlock *bb) {
     Instruction *term = bb->get_terminator();
     if (!term)
@@ -102,6 +113,7 @@ static void canonicalizePattern2(CallInst *call, BasicBlock *bb,
         new ReturnInst(call, bb);
 }
 
+// 兼容入口：逐函数识别和规范化尾调用。
 void TailCallOpt::execute(Module *module) {
     AnalysisManager unused;
     execute(module, unused);
@@ -117,6 +129,7 @@ PreservedAnalyses TailCallOpt::execute(Module *module, AnalysisManager &) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+// 扫描函数所有返回路径，为满足约束的调用设置尾调用标记。
 bool TailCallOpt::runOnFunction(Function *func) {
     // Collect sites first so Pattern-2 rewrites do not invalidate iteration.
     struct Site {

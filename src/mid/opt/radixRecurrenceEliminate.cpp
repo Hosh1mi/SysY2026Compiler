@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：F(a,b) 递归计算 F(a,b/2)，将结果翻倍，奇数 b 再加 a 并取模。
+//   优化后：直接生成等价的 MulMod，或生成保持 i32 运算次序的按位迭代。
+// 结构匹配同时验证基例、递推式和模数，确保递归闭式可被证明。
+
 #include "../../include/mid/opt/radixRecurrenceEliminate.hpp"
 
 #include "../../include/mid/ir/constant.hpp"
@@ -8,6 +13,9 @@
 #include <array>
 #include <vector>
 
+// RadixRecurrenceEliminate 匹配二进制分解形式的纯自递归模运算，并将其改写为
+// MulMod 或保持 i32 运算顺序的按位迭代。匹配完全依赖 CFG 与指令形状。
+
 namespace {
 
 struct Match {
@@ -17,10 +25,12 @@ struct Match {
     int modulus = 0;
 };
 
+// 将 Value 安全转换为整数常量。
 ConstantInt *asConstant(Value *value) {
     return dynamic_cast<ConstantInt *>(value);
 }
 
+// 判断值是否为给定整数，兼容显式常量与零初始化常量。
 bool isConstant(Value *value, int expected) {
     auto *constant = asConstant(value);
     return constant && constant->value_ == expected;
@@ -46,6 +56,7 @@ BinaryInst *findBinaryUser(Value *value, Instruction::OpID op,
     return result;
 }
 
+// 在 value 的 use 中寻找形如 `value srem modulus` 的余数归一化节点。
 BinaryInst *findRemainderUser(Value *value, int modulus) {
     BinaryInst *result = nullptr;
     for (auto &use : value->use_list_) {
@@ -60,6 +71,7 @@ BinaryInst *findRemainderUser(Value *value, int modulus) {
     return result;
 }
 
+// 匹配 `lhs == rhs`，允许常量位于比较任一侧。
 bool matchEq(Value *value, Value *lhs, int rhs) {
     auto *cmp = dynamic_cast<ICmpInst *>(value);
     if (!cmp || cmp->icmp_op_ != ICmpInst::ICMP_EQ) return false;
@@ -77,12 +89,14 @@ bool matchCondBranch(BasicBlock *block, Value *lhs, int rhs,
            branch->get_operand(2) == falseTarget;
 }
 
+// 判断基本块是否以无条件分支直接到达目标块。
 bool isUnconditionalTo(BasicBlock *block, BasicBlock *target) {
     if (!block) return false;
     auto *branch = dynamic_cast<BranchInst *>(block->get_terminator());
     return branch && branch->num_ops() == 1 && branch->get_operand(0) == target;
 }
 
+// 查找 PHI 中某个 incoming value 对应的前驱块。
 BasicBlock *incomingBlock(PhiInst *phi, Value *value) {
     BasicBlock *result = nullptr;
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
@@ -94,6 +108,7 @@ BasicBlock *incomingBlock(PhiInst *phi, Value *value) {
     return result;
 }
 
+// 保证候选函数只含纯标量计算，且唯一调用为指定 self call。
 bool hasOnlyPureScalarInstructions(Function *function, CallInst *selfCall) {
     unsigned selfCalls = 0;
     for (auto *block : function->basic_blocks_) {
@@ -122,6 +137,7 @@ bool hasOnlyPureScalarInstructions(Function *function, CallInst *selfCall) {
     return selfCalls == 1;
 }
 
+// 验证基例、奇偶分支、自递归参数和取模链，成功时填充完整 Match。
 bool matchFunction(Function *function, Match &match) {
     auto isI32 = [](Type *type) {
         auto *integer = dynamic_cast<IntegerType *>(type);
@@ -266,6 +282,7 @@ bool matchFunction(Function *function, Match &match) {
     return true;
 }
 
+// 删除原函数全部基本块，为闭式或迭代实现腾出函数体。
 void discardBody(Function *function) {
     std::vector<BasicBlock *> blocks = function->basic_blocks_;
     for (auto blockIt = blocks.rbegin(); blockIt != blocks.rend(); ++blockIt) {
@@ -286,6 +303,7 @@ BinaryInst *binary(Module *module, BasicBlock *block, Instruction::OpID op,
     return new BinaryInst(module->int32_ty_, op, lhs, rhs, block);
 }
 
+// 根据溢出证明选择 MulMod 或 bit-walking 版本，并重建函数 CFG。
 void rewrite(const Match &match, Module *module) {
     Function *function = match.function;
     Argument *addend = match.addend;
@@ -402,6 +420,7 @@ void rewrite(const Match &match, Module *module) {
 
 } // namespace
 
+// 扫描模块函数，先完成结构匹配，再改写命中的候选。
 void RadixRecurrenceEliminate::execute(Module *module) {
     std::vector<Match> matches;
     for (auto *function : module->function_list_) {

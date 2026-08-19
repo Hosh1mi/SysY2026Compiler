@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：条件分支两臂分别产生 %a、%b，汇合块通过 PHI 选择结果。
+//   优化后：%result = select %cond, %a, %b。
+// 两臂指令可安全投机且转换收益足够时，控制依赖会变成数据依赖。
+
 #include "../../include/mid/opt/ifConversion.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -5,6 +10,10 @@
 #include <algorithm>
 #include <set>
 #include <vector>
+
+// IfConversion 消除适合无分支执行的短小控制流：普通菱形被折叠为 select，
+// 循环内条件累加可改写为掩码算术，条件 store 则在别名与投机安全条件满足时
+// 合并。收益判断会限制克隆成本，并排除可能产生异常或可观察副作用的指令。
 
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {

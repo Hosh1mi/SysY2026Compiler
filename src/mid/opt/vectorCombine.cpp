@@ -1,4 +1,11 @@
-// Recover profitable vector operations from scalar extract/insert forms.
+// 典型示例：
+//   优化前：逐 lane extract 两个向量、执行四次标量 add，再逐 lane insert。
+//   优化后：用一条向量 add 产生完整结果向量。
+// lane 索引、操作码和来源向量全部匹配时，标量拼装链可被整体替换。
+
+// VectorCombine 从 extractelement/insertelement 形成的标量链中恢复向量运算。
+// 它按 lane 核对来源向量、操作码和索引完整性，在成本模型确认有收益后，以
+// 一条向量指令替换整组标量指令，并清理只为拼装结果存在的中间值。
 
 #include "../../include/mid/opt/vectorCombine.hpp"
 
@@ -14,6 +21,7 @@ namespace {
 
 constexpr unsigned VectorWidth = VectorizationCostModel::VectorWidth;
 
+// 提取常量 lane 下标，动态索引无法参与固定宽度模式匹配。
 std::optional<unsigned> constantLane(Value *value) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     if (!constant || constant->value_ < 0 ||
@@ -22,6 +30,7 @@ std::optional<unsigned> constantLane(Value *value) {
     return static_cast<unsigned>(constant->value_);
 }
 
+// 检查向量类型和宽度是否受当前成本模型与后端支持。
 bool isSupportedVectorType(Type *type) {
     auto *vector = dynamic_cast<VectorType *>(type);
     if (!vector || vector->num_elements_ != VectorWidth)
@@ -32,6 +41,7 @@ bool isSupportedVectorType(Type *type) {
     return integer && integer->num_bits_ == 32;
 }
 
+// 确认中间值只服务于当前拼装链，替换后可安全删除。
 bool onlyUsedBy(Value *value, Instruction *user) {
     if (value->use_list_.empty())
         return false;
@@ -41,6 +51,7 @@ bool onlyUsedBy(Value *value, Instruction *user) {
     return true;
 }
 
+// 判断操作码能否逐 lane 映射为整数向量二元指令。
 bool integerLaneBinary(Instruction::OpID opcode) {
     switch (opcode) {
     case Instruction::Add:
@@ -55,6 +66,7 @@ bool integerLaneBinary(Instruction::OpID opcode) {
     }
 }
 
+// 判断操作码能否逐 lane 映射为浮点向量二元指令。
 bool floatingLaneBinary(Instruction::OpID opcode) {
     switch (opcode) {
     case Instruction::FAdd:
@@ -67,6 +79,7 @@ bool floatingLaneBinary(Instruction::OpID opcode) {
     }
 }
 
+// 匹配每个 lane 上结构相同的二元运算，并生成对应向量运算。
 bool combineLaneBinary(BinaryInst *binary,
                        const VectorizationCostModel &costs) {
     if ((!integerLaneBinary(binary->op_id_) &&
@@ -129,6 +142,7 @@ struct LaneSource {
     unsigned lane = 0;
 };
 
+// 将逐 lane 常量取余拼装链合并成可等价表达的向量计算。
 bool combinePackedConstantRemainder(InsertElementInst *root) {
     auto *vectorType = dynamic_cast<VectorType *>(root->type_);
     auto *elementType = vectorType
@@ -210,6 +224,7 @@ bool combinePackedConstantRemainder(InsertElementInst *root) {
     return true;
 }
 
+// 从最终 insertelement 逆向收集完整 lane 链并尝试整体合并。
 bool combineInsertChain(InsertElementInst *root,
                         const VectorizationCostModel &costs) {
     if (!isSupportedVectorType(root->type_))
@@ -285,6 +300,7 @@ bool combineInsertChain(InsertElementInst *root,
     return true;
 }
 
+// 识别由嵌套 shuffle 构成的固定重排，并折叠为更直接的向量形式。
 bool combineShuffleChain(ShuffleVectorInst *outer,
                          const VectorizationCostModel &costs) {
     if (!isSupportedVectorType(outer->type_))
@@ -331,6 +347,7 @@ bool combineShuffleChain(ShuffleVectorInst *outer,
 
 } // namespace
 
+// 在单个函数内迭代匹配，直到本轮没有新的标量链可合并。
 bool VectorCombine::runOnFunction(Function *function) {
     bool changed = false;
     const VectorizationCostModel costs;
@@ -354,6 +371,7 @@ bool VectorCombine::runOnFunction(Function *function) {
     return changed;
 }
 
+// 模块入口：逐函数执行向量组合。
 void VectorCombine::execute(Module *module) {
     for (Function *function : module->function_list_)
         if (!function->is_declaration())

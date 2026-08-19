@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：%x = add %a, %b；%y = add %a, %b。
+//   优化后：所有 %y 的使用改为 %x，并删除第二条 add。
+// 对 load 的复用还需证明两次读取之间没有可能别名的写操作。
+
 #include "../../include/mid/opt/earlyCSE.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/opt/cse_common.hpp"
@@ -6,7 +11,11 @@
 #include <set>
 #include <stack>
 
-// ---------- Helpers ----------
+// EarlyCSE 沿支配树深度优先遍历，在作用域栈中记录已经计算的表达式和最近的
+// 内存定义。表达式命中时复用支配当前点的旧值；load 转发还会借助 BasicAA
+// 检查中间写操作。循环入口放置哨兵，阻止跨迭代复用可能失效的内存值。
+
+// 取出 GEP/bitcast 链最底层的内存对象，供别名与写入失效判断使用。
 static Value* getBase(Value *ptr) {
     while (true) {
         if (auto *gep = dynamic_cast<GetElementPtrInst*>(ptr)) {

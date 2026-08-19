@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：%sum = add %a, %b 位于分支前，且仅在 %then 中使用。
+//   优化后：%sum 移入 %then，并放在首次使用之前。
+// 下沉缩短值的生存区间，也避免未走 %then 路径时执行无用计算。
+
 #include "../../include/mid/opt/codeSink.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
@@ -6,8 +11,12 @@
 #include <set>
 #include <vector>
 
+// CodeSink 将纯计算移动到所有 use 的最近公共使用区域，缩短值的活跃区间。
+// 下沉前同时检查支配性与循环深度，防止操作数在新位置不可用或计算被移入更深循环。
+
 namespace {
 
+// 限定可下沉的无副作用指令集合，并排除 PHI、终结指令和无 use 的死值。
 bool isSinkableInstruction(Instruction *inst) {
     if (!inst || inst->is_phi() || inst->isTerminator() || inst->use_list_.empty())
         return false;
@@ -40,12 +49,14 @@ bool isSinkableInstruction(Instruction *inst) {
     }
 }
 
+// PHI 的某个 value 操作数只在其配对 predecessor edge 上使用。
 BasicBlock *phiIncomingBlock(PhiInst *phi, unsigned argNo) {
     if (!phi || (argNo % 2) != 0 || argNo + 1 >= phi->num_ops())
         return nullptr;
     return dynamic_cast<BasicBlock *>(phi->get_operand(argNo + 1));
 }
 
+// 将普通 use 映射到 user 所在块，将 PHI use 映射到对应入边的前驱块。
 BasicBlock *useBlock(const Use &use) {
     auto *user = use.user_;
     if (!user)
@@ -55,6 +66,7 @@ BasicBlock *useBlock(const Use &use) {
     return user->parent_;
 }
 
+// 返回基本块所属的最内层循环深度，循环外为 0。
 int loopDepth(LoopInfo &LI, BasicBlock *bb) {
     Loop *loop = LI.getLoopFor(bb);
     return loop ? loop->depth + 1 : 0;
@@ -74,6 +86,7 @@ bool operandsDominateTarget(Instruction *inst, const DominatorTreeAnalysis &DT,
     return true;
 }
 
+// 检查 user 当前是否仍引用 value，过滤前序替换留下的过期 Use 快照。
 bool userUsesValue(Instruction *user, Value *value) {
     if (!user)
         return false;
@@ -84,6 +97,7 @@ bool userUsesValue(Instruction *user, Value *value) {
     return false;
 }
 
+// 在目标块中选择最早且满足全部依赖的插入点，同时保证新定义位于所有本块 use 之前。
 Instruction *findInsertionPoint(Instruction *inst, BasicBlock *target) {
     for (auto *cur : target->instr_list_) {
         if (cur->is_phi())
@@ -137,11 +151,13 @@ bool trySinkInstruction(Instruction *inst, Function *func, LoopInfo &LI,
 
 } // namespace
 
+// 兼容旧式入口，内部创建分析管理器。
 void CodeSink::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+// 逐函数执行下沉；只移动指令，不改 CFG，因此保留 CFG 类分析。
 PreservedAnalyses CodeSink::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -152,6 +168,7 @@ PreservedAnalyses CodeSink::execute(Module *module, AnalysisManager &AM) {
                    : PreservedAnalyses::all();
 }
 
+// 计算所有 use 块的最近公共支配块，验证循环深度后将候选指令移动到该块。
 bool CodeSink::runOnFunction(Function *func, AnalysisManager &AM) {
     bool changed = false;
 

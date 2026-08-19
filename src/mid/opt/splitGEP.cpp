@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：循环每轮都计算 GEP @a, 0, %row, %i。
+//   优化后：预头计算行基址 GEP @a, 0, %row，循环内仅追加 %i。
+// %row 在循环中保持不变，因此多维地址的不变前缀可以只计算一次。
+
 #include "../../include/mid/opt/splitGEP.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -5,19 +10,24 @@
 #include <iostream>
 #include <vector>
 
+// SplitGEP 将循环内多维地址计算拆成“不变前缀 + 变化下标”。不变的行基址
+// GEP 被移动到循环预头，循环体只保留随迭代变化的末级索引，以减少重复计算，
+// 同时为后续向量化暴露更直接的连续地址形式。
+
 static bool isSplitGEPDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_SPLIT_GEP") != nullptr;
     return enabled;
 }
 
-// A value is invariant in `loop` iff it is not an instruction defined inside
-// the loop body. Constants, globals, allocas and arguments are never inside.
+// 值未由循环体内的指令定义时视为循环不变量；常量、全局、alloca 和参数
+// 天然满足此条件。
 static bool isInvariantInLoop(Value *v, Loop *loop) {
     auto *inst = dynamic_cast<Instruction *>(v);
     if (!inst) return true;
     return loop->blocks.count(inst->parent_) == 0;
 }
 
+// 在单个规范循环中寻找可拆分 GEP，把最大不变前缀提到预头并替换原地址链。
 bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI,
                          const DominatorTreeAnalysis &DT) {
     BasicBlock *preheader = loop->preheader;
@@ -131,6 +141,7 @@ bool SplitGEP::runOnLoop(Loop *loop, LoopInfo &LI,
     return changed;
 }
 
+// 以内层优先顺序处理循环；改写后声明 CFG 分析仍有效，值相关分析失效。
 PreservedAnalyses SplitGEP::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *f : module->function_list_) {
@@ -144,6 +155,7 @@ PreservedAnalyses SplitGEP::execute(Module *module, AnalysisManager &AM) {
                    : PreservedAnalyses::all();
 }
 
+// 兼容旧式 Pass 接口。
 void SplitGEP::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);

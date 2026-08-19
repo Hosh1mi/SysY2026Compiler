@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：(%c + %a) + %b。
+//   优化后：(%a + %b) + %c，操作数依据稳定 rank 排列。
+// 统一的表达式形态更容易与其它位置的同值计算匹配，并可缩短部分依赖链。
+
 #include "../../include/mid/opt/reassociate.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -6,6 +11,10 @@
 #include <functional>
 #include <iostream>
 #include <queue>
+
+// Reassociate 为交换律/结合律表达式建立稳定的操作数顺序，使公共子表达式更易
+// 暴露。通用路径按支配关系计算 rank 并重建表达式树；i32 加减法另有线性形式，
+// 将系数和常量统一收集后，仅在重建成本更低时生成新树。
 
 namespace {
 
@@ -26,11 +35,13 @@ struct LinearForm {
     unsigned visits = 0;
 };
 
+// 线性化路径仅处理具有模 2^32 语义的 i32 值。
 static bool isI32(Value *value) {
     auto *type = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
     return type && type->num_bits_ == 32;
 }
 
+// 将无符号位模式按二补码解释为有符号常量，避免宿主溢出参与推导。
 static int signedBits(std::uint32_t bits) {
     std::int32_t value;
     static_assert(sizeof(value) == sizeof(bits), "i32 bit width mismatch");
@@ -38,6 +49,7 @@ static int signedBits(std::uint32_t bits) {
     return static_cast<int>(value);
 }
 
+// 向线性形式合并一项；相同 SSA 值的系数按模 2^32 累加。
 static bool addLinearTerm(LinearForm &form, Value *value,
                           std::uint32_t coefficient) {
     if (coefficient == 0)
@@ -55,6 +67,7 @@ static bool addLinearTerm(LinearForm &form, Value *value,
     return true;
 }
 
+// 递归展开 add/sub/常量乘法，收集“系数 * 叶子 + 常量”的规范表示。
 static bool collectLinear(Value *value, std::uint32_t scale, BasicBlock *bb,
                           unsigned depth, LinearForm &form) {
     if (++form.visits > kMaxLinearVisits || depth > kMaxLinearDepth)
@@ -104,12 +117,14 @@ static bool collectLinear(Value *value, std::uint32_t scale, BasicBlock *bb,
     }
 }
 
+// 给原算术节点估算目标相关的相对代价。
 static int arithmeticCost(BinaryInst *inst) {
     if (!inst)
         return 0;
     return inst->op_id_ == Instruction::Mul ? 2 : 1;
 }
 
+// 统计重建后能够因无其它使用而删除的原表达式成本。
 static int removableCost(BinaryInst *root, const LinearForm &form) {
     std::unordered_map<BinaryInst *, bool> memo;
     std::unordered_set<BinaryInst *> active;
@@ -143,6 +158,7 @@ static int removableCost(BinaryInst *root, const LinearForm &form) {
     return cost;
 }
 
+// 估算从线性形式重新生成乘法与加法树的成本。
 static int rebuiltCost(const LinearForm &form) {
     int valueCount = form.constant != 0 ? 1 : 0;
     int cost = 0;
@@ -169,6 +185,7 @@ static int rebuiltCost(const LinearForm &form) {
     return cost;
 }
 
+// 在 root 前按规范顺序生成线性表达式，并保留 i32 环绕语义。
 static Value *buildLinear(const LinearForm &form, BinaryInst *root) {
     BasicBlock *bb = root->parent_;
     Type *type = root->type_;
@@ -216,6 +233,7 @@ static Value *buildLinear(const LinearForm &form, BinaryInst *root) {
     return result;
 }
 
+// 仅当线性重建严格降低成本时替换原根节点。
 static bool tryReassociateLinear(BinaryInst *root) {
     if (!root || !root->parent_ || !isI32(root) ||
         (root->op_id_ != Instruction::Add &&
@@ -251,6 +269,7 @@ static bool tryReassociateLinear(BinaryInst *root) {
 
 } // namespace
 
+// 模块入口：逐函数完成 rank 计算和表达式重排。
 void Reassociate::execute(Module *module) {
     changed_ = false;
     for (auto func : module->function_list_) {
@@ -265,6 +284,7 @@ PreservedAnalyses Reassociate::execute(Module *module, AnalysisManager &AM) {
     return changed_ ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+// 先建立值 rank，再访问每条可结合二元指令并尝试局部重建。
 void Reassociate::runOnFunction(Function *func) {
     valueRank_.clear();
     bbRank_.clear();
@@ -304,6 +324,7 @@ void Reassociate::computeRanks(Function *func) {
     }
 }
 
+// 返回值的稳定排序等级；常量最低，指令依据所在块与依赖层级排序。
 int Reassociate::getRank(Value *v) {
     if (dynamic_cast<Constant*>(v)) return 0;
     if (dynamic_cast<Argument*>(v)) return valueRank_[v];
@@ -328,6 +349,7 @@ void Reassociate::swapOperands(Instruction *inst) {
     changed_ = true;
 }
 
+// 在指定位置创建同类型二元指令，供重建树复用统一插入逻辑。
 BinaryInst *Reassociate::createBinary(Instruction::OpID op, Value *v1, Value *v2,
                                        BasicBlock *bb, Instruction *before) {
     auto *bin = new BinaryInst(v1->type_, op, v1, v2, bb, true);
@@ -364,6 +386,7 @@ Value *Reassociate::rebuildAddTree(std::vector<Value*> &ops, BasicBlock *bb,
     return createBinary(Instruction::Add, lhs, rhs, bb, before);
 }
 
+// 将已排序叶子按较平衡的形态重新组合，缩短依赖链。
 static Value *rebuildTree(Instruction::OpID op, std::vector<Value*> &ops,
                           BasicBlock *bb, Instruction *before) {
     if (ops.size() == 1) return ops[0];

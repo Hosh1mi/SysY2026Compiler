@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：pred 已知 x == 0，却仍跳到 mid 再按 x == 0 选择 left/right。
+//   优化后：pred 直接跳到 left，mid 留给事实尚未确定的其它前驱。
+// 穿透前会先计算目标块 PHI 在新边上应接收的值。
+
 #include "../../include/mid/opt/jumpThreadingLite.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
@@ -7,15 +12,20 @@
 #include <set>
 #include <vector>
 
+// 轻量跳转穿透根据前驱边上已知的分支事实，直接决定中间块的条件分支去向。
+// 改写前会完整规划目标块 PHI 的新增、替换和删除操作；遇到循环头、回边或
+// 无法唯一确定 PHI 值的路径时保守退出，从而保持 SSA 与循环结构有效。
+
 namespace {
 
 struct PhiRepairEdit {
     PhiInst *phi = nullptr;
-    int incomingIdx = -1;       // block operand index for the old mid incoming
+    int incomingIdx = -1;       // 旧中间块入边对应的 block 操作数下标
     Value *replacement = nullptr;
     bool removeMidIncoming = false;
 };
 
+// 检查终结指令是否包含 from -> to 的 CFG 边。
 bool hasTerminatorEdge(BasicBlock *from, BasicBlock *to) {
     auto *term = from ? from->get_terminator() : nullptr;
     if (!term) return false;
@@ -26,6 +36,7 @@ bool hasTerminatorEdge(BasicBlock *from, BasicBlock *to) {
     return false;
 }
 
+// 统计终结指令指向同一目标的边数，兼容条件分支两臂同目标的情况。
 int countTerminatorEdges(BasicBlock *from, BasicBlock *to) {
     auto *term = from ? from->get_terminator() : nullptr;
     if (!term) return 0;
@@ -37,6 +48,7 @@ int countTerminatorEdges(BasicBlock *from, BasicBlock *to) {
     return count;
 }
 
+// 比较两个值是否为同一 SSA 值或数值相同的整数常量。
 bool sameValue(Value *lhs, Value *rhs) {
     if (lhs == rhs) return true;
     int lhsConst = 0;
@@ -50,6 +62,7 @@ bool isLoopHeader(BasicBlock *bb, const std::set<BasicBlock *> &loopHeaders) {
     return loopHeaders.find(bb) != loopHeaders.end();
 }
 
+// 拒绝会穿越循环头或制造回边的改写，保持 LoopInfo 所需的规范结构。
 bool isUnsafeLoopThread(BasicBlock *pred, BasicBlock *mid, BasicBlock *chosenSucc,
                         const DominatorTreeAnalysis &DT,
                         const std::set<BasicBlock *> &loopHeaders) {
@@ -68,6 +81,7 @@ bool isUnsafeLoopThread(BasicBlock *pred, BasicBlock *mid, BasicBlock *chosenSuc
     return false;
 }
 
+// 从后继块所有 PHI 中删除指定前驱对应的入值。
 void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -79,6 +93,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     }
 }
 
+// 从 pred 到 succ 的分支方向提取布尔与整数比较事实。
 void collectEdgeFacts(BasicBlock *pred, BasicBlock *succ, BoolFactMap &boolFacts,
                       ICmpFactMap &cmpFacts) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
@@ -89,6 +104,7 @@ void collectEdgeFacts(BasicBlock *pred, BasicBlock *succ, BoolFactMap &boolFacts
     recordAssumedBool(br->get_operand(0), trueDest == succ, boolFacts, cmpFacts);
 }
 
+// PHI 替代值必须在新前驱末尾可用，或属于可跨块复用的常量/参数/全局。
 bool isAllowedPhiIncomingValue(Value *value, BasicBlock *pred,
                                const DominatorTreeAnalysis &DT) {
     if (dynamic_cast<Constant *>(value)) return true;
@@ -122,6 +138,7 @@ Value *substitutePhiOnEdge(Value *value, BasicBlock *mid, BasicBlock *pred) {
     return substitutePhiOnEdge(value, mid, pred, visiting);
 }
 
+// 将中间块 PHI 按给定前驱代入，再利用路径事实求出条件的确定布尔值。
 std::optional<bool> evaluateBoolWithSubstitution(Value *value, BasicBlock *mid,
                                                  BasicBlock *pred,
                                                  const BoolFactMap &boolFacts,
@@ -160,6 +177,7 @@ std::optional<bool> evaluateBoolWithSubstitution(Value *value, BasicBlock *mid,
     return std::nullopt;
 }
 
+// 验证中间块只含 PHI、可解释的比较和条件分支。
 bool isThreadableMidBlock(BasicBlock *bb, ICmpInst *&cmpOut) {
     cmpOut = nullptr;
     auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
@@ -178,6 +196,7 @@ bool isThreadableMidBlock(BasicBlock *bb, ICmpInst *&cmpOut) {
     return true;
 }
 
+// 将前驱终结指令中的 oldTarget 精确替换为 newTarget。
 bool redirectPredEdge(BasicBlock *pred, BasicBlock *oldTarget,
                       BasicBlock *newTarget) {
     auto *br = dynamic_cast<BranchInst *>(pred->get_terminator());
@@ -206,6 +225,7 @@ bool redirectPredEdge(BasicBlock *pred, BasicBlock *oldTarget,
     return false;
 }
 
+// 在修改 CFG 前计算目标 PHI 的修复方案；任一入值无法确定时整次放弃。
 bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
                              BasicBlock *pred, const DominatorTreeAnalysis &DT,
                              std::vector<PhiRepairEdit> &edits) {
@@ -249,6 +269,7 @@ bool planSuccessorPhiRepairs(BasicBlock *chosenSucc, BasicBlock *mid,
     return true;
 }
 
+// 原子应用预先验证的 PHI 修复方案。
 void applySuccessorPhiRepairs(const std::vector<PhiRepairEdit> &edits,
                               BasicBlock *pred, bool midStillPredecessor) {
     for (const auto &edit : edits) {
@@ -270,6 +291,7 @@ void applySuccessorPhiRepairs(const std::vector<PhiRepairEdit> &edits,
     }
 }
 
+// 尝试将单条 pred -> mid 边穿透到已确定的后继。
 bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid,
                    const DominatorTreeAnalysis &DT,
                    const std::set<BasicBlock *> &loopHeaders) {
@@ -337,6 +359,7 @@ bool tryThreadEdge(BasicBlock *pred, BasicBlock *mid,
 
 } // namespace
 
+// 兼容入口，使用局部 AnalysisManager 执行。
 void JumpThreadingLite::execute(Module *module) {
     AnalysisManager AM;
     for (auto *func : module->function_list_) {
@@ -364,6 +387,7 @@ bool JumpThreadingLite::runOnModule(Module *module) {
     return changed;
 }
 
+// 在单个函数内反复寻找可穿透边，直到没有新的 CFG 变化。
 bool JumpThreadingLite::runOnFunction(Function *func, AnalysisManager *AM) {
     // Each successful edge rewrite invalidates LoopInfo and restarts the
     // whole-CFG search.  Keep this fixed-point algorithm within a predictable

@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：在 x == 0 的 true 分支内再次计算 icmp eq %x, 0。
+//   优化后：第二次比较替换为 true，并继续折叠依赖它的 select 或分支。
+// 路径条件为块内的值提供了比全局常量传播更精确的事实。
+
 #include "../../include/mid/opt/correlatedValuePropagation.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/analysis/lazyValueInfo.hpp"
@@ -8,8 +13,12 @@
 #include <optional>
 #include <vector>
 
+// CorrelatedValuePropagation 使用 LazyValueInfo 提供的块内与边上事实折叠 PHI、比较、
+// select 和条件分支。每次 CFG 改写后会清理不可达块，确保后续分析看到一致的 PHI 入边。
+
 namespace {
 
+// 删除 pred 被移除后在 succ 的全部 PHI incoming 对。
 void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -21,6 +30,7 @@ void removeIncomingFromPred(BasicBlock *succ, BasicBlock *pred) {
     }
 }
 
+// 将条件分支改为无条件分支，并同步移除未选后继的 PHI 入边和 CFG 关系。
 void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
     auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
     if (!br || br->num_ops() != 3) return;
@@ -38,6 +48,7 @@ void replaceBranchWithUncond(BasicBlock *bb, BasicBlock *target) {
     new BranchInst(target, bb);
 }
 
+// 比较两个整数常量的值，兼容 ConstantInt 与 ConstantZero。
 bool sameIntegerConstant(Constant *lhs, Value *rhs) {
     int lhsValue = 0;
     int rhsValue = 0;
@@ -46,10 +57,12 @@ bool sameIntegerConstant(Constant *lhs, Value *rhs) {
            getIntegerConstantValue(rhs, rhsValue) && lhsValue == rhsValue;
 }
 
+// 构造当前模块 i1 类型的布尔常量。
 ConstantInt *getBoolConstant(Module *module, bool value) {
     return new ConstantInt(module->int1_ty_, value ? 1 : 0);
 }
 
+// 查询 value 在具体 user 位置可证明的常量；优先使用字面常量，再咨询 LVI。
 Constant *getConstantAt(Value *value, Instruction *user, LazyValueInfo &LVI) {
     if (!value) return nullptr;
     if (auto *constant = dynamic_cast<Constant *>(value))
@@ -89,6 +102,7 @@ bool isSafePhiReplacement(Value *value, PhiInst *phi,
     return DT.dominates(inst->parent_, phi->parent_);
 }
 
+// 删除所有有效 incoming 值相同的 PHI，并用该共同值替换其 use。
 bool simplifyTrivialPhi(PhiInst *phi) {
     Value *common = nullptr;
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
@@ -184,6 +198,7 @@ bool simplifyPhisInBlock(BasicBlock *bb, LazyValueInfo &LVI,
     return changed;
 }
 
+// 逐 use 查询 select 条件；不同路径上的 use 可以各自折叠到不同分支值。
 bool foldSelectPerUse(SelectInst *select, LazyValueInfo &LVI) {
     if (!select || !select->parent_) return false;
 
@@ -220,6 +235,7 @@ bool foldSelectPerUse(SelectInst *select, LazyValueInfo &LVI) {
     return changed;
 }
 
+// 在一个块内应用局部事实折叠，并在分支条件确定时直接收缩 CFG。
 bool foldInstructionsInBlock(BasicBlock *bb, LazyValueInfo &LVI) {
     bool changed = false;
     Module *module = bb->parent_->parent_;
@@ -275,6 +291,7 @@ bool foldInstructionsInBlock(BasicBlock *bb, LazyValueInfo &LVI) {
 
 } // namespace
 
+// 兼容旧式入口。
 void CorrelatedValuePropagation::execute(Module *module) {
     AnalysisManager AM;
     runOnModule(module, AM);
@@ -286,6 +303,7 @@ PreservedAnalyses CorrelatedValuePropagation::execute(Module *module,
                                    : PreservedAnalyses::all();
 }
 
+// 逐函数取得 LVI，反复处理直到本轮没有新的折叠机会。
 bool CorrelatedValuePropagation::runOnModule(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {

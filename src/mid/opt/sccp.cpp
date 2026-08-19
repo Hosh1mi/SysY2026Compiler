@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：%x = phi [1, %a], [1, %b]；br i1 (%x == 1), %yes, %no。
+//   优化后：%x 替换为 1，分支直接跳到 %yes，%no 若不可达则被删除。
+// SCCP 只合并当前已知可执行边上的值，因此能同时收缩数据流和控制流。
+
 #include "../../include/mid/opt/sccp.hpp"
 #include "../../include/mid/analysis/constantEvaluator.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -8,7 +13,11 @@
 #include <set>
 // #define SCCP_DEBUG
 
-// ── helpers ─────────────────────────────────────────────────────────
+// SCCP 同时传播 SSA 常量与可执行 CFG 边。值格包含 UNDEF、CONSTANT、
+// OVERDEF 三种状态；仅从可执行边汇入 PHI。格状态稳定后替换常量、折叠条件
+// 分支并删除不可达块，最后同步修复后继块的 PHI 入边。
+
+// CFG 清理辅助函数。
 
 static void removeBBFromPhi(BasicBlock *deadBlock, BasicBlock *succ) {
     for (auto *instr : succ->instr_list_) {
@@ -117,6 +126,7 @@ public:
 static LatticeValue LV_UNDEF(LatticeValue::UNDEF);
 static LatticeValue LV_OVERDEF(LatticeValue::OVERDEF);
 
+// 格合并：UNDEF 不提供约束，相同常量保持常量，其余组合提升为 OVERDEF。
 static LatticeValue meet(const LatticeValue &a, const LatticeValue &b) {
     if (a.isOverdef() || b.isOverdef()) return LV_OVERDEF;
     if (a.isUndef()) return b;
@@ -127,6 +137,7 @@ static LatticeValue meet(const LatticeValue &a, const LatticeValue &b) {
 
 // ── Transfer helper (no allocation) ──────────────────────
 
+// 在编译期求值支持的整数二元操作；无定义结果通过 valid=false 保守处理。
 static int evalBinOp(Instruction::OpID op, int a, int b, bool &valid) {
     valid = true;
     int result = 0;
@@ -144,6 +155,7 @@ static int evalBinOp(Instruction::OpID op, int a, int b, bool &valid) {
 
 // ── SCCP core ───────────────────────────────────────────────────────
 
+// 交替处理可执行边和值状态工作队列，达到不动点后统一改写 IR 与 CFG。
 bool SCCP::runOnFunction(Function *func) {
     std::map<Value*, LatticeValue> lattice;
 
@@ -345,6 +357,7 @@ bool SCCP::runOnFunction(Function *func) {
     return changed2;
 }
 
+// 兼容入口：逐函数执行稀疏条件常量传播。
 void SCCP::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())

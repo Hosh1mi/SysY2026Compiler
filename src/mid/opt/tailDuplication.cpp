@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：left 和 right 都跳到只含 add %x, 1 与 br exit 的短尾块。
+//   优化后：该 add 和跳转分别复制到 left、right，公共尾块被移除。
+// 复制后的分支上下文可让常量折叠继续简化各自路径。
+
 #include "../../include/mid/opt/tailDuplication.hpp"
 #include "../../include/mid/ir/ir.hpp"
 #include "../../include/mid/ir/instruction.hpp"
@@ -5,13 +10,17 @@
 #include <unordered_map>
 #include <vector>
 
+// 尾复制将极短的公共尾块克隆到各前驱，消除前驱到尾块的跳转并为后续常量
+// 折叠创造机会。只复制少量无副作用、无内存访问的普通指令；改写同时为每条
+// 前驱边映射 SSA 值，并维护原后继块中的 PHI 入边。
+
 namespace {
 
 static const int MAX_DUP_INSTS = 3;
 
-// Check if an instruction is safe to clone (duplicate into predecessors).
+// 判断指令能否安全复制到多个前驱。
 static bool isClonableInstruction(Instruction *inst) {
-    // Never clone terminators, phis, or memory operations.
+    // 终结指令、PHI 和内存操作均不能复制。
     if (inst->is_br())   return false;
     if (inst->is_ret())  return false;
     if (inst->is_phi())  return false;
@@ -102,6 +111,7 @@ static bool allClonable(const std::vector<Instruction *> &instrs) {
 
 } // namespace
 
+// 搜索满足大小与合法性约束的尾块，并将其分别克隆到所有前驱。
 bool TailDuplication::runOnFunction(Function *func) {
     bool changed = false;
 
@@ -239,6 +249,7 @@ bool TailDuplication::runOnFunction(Function *func) {
     return changed;
 }
 
+// 模块入口：逐函数执行尾复制。
 void TailDuplication::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (func->is_declaration()) continue;

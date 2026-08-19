@@ -1,3 +1,8 @@
+// 典型示例：
+//   优化前：%tmp = add %a, %b，且 %tmp 没有任何使用。
+//   优化后：删除 %tmp；若其操作数也随之无用，则继续递归清理。
+// 具有写内存、调用或控制流效果的指令会被保留。
+
 #include "../../include/mid/opt/deadCodeEliminate.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
@@ -8,8 +13,12 @@
 #include <string>
 #include <vector>
 
+// DeadCodeEliminate 先清理模块级不可达函数和未引用全局量，再删除函数内无可观察效果的
+// 指令与平凡 PHI。模块对象先收集后删除，避免修改容器时破坏正在进行的遍历。
+
 namespace {
 
+// 从 CallInst 的最后一个操作数取得直接调用目标；间接或非法调用返回空。
 Function *calledFunction(Instruction *inst) {
     auto *call = dynamic_cast<CallInst *>(inst);
     if (!call || call->num_ops() == 0)
@@ -17,6 +26,7 @@ Function *calledFunction(Instruction *inst) {
     return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
+// 按符号名查找模块函数，供并行运行时入口识别使用。
 Function *findFunction(Module *module, const std::string &name) {
     for (auto *func : module->function_list_)
         if (func->name_ == name)
@@ -24,6 +34,7 @@ Function *findFunction(Module *module, const std::string &name) {
     return nullptr;
 }
 
+// 识别由并行 runtime 间接引用的 loop body，防止普通直接调用图遗漏这些函数。
 bool isParallelBody(Function *func) {
     return func && func->name_.rfind("__sysy_par_body_", 0) == 0;
 }
@@ -56,6 +67,7 @@ void markParallelBodiesForCall(Module *module, CallInst *call,
 
 } // namespace
 
+// 按“函数/全局可达性、指令 DCE、平凡 PHI”顺序反复清理模块。
 void DeadCodeEliminate::execute(Module *module) {
     AnalysisManager AM;
     runPass(module, AM);
@@ -81,6 +93,7 @@ PassRunResult DeadCodeEliminate::runPass(Module *module,
                              : PreservedAnalyses::all()};
 }
 
+// 从入口函数及特殊 runtime 根出发遍历直接调用图，删除未到达的函数定义。
 bool DeadCodeEliminate::eliminateUnreachableFunctions(Module *module) {
     Function *entry = module->getMainFunc();
     if (!entry)
@@ -120,6 +133,7 @@ bool DeadCodeEliminate::eliminateUnreachableFunctions(Module *module) {
     return funcs.size() != oldSize;
 }
 
+// 删除 use-list 为空且没有外部可见性的全局对象。
 bool DeadCodeEliminate::eliminateUnusedGlobals(Module *module) {
     std::set<GlobalVariable *> used;
 
@@ -218,6 +232,7 @@ bool DeadCodeEliminate::eliminateDeadInstructions(
     return changed;
 }
 
+// 将所有有效 incoming 值相同的 PHI 折叠为共同值，循环执行以处理连锁机会。
 bool DeadCodeEliminate::eliminateTrivialPhis(Function *func) {
     std::set<PhiInst *> worklist;
     for (auto *bb : func->basic_blocks_) {

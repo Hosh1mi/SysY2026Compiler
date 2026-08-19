@@ -1,9 +1,19 @@
+// 典型示例：
+//   优化前：return sum(n - 1, acc + n) 通过自调用推进递归。
+//   优化后：n 和 acc 由入口 PHI 保存新一轮值，尾调用改成跳回循环头。
+// 每次迭代复用同一栈帧，递归深度不再增加运行时栈空间。
+
 #include "../../include/mid/opt/tailRecursionEliminate.hpp"
 
 #include <set>
 
 #include <vector>
 
+// 尾递归消除把自调用改写为函数入口处的循环。入口 PHI 保存当前一轮参数，
+// 每个尾调用点将实参作为回边值送入 PHI 并跳回循环头，从而复用当前栈帧。
+// 同时支持直接返回自调用结果和经统一返回块返回结果的两种 CFG 形态。
+
+// 尾调用必须是本块 terminator 前的最后一条普通指令。
 static bool isFinalNonTerminator(CallInst *call, BasicBlock *block) {
     if (!call || !block)
         return false;
@@ -20,6 +30,7 @@ static bool isFinalNonTerminator(CallInst *call, BasicBlock *block) {
     return seenCall;
 }
 
+// 模块入口：先识别尾递归函数，再执行 CFG 改写。
 void TailRecursionEliminate::execute(Module *module) {
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
@@ -68,6 +79,7 @@ static bool isPattern2TailCall(CallInst *call, Function *func,
 
 // 检查函数是否包含尾递归调用（允许 ret <call> 或 call + br + phi + ret 两种形式）
 // 现在支持部分转换：只要至少有一个尾调用即可，非尾调用的自调用保留不动。
+// 验证所有自调用都位于支持的尾位置，并记录可消除的调用形态。
 bool TailRecursionEliminate::isTailRecursive(Function *func) {
     int intArgs = 0;
     int floatArgs = 0;
@@ -116,6 +128,7 @@ bool TailRecursionEliminate::isTailRecursive(Function *func) {
     return hasTailCall;
 }
 
+// 创建参数 PHI 和回边，以跳转替换尾部自调用并清理失效指令。
 void TailRecursionEliminate::eliminateTailRecursion(Function *func, Module *module) {
     // 1. 创建循环头块，插入 entry 之后。entry 本身充当 preheader，其内容将融入 header
     auto entry_bb = func->basic_blocks_.front();

@@ -1,14 +1,13 @@
-// BitFuncRecognize — bit-level abstract interpretation for recognizing
-// bitwise-op emulations. See header and docs/BITOP_LOWERING.md.
-//
-// ── Sections ──────────────────────────────────────────────────────────
-//   §A  Abstract domain (BitExpr, hash-consing)
-//   §B  Smart constructors with simplification
-//   §C  BitVec (32-bit abstract value)
-//   §D  Transfer functions per IR op
-//   §E  Function-body analyzer
-//   §F  Closed-form recognizer
-//   §G  Module-level driver
+// 典型示例：
+//   优化前：函数逐位提取 x、y，再通过循环和条件组合出每一位结果。
+//   优化后：调用点直接使用 x & y 等价表达式。
+// 逐位抽象解释证明 32 个输出位均符合目标位运算后才会执行替换。
+
+// BitFuncRecognize 使用逐位抽象解释识别由算术和控制流模拟的位运算。
+// 每个 i32 被表示成 32 个 BitExpr；表达式通过哈希驻留共享节点，智能构造器
+// 同时完成局部化简。函数分析得到返回值的位表达式后，闭式匹配器将其还原为
+// and/or/xor/移位等直接 IR，模块驱动层再替换原调用。详细推导见头文件和
+// docs/BITOP_LOWERING.md。
 
 #include "../../include/mid/opt/bitFuncRecognize.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
