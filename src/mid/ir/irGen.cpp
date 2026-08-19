@@ -55,7 +55,7 @@ struct ScalarizedFunctionInfo {
 };
 
 struct FunctionLoweringInfo {
-    ScalarizedVectorType* returnType;
+    ScalarizedVectorType* returnType = nullptr;
     bool tensorReturn = false;
     ArrayType* tensorReturnType = nullptr;
     vector<ScalarizedVectorType *> valueParameters;
@@ -94,7 +94,7 @@ static unsigned tensorElementCount(ArrayType *type){
     Type *current = type;
     while(current->tid_==Type::ArrayTyID){
         auto *array = static_cast<ArrayType *>(current);
-        count = array->num_elements_;
+        count *= array->num_elements_;
         current = array->contained_;
     }
     return count;
