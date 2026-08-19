@@ -1,3 +1,6 @@
+// RangeAnalysis 推导整数值在指定基本块中的闭区间。它综合指令语义、支配当前块的分支
+// 条件、SCEV 循环界、简单内存数据流和函数返回摘要；溢出、回绕或信息不足时返回 Top。
+// 范围事实服务于条件化简、边界检查、模递推识别以及多种循环优化的安全性证明。
 #include "../../include/mid/analysis/rangeAnalysis.hpp"
 #include "../../include/mid/analysis/analysisManager.hpp"
 #include "../../include/mid/analysis/valueFacts.hpp"
@@ -13,11 +16,13 @@
 
 namespace {
 
+// debugEnabled：读取调试开关或输出分析中间结果，不参与正常语义判断。
 bool debugEnabled() {
     static bool enabled = std::getenv("DEBUG_RANGE_ANALYSIS") != nullptr;
     return enabled;
 }
 
+// debugLog：读取调试开关或输出分析中间结果，不参与正常语义判断。
 void debugLog(const char *what, Value *v, BasicBlock *ctx, const RangeAnalysis::IntRange &r) {
     if (!debugEnabled()) return;
     std::cerr << "[RangeAnalysis] " << what
@@ -45,12 +50,14 @@ private:
 
 } // namespace
 
+// RangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::RangeAnalysis(Function *func, AnalysisManager *AM, const LoopInfo &LI,
                              ScalarEvolution &SE)
     : func_(func), AM_(AM), LI_(&LI), SE_(&SE) {
     buildControlDependence(func);
 }
 
+// clear：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void RangeAnalysis::clear() {
     cache_.clear();
     memoryInFacts_.clear();
@@ -62,6 +69,7 @@ void RangeAnalysis::clear() {
     returnSummary_ = ReturnSummary{};
 }
 
+// clearCache：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void RangeAnalysis::clearCache() {
     cache_.clear();
     memoryInFacts_.clear();
@@ -72,6 +80,7 @@ void RangeAnalysis::clearCache() {
     returnSummary_ = ReturnSummary{};
 }
 
+// typeBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::pair<long long, long long> RangeAnalysis::typeBounds(Type *ty) {
     if (!ty || ty->tid_ != Type::IntegerTyID) {
         return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
@@ -86,6 +95,7 @@ std::pair<long long, long long> RangeAnalysis::typeBounds(Type *ty) {
     return {lo, hi};
 }
 
+// multiplyBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::multiplyBounds(long long a, long long b, long long &out) {
     if (a == 0 || b == 0) {
         out = 0;
@@ -99,6 +109,7 @@ bool RangeAnalysis::multiplyBounds(long long a, long long b, long long &out) {
     return true;
 }
 
+// addBounds：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 bool RangeAnalysis::addBounds(long long a, long long b, long long &out) {
     if ((b > 0 && a > std::numeric_limits<long long>::max() - b) ||
         (b < 0 && a < std::numeric_limits<long long>::min() - b))
@@ -107,10 +118,12 @@ bool RangeAnalysis::addBounds(long long a, long long b, long long &out) {
     return true;
 }
 
+// subtractBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::subtractBounds(long long a, long long b, long long &out) {
     return addBounds(a, -b, out);
 }
 
+// getConstInt：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool RangeAnalysis::getConstInt(Value *v, long long &out) {
     if (auto *ci = dynamic_cast<ConstantInt *>(v)) {
         out = ci->value_;
@@ -119,10 +132,12 @@ bool RangeAnalysis::getConstInt(Value *v, long long &out) {
     return false;
 }
 
+// isIntegerValue：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isIntegerValue(Value *v) {
     return v && v->type_ && v->type_->tid_ == Type::IntegerTyID;
 }
 
+// negatePredicate：返回交换操作数或翻转分支后语义等价的比较谓词。
 ICmpInst::ICmpOp RangeAnalysis::negatePredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_NE;
@@ -139,6 +154,7 @@ ICmpInst::ICmpOp RangeAnalysis::negatePredicate(ICmpInst::ICmpOp pred) {
     }
 }
 
+// swapPredicate：返回交换操作数或翻转分支后语义等价的比较谓词。
 ICmpInst::ICmpOp RangeAnalysis::swapPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_EQ;
@@ -155,11 +171,13 @@ ICmpInst::ICmpOp RangeAnalysis::swapPredicate(ICmpInst::ICmpOp pred) {
     }
 }
 
+// getConstantRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getConstantRange(ConstantInt *ci) const {
     if (!ci) return IntRange::top();
     return IntRange::constant(ci->value_);
 }
 
+// buildControlDependence：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 void RangeAnalysis::buildControlDependence(Function *func) {
     if (!func) return;
     for (auto *bb : func->basic_blocks_) {
@@ -167,6 +185,7 @@ void RangeAnalysis::buildControlDependence(Function *func) {
         auto *br = dynamic_cast<BranchInst *>(term);
         if (!br || br->num_ops() != 3) continue;
 
+        // 分别求真假后继的可达集合；两侧均可到达的汇合块不能继承任一侧条件。
         std::vector<std::set<BasicBlock *>> reachable(2);
         for (unsigned succIdx = 0; succIdx < 2; ++succIdx) {
             auto *succ = static_cast<BasicBlock *>(br->get_operand(succIdx + 1));
@@ -206,6 +225,7 @@ void RangeAnalysis::buildControlDependence(Function *func) {
     }
 }
 
+// factsForBlock：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const std::vector<RangeAnalysis::PredicateFact> &RangeAnalysis::factsForBlock(BasicBlock *bb) {
     static const std::vector<PredicateFact> empty;
     auto it = blockFacts_.find(bb);
@@ -213,6 +233,7 @@ const std::vector<RangeAnalysis::PredicateFact> &RangeAnalysis::factsForBlock(Ba
     return empty;
 }
 
+// collectFacts：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 void RangeAnalysis::collectFacts(BasicBlock *bb, std::vector<PredicateFact> &out,
                                  std::set<BasicBlock *> &visiting) {
     if (!bb || !visiting.insert(bb).second) return;
@@ -222,6 +243,7 @@ void RangeAnalysis::collectFacts(BasicBlock *bb, std::vector<PredicateFact> &out
     }
 }
 
+// refineWithFact：依据当前路径或内存效果更新事实，并移除可能已失效的结论。
 RangeAnalysis::IntRange RangeAnalysis::refineWithFact(Value *query, const IntRange &base,
                                                       const PredicateFact &fact) const {
     auto refineWithConst = [&](ICmpInst::ICmpOp pred, long long c, bool branchTaken) -> IntRange {
@@ -266,6 +288,7 @@ RangeAnalysis::IntRange RangeAnalysis::refineWithFact(Value *query, const IntRan
     return base;
 }
 
+// applyFacts：依据当前路径或内存效果更新事实，并移除可能已失效的结论。
 RangeAnalysis::IntRange RangeAnalysis::applyFacts(Value *query, const IntRange &base,
                                                   BasicBlock *ctx) {
     if (!ctx) return base;
@@ -281,16 +304,20 @@ RangeAnalysis::IntRange RangeAnalysis::applyFacts(Value *query, const IntRange &
     return result;
 }
 
+// getRange：查询值在指定基本块中的整数范围；结果按值和上下文缓存，递归查询先返回 Top。
 RangeAnalysis::IntRange RangeAnalysis::getRange(Value *v, BasicBlock *ctx) {
+    // 同一 SSA 值在不同块会受不同分支事实约束，所以观察位置也是缓存键的一部分。
     CacheKey key{v, ctx};
     auto it = cache_.find(key);
     if (it != cache_.end()) return it->second;
 
     if (!v) return IntRange::top();
+    // 循环 PHI 和递归函数摘要可能重新查询自身；遇到正在计算的键先返回 Top 截断环。
     auto guard = std::make_pair(v, ctx);
     if (!visiting_.insert(guard).second) return IntRange::top();
 
     if (AM_ && queryDepth_++ == 0) AM_->enterRangeAnalysis(func_);
+    // 先从定义得到基础范围，再叠加语义标记和当前控制流位置必然成立的谓词。
     IntRange result = getRangeImpl(v, ctx);
     if (v->hasSemFlag(SemFlag::KnownNonNegative) && isIntegerValue(v)) {
         auto [lo, hi] = typeBounds(v->type_);
@@ -304,6 +331,7 @@ RangeAnalysis::IntRange RangeAnalysis::getRange(Value *v, BasicBlock *ctx) {
     return result;
 }
 
+// getRangeImpl：按常量、算术、PHI、调用、load 等节点类型分派到对应的区间推导逻辑。
 RangeAnalysis::IntRange RangeAnalysis::getRangeImpl(Value *v, BasicBlock *ctx) {
     if (!v) return IntRange::top();
     if (auto *ci = dynamic_cast<ConstantInt *>(v)) return getConstantRange(ci);
@@ -323,6 +351,7 @@ RangeAnalysis::IntRange RangeAnalysis::getRangeImpl(Value *v, BasicBlock *ctx) {
     return IntRange::top();
 }
 
+// getBinaryRange：由两个操作数区间推导算术结果边界；可能溢出或产生回绕区间时返回 Top。
 RangeAnalysis::IntRange RangeAnalysis::getBinaryRange(BinaryInst *bin, BasicBlock *ctx) {
     if (!bin || !isIntegerValue(bin)) return IntRange::top();
 
@@ -382,6 +411,7 @@ RangeAnalysis::IntRange RangeAnalysis::getBinaryRange(BinaryInst *bin, BasicBloc
     }
 }
 
+// getIntrinsicRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getIntrinsicRange(Value *v) {
     if (!v) return IntRange::top();
     if (auto *ci = dynamic_cast<ConstantInt *>(v)) return getConstantRange(ci);
@@ -393,6 +423,7 @@ RangeAnalysis::IntRange RangeAnalysis::getIntrinsicRange(Value *v) {
     return getSCEVRange(v, nullptr);
 }
 
+// getZExtRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *ctx) {
     if (!zext) return IntRange::top();
     auto *srcTy = zext->get_operand(0)->type_;
@@ -414,6 +445,7 @@ RangeAnalysis::IntRange RangeAnalysis::getZExtRange(ZextInst *zext, BasicBlock *
     return IntRange::top();
 }
 
+// getPhiRange：合并 PHI 各条可达 incoming 边上的值域，得到覆盖全部来路的区间。
 RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx) {
     if (!phi) return IntRange::top();
     IntRange result = IntRange::bottom();
@@ -428,6 +460,7 @@ RangeAnalysis::IntRange RangeAnalysis::getPhiRange(PhiInst *phi, BasicBlock *ctx
     return result;
 }
 
+// getCallRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getCallRange(CallInst *call, BasicBlock *ctx) {
     if (!call || !AM_) return IntRange::top();
     auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
@@ -469,6 +502,7 @@ RangeAnalysis::IntRange RangeAnalysis::getCallRange(CallInst *call, BasicBlock *
     return result;
 }
 
+// getArgumentRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBlock *ctx) {
     if (!arg || !arg->parent_ || !AM_) return IntRange::top();
 
@@ -522,6 +556,7 @@ RangeAnalysis::IntRange RangeAnalysis::getArgumentRange(Argument *arg, BasicBloc
     return result;
 }
 
+// getSCEVRange：利用归纳变量起点、步长和循环次数估计循环内可能达到的上下界。
 RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(Value *v, BasicBlock *ctx) {
     if (!v || !SE_) return IntRange::top();
 
@@ -581,6 +616,7 @@ RangeAnalysis::IntRange RangeAnalysis::getSCEVRange(Value *v, BasicBlock *ctx) {
     return IntRange::top();
 }
 
+// getGEPOffsetRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getGEPOffsetRange(GetElementPtrInst *gep, BasicBlock *ctx) {
     if (!gep || gep->num_ops() < 2) return IntRange::top();
 
@@ -642,6 +678,7 @@ RangeAnalysis::IntRange RangeAnalysis::getGEPOffsetRange(GetElementPtrInst *gep,
     return result;
 }
 
+// compareRanges：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::TruthValue RangeAnalysis::compareRanges(ICmpInst::ICmpOp pred,
                                                        const IntRange &lhs,
                                                        const IntRange &rhs) const {
@@ -719,6 +756,7 @@ RangeAnalysis::TruthValue RangeAnalysis::compareRanges(ICmpInst::ICmpOp pred,
     return TruthValue::Unknown;
 }
 
+// getPredicateResult：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::TruthValue RangeAnalysis::getPredicateResult(ICmpInst::ICmpOp pred, Value *lhs,
                                                             Value *rhs, BasicBlock *ctx) {
     auto l = getRange(lhs, ctx);
@@ -726,11 +764,13 @@ RangeAnalysis::TruthValue RangeAnalysis::getPredicateResult(ICmpInst::ICmpOp pre
     return compareRanges(pred, l, r);
 }
 
+// isKnownNonNegative：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegative(Value *v, BasicBlock *ctx) {
     auto r = getRange(v, ctx);
     return r.knownNonNegative();
 }
 
+// getICmpRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getICmpRange(ICmpInst *icmp, BasicBlock *ctx) {
     if (!icmp) return IntRange::top();
     auto tv = getPredicateResult(icmp->icmp_op_, icmp->get_operand(0), icmp->get_operand(1), ctx);
@@ -742,6 +782,7 @@ RangeAnalysis::IntRange RangeAnalysis::getICmpRange(ICmpInst *icmp, BasicBlock *
     return IntRange::top();
 }
 
+// getSelectRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBlock *ctx) {
     if (!sel) return IntRange::top();
     auto condRange = getRange(sel->get_operand(0), ctx);
@@ -826,10 +867,12 @@ RangeAnalysis::IntRange RangeAnalysis::getSelectRange(SelectInst *sel, BasicBloc
     return t.join(f);
 }
 
+// addMemoryKeyOffset：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, long long offset) const {
     return addBounds(key.constantOffset, offset, key.constantOffset);
 }
 
+// addMemoryKeyOffset：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, Value *idx, long long scale) const {
     long long constIdx = 0;
     if (getConstInt(idx, constIdx)) {
@@ -848,6 +891,7 @@ bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, Value *idx, long long sca
     return addBounds(key.symbolicScale, scale, key.symbolicScale);
 }
 
+// typeElementCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::typeElementCount(Type *ty, Type *elemType, long long &count) const {
     if (!ty || !elemType) return false;
     if (ty == elemType) {
@@ -861,6 +905,7 @@ bool RangeAnalysis::typeElementCount(Type *ty, Type *elemType, long long &count)
     return multiplyBounds(static_cast<long long>(arrTy->num_elements_), nested, count);
 }
 
+// decomposeMemoryAddress：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool RangeAnalysis::decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey &key) const {
     if (!ptr || !elemType) return false;
 
@@ -918,6 +963,7 @@ bool RangeAnalysis::decomposeMemoryAddress(Value *ptr, Type *elemType, MemoryKey
     return true;
 }
 
+// getMemoryKey：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool RangeAnalysis::getMemoryKey(Value *ptr, MemoryKey &key) const {
     auto *ptrTy = ptr ? dynamic_cast<PointerType *>(ptr->type_) : nullptr;
     if (!ptrTy) return false;
@@ -928,6 +974,7 @@ bool RangeAnalysis::getMemoryKey(Value *ptr, MemoryKey &key) const {
     return key.base && key.elemType == elemType;
 }
 
+// killElementFactsFor：依据当前路径或内存效果更新事实，并移除可能已失效的结论。
 void RangeAnalysis::killElementFactsFor(Value *ptr, MemoryFactSet &facts,
                                         BasicAliasAnalysis &AA) {
     MemoryKey killKey;
@@ -962,6 +1009,7 @@ void RangeAnalysis::killElementFactsFor(Value *ptr, MemoryFactSet &facts,
 }
 
 RangeAnalysis::MemoryFactSet
+// meetMemoryFacts：依据当前路径或内存效果更新事实，并移除可能已失效的结论。
 RangeAnalysis::meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts) {
     MemoryFactSet result;
     if (predFacts.empty()) return result;
@@ -1005,6 +1053,7 @@ RangeAnalysis::meetMemoryFacts(const std::vector<MemoryFactSet> &predFacts) {
     return result;
 }
 
+// getNormalizedValueMod：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 long long RangeAnalysis::getNormalizedValueMod(Value *v, BasicBlock *ctx) {
     auto range = getRange(v, ctx);
     if (!range.valid || range.isTop || range.isBottom) return 0;
@@ -1013,6 +1062,7 @@ long long RangeAnalysis::getNormalizedValueMod(Value *v, BasicBlock *ctx) {
     return range.upper + 1;
 }
 
+// killMemoryFactsFor：依据当前路径或内存效果更新事实，并移除可能已失效的结论。
 void RangeAnalysis::killMemoryFactsFor(Value *ptr, MemoryFactSet &facts,
                                        BasicAliasAnalysis &AA) {
     if (!ptr) {
@@ -1041,6 +1091,7 @@ void RangeAnalysis::killMemoryFactsFor(Value *ptr, MemoryFactSet &facts,
     }
 }
 
+// transferMemoryFact：顺序模拟指令对内存事实的影响：store 建立事实，潜在写操作负责使事实失效。
 void RangeAnalysis::transferMemoryFact(Instruction *inst, MemoryFactSet &facts) {
     if (!inst || !AM_ || !func_ || !func_->parent_) return;
 
@@ -1102,17 +1153,20 @@ void RangeAnalysis::transferMemoryFact(Instruction *inst, MemoryFactSet &facts) 
     }
 }
 
+// computeMemoryFacts：在 CFG 上迭代传播基本块入口和出口状态，直到内存范围事实达到不动点。
 void RangeAnalysis::computeMemoryFacts() {
     if (memoryFactsComputed_ || memoryFactsComputing_ || !func_ || !AM_) return;
     memoryFactsComputing_ = true;
     memoryInFacts_.clear();
     memoryOutFacts_.clear();
 
+    // 所有块从“没有已知内存事实”开始，入口和出口状态分开保存。
     for (auto *bb : func_->basic_blocks_) {
         memoryInFacts_[bb] = MemoryFactSet{};
         memoryOutFacts_[bb] = MemoryFactSet{};
     }
 
+    // 前驱合流只保留共同事实，再按块内顺序执行 transfer；存在回边时迭代到不动点。
     bool changed = true;
     while (changed) {
         changed = false;
@@ -1142,6 +1196,7 @@ void RangeAnalysis::computeMemoryFacts() {
     cache_.clear();
 }
 
+// entryMemoryFacts：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const RangeAnalysis::MemoryFactSet &RangeAnalysis::entryMemoryFacts(BasicBlock *bb) {
     static const MemoryFactSet empty;
     if (!bb) return empty;
@@ -1150,6 +1205,7 @@ const RangeAnalysis::MemoryFactSet &RangeAnalysis::entryMemoryFacts(BasicBlock *
     return it == memoryInFacts_.end() ? empty : it->second;
 }
 
+// memoryFactsBefore：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::MemoryFactSet RangeAnalysis::memoryFactsBefore(Instruction *target) {
     MemoryFactSet facts;
     if (!target || !target->parent_) return facts;
@@ -1161,6 +1217,7 @@ RangeAnalysis::MemoryFactSet RangeAnalysis::memoryFactsBefore(Instruction *targe
     return facts;
 }
 
+// getLoadRange：查询 load 前仍成立的内存事实；地址无法分解或事实已被覆盖时返回 Top。
 RangeAnalysis::IntRange RangeAnalysis::getLoadRange(LoadInst *load, BasicBlock *ctx) {
     (void)ctx;
     if (!load || !isIntegerValue(load)) return IntRange::top();
@@ -1189,6 +1246,7 @@ RangeAnalysis::IntRange RangeAnalysis::getLoadRange(LoadInst *load, BasicBlock *
     return IntRange::top();
 }
 
+// inferDirectReturnModulus：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 long long RangeAnalysis::inferDirectReturnModulus(Value *v) const {
     auto *inst = dynamic_cast<Instruction *>(v);
     if (!inst || inst->op_id_ != Instruction::SRem) return 0;
@@ -1198,6 +1256,7 @@ long long RangeAnalysis::inferDirectReturnModulus(Value *v) const {
     return mod->value_;
 }
 
+// getDirectNormalizedSRemMod：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 long long RangeAnalysis::getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx) {
     long long mod = inferDirectReturnModulus(v);
     if (mod <= 0) return 0;
@@ -1211,6 +1270,7 @@ long long RangeAnalysis::getDirectNormalizedSRemMod(Value *v, BasicBlock *ctx) {
     return mod;
 }
 
+// inferNormalizedModulus：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
                                            std::set<Value *> &visiting) const {
     if (!v || !visiting.insert(v).second) return true;
@@ -1274,6 +1334,7 @@ bool RangeAnalysis::inferNormalizedModulus(Value *v, long long &mod,
     return true;
 }
 
+// addPendingNonNegativeArg：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 bool RangeAnalysis::addPendingNonNegativeArg(unsigned argNo) {
     auto &args = returnSummary_.pendingNonNegativeArgs;
     if (std::find(args.begin(), args.end(), argNo) != args.end()) return false;
@@ -1282,16 +1343,19 @@ bool RangeAnalysis::addPendingNonNegativeArg(unsigned argNo) {
     return true;
 }
 
+// hasPendingNonNegativeArg：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::hasPendingNonNegativeArg(unsigned argNo) const {
     const auto &args = returnSummary_.pendingNonNegativeArgs;
     return std::find(args.begin(), args.end(), argNo) != args.end();
 }
 
+// isKnownNonNegativeForSummary：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx) {
     std::set<Value *> visiting;
     return isKnownNonNegativeForSummary(v, ctx, visiting);
 }
 
+// isKnownNonNegativeForSummary：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx,
                                                  std::set<Value *> &visiting) {
     if (!v) return false;
@@ -1362,6 +1426,7 @@ bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx,
     }
 }
 
+// proveOrRequireNonNegative：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::proveOrRequireNonNegative(Value *v, BasicBlock *ctx) {
     if (isKnownNonNegativeForSummary(v, ctx)) return true;
 
@@ -1371,6 +1436,7 @@ bool RangeAnalysis::proveOrRequireNonNegative(Value *v, BasicBlock *ctx) {
     return true;
 }
 
+// callSatisfiesReturnRequirements：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx) {
     if (!call) return false;
     auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
@@ -1420,6 +1486,7 @@ bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *
     return true;
 }
 
+// allCallSitesSatisfyReturnRequirements：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
     if (!func_ || !func_->parent_) return false;
     if (returnSummary_.pendingNonNegativeArgs.empty()) return true;
@@ -1441,11 +1508,13 @@ bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
     return true;
 }
 
+// valueMatchesNormalizedMod：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod) {
     std::set<Value *> visiting;
     return valueMatchesNormalizedMod(v, ctx, mod, visiting);
 }
 
+// valueMatchesNormalizedMod：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx,
                                                long long mod,
                                                std::set<Value *> &visiting) {
@@ -1494,6 +1563,7 @@ bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx,
            range.lower >= 0 && range.upper < mod;
 }
 
+// computeNormalizedReturnSummary：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 void RangeAnalysis::computeNormalizedReturnSummary() {
     if (returnSummary_.computed) {
         return;
@@ -1565,6 +1635,7 @@ void RangeAnalysis::computeNormalizedReturnSummary() {
     }
 }
 
+// getNormalizedReturnRange：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRange() {
     computeNormalizedReturnSummary();
 
@@ -1572,6 +1643,7 @@ RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRange() {
     return IntRange::bounded(0, returnSummary_.modulus - 1);
 }
 
+// getNormalizedReturnRangeForCall：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis::IntRange RangeAnalysis::getNormalizedReturnRangeForCall(CallInst *call,
                                                                        BasicBlock *ctx) {
     computeNormalizedReturnSummary();

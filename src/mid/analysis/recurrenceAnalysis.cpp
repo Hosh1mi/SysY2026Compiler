@@ -1,14 +1,18 @@
+// RecurrenceAnalysis 从累加器 PHI 的回边表达式提取单轮更新，并结合 SCEV trip count 求
+// 等差或线性递推的闭式结果。所有系数计算都检查溢出，供循环重复折叠安全替换长循环。
 #include "../../include/mid/analysis/recurrenceAnalysis.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <limits>
 
+// fitsI32：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool RecurrenceAnalysis::fitsI32(long long value) {
     return value >= std::numeric_limits<int>::min() &&
            value <= std::numeric_limits<int>::max();
 }
 
+// checkedAdd：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool RecurrenceAnalysis::checkedAdd(long long a, long long b, long long &out) {
     if ((b > 0 && a > std::numeric_limits<long long>::max() - b) ||
         (b < 0 && a < std::numeric_limits<long long>::min() - b))
@@ -17,6 +21,7 @@ bool RecurrenceAnalysis::checkedAdd(long long a, long long b, long long &out) {
     return true;
 }
 
+// checkedMul：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool RecurrenceAnalysis::checkedMul(long long a, long long b, long long &out) {
     __int128 product = static_cast<__int128>(a) * static_cast<__int128>(b);
     if (product > std::numeric_limits<long long>::max() ||
@@ -26,11 +31,13 @@ bool RecurrenceAnalysis::checkedMul(long long a, long long b, long long &out) {
     return true;
 }
 
+// checkedSub：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool RecurrenceAnalysis::checkedSub(long long a, long long b, long long &out) {
     if (b == std::numeric_limits<long long>::min()) return false;
     return checkedAdd(a, -b, out);
 }
 
+// scevConstant：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RecurrenceAnalysis::scevConstant(const SCEV *s, long long &value) {
     auto *constant = dynamic_cast<const SCEVConstant *>(s);
     if (!constant) return false;
@@ -38,6 +45,7 @@ bool RecurrenceAnalysis::scevConstant(const SCEV *s, long long &value) {
     return true;
 }
 
+// addAffine：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 bool RecurrenceAnalysis::addAffine(AffineRecurrenceStep &lhs,
                                    const AffineRecurrenceStep &rhs) {
     long long coeff = 0;
@@ -50,6 +58,7 @@ bool RecurrenceAnalysis::addAffine(AffineRecurrenceStep &lhs,
     return true;
 }
 
+// scaleAffine：组合两侧摘要并规范化结果；系数或常量溢出时返回无效值。
 bool RecurrenceAnalysis::scaleAffine(AffineRecurrenceStep &expr,
                                      long long factor) {
     long long coeff = 0;
@@ -61,6 +70,7 @@ bool RecurrenceAnalysis::scaleAffine(AffineRecurrenceStep &expr,
     return true;
 }
 
+// extractAffineStep：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 AffineRecurrenceStep RecurrenceAnalysis::extractAffineStep(
     const SCEV *s, PhiInst *iv, Loop *loop) const {
     AffineRecurrenceStep invalid;
@@ -124,10 +134,12 @@ AffineRecurrenceStep RecurrenceAnalysis::extractAffineStep(
     return invalid;
 }
 
+// invalidAccumulatorStep：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 AccumulatorRecurrenceStep RecurrenceAnalysis::invalidAccumulatorStep() {
     return {false, 0, {}};
 }
 
+// combineAccumulatorSteps：组合两侧摘要并规范化结果；系数或常量溢出时返回无效值。
 AccumulatorRecurrenceStep RecurrenceAnalysis::combineAccumulatorSteps(
     AccumulatorRecurrenceStep lhs,
     AccumulatorRecurrenceStep rhs,
@@ -139,6 +151,7 @@ AccumulatorRecurrenceStep RecurrenceAnalysis::combineAccumulatorSteps(
     return lhs;
 }
 
+// analyzeAccumulatorStep：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 AccumulatorRecurrenceStep RecurrenceAnalysis::analyzeAccumulatorStep(
     Value *value,
     PhiInst *totalPhi,
@@ -169,6 +182,7 @@ AccumulatorRecurrenceStep RecurrenceAnalysis::analyzeAccumulatorStep(
     return {true, 0, step};
 }
 
+// computeAffineSumClosedForm：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool RecurrenceAnalysis::computeAffineSumClosedForm(
     long long init,
     const AffineRecurrenceStep &step,
@@ -190,4 +204,3 @@ bool RecurrenceAnalysis::computeAffineSumClosedForm(
     if (!checkedAdd(result, constantTerm, result)) return false;
     return fitsI32(result);
 }
-

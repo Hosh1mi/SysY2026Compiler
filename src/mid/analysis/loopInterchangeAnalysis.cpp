@@ -1,9 +1,12 @@
+// LoopInterchangeAnalysis 为循环交换筛选候选。它检查规范形、非归纳 PHI、副作用和依赖
+// 方向是否合法，再比较交换前后的访存连续性与并行收益；这里只生成建议，不直接修改 CFG。
 #include "../../include/mid/analysis/loopInterchangeAnalysis.hpp"
 
 #include <functional>
 
 namespace {
 
+// hasHeaderIVGuard：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool hasHeaderIVGuard(Loop *loop) {
     if (!loop || !loop->header || !loop->canonicalIV) return false;
     auto *term = loop->header->get_terminator();
@@ -13,6 +16,7 @@ bool hasHeaderIVGuard(Loop *loop) {
     return cmp->get_operand(0) == loop->canonicalIV;
 }
 
+// containsWavefrontCoincidentLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool containsWavefrontCoincidentLoop(Loop *loop) {
     if (!loop) return false;
     if (loop->header &&
@@ -25,12 +29,14 @@ bool containsWavefrontCoincidentLoop(Loop *loop) {
 
 } // namespace
 
+// isInterchangeLegal：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopInterchangeAnalysis::isInterchangeLegal(
     Loop *outer, Loop *inner,
     const std::vector<Instruction *> &accesses) const {
     return DA_->isInterchangeLegal(outer, inner, accesses);
 }
 
+// estimateCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 LoopInterchangeCost LoopInterchangeAnalysis::estimateCost(
     const std::vector<GetElementPtrInst *> &geps,
     PhiInst *beforeInnerIV,
@@ -41,6 +47,7 @@ LoopInterchangeCost LoopInterchangeAnalysis::estimateCost(
     return cost;
 }
 
+// deepestCanonicalDescendant：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Loop *LoopInterchangeAnalysis::deepestCanonicalDescendant(Loop *loop) const {
     Loop *best = nullptr;
     int bestDepth = -1;
@@ -57,6 +64,7 @@ Loop *LoopInterchangeAnalysis::deepestCanonicalDescendant(Loop *loop) const {
     return best;
 }
 
+// hasNonIVHeaderPhi：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopInterchangeAnalysis::hasNonIVHeaderPhi(Loop *loop) const {
     if (!loop || !loop->header) return true;
     for (auto *inst : loop->header->instr_list_) {
@@ -67,6 +75,7 @@ bool LoopInterchangeAnalysis::hasNonIVHeaderPhi(Loop *loop) const {
 }
 
 ParallelSinkAnalysisResult
+// analyzeParallelSink：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 LoopInterchangeAnalysis::analyzeParallelSink(Loop *loop) const {
     ParallelSinkAnalysisResult result;
 
@@ -129,6 +138,7 @@ LoopInterchangeAnalysis::analyzeParallelSink(Loop *loop) const {
 }
 
 ParallelFloatAnalysisResult
+// analyzeParallelFloat：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 LoopInterchangeAnalysis::analyzeParallelFloat(Loop *loop) const {
     ParallelFloatAnalysisResult result;
 

@@ -1,4 +1,5 @@
-// Module::verify —— IR 完整性校验（--verify-ir 时每个 pass 之后运行）
+// Module::verify —— IR 完整性校验（--verify-ir 时每个 pass 之后运行）。它独立从 terminator
+// 重建 CFG 和支配关系，不信任待校验对象中的缓存，因此能发现 pass 同步维护不完整的问题。
 //
 // 自包含设计：CFG 一律从 terminator 操作数推导，不信任 pre_bbs_/succ_bbs_
 // 链表（它们本身是被校验对象之一）。支配关系用 Cooper-Harvey-Kennedy
@@ -437,10 +438,12 @@ struct Verifier {
 
 } // namespace
 
+// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void Module::verify() {
     verify("");
 }
 
+// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void Module::verify(const std::string &context) {
     int total = 0;
     for (auto *func : function_list_) {

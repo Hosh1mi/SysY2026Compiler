@@ -100,6 +100,7 @@ const SCEV *ScalarEvolution::getTripCount(Loop *loop) {
 }
 
 std::optional<long long>
+// getConstantTripCount：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 ScalarEvolution::getConstantTripCount(Loop *loop) const {
     // 当前只处理单退出块、单退出边的规范循环。多出口循环需要比较多条路径的
     // 首次退出时刻，当前分析没有建立这类证明。
@@ -360,6 +361,8 @@ const SCEV *ScalarEvolution::getSCEVImpl(Value *v) {
 
     const SCEV *result = nullptr;
 
+    // 只展开能够保持符号语义的节点。其它合法 SSA 值作为 Unknown 叶子保留身份，真正
+    // 无法回答的问题才使用 CouldNotCompute。
     if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
         result = getConstant(ci->type_, ci->value_);
     } else if (auto *phi = dynamic_cast<PhiInst*>(v)) {
@@ -410,6 +413,7 @@ const SCEV *ScalarEvolution::tryCreateAddRec(PhiInst *phi) {
     Loop *loop = LI_->getLoopFor(phi->parent_);
     if (!loop || loop->header != phi->parent_) return nullptr;
 
+    // 规范一阶递推必须恰好有一个循环外初值和一个循环内回边值。
     Value *outsideVal = nullptr;
     Value *insideVal = nullptr;
 

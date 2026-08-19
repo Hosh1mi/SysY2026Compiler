@@ -1,3 +1,6 @@
+// 本文件用普通中端 IR 物化 LoopRepFold 所需的模求和 runtime，而不是实现宿主机函数。
+// 生成代码按 select、符号和 i32 回绕边界切分长区间，用 i64 闭式计算前缀，再按原 i32
+// 顺序执行有限尾部；两种余数表示不能得到一致结果时返回哨兵，让调用点执行原循环。
 #include "../../include/mid/runtime/summableModSumRuntime.hpp"
 
 #include "../../include/mid/ir/basicBlock.hpp"
@@ -14,17 +17,22 @@ namespace {
 
 class RuntimeBuilder {
 public:
+    // 绑定目标模块和函数；后续辅助方法都把指令追加到 current 指向的基本块。
     RuntimeBuilder(Module *module, Function *function)
         : module(module), function(function) {}
 
+    // 创建基本块并将其设为当前插入点。
     BasicBlock *block(const std::string &name) {
         current = new BasicBlock(module, name, function);
         return current;
     }
+    // 切换插入点，不创建或移动已有指令。
     void at(BasicBlock *block) { current = block; }
+    // 构造闭式计算使用的 i64 常量。
     ConstantInt *i64(std::int64_t value) {
         return new ConstantInt(module->int64_ty_, value);
     }
+    // 构造模拟源程序运算使用的 i32 常量。
     ConstantInt *i32(std::int64_t value) {
         return new ConstantInt(module->int32_ty_, value);
     }
@@ -43,6 +51,7 @@ public:
     Value *trunc(Value *value) {
         return new ZextInst(Instruction::Trunc, value, module->int32_ty_, current);
     }
+    // 先截断再符号扩展，把宽位值规范为对应 i32 的有符号表示。
     Value *i32Value(Value *value) { return sext(trunc(value)); }
     CallInst *call(Function *callee, std::vector<Value *> arguments) {
         return new CallInst(callee, std::move(arguments), current);
@@ -52,10 +61,13 @@ public:
     void store(Value *value, Value *address) {
         new StoreInst(value, address, current);
     }
+    // 用无条件分支结束当前块。
     void jump(BasicBlock *target) { new BranchInst(target, current); }
+    // 用条件分支结束当前块并连接真假后继。
     void branch(Value *condition, BasicBlock *yes, BasicBlock *no) {
         new BranchInst(condition, yes, no, current);
     }
+    // 生成返回指令，结束当前 runtime 路径。
     void ret(Value *value) { new ReturnInst(value, current); }
 
     Module *module;
@@ -63,6 +75,7 @@ public:
     BasicBlock *current = nullptr;
 };
 
+// makeFunction：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *makeFunction(Module *module, const std::string &name, Type *result,
                        unsigned argumentCount, Type *argumentType = nullptr) {
     if (!argumentType) argumentType = module->int64_ty_;
@@ -72,7 +85,9 @@ Function *makeFunction(Module *module, const std::string &name, Type *result,
         name, module);
 }
 
+// buildFloorDiv：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildFloorDiv(Module *module) {
+    // IR 的 sdiv 向零截断；余数为负时将商减一，得到 floor division 所需的向下取整。
     auto *function = makeFunction(module, "__compiler.sms.floor_div",
                                   module->int64_ty_, 2);
     RuntimeBuilder b(module, function);
@@ -87,7 +102,9 @@ Function *buildFloorDiv(Module *module) {
     return function;
 }
 
+// buildGCD：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildGCD(Module *module) {
+    // 两个 PHI 保存 Euclid 算法本轮的被除数和除数，余数归零时结束。
     auto *function = makeFunction(module, "__compiler.sms.gcd",
                                   module->int64_ty_, 2);
     RuntimeBuilder b(module, function);
@@ -123,7 +140,9 @@ Function *buildGCD(Module *module) {
     return function;
 }
 
+// buildFloorSum：生成 floor-sum 的迭代式 Euclid 算法，用于计算等差序列商值之和。
 Function *buildFloorSum(Module *module, Function *floorDiv) {
+    // 先抽出 a、b 中整倍数的直接贡献，再交换并缩小参数继续迭代，避免生成递归调用。
     auto *function = makeFunction(module, "__compiler.sms.floor_sum",
                                   module->int64_ty_, 4);
     RuntimeBuilder b(module, function);
@@ -231,6 +250,7 @@ Function *buildFloorSum(Module *module, Function *floorDiv) {
     return function;
 }
 
+// buildSumNonnegative：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildSumNonnegative(Module *module, Function *floorSum) {
     auto *function = makeFunction(module, "__compiler.sms.sum_nonnegative",
                                   module->int64_ty_, 4);
@@ -277,6 +297,7 @@ Function *buildSumNonnegative(Module *module, Function *floorSum) {
     return function;
 }
 
+// buildSumSigned：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildSumSigned(Module *module, Function *sumNonnegative) {
     auto *function = makeFunction(module, "__compiler.sms.sum_signed",
                                   module->int64_ty_, 4);
@@ -324,6 +345,7 @@ Function *buildSumSigned(Module *module, Function *sumNonnegative) {
     return function;
 }
 
+// buildKey：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildKey(Module *module, Function *floorDiv) {
     auto *function = makeFunction(module, "__compiler.sms.key",
                                   module->int64_ty_, 2);
@@ -344,6 +366,7 @@ Function *buildKey(Module *module, Function *floorDiv) {
     return function;
 }
 
+// buildEndOfKeyRun：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildEndOfKeyRun(Module *module, Function *key) {
     auto *function = makeFunction(module, "__compiler.sms.end_key_run",
                                   module->int64_ty_, 5);
@@ -412,6 +435,7 @@ Function *buildEndOfKeyRun(Module *module, Function *key) {
     return function;
 }
 
+// buildSumMonotone：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 Function *buildSumMonotone(Module *module, Function *gcd,
                            Function *endKey, Function *sumSigned) {
     auto *function = makeFunction(module, "__compiler.sms.sum_monotone",
@@ -632,7 +656,9 @@ Function *buildSumMonotone(Module *module, Function *gcd,
     return function;
 }
 
+// buildEntry：生成 runtime 入口，负责计算迭代数、分段求和、执行标量尾部并验证候选结果。
 void buildEntry(Module *module, Function *function, Function *sumMonotone) {
+    // 先计算总迭代数并保留固定长度尾部；只有长前缀进入分段闭式快路径。
     RuntimeBuilder b(module, function);
     auto *entry = b.block("label_entry");
     auto *closedCond = b.block("label_closed_cond");
@@ -868,6 +894,7 @@ void buildEntry(Module *module, Function *function, Function *sumMonotone) {
 
 } // namespace
 
+// materializeSummableModSumRuntime：仅在入口声明存在且尚无函数体时，按依赖顺序生成整套求和 runtime IR。
 void materializeSummableModSumRuntime(Module *module) {
     Function *entry = nullptr;
     for (auto *function : module->function_list_)

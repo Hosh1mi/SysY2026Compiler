@@ -1,4 +1,5 @@
-// 所有 IR 指令的 print()、静态查找表、辅助打印函数
+// 本文件实现各类指令的文本输出和操作码名称映射。打印逻辑遵守项目 IR 的操作数布局，
+// 尤其是 PHI 的 value/block 对、条件分支的真假目标和 GEP 的逐级索引类型。
 
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
@@ -403,6 +404,7 @@ std::string AllocaInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ZextInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -418,6 +420,7 @@ std::string ZextInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string FpToSiInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -433,6 +436,7 @@ std::string FpToSiInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string SiToFpInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -448,6 +452,7 @@ std::string SiToFpInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string Bitcast::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -463,6 +468,7 @@ std::string Bitcast::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string InsertElementInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -483,6 +489,7 @@ std::string InsertElementInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ExtractElementInst::print() {
     std::string instr_ir;
     instr_ir += "%" + name_ + " = ";
@@ -493,6 +500,7 @@ std::string ExtractElementInst::print() {
     return instr_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ShuffleVectorInst::print() {
     std::string instr_ir;
     instr_ir += "%" + name_ + " = ";
@@ -541,12 +549,14 @@ std::string PhiInst::print() {
     return instr_ir;
 }
 
+// create_phi：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 PhiInst* PhiInst::create_phi(Type* ty, BasicBlock* bb) {
     std::vector<Value*> vals;
     std::vector<BasicBlock*> val_bbs;
     return new PhiInst(Instruction::PHI, vals, val_bbs, ty, bb);
 }
 
+// add_phi_pair_operand：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 void PhiInst::add_phi_pair_operand(Value* val, Value* pre_bb) {
     this->add_operand(val);
     this->add_operand(pre_bb);

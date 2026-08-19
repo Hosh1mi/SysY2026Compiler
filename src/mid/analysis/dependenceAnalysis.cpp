@@ -1,3 +1,6 @@
+// DependenceAnalysis 判断两次循环访存是否可能在不同迭代命中同一地址。它先处理基址别名，
+// 再把 GEP 下标写成公共循环层上的仿射式，使用精确方程、GCD 和 Banerjee 界逐层排除依赖。
+// 输出方向向量供循环交换、并行化和向量化判断合法性；证明不足时保留 DIR_ANY。
 #include "../../include/mid/analysis/dependenceAnalysis.hpp"
 #include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -25,6 +28,7 @@ GetElementPtrInst *DependenceAnalysis::accessGEP(Instruction *acc) const {
     return nullptr;
 }
 
+// gepBase：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Value *DependenceAnalysis::gepBase(GetElementPtrInst *gep) const {
     if (!gep) return nullptr;
     Value *base = gep->get_operand(0);
@@ -35,6 +39,7 @@ Value *DependenceAnalysis::gepBase(GetElementPtrInst *gep) const {
 }
 
 DependenceAnalysis::BaseRelation
+// baseRelation：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 DependenceAnalysis::baseRelation(Value *a, Value *b) const {
     if (a == b) return BaseRelation::MustAlias;
     // 不同全局变量绝对不别名
@@ -77,6 +82,7 @@ struct BanerjeeRange {
     bool valid = false;
 };
 
+// addLinearRange：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 static void addLinearRange(__int128 coeff, long long lo, long long hi,
                            BanerjeeRange &range) {
     __int128 a = coeff * lo;
@@ -85,6 +91,7 @@ static void addLinearRange(__int128 coeff, long long lo, long long hi,
     range.hi += std::max(a, b);
 }
 
+// hasOnlyNestIVs：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool hasOnlyNestIVs(const AffineExpr &expr,
                            const std::vector<Loop *> &loops) {
     for (const auto &term : expr.coeffs) {
@@ -161,6 +168,7 @@ static BanerjeeRange computeBanerjee(const AffineExpr &e1,
     return result;
 }
 
+// mayContainZero：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool mayContainZero(const BanerjeeRange &range) {
     return range.valid && range.lo <= 0 && range.hi >= 0;
 }
@@ -168,6 +176,7 @@ static bool mayContainZero(const BanerjeeRange &range) {
 // ── 主测试 ──────────────────────────────────────────────────────────────
 
 DependenceAnalysis::Result
+// test：综合基址别名、仿射下标和循环界执行依赖测试，并为各循环层生成方向信息。
 DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
     Result result;
 
@@ -358,6 +367,7 @@ DependenceAnalysis::test(Instruction *acc1, Instruction *acc2) {
 }
 
 DependenceAnalysis::DistanceResult
+// getConstantDistance：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 DependenceAnalysis::getConstantDistance(
     Instruction *source, Instruction *sink,
     const std::vector<Loop *> &nest) {

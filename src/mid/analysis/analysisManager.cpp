@@ -1,14 +1,19 @@
+// AnalysisManager 统一创建、缓存和失效中端分析。各 get 接口按需建立依赖，例如 LoopInfo
+// 依赖支配树，RangeAnalysis 又依赖 LoopInfo 和 SCEV；优化 pass 修改 IR 后通过
+// PreservedAnalyses 声明仍然有效的结果，管理器据此清理其余缓存。
 #include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
+// isAnalysisManagerDebugEnabled：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isAnalysisManagerDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_ANALYSIS_MANAGER") != nullptr;
     return enabled;
 }
 
+// debug：读取调试开关或输出分析中间结果，不参与正常语义判断。
 void AnalysisManager::debug(const char *event, const char *analysis,
                             const std::string &unit) const {
     if (!isAnalysisManagerDebugEnabled()) return;
@@ -17,6 +22,7 @@ void AnalysisManager::debug(const char *event, const char *analysis,
               << " unit=" << unit << "\n";
 }
 
+// getBasicAA：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 BasicAliasAnalysis &AnalysisManager::getBasicAA(Module *module) {
     if (!basicAA_ || basicAAModule_ != module) {
         debug("miss", "BasicAA", "module");
@@ -29,6 +35,7 @@ BasicAliasAnalysis &AnalysisManager::getBasicAA(Module *module) {
     return *basicAA_;
 }
 
+// getDominatorTree：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 DominatorTreeAnalysis &AnalysisManager::getDominatorTree(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.dominatorTree) {
@@ -42,6 +49,7 @@ DominatorTreeAnalysis &AnalysisManager::getDominatorTree(Function *func) {
 }
 
 PostDominatorTreeAnalysis &
+// getPostDominatorTree：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 AnalysisManager::getPostDominatorTree(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.postDominatorTree) {
@@ -55,6 +63,7 @@ AnalysisManager::getPostDominatorTree(Function *func) {
 }
 
 DominanceFrontierAnalysis &
+// getDominanceFrontier：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 AnalysisManager::getDominanceFrontier(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.dominanceFrontier) {
@@ -67,6 +76,7 @@ AnalysisManager::getDominanceFrontier(Function *func) {
     return *cache.dominanceFrontier;
 }
 
+// getLazyValueInfo：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.lazyValueInfo) {
@@ -80,6 +90,7 @@ LazyValueInfo &AnalysisManager::getLazyValueInfo(Function *func) {
     return *cache.lazyValueInfo;
 }
 
+// getLoopInfo：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 LoopInfo &AnalysisManager::getLoopInfo(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.loopInfo) {
@@ -92,6 +103,7 @@ LoopInfo &AnalysisManager::getLoopInfo(Function *func) {
     return *cache.loopInfo;
 }
 
+// getRangeAnalysis：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 RangeAnalysis &AnalysisManager::getRangeAnalysis(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.rangeAnalysis) {
@@ -105,6 +117,7 @@ RangeAnalysis &AnalysisManager::getRangeAnalysis(Function *func) {
     return *cache.rangeAnalysis;
 }
 
+// getScalarEvolution：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
     auto &cache = functionCaches_[func];
     if (!cache.scalarEvolution) {
@@ -117,18 +130,22 @@ ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
     return *cache.scalarEvolution;
 }
 
+// isRangeAnalysisActive：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool AnalysisManager::isRangeAnalysisActive(Function *func) const {
     return activeRangeAnalyses_.count(func) != 0;
 }
 
+// enterRangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::enterRangeAnalysis(Function *func) {
     if (func) activeRangeAnalyses_.insert(func);
 }
 
+// leaveRangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::leaveRangeAnalysis(Function *func) {
     if (func) activeRangeAnalyses_.erase(func);
 }
 
+// invalidateFunctionCache：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
                                               const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
@@ -167,6 +184,7 @@ void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
     }
 }
 
+// invalidate：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidate(Module *module, const PreservedAnalyses &pa) {
     if (pa.preservesAll()) {
         debug("preserve", "all", "module");
@@ -185,6 +203,7 @@ void AnalysisManager::invalidate(Module *module, const PreservedAnalyses &pa) {
     }
 }
 
+// invalidateFunction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidateFunction(Function *func,
                                          const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
@@ -208,6 +227,7 @@ void AnalysisManager::invalidateFunction(Function *func,
     invalidateFunctionCache(it->second, pa);
 }
 
+// clearRangeAnalyses：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void AnalysisManager::clearRangeAnalyses() {
     debug("clear", "RangeAnalysis", "all functions");
     activeRangeAnalyses_.clear();
@@ -215,11 +235,13 @@ void AnalysisManager::clearRangeAnalyses() {
         entry.second.rangeAnalysis.reset();
 }
 
+// clear：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void AnalysisManager::clear(Function *func) {
     debug("clear", "function", func ? func->name_ : "<null>");
     functionCaches_.erase(func);
 }
 
+// clear：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void AnalysisManager::clear() {
     debug("clear", "all", "module");
     basicAA_.reset();

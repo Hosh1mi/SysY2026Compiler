@@ -1,4 +1,5 @@
-// BasicBlock 的方法：print、指令增删、终止指令获取、CFG 维护
+// BasicBlock 管理有序指令链表及其前驱、后继关系。指令插入和移除除了修改链表，还必须
+// 同步 parent_ 与链表位置；CFG 边由分支指令维护，供支配、循环和验证分析直接读取。
 
 #include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/instruction.hpp"

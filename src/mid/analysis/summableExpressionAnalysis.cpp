@@ -1,3 +1,5 @@
+// SummableExpressionAnalysis 将循环每轮贡献拆成线性项、常量乘除、正模和可选 select 分支，
+// 只接受 runtime 能按原 i32 语义重放的表达式。生成的摘要由 LoopRepFold 传给模求和 runtime。
 #include "../../include/mid/analysis/summableExpressionAnalysis.hpp"
 
 #include "../../include/mid/ir/instruction.hpp"
@@ -12,6 +14,7 @@
 namespace SummableExpressionAnalysis {
 namespace {
 
+// constantI32：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool constantI32(Value *value, int &result) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     if (!constant || constant->value_ < std::numeric_limits<int>::min() ||
@@ -21,6 +24,7 @@ bool constantI32(Value *value, int &result) {
     return true;
 }
 
+// checkedAccumulate：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool checkedAccumulate(int &value, std::int64_t delta) {
     std::int64_t next = static_cast<std::int64_t>(value) + delta;
     if (next < std::numeric_limits<int>::min() ||
@@ -30,6 +34,7 @@ bool checkedAccumulate(int &value, std::int64_t delta) {
     return true;
 }
 
+// matchMultiplyByConstant：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchMultiplyByConstant(Value *value, Value *input, int &constant) {
     if (value == input) {
         constant = 1;
@@ -59,6 +64,7 @@ struct AffineLine {
     int constant = 0;
 };
 
+// analyzeAffine：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool analyzeAffine(Value *value, Value *symbol, AffineLine &result,
                    std::set<Value *> &visiting, unsigned depth) {
     if (!value || depth > 16 || !visiting.insert(value).second)
@@ -143,6 +149,7 @@ bool analyzeAffine(Value *value, Value *symbol, AffineLine &result,
     return finish(false);
 }
 
+// analyzeAffine：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool analyzeAffine(Value *value, Value *symbol, AffineLine &result) {
     std::set<Value *> visiting;
     return analyzeAffine(value, symbol, result, visiting, 0);
@@ -154,6 +161,7 @@ struct AffineSelectionBasis {
     bool trueUsesRight = true;
 };
 
+// matchReflected：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchReflected(Value *value, Value *base, int &constant) {
     auto *subtract = dynamic_cast<BinaryInst *>(value);
     return subtract && subtract->is_sub() &&
@@ -161,6 +169,7 @@ bool matchReflected(Value *value, Value *base, int &constant) {
            subtract->get_operand(1) == base;
 }
 
+// matchRedundantReflectedMaximum：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchRedundantReflectedMaximum(Value *value, PhiInst *induction,
                                     int &reflectionConstant,
                                     long long &lowerBound) {
@@ -197,6 +206,7 @@ bool matchRedundantReflectedMaximum(Value *value, PhiInst *induction,
     return true;
 }
 
+// matchAffineSelectionBasis：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchAffineSelectionBasis(Value *value, PhiInst *induction,
                                AffineSelectionBasis &result) {
     int reflectionConstant = 0;
@@ -238,6 +248,7 @@ bool matchAffineSelectionBasis(Value *value, PhiInst *induction,
     return true;
 }
 
+// collectValues：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 void collectValues(Value *value, std::set<Value *> &seen,
                    std::vector<Value *> &values, unsigned depth) {
     if (!value || depth > 20 || !seen.insert(value).second) return;
@@ -253,6 +264,7 @@ void collectValues(Value *value, std::set<Value *> &seen,
     }
 }
 
+// flattenSignedAdd：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool flattenSignedAdd(Value *value, int sign,
                       std::vector<std::pair<Value *, int>> &terms,
                       int &constant) {
@@ -275,6 +287,7 @@ bool flattenSignedAdd(Value *value, int sign,
     return true;
 }
 
+// matchFloorTerm：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchFloorTerm(Value *value, Value *basis, int &numeratorMultiplier,
                     int &divisor, int &quotientMultiplier) {
     Value *quotient = value;
@@ -298,6 +311,7 @@ bool matchFloorTerm(Value *value, Value *basis, int &numeratorMultiplier,
                                    numeratorMultiplier);
 }
 
+// analyzeWithBasis：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool analyzeWithBasis(Value *dividend, Value *basis, PhiInst *induction,
                       const AffineSelectionBasis *selection,
                       int modulus, LinearFloorExpression &result) {
@@ -360,6 +374,7 @@ bool analyzeWithBasis(Value *dividend, Value *basis, PhiInst *induction,
 
 } // namespace
 
+// analyzeModular：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool analyzeModular(Value *value, PhiInst *induction,
                     LinearFloorExpression &result) {
     auto *remainder = dynamic_cast<BinaryInst *>(value);

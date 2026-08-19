@@ -5,6 +5,7 @@
 #include <limits>
 #include <string>
 
+// typeStorageBytes：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 long long typeStorageBytes(Type *type) {
     if (!type) return -1;
 
@@ -41,6 +42,7 @@ long long typeStorageBytes(Type *type) {
     return elementBytes * static_cast<long long>(elementCount);
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string Type::print() {
     std::string type_ir;
     switch (this->tid_) {

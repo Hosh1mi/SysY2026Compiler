@@ -1,3 +1,6 @@
+// BasicAliasAnalysis 回溯 GEP/bitcast，将地址归约为“底层对象 + 常量字节偏移”，据此判断
+// NoAlias、MustAlias 或 MayAlias；同时扫描函数体建立 Mod/Ref、副作用和参数逃逸摘要。
+// LICM、DSE、GVN、内存标量提升以及循环向量化都依赖这些结论保证访存重排安全。
 #include "../../include/mid/analysis/basicAliasAnalysis.hpp"
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -6,16 +9,20 @@
 #include <cstdlib>
 #include <iostream>
 
+// isBasicAADebugEnabled：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isBasicAADebugEnabled() {
     static bool enabled = std::getenv("DEBUG_BASIC_AA") != nullptr;
     return enabled;
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void BasicAliasAnalysis::analyze(Module *module) {
     module_ = module;
     summaries_.clear();
     if (!module_) return;
 
+    // 先为函数定义放入空效果摘要，声明函数保持保守默认值；后续迭代再把被调函数效果
+    // 逐层传播到调用者。
     for (auto *func : module_->function_list_) {
         FunctionSummary summary;
         if (!func->is_declaration()) {
@@ -27,6 +34,7 @@ void BasicAliasAnalysis::analyze(Module *module) {
         summaries_[func] = summary;
     }
 
+    // 调用图可能含递归环，无法依赖单一拓扑序；反复重算直到所有函数摘要稳定。
     bool changed = true;
     while (changed) {
         changed = false;
@@ -47,10 +55,13 @@ void BasicAliasAnalysis::analyze(Module *module) {
     }
 }
 
+// getPointerInfo：沿 GEP 和 bitcast 回溯地址，提取底层对象和可静态确定的字节偏移。
 BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) const {
     PointerInfo info;
     info.base = ptr;
 
+    // bitcast 不改变地址，GEP 只改变偏移。遇到动态下标或未知尺寸时仍保留根对象，但将
+    // hasConstantOffset 清零，防止用不完整偏移错误证明 NoAlias。
     while (true) {
         if (auto *bc = dynamic_cast<Bitcast *>(info.base)) {
             info.base = bc->get_operand(0);
@@ -98,12 +109,14 @@ BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) c
     return info;
 }
 
+// isTrackedMemoryObject：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isTrackedMemoryObject(Value *value) const {
     return dynamic_cast<GlobalVariable *>(value) ||
            dynamic_cast<AllocaInst *>(value) ||
            dynamic_cast<Argument *>(value);
 }
 
+// getMemoryLocation：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 MemoryLocation BasicAliasAnalysis::getMemoryLocation(Value *ptr) const {
     MemoryLocation loc;
     loc.ptr = ptr;
@@ -114,6 +127,7 @@ MemoryLocation BasicAliasAnalysis::getMemoryLocation(Value *ptr) const {
     return loc;
 }
 
+// aliasResultName：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string BasicAliasAnalysis::aliasResultName(AliasResult result) const {
     switch (result) {
     case AliasResult::NoAlias:
@@ -126,6 +140,7 @@ std::string BasicAliasAnalysis::aliasResultName(AliasResult result) const {
     return "MayAlias";
 }
 
+// alias：比较两个地址的根对象、常量偏移和访问区间，返回 NoAlias、MustAlias 或 MayAlias。
 AliasResult BasicAliasAnalysis::alias(const MemoryLocation &a,
                                       const MemoryLocation &b) const {
     if (!a.ptr || !b.ptr) return AliasResult::MayAlias;
@@ -186,10 +201,12 @@ AliasResult BasicAliasAnalysis::alias(const MemoryLocation &a,
     return result;
 }
 
+// alias：比较两个地址的根对象、常量偏移和访问区间，返回 NoAlias、MustAlias 或 MayAlias。
 AliasResult BasicAliasAnalysis::alias(Value *a, Value *b) const {
     return alias(getMemoryLocation(a), getMemoryLocation(b));
 }
 
+// getConstantOffsetFromObject：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool BasicAliasAnalysis::getConstantOffsetFromObject(
     Value *ptr, Value *&object, long long &offsetBytes) const {
     PointerInfo info = getPointerInfo(ptr);
@@ -202,6 +219,7 @@ bool BasicAliasAnalysis::getConstantOffsetFromObject(
     return true;
 }
 
+// addLocationEffect：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 void BasicAliasAnalysis::addLocationEffect(FunctionSummary &summary,
                                            MemoryLocation loc,
                                            ModRefInfo effect) const {
@@ -222,6 +240,7 @@ void BasicAliasAnalysis::addLocationEffect(FunctionSummary &summary,
 }
 
 BasicAliasAnalysis::FunctionSummary
+// computeFunctionSummary：扫描函数体的访存与调用，将局部效果合并成 Mod/Ref、副作用和逃逸摘要。
 BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
     FunctionSummary summary;
     summary.pure = true;
@@ -307,6 +326,7 @@ BasicAliasAnalysis::computeFunctionSummary(Function *func) const {
     return summary;
 }
 
+// getFunctionModRef：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 ModRefInfo BasicAliasAnalysis::getFunctionModRef(Function *func,
                                                  Value *ptrOrGlobal) const {
     if (!func) return ModRefInfo::ModRef;
@@ -334,6 +354,7 @@ ModRefInfo BasicAliasAnalysis::getFunctionModRef(Function *func,
     return result;
 }
 
+// getModRefInfo：判断一条指令相对指定内存位置是只读、只写、读写还是不访问。
 ModRefInfo BasicAliasAnalysis::getModRefInfo(Instruction *inst, Value *ptr) const {
     if (!inst) return ModRefInfo::NoModRef;
 
@@ -358,6 +379,7 @@ ModRefInfo BasicAliasAnalysis::getModRefInfo(Instruction *inst, Value *ptr) cons
     return ModRefInfo::NoModRef;
 }
 
+// getCallModRef：把被调函数摘要中的形参位置映射到实参，计算调用对目标地址的实际影响。
 ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
     if (!call || !ptr) return ModRefInfo::ModRef;
 
@@ -403,6 +425,7 @@ ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
     return result;
 }
 
+// isPure：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isPure(Function *func) const {
     if (func && func->hasSemFlag(SemFlag::FnPure))
         return true;
@@ -410,6 +433,7 @@ bool BasicAliasAnalysis::isPure(Function *func) const {
     return it != summaries_.end() && it->second.pure;
 }
 
+// mayHaveSideEffect：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::mayHaveSideEffect(Function *func) const {
     if (func &&
         (func->hasSemFlag(SemFlag::FnPure) ||
@@ -420,6 +444,7 @@ bool BasicAliasAnalysis::mayHaveSideEffect(Function *func) const {
     return it == summaries_.end() || it->second.sideEffect;
 }
 
+// isNoCapture：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
     if (!func || !arg || arg->parent_ != func)
         return false;
@@ -434,12 +459,14 @@ bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
     return it->second.argNoCapture[arg->arg_no_];
 }
 
+// isLocalArrayPointer：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
     PointerInfo info = getPointerInfo(ptr);
     auto *alloca = dynamic_cast<AllocaInst *>(info.base);
     return alloca && alloca->allocated_type()->tid_ == Type::ArrayTyID;
 }
 
+// isImmutableLoad：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
                                          const LoopInfo &LI) const {
     if (!load || !load->is_load()) return false;
@@ -459,6 +486,7 @@ bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
 
 namespace {
 
+// isPointerDerivedFrom：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isPointerDerivedFrom(Value *value, Value *target,
                           std::unordered_set<Value *> &visited) {
     if (value == target) return true;
@@ -470,6 +498,7 @@ bool isPointerDerivedFrom(Value *value, Value *target,
     return false;
 }
 
+// resolveUnderlyingObject：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Value *resolveUnderlyingObject(Value *value,
                                std::unordered_set<Value *> &visiting) {
     if (!value) return nullptr;
@@ -504,11 +533,13 @@ Value *resolveUnderlyingObject(Value *value,
 
 } // namespace
 
+// getUnderlyingObject：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Value *BasicAliasAnalysis::getUnderlyingObject(Value *ptr) const {
     std::unordered_set<Value *> visiting;
     return resolveUnderlyingObject(ptr, visiting);
 }
 
+// valueDoesNotCapture：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool BasicAliasAnalysis::valueDoesNotCapture(
     Value *value, std::unordered_set<Value *> &visited) const {
     if (!value)
@@ -567,6 +598,7 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
     return true;
 }
 
+// immutableObjectHasSafeUses：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool BasicAliasAnalysis::immutableObjectHasSafeUses(
     Value *value, std::unordered_set<Value *> &visited) const {
     if (!value || !visited.insert(value).second)

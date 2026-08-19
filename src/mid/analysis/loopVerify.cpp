@@ -21,6 +21,7 @@ namespace {
 
 const int kMaxReports = 20;
 
+// report：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void report(int &levelViolations, int &totalReports,
             const std::string &context, Function *func,
             const std::string &msg) {
@@ -32,6 +33,7 @@ void report(int &levelViolations, int &totalReports,
     }
 }
 
+// useLocation：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string useLocation(Instruction *user, BasicBlock *semanticBlock) {
     if (!user || !user->parent_)
         return "<unknown>";
@@ -42,6 +44,7 @@ std::string useLocation(Instruction *user, BasicBlock *semanticBlock) {
     return loc;
 }
 
+// preheaderDiagnostic：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string preheaderDiagnostic(Loop *loop) {
     if (!loop || !loop->header)
         return "loop has no header";
@@ -74,6 +77,7 @@ std::string preheaderDiagnostic(Loop *loop) {
     return "has no dedicated preheader";
 }
 
+// latchDiagnostic：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string latchDiagnostic(Loop *loop) {
     if (!loop || !loop->header)
         return "loop has no header";
@@ -108,6 +112,7 @@ std::string latchDiagnostic(Loop *loop) {
 
 } // namespace
 
+// verifyLoopForms：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 LoopVerifyResult verifyLoopForms(Module *m, int level,
                                  const std::string &context,
                                  bool warnOnly,
@@ -200,6 +205,7 @@ LoopVerifyResult verifyLoopForms(Module *m, int level,
     return result;
 }
 
+// verifyLoops：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int verifyLoops(Module *m, int level, const std::string &context,
                 bool warnOnly) {
     return verifyLoopForms(m, level, context, warnOnly,

@@ -1,5 +1,6 @@
-// FunctionTerminationAnalysis supplies reusable must-return facts for
-// transformations that remove dynamically executed calls.
+// FunctionTerminationAnalysis 证明函数在定义行为下是否必然返回。它检查所有可达路径，并
+// 只在循环具有可证明的单调控制变量和有限边界时接受循环。自动记忆化等会改变调用次数的
+// 优化借此避免删除原程序中可能永不返回的调用。
 
 #include "../../include/mid/analysis/functionTerminationAnalysis.hpp"
 
@@ -9,24 +10,28 @@
 
 namespace {
 
+// calledFunction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Function *calledFunction(CallInst *call) {
     if (!call || call->num_ops() == 0)
         return nullptr;
     return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
+// isUnitStep：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isUnitStep(const InductionDescriptor &control, long long expected) {
     return control.constantStep && *control.constantStep == expected;
 }
 
 } // namespace
 
+// mustReturn：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool FunctionTerminationAnalysis::mustReturn(Function *function) {
     if (!module_ || !function || function->parent_ != module_)
         return false;
     return analyzeFunction(function);
 }
 
+// loopIsFinite：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool FunctionTerminationAnalysis::loopIsFinite(const Loop &loop) const {
     if (!loop.preheader || !loop.singleLatch() || !loop.singleExit() ||
         loop.exiting.size() != 1)
@@ -64,6 +69,7 @@ bool FunctionTerminationAnalysis::loopIsFinite(const Loop &loop) const {
     return false;
 }
 
+// analyzeFunction：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool FunctionTerminationAnalysis::analyzeFunction(Function *function) {
     State &state = states_[function];
     if (state == State::Returns)

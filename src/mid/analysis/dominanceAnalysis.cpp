@@ -1,3 +1,6 @@
+// 本文件建立入口支配树、出口后支配关系和支配边界。支配树用于 SSA 合法性、循环识别及
+// 代码移动；后支配关系用于判断控制流汇合；支配边界供 Mem2Reg 寻找 PHI 放置点。
+// 正向分析只覆盖入口可达块，反向分析只覆盖能够到达实际出口的块。
 #include "../../include/mid/analysis/dominanceAnalysis.hpp"
 
 #include "../../include/mid/ir/basicBlock.hpp"
@@ -13,11 +16,13 @@
 
 namespace {
 
+// verifyDominanceEnabled：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool verifyDominanceEnabled() {
     static bool enabled = std::getenv("DEBUG_VERIFY_DOMINANCE") != nullptr;
     return enabled;
 }
 
+// computeRPO：从入口深度优先遍历可达 CFG，反转后序结果供支配树迭代使用。
 std::vector<BasicBlock *> computeRPO(Function *func) {
     std::vector<BasicBlock *> postorder;
     if (!func || func->basic_blocks_.empty()) return postorder;
@@ -35,15 +40,18 @@ std::vector<BasicBlock *> computeRPO(Function *func) {
 
 } // namespace
 
+// reset：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void DominatorTreeAnalysis::reset() {
     function_ = nullptr;
     root_ = nullptr;
     nodes_.clear();
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void DominatorTreeAnalysis::analyze(Function *func) {
     reset();
     function_ = func;
+    // 第一阶段只给入口可达块编号；不可达块不进入树，相关支配查询自然返回 false。
     auto rpo = computeRPO(func);
     if (rpo.empty()) return;
 
@@ -61,6 +69,8 @@ void DominatorTreeAnalysis::analyze(Function *func) {
         return a;
     };
 
+    // 第二阶段按 RPO 反复求 idom。每个块的新 idom 是所有已知前驱支配链的交点；
+    // 回边信息在后续轮次补齐，直到整张表不再变化。
     bool changed = true;
     while (changed) {
         changed = false;
@@ -78,6 +88,7 @@ void DominatorTreeAnalysis::analyze(Function *func) {
         }
     }
 
+    // 第三阶段将 idom 表转换成显式树，并计算深度及 DFS 区间供高频查询使用。
     for (unsigned i = 0; i < rpo.size(); ++i) {
         auto *bb = rpo[i];
         nodes_[bb] = std::unique_ptr<DominatorTreeNode>(new DominatorTreeNode(bb));
@@ -102,6 +113,7 @@ void DominatorTreeAnalysis::analyze(Function *func) {
     }
 }
 
+// assignDFSNumbers：为支配树节点记录 DFS 进入和离开编号，将支配查询化为区间包含判断。
 void DominatorTreeAnalysis::assignDFSNumbers() {
     unsigned number = 0;
     std::function<void(DominatorTreeNode *)> dfs = [&](DominatorTreeNode *node) {
@@ -112,43 +124,51 @@ void DominatorTreeAnalysis::assignDFSNumbers() {
     if (root_) dfs(root_);
 }
 
+// getNode：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 DominatorTreeNode *DominatorTreeAnalysis::getNode(BasicBlock *bb) const {
     auto it = nodes_.find(bb);
     return it == nodes_.end() ? nullptr : it->second.get();
 }
 
+// getIDom：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 BasicBlock *DominatorTreeAnalysis::getIDom(BasicBlock *bb) const {
     auto *node = getNode(bb);
     return node && node->idom_ ? node->idom_->block_ : nullptr;
 }
 
+// getRPOIndex：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 unsigned DominatorTreeAnalysis::getRPOIndex(BasicBlock *bb) const {
     auto *node = getNode(bb);
     return node ? node->rpoIndex_ : static_cast<unsigned>(-1);
 }
 
 const std::vector<DominatorTreeNode *> &
+// getChildren：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 DominatorTreeAnalysis::getChildren(BasicBlock *bb) const {
     static const std::vector<DominatorTreeNode *> empty;
     auto *node = getNode(bb);
     return node ? node->children_ : empty;
 }
 
+// isReachableFromEntry：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool DominatorTreeAnalysis::isReachableFromEntry(BasicBlock *bb) const {
     return getNode(bb) != nullptr;
 }
 
+// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(BasicBlock *a, BasicBlock *b) const {
     auto *an = getNode(a);
     auto *bn = getNode(b);
     return an && bn && an->dfsIn_ <= bn->dfsIn_ && an->dfsOut_ >= bn->dfsOut_;
 }
 
+// properlyDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::properlyDominates(BasicBlock *a,
                                                BasicBlock *b) const {
     return a != b && dominates(a, b);
 }
 
+// instructionComesBefore：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::instructionComesBefore(const Instruction *a,
                                                     const Instruction *b) const {
     if (!a || !b || !a->parent_ || a->parent_ != b->parent_) return false;
@@ -159,6 +179,7 @@ bool DominatorTreeAnalysis::instructionComesBefore(const Instruction *a,
     return false;
 }
 
+// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(Instruction *def,
                                        Instruction *use) const {
     if (!def || !use || !def->parent_ || !use->parent_) return false;
@@ -168,6 +189,7 @@ bool DominatorTreeAnalysis::dominates(Instruction *def,
     return dominates(def->parent_, use->parent_);
 }
 
+// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(Value *def, const Use &use) const {
     auto *user = use.user_;
     if (!def || !user || !user->parent_) return false;
@@ -185,6 +207,7 @@ bool DominatorTreeAnalysis::dominates(Value *def, const Use &use) const {
     return dominates(defInst->parent_, incoming);
 }
 
+// findNearestCommonDominator：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 BasicBlock *DominatorTreeAnalysis::findNearestCommonDominator(
     BasicBlock *a, BasicBlock *b) const {
     auto *an = getNode(a);
@@ -199,6 +222,7 @@ BasicBlock *DominatorTreeAnalysis::findNearestCommonDominator(
     return an ? an->block_ : nullptr;
 }
 
+// getDescendants：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 void DominatorTreeAnalysis::getDescendants(
     BasicBlock *root, std::vector<BasicBlock *> &result) const {
     auto *node = getNode(root);
@@ -208,6 +232,7 @@ void DominatorTreeAnalysis::getDescendants(
         getDescendants(child->block_, result);
 }
 
+// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::verify() const {
     if (!function_) return nodes_.empty() && !root_;
     auto rpo = computeRPO(function_);
@@ -281,6 +306,7 @@ bool DominatorTreeAnalysis::verify() const {
     return true;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 void DominatorTreeAnalysis::print(std::ostream &os) const {
     for (const auto &entry : nodes_) {
         auto *node = entry.second.get();
@@ -290,6 +316,7 @@ void DominatorTreeAnalysis::print(std::ostream &os) const {
     }
 }
 
+// reset：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void PostDominatorTreeAnalysis::reset() {
     function_ = nullptr;
     roots_.clear();
@@ -298,6 +325,7 @@ void PostDominatorTreeAnalysis::reset() {
     ipdom_.clear();
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void PostDominatorTreeAnalysis::analyze(Function *func) {
     reset();
     function_ = func;
@@ -381,26 +409,31 @@ void PostDominatorTreeAnalysis::analyze(Function *func) {
     }
 }
 
+// getIPostDominator：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 BasicBlock *PostDominatorTreeAnalysis::getIPostDominator(BasicBlock *bb) const {
     auto it = ipdom_.find(bb);
     return it == ipdom_.end() ? nullptr : it->second;
 }
 
+// canReachExit：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool PostDominatorTreeAnalysis::canReachExit(BasicBlock *bb) const {
     return reachesExit_.count(bb) != 0;
 }
 
+// postDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::postDominates(BasicBlock *a,
                                                BasicBlock *b) const {
     auto it = postDominators_.find(b);
     return a && it != postDominators_.end() && it->second.count(a) != 0;
 }
 
+// properlyPostDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::properlyPostDominates(BasicBlock *a,
                                                        BasicBlock *b) const {
     return a != b && postDominates(a, b);
 }
 
+// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::verify() const {
     if (!function_) return reachesExit_.empty();
 
@@ -481,6 +514,7 @@ bool PostDominatorTreeAnalysis::verify() const {
     return true;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 void PostDominatorTreeAnalysis::print(std::ostream &os) const {
     for (auto *bb : reachesExit_) {
         auto *parent = getIPostDominator(bb);
@@ -489,11 +523,13 @@ void PostDominatorTreeAnalysis::print(std::ostream &os) const {
     }
 }
 
+// reset：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void DominanceFrontierAnalysis::reset() {
     function_ = nullptr;
     frontiers_.clear();
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void DominanceFrontierAnalysis::analyze(Function *func,
                                          const DominatorTreeAnalysis &DT) {
     reset();
@@ -519,12 +555,14 @@ void DominanceFrontierAnalysis::analyze(Function *func,
 }
 
 const std::set<BasicBlock *> &
+// getFrontier：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 DominanceFrontierAnalysis::getFrontier(BasicBlock *bb) const {
     static const std::set<BasicBlock *> empty;
     auto it = frontiers_.find(bb);
     return it == frontiers_.end() ? empty : it->second;
 }
 
+// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominanceFrontierAnalysis::verify(const DominatorTreeAnalysis &DT) const {
     if (function_ != DT.function()) return false;
     for (const auto &entry : frontiers_) {
@@ -539,6 +577,7 @@ bool DominanceFrontierAnalysis::verify(const DominatorTreeAnalysis &DT) const {
     return true;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 void DominanceFrontierAnalysis::print(std::ostream &os) const {
     for (const auto &entry : frontiers_) {
         os << entry.first->name_ << ":";

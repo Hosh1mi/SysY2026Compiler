@@ -1,3 +1,6 @@
+// AffineAnalysis 将整数下标化成“常数 + 若干归纳变量的一次组合”。它借助 SCEV 识别
+// 常量、加法、常量乘法和固定步长递推，拒绝变量相乘等非线性结构。结果主要提供给循环
+// 依赖测试、循环交换和访存步长分析，用来判断不同迭代的数组下标是否可能相等。
 #include "../../include/mid/analysis/affineAnalysis.hpp"
 #include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -21,6 +24,7 @@ static bool ivIndepImpl(Value *v, PhiInst *iv, std::set<Value *> &seen) {
     return true;
 }
 
+// provablyIndependentOfIV：沿 use-def 链检查值是否依赖指定归纳变量；load 等未知来源保守视为相关。
 bool AffineAnalysis::provablyIndependentOfIV(Value *v, PhiInst *iv) {
     if (!v || !iv) return false;
     std::set<Value *> seen;
@@ -52,6 +56,7 @@ AffineExpr AffineExpr::operator*(int k) const {
     return r;
 }
 
+// canonicalize：合并相同归纳变量的系数并删除零项，使仿射表达式具有稳定形式。
 void AffineExpr::canonicalize() {
     for (auto it = coeffs.begin(); it != coeffs.end();) {
         if (it->second == 0) it = coeffs.erase(it);
@@ -59,6 +64,7 @@ void AffineExpr::canonicalize() {
     }
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string AffineExpr::print() const {
     if (!valid) return "<invalid>";
     std::ostringstream oss;
@@ -119,6 +125,7 @@ AffineExpr AffineAnalysis::analyze(Value *v) {
     return result;
 }
 
+// fromSCEV：把 SCEV 常量、加法、常量乘法和 AddRec 转成仿射式，非线性节点返回无效。
 AffineExpr AffineAnalysis::fromSCEV(const SCEV *s) {
     if (!s) return AffineExpr::makeInvalid();
 

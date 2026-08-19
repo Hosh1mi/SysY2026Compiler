@@ -1,4 +1,7 @@
-// AST → 基础 IR：局部量走 entry alloca 槽，非 void 函数统一经 %retval 返回。
+// IRGen 把前端 AST 降为未优化的中端 IR。标量局部变量先放入 entry alloca，控制语句显式
+// 建立基本块和分支，非 void 标量函数经统一 retval/return block 返回；vector、tensor 还会
+// 根据静态或动态形状选择原生向量、逐 lane 值或隐藏返回指针。后续 Mem2Reg、CFG 化简和
+// 向量优化均建立在这里生成的 use-def、类型和 CFG 关系正确的前提上。
 #include "../../include/mid/ir/irGen.hpp"
 #include <iostream>
 #include <unordered_map>
@@ -554,10 +557,12 @@ public:
 
 
 
+// scalarType：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Type *scalarType(Module *module, TYPE element) {
     return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
 }
 
+// resolveVectorLanes：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 static unsigned resolveVectorLanes(GenIR *gen, const TypeSpec &type) {
     unsigned lanes = type.lanes;
     if (!type.laneConstant.empty()) {
@@ -578,6 +583,7 @@ static unsigned resolveVectorLanes(GenIR *gen, const TypeSpec &type) {
     return lanes;
 }
 
+// lowerFixedType：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Type *lowerFixedType(GenIR *gen, const TypeSpec &type) {
     if (!type.isFixedVector())
         return scalarType(gen->module.get(), type.element);
@@ -588,6 +594,7 @@ static Type *lowerFixedType(GenIR *gen, const TypeSpec &type) {
     return gen->module->get_scalarized_vector_type(element, lanes);
 }
 
+// isIntegerValueType：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isIntegerValueType(Type *type) {
     if (type->tid_ == Type::IntegerTyID)
         return true;
@@ -596,6 +603,7 @@ static bool isIntegerValueType(Type *type) {
 }
 
 
+// coerceScalar：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *coerceScalar(IRStmtBuilder *builder, Module *module, Value *value,
                            Type *target) {
     if (value->type_ == target)
@@ -614,10 +622,12 @@ static Value *coerceScalar(IRStmtBuilder *builder, Module *module, Value *value,
     std::exit(1);
 }
 
+// asScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *asScalarizedVector(Value *value) {
     return dynamic_cast<ScalarizedVectorValue *>(value);
 }
 
+// splatScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *splatScalarizedVector(
     GenIR *gen, Value *value, ScalarizedVectorType *type) {
     value = coerceScalar(gen->builder, gen->module.get(), value,
@@ -626,6 +636,7 @@ static ScalarizedVectorValue *splatScalarizedVector(
         type, std::vector<Value *>(type->num_elements_, value));
 }
 
+// loadScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *loadScalarizedVector(
     GenIR *gen, Value *pointer, ScalarizedVectorType *type) {
     std::vector<Value *> lanes;
@@ -639,6 +650,7 @@ static ScalarizedVectorValue *loadScalarizedVector(
     return new ScalarizedVectorValue(type, std::move(lanes));
 }
 
+// constantScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *constantScalarizedVector(
     Module *module, ScalarizedVectorType *type, Constant *constant) {
     std::vector<Value *> lanes;
@@ -657,6 +669,7 @@ static ScalarizedVectorValue *constantScalarizedVector(
     return new ScalarizedVectorValue(type, std::move(lanes));
 }
 
+// constantFromScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ConstantArray *constantFromScalarizedVector(
     ScalarizedVectorValue *value) {
     std::vector<Constant *> lanes;
@@ -671,6 +684,7 @@ static ConstantArray *constantFromScalarizedVector(
         static_cast<ScalarizedVectorType *>(value->type_), lanes);
 }
 
+// storeScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static void storeScalarizedVector(GenIR *gen, Value *pointer,
                                   ScalarizedVectorValue *value,
                                   ScalarizedVectorType *type) {
@@ -686,6 +700,7 @@ static void storeScalarizedVector(GenIR *gen, Value *pointer,
     }
 }
 
+// buildScalarizedVectorInitializer：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 static ScalarizedVectorValue *buildScalarizedVectorInitializer(
     GenIR *gen, InitValAST *init, ScalarizedVectorType *type) {
     if (!init || (!init->isExpression() && init->elements().empty())) {
@@ -728,6 +743,7 @@ static ScalarizedVectorValue *buildScalarizedVectorInitializer(
     return new ScalarizedVectorValue(type, std::move(lanes));
 }
 
+// buildVectorInitializer：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
                                      VectorType *vectorType) {
     if (!init || (!init->isExpression() && init->elements().empty()))
@@ -779,6 +795,7 @@ static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
     return result;
 }
 
+// isFloatLiteral：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isFloatLiteral(const ExprAST *expr) {
     if (const auto *literal = dynamic_cast<const LiteralExprAST *>(expr))
         return std::holds_alternative<float>(literal->value);
@@ -895,6 +912,7 @@ static void storeLocalVectorAggregate(GenIR *gen, Value *slot, InitValAST *init,
     }
 }
 
+// splatScalar：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
                            VectorType *type) {
     value = coerceScalar(builder, module, value, type->contained_);
@@ -910,6 +928,7 @@ static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
     return result;
 }
 
+// scalarizeIntegerVectorBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *scalarizeIntegerVectorBinary(IRStmtBuilder *builder, Module *module,
                                            Value *lhs, Value *rhs,
                                            Instruction::OpID op,
@@ -926,6 +945,7 @@ static Value *scalarizeIntegerVectorBinary(IRStmtBuilder *builder, Module *modul
     return result;
 }
 
+// foldConstantVector：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
 static ConstantVector *foldConstantVector(Module *module,
                                           Instruction::OpID op,
                                           ConstantVector *lhs,
@@ -975,6 +995,7 @@ static ConstantVector *foldConstantVector(Module *module,
     return new ConstantVector(type, result);
 }
 
+// scalarizedLaneBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *scalarizedLaneBinary(GenIR *gen, Value *lhs, Value *rhs,
                                    Instruction::OpID op, Type *elementType) {
     lhs = coerceScalar(gen->builder, gen->module.get(), lhs, elementType);
@@ -1028,6 +1049,7 @@ static Value *scalarizedLaneBinary(GenIR *gen, Value *lhs, Value *rhs,
     return new BinaryInst(elementType, op, lhs, rhs, gen->builder->BB_);
 }
 
+// scalarizedVectorBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *scalarizedVectorBinary(
     GenIR *gen, Value *lhs, Value *rhs, Instruction::OpID integerOp,
     Instruction::OpID floatingOp) {
@@ -1057,6 +1079,7 @@ static ScalarizedVectorValue *scalarizedVectorBinary(
     return new ScalarizedVectorValue(type, std::move(lanes));
 }
 
+// scalarizedVectorUnary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static ScalarizedVectorValue *scalarizedVectorUnary(GenIR *gen,
                                                      ScalarizedVectorValue *value,
                                                      UnaryOp op) {
@@ -1216,11 +1239,13 @@ void GenIR::checkInitType() const {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(CompUnitAST &ast) {
     for (auto &item : ast.items)
         std::visit([this](auto &node) { node->accept(*this); }, item);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(DeclAST &ast) {
     isConst = ast.isConst;
     curSourceType = ast.type;
@@ -1238,6 +1263,7 @@ void GenIR::visit(DeclAST &ast) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ObjectDefAST &ast) {
     string varName = ast.name;
     if ((dynamic_cast<VectorType *>(curType) ||
@@ -1656,12 +1682,14 @@ void GenIR::localInit(Value* ptr, vector<unique_ptr<InitValAST>> &list, vector<i
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(InitValAST &ast) {
     //不是数组则求exp的值，若是数组不会进入此函数
     if (ast.isExpression())
         ast.expression()->accept(*this);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(FuncDefAST &ast) {
     isNewFunc = true;
     params.clear();
@@ -1803,6 +1831,7 @@ void GenIR::visit(FuncDefAST &ast) {
     tensorReturnPointer = nullptr;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(FuncParamAST &ast) {
     //获取参数类型
     Type *paramType;
@@ -1844,6 +1873,7 @@ void GenIR::visit(FuncParamAST &ast) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BlockAST &ast) {
     //如果是一个新的函数，则不用再进入一个新的作用域
     if (isNewFunc)
@@ -1861,8 +1891,10 @@ void GenIR::visit(BlockAST &ast) {
     scope.exit();
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(EmptyStmtAST &) {}
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(AssignStmtAST &ast) {
     is_single_exp = true;
     vectorLaneBase = nullptr;
@@ -1937,6 +1969,7 @@ void GenIR::visit(AssignStmtAST &ast) {
     builder->create_store(expval, var);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ExprStmtAST &ast) {
     is_single_exp = true;
     ast.expression->accept(*this);
@@ -1945,18 +1978,22 @@ void GenIR::visit(ExprStmtAST &ast) {
     is_single_exp = false;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ContinueStmtAST &) {
     builder->create_br(whileCondBB);
     has_br = true;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BreakStmtAST &) {
     builder->create_br(whileFalseBB);
     has_br = true;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BlockStmtAST &ast) { ast.block->accept(*this); }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ReturnStmtAST &ast) {
     if(currentTensorReturn){
         // tensor 返回值写入调用者的隐藏缓冲区；顶层调用可直接复用该缓冲区。
@@ -2021,6 +2058,7 @@ void GenIR::visit(ReturnStmtAST &ast) {
     has_br = true;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(IfStmtAST &ast) {
     //先保存trueBB和falseBB，防止嵌套导致返回上一层后丢失块的地址
     auto tempTrue = trueBB;
@@ -2087,6 +2125,7 @@ void GenIR::visit(IfStmtAST &ast) {
     falseBB = tempFalse;
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(WhileStmtAST &ast) {
     //先保存trueBB和falseBB，防止嵌套导致返回上一层后丢失块的地址
     auto tempTrue = trueBB;
@@ -2173,6 +2212,7 @@ void GenIR::checkCalType(Value* val[]) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BinaryExprAST &ast) {
     // 无调用的逐元素 tensor 表达式整体融合，避免每个二元节点各生成一次遍历和临时量。
     if(isTensorElementwise(ast.op) && containsTensorValue(this, &ast) && !containsCall(&ast)){
@@ -2339,6 +2379,7 @@ void GenIR::visit(BinaryExprAST &ast) {
     }
 }
 
+// lowerMultiplicative：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     Value* val[2]; //lVal, rVal
     ArrayType* savedTensorExpected = expectedTensorType;
@@ -2479,6 +2520,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(UnaryExprAST &ast) {
     // tensor 正负号可并入逐元素融合循环；含调用时退回顺序求值以保留副作用次序。
     if((ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus) && !containsCall(&ast) && containsTensorValue(this, &ast)){
@@ -2555,6 +2597,7 @@ void GenIR::visit(UnaryExprAST &ast) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(SubscriptExprAST &ast) {
     ast.base->accept(*this);
     Value *base = recentVal;
@@ -2636,6 +2679,7 @@ void GenIR::visit(SubscriptExprAST &ast) {
     recentVal = new ExtractElementInst(base, index, builder->BB_);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(AggregateExprAST &ast) {
     if (expectedScalarizedVectorType) {
         recentVal = buildScalarizedVectorInitializer(
@@ -2647,6 +2691,7 @@ void GenIR::visit(AggregateExprAST &ast) {
     recentVal = buildVectorInitializer(this, ast.initializer.get(), type);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(LValueAST &ast) {
     bool isTrueLVal = requireLVal; //是否真是作为左值
     requireLVal = false;
@@ -2977,6 +3022,7 @@ void GenIR::visit(LValueAST &ast) {
     }
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(LiteralExprAST &ast) {
     if (const auto *integer = std::get_if<int>(&ast.value))
         recentVal = CONST_INT(*integer);
@@ -2984,6 +3030,7 @@ void GenIR::visit(LiteralExprAST &ast) {
         recentVal = CONST_FLOAT(std::get<float>(ast.value));
 }
 
+// lowerRuntimeString：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *lowerRuntimeString(GenIR *gen, const string &text) {
     auto *byteType = gen->module->int8_ty_;
     auto *arrayType = gen->module->get_array_type(byteType, text.size() + 1);
@@ -3006,6 +3053,7 @@ static Value *lowerRuntimeString(GenIR *gen, const string &text) {
         global, indices);
 }
 
+// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(CallExprAST &ast) {
     // 将 C 宏名映射到 SysY 运行时函数
     if (ast.callee == "starttime") ast.callee = "_sysy_starttime";

@@ -1,3 +1,5 @@
+// ReductionAnalysis 识别以 header PHI 为状态、沿唯一回写链执行 add/mul/min/max 的标量归约，
+// 并检查初值、额外使用和嵌套循环是否允许扩展。结果供循环向量化和标量扩展构造归约代码。
 #include "../../include/mid/analysis/reductionAnalysis.hpp"
 #include "../../include/mid/analysis/loopAccessAnalysis.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -6,6 +8,7 @@
 
 namespace {
 
+// availableOutsideLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool availableOutsideLoop(Value *value, Loop *loop) {
     if (dynamic_cast<Constant *>(value)) return true;
     if (dynamic_cast<GlobalVariable *>(value)) return true;
@@ -15,6 +18,7 @@ bool availableOutsideLoop(Value *value, Loop *loop) {
     return !loop->blocks.count(inst->parent_);
 }
 
+// provablyNonNegative：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool provablyNonNegative(Value *value, Loop *scope) {
     if (auto *constant = dynamic_cast<ConstantInt *>(value))
         return constant->value_ >= 0;
@@ -73,6 +77,7 @@ bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
 
 } // namespace
 
+// detectScalarExpandableNest：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool ReductionAnalysis::detectScalarExpandableNest(
     Loop *inner, ScalarReductionNestInfo &out) {
     if (!inner) return false;
@@ -230,6 +235,7 @@ bool ReductionAnalysis::detectScalarExpandableNest(
     return true;
 }
 
+// isScalarExpansionMemoryLegal：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool ReductionAnalysis::isScalarExpansionMemoryLegal(
     const ScalarReductionNestInfo &info) const {
     if (!info.parent_loop || !info.parent_loop->getInductionIV()) return false;

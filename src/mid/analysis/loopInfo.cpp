@@ -1,3 +1,6 @@
+// LoopInfo 利用“header 支配 latch”的回边识别自然循环，合并同头回边并按块集合包含关系
+// 建立嵌套树；随后补充 preheader、latch、exit 和规范归纳变量。几乎所有循环优化都以该
+// 结构为入口，结构不规范只会让相应高级字段为空，不会影响基本循环集合。
 #include "../../include/mid/analysis/loopInfo.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -11,6 +14,7 @@
 
 namespace {
 
+// isDedicatedPreheader：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
     if (!bb || !header) return false;
     if (bb->succ_bbs_.size() != 1 || bb->succ_bbs_[0] != header)
@@ -21,6 +25,7 @@ bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
            term->get_operand(0) == header;
 }
 
+// isLoopInvariant：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isLoopInvariant(Value *value, const Loop *loop) {
     if (!value || !loop) return false;
     if (dynamic_cast<Constant *>(value) ||
@@ -31,6 +36,7 @@ bool isLoopInvariant(Value *value, const Loop *loop) {
     return inst && !loop->blocks.count(inst->parent_);
 }
 
+// swapPredicate：返回交换操作数或翻转分支后语义等价的比较谓词。
 ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_UGT: return ICmpInst::ICMP_ULT;
@@ -45,6 +51,7 @@ ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp pred) {
     }
 }
 
+// invertPredicate：返回交换操作数或翻转分支后语义等价的比较谓词。
 ICmpInst::ICmpOp invertPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_EQ: return ICmpInst::ICMP_NE;
@@ -61,6 +68,7 @@ ICmpInst::ICmpOp invertPredicate(ICmpInst::ICmpOp pred) {
     return pred;
 }
 
+// isOrderedPredicate：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isOrderedPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_UGT:
@@ -77,6 +85,7 @@ bool isOrderedPredicate(ICmpInst::ICmpOp pred) {
     }
 }
 
+// matchInductionUpdate：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchInductionUpdate(Value *value, PhiInst *phi, const Loop *loop,
                           BinaryInst *&update, Value *&step,
                           bool &stepNegated,
@@ -114,6 +123,7 @@ bool matchInductionUpdate(Value *value, PhiInst *phi, const Loop *loop,
     return true;
 }
 
+// normalizeCompare：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool normalizeCompare(ICmpInst *compare, Value *inductionValue,
                       Value *&bound, ICmpInst::ICmpOp &predicate) {
     if (!compare || !inductionValue) return false;
@@ -132,6 +142,7 @@ bool normalizeCompare(ICmpInst *compare, Value *inductionValue,
 bool continuationSense(BranchInst *branch, const Loop *loop,
                        bool &continuesWhenTrue);
 
+// matchEqualityGuard：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
                         const Loop *loop, ICmpInst *&compare, Value *&bound,
                         ICmpInst::ICmpOp &predicate) {
@@ -167,6 +178,7 @@ bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
     return predicate == ICmpInst::ICMP_NE;
 }
 
+// continuationSense：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool continuationSense(BranchInst *branch, const Loop *loop,
                        bool &continuesWhenTrue) {
     if (!branch || branch->num_ops() != 3 || !loop) return false;
@@ -180,6 +192,7 @@ bool continuationSense(BranchInst *branch, const Loop *loop,
     return true;
 }
 
+// matchGuard：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchGuard(BasicBlock *guardBlock, Value *inductionValue,
                 const Loop *loop, ICmpInst *&compare, Value *&bound,
                 ICmpInst::ICmpOp &predicate) {
@@ -201,6 +214,7 @@ bool matchGuard(BasicBlock *guardBlock, Value *inductionValue,
     return true;
 }
 
+// describeControlInduction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool describeControlInduction(Loop *loop, PhiInst *phi, Value *start,
                               Value *latchValue,
                               InductionDescriptor &descriptor) {
@@ -240,6 +254,7 @@ bool describeControlInduction(Loop *loop, PhiInst *phi, Value *start,
     return true;
 }
 
+// isAddOneOf：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isAddOneOf(Value *value, PhiInst *phi) {
     auto *add = dynamic_cast<BinaryInst *>(value);
     if (!add || !add->is_add()) return false;
@@ -251,6 +266,7 @@ bool isAddOneOf(Value *value, PhiInst *phi) {
            (op1 == phi && c0 && c0->value_ == 1);
 }
 
+// isStepFromLatch：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
     if (isAddOneOf(value, phi)) return true;
 
@@ -264,6 +280,7 @@ bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
     return true;
 }
 
+// headerGuardTripCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
     auto *term = loop->header->get_terminator();
     if (!term || !term->is_br() || term->num_ops() != 3) return false;
@@ -274,6 +291,7 @@ bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
     return true;
 }
 
+// latchGuardTripCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
     BasicBlock *latch = loop->singleLatch();
     if (!latch || !stepValue) return false;
@@ -288,6 +306,7 @@ bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
 
 } // namespace
 
+// describeEqualityControlInduction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool describeEqualityControlInduction(const Loop &loop,
                                       InductionDescriptor &descriptor) {
     BasicBlock *latch = loop.singleLatch();
@@ -385,16 +404,20 @@ void LoopInfo::reset() {
     bb2innermost_.clear();
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void LoopInfo::analyze(Function *func) {
     DominatorTreeAnalysis DT;
     DT.analyze(func);
     analyze(func, DT);
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void LoopInfo::analyze(Function *func, const DominatorTreeAnalysis &DT) {
     reset();
     if (!func || func->basic_blocks_.empty()) return;
 
+    // 先建立纯 CFG 意义上的循环集合，再补结构字段和嵌套关系。归纳变量最后分析，因为它
+    // 依赖 preheader、latch 和 exit 已经确定。
     findLoops(func, DT);
     for (auto &loop : loops_) enrichLoop(loop.get(), DT);
     buildNestTree();
@@ -544,6 +567,7 @@ void LoopInfo::buildNestTree() {
     }
 }
 
+// getLoopFor：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Loop *LoopInfo::getLoopFor(BasicBlock *bb) const {
     auto it = bb2innermost_.find(bb);
     return it == bb2innermost_.end() ? nullptr : it->second;

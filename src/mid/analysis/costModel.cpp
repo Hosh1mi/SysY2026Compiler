@@ -1,8 +1,11 @@
+// CostModel 根据 GEP 的数组维度和归纳变量系数估算一次循环迭代跨过的字节数。该信息用于
+// 比较循环交换前后的 cache stride；地址不能线性化时返回未知，避免凭不完整信息改换循环。
 #include "../../include/mid/analysis/costModel.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 
 #include <cstdlib>
 
+// strideAlong：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
     if (!gep || !iv) return -1;
 

@@ -1,3 +1,6 @@
+// ModuloRecurrenceAnalysis 识别 state = normalize(state + delta(i), mod) 形式的循环状态。
+// 它追踪 PHI 回边、验证正模语义和中间值范围，并确保每轮贡献可以安全合并，为 LoopRepFold
+// 使用闭式或 runtime 批量计算迭代结果提供合法性摘要。
 #include "../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
 #include <algorithm>
@@ -9,6 +12,7 @@
 namespace ModuloRecurrenceAnalysis {
 namespace {
 
+// checkedAdd：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool checkedAdd(long long lhs, long long rhs, long long &result) {
     __int128 wide = static_cast<__int128>(lhs) + rhs;
     if (wide < std::numeric_limits<int>::min() ||
@@ -18,6 +22,7 @@ bool checkedAdd(long long lhs, long long rhs, long long &result) {
     return true;
 }
 
+// checkedSub：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool checkedSub(long long lhs, long long rhs, long long &result) {
     __int128 wide = static_cast<__int128>(lhs) - rhs;
     if (wide < std::numeric_limits<int>::min() ||
@@ -27,6 +32,7 @@ bool checkedSub(long long lhs, long long rhs, long long &result) {
     return true;
 }
 
+// checkedMul：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool checkedMul(long long lhs, long long rhs, long long &result) {
     __int128 wide = static_cast<__int128>(lhs) * rhs;
     if (wide < std::numeric_limits<int>::min() ||
@@ -36,6 +42,7 @@ bool checkedMul(long long lhs, long long rhs, long long &result) {
     return true;
 }
 
+// dependsOnImpl：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool dependsOnImpl(Value *value, Value *target,
                    std::set<Value *> &visiting, unsigned depth) {
     if (value == target)
@@ -71,6 +78,7 @@ bool dependsOnImpl(Value *value, Value *target,
     return false;
 }
 
+// inferBoundsImpl：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool inferBoundsImpl(Value *value, long long &lower, long long &upper,
                      std::set<Value *> &visiting, unsigned depth) {
     if (!value || depth > 16 || !visiting.insert(value).second)
@@ -234,16 +242,19 @@ bool inferBoundsImpl(Value *value, long long &lower, long long &upper,
 
 } // namespace
 
+// dependsOn：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool dependsOn(Value *value, Value *target) {
     std::set<Value *> visiting;
     return dependsOnImpl(value, target, visiting, 0);
 }
 
+// inferBounds：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool inferBounds(Value *value, Bounds &bounds) {
     std::set<Value *> visiting;
     return inferBoundsImpl(value, bounds.lower, bounds.upper, visiting, 0);
 }
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 bool analyze(PhiInst *state, BinaryInst *remainder,
              const std::set<BasicBlock *> &updateBlocks,
              Recurrence &result) {
@@ -290,6 +301,7 @@ bool analyze(PhiInst *state, BinaryInst *remainder,
     return true;
 }
 
+// hasPrivateUpdateChain：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool hasPrivateUpdateChain(const Recurrence &recurrence,
                            const std::set<BasicBlock *> &updateBlocks,
                            bool allowExternalUses) {
@@ -310,6 +322,7 @@ bool hasPrivateUpdateChain(const Recurrence &recurrence,
     return true;
 }
 
+// inferContributionBounds：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 bool inferContributionBounds(Recurrence &recurrence,
                              const std::vector<PhiInst *> &loopStates,
                              PhiInst *inductionState) {
@@ -339,6 +352,7 @@ bool inferContributionBounds(Recurrence &recurrence,
     return true;
 }
 
+// advanceBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool advanceBounds(Bounds &bounds, const Recurrence &recurrence,
                    unsigned repetitions) {
     for (unsigned iteration = 0; iteration < repetitions; ++iteration) {
@@ -364,6 +378,7 @@ bool advanceBounds(Bounds &bounds, const Recurrence &recurrence,
     return true;
 }
 
+// proveNoI32UpdateWrap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool proveNoI32UpdateWrap(Recurrence &recurrence,
                           const std::vector<PhiInst *> &loopStates,
                           PhiInst *inductionState, Value *initial) {
@@ -379,11 +394,13 @@ bool proveNoI32UpdateWrap(Recurrence &recurrence,
     return advanceBounds(updateBounds, recurrence);
 }
 
+// fitsSignedI32：检查整数运算或结果是否可表示；溢出时返回 false，不产生截断结果。
 bool fitsSignedI32(long long lower, long long upper) {
     return lower >= std::numeric_limits<int>::min() &&
            upper <= std::numeric_limits<int>::max();
 }
 
+// needsAtMostOneCorrection：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool needsAtMostOneCorrection(long long lower, long long upper,
                               long long modulus) {
     if (modulus <= 0)

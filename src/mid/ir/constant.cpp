@@ -92,10 +92,12 @@ std::string ConstantVector::print() {
     return const_ir;
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ConstantZero::print() {
     return "zeroinitializer";
 }
 
+// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string UndefValue::print() {
     return "undef";
 }

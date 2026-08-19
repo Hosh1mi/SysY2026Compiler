@@ -1,3 +1,6 @@
+// LoopVectorizationAnalysis 构造循环向量化计划：识别控制变量、trip count、归约以及连续或
+// 可广播访存，结合别名和依赖结果排除跨 lane 冲突，最后用成本模型判断是否值得执行。
+// 输出由 LoopVectorize 消费，失败原因会保留在计划中便于定位拒绝条件。
 #include "../../include/mid/analysis/loopVectorizationAnalysis.hpp"
 #include "../../include/mid/analysis/vectorizationCostModel.hpp"
 #include "../../include/mid/ir/intrinsics.hpp"
@@ -9,6 +12,7 @@
 
 namespace {
 
+// getLoopPhiIncoming：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
                         Value *&latchValue, BasicBlock *&latchBlock) {
     init = nullptr;
@@ -29,6 +33,7 @@ bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi, Value *&init,
     return init && latchValue && latchBlock;
 }
 
+// matchIVPlusConstant：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     if (value == iv) {
         offset = 0;
@@ -59,6 +64,7 @@ bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     return false;
 }
 
+// varyingIndexHasUnitElementStride：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
                                       unsigned varyingIndex,
                                       Type *scalarType) {
@@ -80,6 +86,7 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
     return false;
 }
 
+// pointerOffsetFromPhi：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     offset = 0;
     Value *cursor = pointer;
@@ -94,10 +101,12 @@ bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     return true;
 }
 
+// memoryPointer：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Value *memoryPointer(Instruction *inst) {
     return inst->is_load() ? inst->get_operand(0) : inst->get_operand(1);
 }
 
+// sameAddressShape：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
                       const LoopVectorizationAnalysis::MemoryAccess &b) {
     if (a.addressKind != b.addressKind) return false;
@@ -117,6 +126,7 @@ bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
     return true;
 }
 
+// constantByteOffset：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<long long> constantByteOffset(
     const LoopVectorizationAnalysis::MemoryAccess &access,
     const LoopVectorizationAnalysis::Plan &plan,
@@ -192,6 +202,7 @@ std::optional<long long> constantByteOffset(
     return offset;
 }
 
+// constantInitialByteOffset：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<long long> constantInitialByteOffset(
     const LoopVectorizationAnalysis::MemoryAccess &access,
     const LoopVectorizationAnalysis::Plan &plan,
@@ -202,6 +213,7 @@ std::optional<long long> constantInitialByteOffset(
     return constantByteOffset(access, plan, BAA, initial->value_);
 }
 
+// minimumVectorRangesOverlap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool minimumVectorRangesOverlap(
     const LoopVectorizationAnalysis::MemoryAccess &a,
     const LoopVectorizationAnalysis::MemoryAccess &b,
@@ -247,6 +259,7 @@ bool minimumVectorRangesOverlap(
     return !(aEnd <= *bStart || bEnd <= *aStart);
 }
 
+// constantIterationRangesOverlap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<bool> constantIterationRangesOverlap(
     const LoopVectorizationAnalysis::MemoryAccess &a,
     const LoopVectorizationAnalysis::MemoryAccess &b,
@@ -283,12 +296,14 @@ std::optional<bool> constantIterationRangesOverlap(
 
 } // namespace
 
+// reject：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::reject(std::string *reason,
                                        const char *message) const {
     if (reason) *reason = message;
     return false;
 }
 
+// isLoopInvariant：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopVectorizationAnalysis::isLoopInvariant(Value *value,
                                                 const Loop &loop) const {
     if (dynamic_cast<Constant *>(value) || dynamic_cast<Argument *>(value) ||
@@ -298,6 +313,7 @@ bool LoopVectorizationAnalysis::isLoopInvariant(Value *value,
     return inst && !loop.blocks.count(inst->parent_);
 }
 
+// findInduction：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
                                               std::string *reason) const {
     auto *headerTerm = loop.header->get_terminator();
@@ -338,6 +354,7 @@ bool LoopVectorizationAnalysis::findInduction(Loop &loop, Plan &plan,
     return reject(reason, "canonical unit-stride induction was not found");
 }
 
+// findPointerRecurrences：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 bool LoopVectorizationAnalysis::findPointerRecurrences(
     Plan &plan, std::string *reason) const {
     Loop &loop = *plan.loop;
@@ -365,6 +382,7 @@ bool LoopVectorizationAnalysis::findPointerRecurrences(
     return true;
 }
 
+// classifyMemory：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
                                                std::string *reason) const {
     auto recordAccess = [&](MemoryAccess access) {
@@ -475,6 +493,7 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
     return true;
 }
 
+// checkInstructions：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
                                                   std::string *reason) const {
     std::set<Instruction *> addressHelpers;
@@ -562,6 +581,7 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
     return true;
 }
 
+// checkMemoryDependences：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkMemoryDependences(
     Plan &plan, std::string *reason) const {
     std::set<std::pair<size_t, size_t>> checkedGroups;
@@ -629,6 +649,7 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
     return true;
 }
 
+// checkProfitability：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
                                                    std::string *reason) const {
     VectorizationCostModel costs;
@@ -705,6 +726,7 @@ bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
     return true;
 }
 
+// buildPlan：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
 bool LoopVectorizationAnalysis::buildPlan(Loop &loop, Plan &plan,
                                           std::string *reason) const {
     plan = Plan{};

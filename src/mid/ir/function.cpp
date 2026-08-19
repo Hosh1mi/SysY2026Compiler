@@ -1,4 +1,5 @@
-// Function / Argument 的 print() 及基本块管理方法
+// Function 负责参数和基本块的所有权、稳定命名及函数级 IR 输出。删除基本块前调用者应先
+// 处理 CFG 和外部 use；set_instr_name 在输出前为尚未命名的 SSA 结果分配唯一编号。
 
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/basicBlock.hpp"
@@ -8,11 +9,13 @@
 #include <set>
 #include <string>
 
+// add_basic_block：更新目标集合或 IR 关系，并同步维护反向引用与所属信息。
 void Function::add_basic_block(BasicBlock *bb) {
     basic_blocks_.push_back(bb);
     basic_block_names_.insert(bb->name_);
 }
 
+// uniqueBasicBlockName：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string Function::uniqueBasicBlockName(const std::string &base) {
     unsigned &suffix = basic_block_suffixes_[base];
     for (;;) {

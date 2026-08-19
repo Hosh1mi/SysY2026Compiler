@@ -1,3 +1,6 @@
+// LazyValueInfo 按查询位置推导常量和比较事实。它沿 use-def 链折叠表达式，利用进入基本块
+// 或 CFG 边时必然成立的分支条件，并按前驱选择 PHI incoming；多条路径不能达成一致时
+// 返回 unknown。分支化简、跳转穿线和条件传播可直接使用这些局部事实。
 #include "../../include/mid/analysis/lazyValueInfo.hpp"
 #include "../../include/mid/ir/constant.hpp"
 #include "../../include/mid/opt/branchFactUtils.hpp"
@@ -38,6 +41,7 @@ struct QueryState {
     std::unordered_set<PredicateQueryKey, PredicateQueryKeyHash> activePredicates;
 };
 
+// swapICmpPredicate：返回交换操作数或翻转分支后语义等价的比较谓词。
 static ICmpInst::ICmpOp swapICmpPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_SGT:
@@ -61,6 +65,7 @@ static ICmpInst::ICmpOp swapICmpPredicate(ICmpInst::ICmpOp pred) {
     }
 }
 
+// evaluateICmpConstants：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
 static bool evaluateICmpConstants(ICmpInst::ICmpOp pred, int lhs, int rhs) {
     switch (pred) {
     case ICmpInst::ICMP_EQ:
@@ -87,6 +92,7 @@ static bool evaluateICmpConstants(ICmpInst::ICmpOp pred, int lhs, int rhs) {
     return false;
 }
 
+// getIncomingValueForPred：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 static Value *getIncomingValueForPred(PhiInst *phi, BasicBlock *pred) {
     if (!phi || !pred) return nullptr;
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
@@ -96,6 +102,7 @@ static Value *getIncomingValueForPred(PhiInst *phi, BasicBlock *pred) {
     return nullptr;
 }
 
+// collectEdgeFacts：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 static void collectEdgeFacts(BasicBlock *fromBB, BasicBlock *toBB,
                              BoolFactMap &boolFacts, ICmpFactMap &cmpFacts) {
     if (!fromBB || !toBB) return;
@@ -110,6 +117,7 @@ static void collectEdgeFacts(BasicBlock *fromBB, BasicBlock *toBB,
     recordAssumedBool(br->get_operand(0), trueDest == toBB, boolFacts, cmpFacts);
 }
 
+// isSameOrNestedLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isSameOrNestedLoop(const Loop *inner, const Loop *outer) {
     if (!outer) return true;
     for (const Loop *loop = inner; loop; loop = loop->parent)
@@ -117,6 +125,7 @@ static bool isSameOrNestedLoop(const Loop *inner, const Loop *outer) {
     return false;
 }
 
+// collectDominatingEdgeFacts：遍历相关指令或控制流汇总事实；合流处只保留安全结论。
 static void collectDominatingEdgeFacts(const QueryState &state,
                                        BoolFactMap &boolFacts,
                                        ICmpFactMap &cmpFacts) {
@@ -168,6 +177,7 @@ static void collectDominatingEdgeFacts(const QueryState &state,
     }
 }
 
+// gatherFacts：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static void gatherFacts(const QueryState &state, BoolFactMap &boolFacts,
                         ICmpFactMap &cmpFacts) {
     collectDominatingEdgeFacts(state, boolFacts, cmpFacts);
@@ -185,6 +195,7 @@ static void gatherFacts(const QueryState &state, BoolFactMap &boolFacts,
 static Constant *evaluateConstant(Value *value, QueryState &state);
 static std::optional<bool> evaluateBool(Value *value, QueryState &state);
 
+// lookupPredicateFacts：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 static std::optional<bool> lookupPredicateFacts(ICmpInst::ICmpOp pred, Value *lhs,
                                                 Value *rhs,
                                                 const BoolFactMap &boolFacts,
@@ -218,6 +229,7 @@ static std::optional<bool> lookupPredicateFacts(ICmpInst::ICmpOp pred, Value *lh
     return std::nullopt;
 }
 
+// evaluatePredicate：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
 static std::optional<bool> evaluatePredicate(ICmpInst::ICmpOp pred, Value *lhs,
                                              Value *rhs, QueryState &state) {
     if (state.depth > 24) return std::nullopt;
@@ -295,6 +307,7 @@ static std::optional<bool> evaluatePredicate(ICmpInst::ICmpOp pred, Value *lhs,
     return std::nullopt;
 }
 
+// evaluateBool：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
 static std::optional<bool> evaluateBool(Value *value, QueryState &state) {
     if (!value || state.depth > 24) return std::nullopt;
 
@@ -335,6 +348,7 @@ static std::optional<bool> evaluateBool(Value *value, QueryState &state) {
     return result;
 }
 
+// evaluateConstant：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
 static Constant *evaluateConstant(Value *value, QueryState &state) {
     if (!value || state.depth > 24) return nullptr;
 
@@ -383,6 +397,7 @@ static Constant *evaluateConstant(Value *value, QueryState &state) {
 
 } // namespace
 
+// analyze：清空旧结果后遍历当前分析单元，建立后续查询所需的完整摘要。
 void LazyValueInfo::analyze(Function *func, const LoopInfo *loopInfo,
                             const DominatorTreeAnalysis *domTree) {
     function_ = func;
@@ -391,6 +406,7 @@ void LazyValueInfo::analyze(Function *func, const LoopInfo *loopInfo,
     domTree_ = domTree;
 }
 
+// getConstant：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Constant *LazyValueInfo::getConstant(Value *value, Instruction *cxtI) {
     QueryState state;
     state.func = function_;
@@ -401,6 +417,7 @@ Constant *LazyValueInfo::getConstant(Value *value, Instruction *cxtI) {
     return evaluateConstant(value, state);
 }
 
+// getConstantOnEdge：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Constant *LazyValueInfo::getConstantOnEdge(Value *value, BasicBlock *fromBB,
                                            BasicBlock *toBB, Instruction *) {
     QueryState state;
@@ -414,6 +431,7 @@ Constant *LazyValueInfo::getConstantOnEdge(Value *value, BasicBlock *fromBB,
     return evaluateConstant(value, state);
 }
 
+// getPredicateAt：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 std::optional<bool> LazyValueInfo::getPredicateAt(ICmpInst::ICmpOp pred,
                                                   Value *lhs, Value *rhs,
                                                   Instruction *cxtI,
@@ -428,6 +446,7 @@ std::optional<bool> LazyValueInfo::getPredicateAt(ICmpInst::ICmpOp pred,
     return evaluatePredicate(pred, lhs, rhs, state);
 }
 
+// getPredicateOnEdge：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 std::optional<bool> LazyValueInfo::getPredicateOnEdge(ICmpInst::ICmpOp pred,
                                                       Value *lhs, Value *rhs,
                                                       BasicBlock *fromBB,
@@ -444,10 +463,13 @@ std::optional<bool> LazyValueInfo::getPredicateOnEdge(ICmpInst::ICmpOp pred,
     return evaluatePredicate(pred, lhs, rhs, state);
 }
 
+// forgetValue：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void LazyValueInfo::forgetValue(Value *) {}
 
+// eraseBlock：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void LazyValueInfo::eraseBlock(BasicBlock *) {}
 
+// clear：清除缓存和访问标记，保证 IR 改写后的查询重新计算。
 void LazyValueInfo::clear() {
     function_ = nullptr;
     module_ = nullptr;
