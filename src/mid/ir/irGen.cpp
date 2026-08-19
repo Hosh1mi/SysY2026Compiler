@@ -325,7 +325,7 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     gen->builder->BB_ = columnBody;
     gen->builder->create_store(new ConstantInt(gen->module->int32_ty_, 0), commonIndexSlot);
     gen->builder->create_store(zeroScalar(gen->module.get(), elementType), sumSlot);
-
+    gen->builder->create_br(commonCond);
     gen->builder->BB_ = commonCond;
     Value *commonIndex = gen->builder->create_load(commonIndexSlot);
     gen->builder->create_cond_br(gen->builder->create_icmp_lt(commonIndex, new ConstantInt(gen->module->int32_ty_, common)), commonBody, commonEnd);
@@ -2316,7 +2316,10 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
         recentVal = lowerTensorMatMul(this, val[0], val[1]);
         return;
     }
-
+    if(val[0]->hasSemFlag(SemFlag::SrcTensor) || val[1]->hasSemFlag(SemFlag::SrcTensor)){
+        recentVal = lowerTensorBinary(this,val[0],val[1],ast.op);
+        return;
+    }
     if (asScalarizedVector(val[0]) || asScalarizedVector(val[1])) {
         Instruction::OpID integerOp = Instruction::Mul;
         Instruction::OpID floatingOp = Instruction::FMul;
