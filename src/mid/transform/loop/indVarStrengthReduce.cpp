@@ -1,3 +1,9 @@
+/**
+ * @file indVarStrengthReduce.cpp
+ * @brief 归纳变量强度削减：把依赖归纳变量的乘法、地址计算等高代价表达式改写为循环递推更新。
+ * @details 从基本归纳变量建立线性 SCEV，把循环内乘法/GEP 改为预头初始化加回边增量，并在每轮改写后刷新分析。
+ */
+
 #include "../../../include/mid/opt/indVarStrengthReduce.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include <algorithm>
@@ -5,11 +11,22 @@
 #include <iostream>
 #include <limits>
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void IndVarStrengthReduce::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses IndVarStrengthReduce::execute(Module *module, AnalysisManager &AM) {
     for (auto func : module->function_list_) {
         if (func->is_declaration()) continue;
@@ -18,6 +35,12 @@ PreservedAnalyses IndVarStrengthReduce::execute(Module *module, AnalysisManager 
     return PreservedAnalyses::none();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return;
 
@@ -47,9 +70,8 @@ void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
             }
         }
         if (!loop) continue;
-        // Self-loop headers are valid IVSR targets, but doing this on outer
-        // self-loop nests creates many long-lived pointer phis and heavy
-        // register pressure. Keep it to innermost self-loops.
+        // 自环 header 在语义上可以做 IVSR，但若它还是外层嵌套，会制造大量跨子循环
+        // 存活的指针 PHI 并显著增加寄存器压力，因此只处理最内层自环。
         if (loop->singleLatch() == loop->header) {
             if (loop->blocks.size() != 1) continue;
             bool hasNestedLoop = false;
@@ -71,6 +93,12 @@ void IndVarStrengthReduce::runOnFunction(Function *func, AnalysisManager &AM) {
 // -----------------------------------------------------------------------
 // 判断值是否在循环中不变
 // -----------------------------------------------------------------------
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param val 待检查或映射的 IR 值。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool IndVarStrengthReduce::isLoopInvariant(Value *val, const std::set<BasicBlock *> &loopBlocks) {
     if (dynamic_cast<Constant *>(val)) return true;
     if (dynamic_cast<Argument *>(val)) return true;
@@ -85,6 +113,13 @@ bool IndVarStrengthReduce::isLoopInvariant(Value *val, const std::set<BasicBlock
 // -----------------------------------------------------------------------
 // 检查 value 通过 phi 链是否最终归结为 target
 // -----------------------------------------------------------------------
+/**
+ * @brief 实现 resolvesTo 对应的局部分析或变换辅助逻辑。
+ * @param val 待检查或映射的 IR 值。
+ * @param target 参数 `target`，用于本函数的分析、匹配或 IR 构造。
+ * @param visited 递归遍历使用的已访问集合，用于避免环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool resolvesTo(Value *val, Value *target, std::set<Value *> &visited) {
     if (val == target) return true;
     if (visited.count(val)) return false;
@@ -105,6 +140,13 @@ static bool resolvesTo(Value *val, Value *target, std::set<Value *> &visited) {
 // 获取 value 在 preheader 中对应的可用值
 // 若 value 是循环中的 phi，返回来自 preheader 的入边值；否则返回自身
 // -----------------------------------------------------------------------
+/**
+ * @brief 追溯循环内 PHI 在进入循环前对应的循环外初值。
+ * @param val 待追溯的值；循环外定义会直接返回。
+ * @param loopBlocks 当前循环包含的基本块集合。
+ * @param visited 已访问值集合，用于终止 PHI 环递归。
+ * @return 找到时返回循环外可用值；无法追溯时返回 nullptr 或原 PHI。
+ */
 static Value *getEntryValue(Value *val, const std::set<BasicBlock *> &loopBlocks,
                              std::set<Value *> &visited) {
     auto *inst = dynamic_cast<Instruction *>(val);
@@ -132,6 +174,11 @@ static Value *getEntryValue(Value *val, const std::set<BasicBlock *> &loopBlocks
 // -----------------------------------------------------------------------
 // 识别 SSA 基本归纳变量：phi(init, add/sub(X, stride)) 其中 X 归结为 phi
 // -----------------------------------------------------------------------
+/**
+ * @brief 收集或查找 findBasicIVs 所需的信息。
+ * @param loop 待检查或变换的循环。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 std::vector<IndVarStrengthReduce::BasicIV> IndVarStrengthReduce::findBasicIVs(Loop &loop) {
     std::vector<BasicIV> ivs;
 
@@ -199,6 +246,13 @@ std::vector<IndVarStrengthReduce::BasicIV> IndVarStrengthReduce::findBasicIVs(Lo
 // -----------------------------------------------------------------------
 // 确保循环有唯一 preheader
 // -----------------------------------------------------------------------
+/**
+ * @brief 返回循环现有 preheader，或创建一个专用 preheader 并修复 PHI 入边。
+ * @param loop 需要规范化入口的循环。
+ * @param func 循环所属函数。
+ * @param module 所属模块，用于创建基本块。
+ * @return 循环最终使用的专用 preheader。
+ */
 BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Module *module) {
     if (loop.preheader) return loop.preheader;
 
@@ -251,6 +305,12 @@ BasicBlock *IndVarStrengthReduce::ensurePreheader(Loop &loop, Function *func, Mo
 // 计算 GEP 中 IV 推进 1 时，地址需要增加多少元素
 // 例如 A[N][M] 中 IV 在索引 1 (i) 时步长为 M，在索引 2 (j) 时步长为 1
 // -----------------------------------------------------------------------
+/**
+ * @brief 计算 computeElementStride 所描述的派生信息，供合法性或收益判断使用。
+ * @param gep 参数 `gep`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivOpIdx 参数 `ivOpIdx`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 static int computeElementStride(GetElementPtrInst *gep, unsigned ivOpIdx) {
     Type *ty = static_cast<PointerType *>(gep->get_operand(0)->type_)->contained_;
     for (unsigned i = 1; i < ivOpIdx; i++) {
@@ -271,26 +331,54 @@ static int computeElementStride(GetElementPtrInst *gep, unsigned ivOpIdx) {
     return stride > 0 ? stride : 1;
 }
 
+/**
+ * @brief 判断 fitsInt 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool fitsInt(long long value) {
     return value >= std::numeric_limits<int>::min() &&
            value <= std::numeric_limits<int>::max();
 }
 
+/**
+ * @brief 判断 isI32 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isI32(Value *value) {
     auto *intTy = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
     return intTy && intTy->num_bits_ == 32;
 }
 
+/**
+ * @brief 判断 isI32SCEV 所描述的结构、合法性或安全条件是否成立。
+ * @param s 参数 `s`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isI32SCEV(const SCEV *s) {
     auto *intTy = s ? dynamic_cast<IntegerType *>(s->type()) : nullptr;
     return intTy && intTy->num_bits_ == 32;
 }
 
+/**
+ * @brief 判断 isIVSRSCEVDebugEnabled 所描述的结构、合法性或安全条件是否成立。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isIVSRSCEVDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_IVSR_SCEV") != nullptr;
     return enabled;
 }
 
+/**
+ * @brief 生成 debugLinearizedGEP 对应的调试诊断，不参与程序语义。
+ * @param func 待分析或改写的函数。
+ * @param loopHeader 参数 `loopHeader`，用于本函数的分析、匹配或 IR 构造。
+ * @param gep 参数 `gep`，用于本函数的分析、匹配或 IR 构造。
+ * @param info 参数 `info`，用于本函数的分析、匹配或 IR 构造。
+ * @param coeff 参数 `coeff`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void debugLinearizedGEP(Function *func, BasicBlock *loopHeader,
                                GetElementPtrInst *gep, const SCEVGEPInfo &info,
                                int coeff) {
@@ -309,6 +397,13 @@ static void debugLinearizedGEP(Function *func, BasicBlock *loopHeader,
     std::cerr << "]\n";
 }
 
+/**
+ * @brief 判断 isSCEVLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param s 参数 `s`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param SE 参数 `SE`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool IndVarStrengthReduce::isSCEVLoopInvariant(const SCEV *s, const Loop &loop,
                                                ScalarEvolution &SE) {
     (void)SE;
@@ -343,6 +438,14 @@ bool IndVarStrengthReduce::isSCEVLoopInvariant(const SCEV *s, const Loop &loop,
     return false;
 }
 
+/**
+ * @brief 计算 linearizeSCEVForIV 所描述的派生信息，供合法性或收益判断使用。
+ * @param s 参数 `s`，用于本函数的分析、匹配或 IR 构造。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param SE 参数 `SE`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 IndVarStrengthReduce::LinearIVExpr
 IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
                                          const Loop &loop, ScalarEvolution &SE) {
@@ -401,10 +504,9 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
             LinearIVExpr term = linearizeSCEVForIV(op, iv, loop, SE);
             if (!term.valid) return invalid;
 
-            // A variable IV coefficient cannot be summed with any other IV term:
-            // `j*colsize + 2*j` would scale the IV by `colsize+2`, which this
-            // single-(coeff,coeffVal) representation cannot express. Require that
-            // the runtime-coefficient term, if present, is the only IV term.
+            // 带运行时系数的 IV 项不能再与其他 IV 项相加。例如 `j*colsize+2*j`
+            // 需要系数 `colsize+2`，当前单一 (coeff, coeffVal) 表示无法表达；
+            // 因此运行时系数项若存在，必须是唯一的 IV 项。
             bool resultHasIV = result.coeff != 0 || result.coeffVal;
             bool termHasIV = term.coeff != 0 || term.coeffVal;
             if ((result.coeffVal || term.coeffVal) && resultHasIV && termHasIV)
@@ -439,9 +541,8 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
 
             if (term.coeff == 0 && !term.coeffVal) {
                 if (term.offset) {
-                    // A loop-invariant *variable* factor: accept at most one, and
-                    // only when it is a single SSA value (SCEVUnknown) so it can
-                    // drive a runtime pointer stride. Anything more complex bails.
+                    // 循环不变但运行时可变的乘数最多允许一个，且必须是单个 SSA 值
+                    // （SCEVUnknown），才能直接作为运行时指针步长；更复杂表达式拒绝。
                     auto *unk = dynamic_cast<const SCEVUnknown *>(term.offset);
                     if (!unk || multiplierVal || term.constOffset != 0)
                         return invalid;
@@ -475,6 +576,15 @@ IndVarStrengthReduce::linearizeSCEVForIV(const SCEV *s, const BasicIV &iv,
     return invalid;
 }
 
+/**
+ * @brief 在 preheader 中物化线性 IV 表达式的循环不变偏移部分。
+ * @param expr 已线性化的 IV 表达式。
+ * @param preheader 新指令的插入基本块。
+ * @param loop 当前循环，用于验证偏移操作数是否循环不变。
+ * @param builder IR 指令构造器。
+ * @param module 所属模块，用于构造 i32 常量。
+ * @return 成功时返回偏移值，表达式不可安全物化时返回 nullptr。
+ */
 Value *IndVarStrengthReduce::materializeOffsetInPreheader(const LinearIVExpr &expr,
                                                           BasicBlock *preheader,
                                                           const Loop &loop,
@@ -525,6 +635,12 @@ Value *IndVarStrengthReduce::materializeOffsetInPreheader(const LinearIVExpr &ex
     return add;
 }
 
+/**
+ * @brief 判断 canMaterializeInvariantSCEV 所描述的结构、合法性或安全条件是否成立。
+ * @param s 参数 `s`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool IndVarStrengthReduce::canMaterializeInvariantSCEV(const SCEV *s,
                                                        const Loop &loop) {
     if (!s || !isI32SCEV(s)) return false;
@@ -553,6 +669,15 @@ bool IndVarStrengthReduce::canMaterializeInvariantSCEV(const SCEV *s,
     return false;
 }
 
+/**
+ * @brief 把由常量、循环外值及加乘节点组成的不变 SCEV 生成为 IR。
+ * @param s 待物化的 ScalarEvolution 表达式。
+ * @param preheader 新指令的插入基本块。
+ * @param loop 当前循环，用于检查不变性。
+ * @param builder IR 指令构造器。
+ * @param module 所属模块，用于取得类型和构造常量。
+ * @return 成功时返回物化值，不支持该 SCEV 形态时返回 nullptr。
+ */
 Value *IndVarStrengthReduce::materializeInvariantSCEV(
     const SCEV *s, BasicBlock *preheader, const Loop &loop,
     IRStmtBuilder *builder, Module *module) {
@@ -595,6 +720,12 @@ Value *IndVarStrengthReduce::materializeInvariantSCEV(
     return result;
 }
 
+/**
+ * @brief 判断 canMaterializeOffsetInPreheader 所描述的结构、合法性或安全条件是否成立。
+ * @param expr 参数 `expr`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &expr,
                                                            const Loop &loop) {
     if (!fitsInt(expr.constOffset)) return false;
@@ -619,11 +750,20 @@ bool IndVarStrengthReduce::canMaterializeOffsetInPreheader(const LinearIVExpr &e
 // -----------------------------------------------------------------------
 // 主体：对循环中的派生 IV 进行强度削弱
 // -----------------------------------------------------------------------
+/**
+ * @brief 实现 processLoop 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param SE 参数 `SE`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *module,
                                        ScalarEvolution &SE) {
-    // Some producers already materialize one target-aware address chain.
-    // Re-strength-reducing its derived part GEPs would create parallel pointer
-    // phis and destroy that chain.  Ordinary vector loops remain eligible.
+    // 先收集基本归纳变量及其线性 GEP 候选，再在预头物化初值、在回边累加步长。
+    // 候选收集与 IR 提交分离，避免某个地址表达式失败时污染其他递推链。
+    // 某些前序 Pass 已物化面向目标的地址递推链；再次削弱其派生 GEP 会生成平行
+    // 指针 PHI 并破坏原链，因此带该语义标记的循环直接跳过。
     if (loop.header->hasSemFlag(SemFlag::TargetPointerRecurrenceLoop))
         return;
 
@@ -635,9 +775,8 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
     if (inLoopHeaderPreds != 1)
         return;
 
-    // Vectorized loops use the same affine recurrence proof as scalar loops.
-    // Keep them eligible here; the candidate checks below still require a
-    // materializable start address and a bounded constant pointer stride.
+    // 向量循环与标量循环共享仿射递推证明，仍可作为候选；下面仍要求起始地址可物化，
+    // 且常量指针步长有界。
     auto ivs = findBasicIVs(loop);
     if (ivs.empty()) return;
 
@@ -648,13 +787,16 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
         auto *initCI = dynamic_cast<ConstantInt *>(iv.initVal);
         if (!initCI && (!isI32(iv.initVal) || !loop.children.empty())) continue;
 
+        /**
+         * @brief 记录可由显式 GEP 改写为循环指针递推的地址计算候选。
+         */
         struct GEPCandidate {
-            GetElementPtrInst *gep;
-            unsigned ivOpIdx;
-            int coeff;
-            Value *coeffVal; // runtime IV-coefficient (variable stride), or null
-            std::vector<LinearIVExpr> indexExprs;
-            bool useLinearizedGEP;
+            GetElementPtrInst *gep;                 ///< 待强度削弱的原始 GEP 指令。
+            unsigned ivOpIdx;                       ///< 含归纳变量的 GEP 操作数下标。
+            int coeff;                              ///< 归纳变量在索引中的常量系数。
+            Value *coeffVal;                        ///< 运行期可变系数；常量步长时为 nullptr。
+            std::vector<LinearIVExpr> indexExprs;   ///< 各级 GEP 索引的线性表达式。
+            bool useLinearizedGEP;                  ///< 是否先将多维索引线性化再构造递推。
         };
         std::vector<GEPCandidate> candidates;
 
@@ -778,11 +920,9 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             }
         }
 
-        // Several control-flow paths can compute the same affine address for
-        // the same IV.  They must share one recurrence: independent pointer
-        // phis obscure the equality from later CSE and keep duplicated address
-        // updates alive.  Equality here includes every linearized index term,
-        // so only GEPs denoting the same address on every iteration are merged.
+        // 多条控制流路径可能为同一 IV 计算出相同仿射地址。它们必须共享一套
+        // 指针递推，否则独立 PHI 会遮蔽等价性并保留重复更新。比较时覆盖全部
+        // 线性化下标项，只合并每次迭代都指向同一地址的 GEP。
         auto sameRecurrence = [](const GEPCandidate &a,
                                  const GEPCandidate &b) {
             if (a.gep->type_ != b.gep->type_ ||
@@ -822,19 +962,15 @@ void IndVarStrengthReduce::processLoop(Loop &loop, Function *func, Module *modul
             int ivStrideVal = 1;
             if (auto *ci = dynamic_cast<ConstantInt*>(iv.stride))
                 ivStrideVal = ci->value_;
-            // Constant factor of the per-iteration element stride. With a runtime
-            // coefficient the true stride is `effectiveStride * coeffVal`; without
-            // one it is the whole stride.
+            // 先计算每轮元素步长的常量部分；若含运行时系数 coeffVal，
+            // 真正步长在 preheader 中物化为 effectiveStride*coeffVal。
             long long effectiveStride64 = static_cast<long long>(ivStrideVal) *
                                           elemStride * c.coeff;
             if (!iv.isAdd) effectiveStride64 = -effectiveStride64;
             if (effectiveStride64 == 0 || !fitsInt(effectiveStride64)) continue;
             int effectiveStride = static_cast<int>(effectiveStride64);
-            // A large constant stride benefits innermost loops by replacing a
-            // full affine address reconstruction.  In an outer loop it keeps
-            // a pointer live across nested loops and can increase register
-            // pressure throughout the nest, so retain the existing small-step
-            // policy there.
+            // 大常量步长在最内层可省掉完整仿射地址重建；在外层则会让指针跨整个
+            // 嵌套循环存活、增加全局寄存器压力，所以外层仍只接受小步长。
             if (!c.coeffVal && std::abs(effectiveStride) > 16 &&
                 !loop.children.empty())
                 continue;

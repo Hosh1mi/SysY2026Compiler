@@ -1,3 +1,9 @@
+/**
+ * @file loopPeel.cpp
+ * @brief 循环剥离：克隆并剥离规范循环的第一次迭代，同时维护侧退出和退出 PHI。
+ * @details 提交前预检所有待克隆指令和值映射；剥离后分别维护头部退出、侧退出和 LCSSA PHI 入边。
+ */
+
 // LoopPeel — peel the first iteration of a canonical 2-BB loop while keeping
 // both the header exit and the latch side-exit.  Trivial-phi / icmp folding /
 // block deletion are left to the subsequent DCE / InstCombine / CFGSimplify
@@ -23,6 +29,14 @@ using loop_clone::incomingFrom;
 using loop_clone::remapValueOrInvariant;
 using loop_clone::removeIncomingFrom;
 
+/**
+ * @brief 原地执行 replaceTerminatorTarget 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param term 参数 `term`，用于本函数的分析、匹配或 IR 构造。
+ * @param opIdx 参数 `opIdx`，用于本函数的分析、匹配或 IR 构造。
+ * @param oldTarget 需要替换的原分支目标。
+ * @param newTarget 替换后的新分支目标。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceTerminatorTarget(Instruction *term, unsigned opIdx,
                              BasicBlock *oldTarget, BasicBlock *newTarget) {
     if (term->get_operand(opIdx) != oldTarget)
@@ -30,6 +44,11 @@ void replaceTerminatorTarget(Instruction *term, unsigned opIdx,
     term->set_operand(opIdx, newTarget);
 }
 
+/**
+ * @brief 判断 isSupportedCloneInst 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSupportedCloneInst(Instruction *inst) {
     if (inst->is_phi() || inst->isTerminator() || inst->is_alloca())
         return false;
@@ -48,6 +67,11 @@ bool isSupportedCloneInst(Instruction *inst) {
            dynamic_cast<CallInst *>(inst);
 }
 
+/**
+ * @brief 判断 hasOnlyLCSSAOutsideUses 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasOnlyLCSSAOutsideUses(Loop &loop) {
     auto isExitBlock = [&](BasicBlock *bb) {
         for (auto *exit : loop.exits) {
@@ -73,6 +97,15 @@ bool hasOnlyLCSSAOutsideUses(Loop &loop) {
     return true;
 }
 
+/**
+ * @brief 实现 willCreateTrivialHeaderPhi 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param preheader 循环预头基本块。
+ * @param latch 循环回边基本块。
+ * @param headerPhis 参数 `headerPhis`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool willCreateTrivialHeaderPhi(
     Loop &loop, BasicBlock *preheader, BasicBlock *latch,
     const std::vector<PhiInst *> &headerPhis,
@@ -89,9 +122,8 @@ bool willCreateTrivialHeaderPhi(
         Value *next = incomingFrom(phi, latch);
         if (!next)
             continue;
-        // Profit preview: latch values defined inside the loop become new
-        // cloned SSA and cannot match `next`.  Loop-invariant latch values
-        // remap to themselves and make the remaining header phi trivial.
+        // 收益预判：循环内定义的 latch 入值在剥离后会成为新的 SSA 值，不可能与
+        // next 相同；只有循环不变量会映射回自身，从而让剩余 header PHI 退化。
         Value *peeled = remapValueOrInvariant(next, seed, loopBlocks);
         if (peeled && peeled == next)
             return true;
@@ -99,12 +131,30 @@ bool willCreateTrivialHeaderPhi(
     return false;
 }
 
+/**
+ * @brief 判断 canRemap 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param valueMap 从原 IR 值到克隆值的映射表。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool canRemap(Value *value,
               const std::unordered_map<Value *, Value *> &valueMap,
               const std::unordered_set<BasicBlock *> &loopBlocks) {
     return remapValueOrInvariant(value, valueMap, loopBlocks) != nullptr;
 }
 
+/**
+ * @brief 实现 preflightClone 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param header 循环头基本块。
+ * @param latch 循环回边基本块。
+ * @param headerExit 参数 `headerExit`，用于本函数的分析、匹配或 IR 构造。
+ * @param latchExit 参数 `latchExit`，用于本函数的分析、匹配或 IR 构造。
+ * @param headerPhis 参数 `headerPhis`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool preflightClone(Loop &loop, BasicBlock *header, BasicBlock *latch,
                     BasicBlock *headerExit, BasicBlock *latchExit,
                     const std::vector<PhiInst *> &headerPhis,
@@ -120,8 +170,8 @@ bool preflightClone(Loop &loop, BasicBlock *header, BasicBlock *latch,
             for (unsigned i = 0; i < inst->num_ops(); ++i)
                 if (!canRemap(inst->get_operand(i), valueMap, loopBlocks))
                     return false;
-            // Model the value produced by each instruction so later operands
-            // can be checked against the same SSA order as the clone.
+            // 用原指令占位模拟克隆结果，使后续操作数按真实克隆时的 SSA 定义顺序
+            // 接受检查；这样可以在创建任何基本块前发现无法映射的依赖。
             valueMap.emplace(inst, inst);
         }
     }
@@ -145,7 +195,16 @@ bool preflightClone(Loop &loop, BasicBlock *header, BasicBlock *latch,
     return true;
 }
 
+/**
+ * @brief 尝试执行 PeelLoop 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
+    // 剥离前完整预检两块循环、可克隆指令、LCSSA 外部使用和值映射。
+    // 预检通过后才复制首轮 header/latch，并分别修复头部退出、侧退出和 PHI 入边。
     if (loop.blocks.size() != 2)
         return false;
     BasicBlock *header = loop.header;
@@ -225,7 +284,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
                         headerPhis, loopBlocks))
         return false;
 
-    // ── Transform ────────────────────────────────────────────────────
+    // ── 提交变换：以下步骤依赖上面的完整预检，正常情况下不再失败 ─────────
     auto *peeledHeader = new BasicBlock(module, "peeled.header", func);
     auto *peeledLatch = new BasicBlock(module, "peeled.latch", func);
 
@@ -233,7 +292,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
     for (auto *phi : headerPhis)
         valueMap[phi] = incomingFrom(phi, preheader);
 
-    // Clone header body (non-phi, non-term).
+    // PHI 已由首轮初值替代，因此这里只克隆 header 的普通指令，并同步建立值映射。
     for (auto *inst : header->instr_list_) {
         if (inst->is_phi() || inst->isTerminator())
             continue;
@@ -241,7 +300,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
             return false;
     }
 
-    // Clone header terminator into peeled.header with remapped successors.
+    // 克隆 header 终结指令：循环内分支改指向 peeledLatch，退出边保持原出口。
     {
         Value *cond = remapValueOrInvariant(headerBr->get_operand(0), valueMap,
                                             loopBlocks);
@@ -261,7 +320,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
         new BranchInst(cond, tSucc, fSucc, peeledHeader);
     }
 
-    // Clone latch body.
+    // 继续克隆 latch 主体；它会使用刚建立的 header 克隆值和已有循环不变量。
     for (auto *inst : latch->instr_list_) {
         if (inst->isTerminator())
             continue;
@@ -271,8 +330,8 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
             return false;
     }
 
-    // Clone latch terminator: backedge still targets original header;
-    // side exit still targets original latchExit.
+    // peeledLatch 的回边直接进入原 header，表示首轮执行完毕后接回原循环；
+    // 侧退出仍进入原 latchExit，以保持首轮提前退出语义。
     {
         Value *cond = remapValueOrInvariant(latchBr->get_operand(0), valueMap,
                                             loopBlocks);
@@ -283,8 +342,8 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
         new BranchInst(cond, tSucc, fSucc, peeledLatch);
     }
 
-    // Patch exit phis for cloned edges before rewriting header phis /
-    // preheader, while original edges still exist for lookup.
+    // 趁原 CFG 入边仍可查询，先为两条克隆退出边补齐出口 PHI；若先改 header PHI
+    // 或 preheader，就会丢失用于查找原入值的前驱关系。
     for (auto *inst : headerExit->instr_list_) {
         if (!inst->is_phi())
             break;
@@ -306,7 +365,8 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
             return false;
     }
 
-    // Rewrite header phis: replace preheader incoming with peeled.latch.
+    // 原循环不再由 preheader 直接进入：将 header PHI 的初值边替换成剥离首轮后
+    // peeledLatch 产生的状态，使后续迭代从“第二轮”开始。
     for (auto *phi : headerPhis) {
         Value *latchIncoming = incomingFrom(phi, latch);
         Value *peeledIncoming =
@@ -317,7 +377,7 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
         phi->addIncoming(peeledIncoming, peeledLatch);
     }
 
-    // Redirect preheader → peeled.header.
+    // 最后才重定向入口边，正式把 peeled.header 接入可达 CFG。
     auto *preBr = preheader->get_terminator();
     if (!preBr || !preBr->is_br())
         return false;
@@ -341,6 +401,12 @@ bool tryPeelLoop(Loop &loop, Function *func, Module *module) {
     return true;
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool runOnFunction(Function *func, Module *module) {
     bool changed = false;
     LoopInfo LI;
@@ -363,6 +429,11 @@ bool runOnFunction(Function *func, Module *module) {
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopPeel::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
@@ -370,6 +441,12 @@ void LoopPeel::execute(Module *module) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopPeel::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;

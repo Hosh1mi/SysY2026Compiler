@@ -1,3 +1,9 @@
+/**
+ * @file instCombineMulDivRem.cpp
+ * @brief 实现乘除余指令的常量折叠、强度削弱和安全的代数化简。
+ * @details 除零、INT_MIN/-1、符号范围和精确整除是主要安全边界；不能证明时保持原指令。
+ */
+
 #include "instCombineInternal.hpp"
 #include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
@@ -11,6 +17,15 @@ namespace {
 // their inputs' exact values.  In particular, a remainder by a positive
 // constant is always in (-C, C), which lets modular loop recurrences retain a
 // useful bound through their header phi.
+/**
+ * @brief 计算 inferSignedBounds 所描述的派生信息，供合法性或收益判断使用。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param lower 参数 `lower`，用于本函数的分析、匹配或 IR 构造。
+ * @param upper 参数 `upper`，用于本函数的分析、匹配或 IR 构造。
+ * @param visiting 参数 `visiting`，用于本函数的分析、匹配或 IR 构造。
+ * @param depth 递归分析深度，用于限制搜索开销。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool inferSignedBounds(Value *value, long long &lower, long long &upper,
                        std::set<Value *> &visiting, unsigned depth = 0) {
     if (!value || depth > 12 || !visiting.insert(value).second)
@@ -106,14 +121,25 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper,
     return finish(false);
 }
 
+/**
+ * @brief 计算 inferSignedBounds 所描述的派生信息，供合法性或收益判断使用。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param lower 参数 `lower`，用于本函数的分析、匹配或 IR 构造。
+ * @param upper 参数 `upper`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
     std::set<Value *> visiting;
     return inferSignedBounds(value, lower, upper, visiting);
 }
 
-// Keep a loop-carried remainder intact until loop transforms have had a
-// chance to combine several unrolled recurrence steps.  A later InstCombine
-// run can still lower the remaining remainder to bounded corrections.
+// 循环变换可能先把多次展开后的递推余数合并起来，因此暂时保留循环携带的 rem。
+// 循环优化结束后再次运行 InstCombine，仍可把剩余 rem 降低为有界修正。
+/**
+ * @brief 判断 isLoopCarriedRemainder 所描述的结构、合法性或安全条件是否成立。
+ * @param remainder 参数 `remainder`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopCarriedRemainder(BinaryInst *remainder) {
     for (const auto &use : remainder->use_list_) {
         auto *phi = dynamic_cast<PhiInst *>(use.user_);
@@ -129,9 +155,8 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
             !gInstCombineDominatorTree->dominates(header, remainder->parent_) ||
             !gInstCombineDominatorTree->dominates(remainder->parent_, backedge))
             continue;
-        // The remainder need not be in the latch itself.  Preserve it when it
-        // is on every path from the loop header to the PHI's backedge; this is
-        // the cross-block form consumed by CFG-region loop unrolling.
+        // rem 不一定直接位于 latch。只要它支配 PHI 回边、即所有从 header 到回边
+        // 的路径都经过它，就保留这种跨基本块形式供 CFG 区域展开识别。
         std::set<BasicBlock *> updateBlocks;
         for (BasicBlock *block : function->basic_blocks_) {
             if (gInstCombineDominatorTree->dominates(header, block) &&
@@ -195,6 +220,11 @@ bool isLoopCarriedRemainder(BinaryInst *remainder) {
 //   - Strength reduce: mul x, 2^k → shl x, k
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 Mul 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitMul(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
@@ -315,7 +345,14 @@ Value* visitMul(BinaryInst *inst) {
 //   - Variable pow2 divisor via isKnownPowerOfTwo, same ashr rule
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 SDiv 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitSDiv(BinaryInst *inst) {
+    // 除法强度削弱的关键是舍入语义：只有被除数非负或除法精确时，
+    // 有符号除以 2^k 才能等价替换为算术右移。除零和溢出交给常量求值器拒绝。
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
 
@@ -346,12 +383,8 @@ Value* visitSDiv(BinaryInst *inst) {
         return neg;
     }
 
-    // Nested constant division: (x / C1) / C2  →  x / (C1 * C2).
-    // Holds for truncating (toward-zero) division because
-    //   trunc(trunc(x/c1)/c2) = trunc(x/(c1*c2))
-    // (magnitudes satisfy floor(floor(a/b)/c) = floor(a/(b*c))), and the
-    // INT_MIN / -1 UB cases coincide on both sides.  The combined divisor
-    // must be exactly representable in i32; skip when the product overflows.
+    // 合并连续常量除法：(x/C1)/C2 → x/(C1*C2)。向零截断满足这一等式，
+    // 但合并后的除数必须能用 i32 精确表示；乘积溢出时保持原式。
     if (cy) {
         auto *innerDiv = dynamic_cast<BinaryInst *>(x);
         if (innerDiv && innerDiv->op_id_ == Instruction::SDiv &&
@@ -430,7 +463,14 @@ Value* visitSDiv(BinaryInst *inst) {
 //       x proven non-negative / exact multiple of 2^k
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 SRem 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitSRem(BinaryInst *inst) {
+    // 余数改写按证明强度逐级尝试：常量/恒等式、已知窄范围的一次修正、
+    // 最后才是二次幂掩码。负数的向零取余与按位与不同，无法证明时必须保留 srem。
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
 
@@ -468,12 +508,9 @@ Value* visitSRem(BinaryInst *inst) {
     if (cy && cy->value_ > 0 && isLoopCarriedRemainder(inst))
         return nullptr;
 
-    // A value already known to lie in (-2M, 2M) needs at most one signed
-    // correction in either direction.  This is especially valuable for
-    // modular loop recurrences: the backedge remainder bounds the state phi,
-    // and a smaller bounded increment keeps the next dividend in this range.
-    // The replacement preserves C/IR signed-remainder behavior for negative
-    // dividends and avoids a multiply-high division sequence on AArch64.
+    // 若已知 x 位于 (-2M, 2M)，有符号余数至多需要向正或负方向修正一次。
+    // 这能把 AArch64 上昂贵的除法序列变成比较、加减和 select，同时保留
+    // 负被除数的 C/IR 向零取余语义。
     if (cy && cy->value_ > 0) {
         long long lower = 0, upper = 0;
         long long modulus = cy->value_;
@@ -603,6 +640,11 @@ Value* visitSRem(BinaryInst *inst) {
 //   - Identity: x*1.0 → x; x*(-1.0) → fneg x
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FMul 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFMul(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::FloatTyID) return nullptr;
 
@@ -648,6 +690,11 @@ Value* visitFMul(BinaryInst *inst) {
 //   - Identity: x/1.0 → x; x/(-1.0) → fneg x
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FDiv 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFDiv(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::FloatTyID) return nullptr;
 

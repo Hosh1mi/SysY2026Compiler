@@ -1,3 +1,9 @@
+/**
+ * @file inductiveRangeCheckElimination.cpp
+ * @brief 归纳边界检查消除：利用归纳变量范围证明删除循环内恒真或恒假的边界检查分支。
+ * @details 从入口保护、单调归纳变量和仿射检查推导有效迭代域，只在整个域上成立时收紧边界或删除检查。
+ */
+
 #include "../../../include/mid/opt/inductiveRangeCheckElimination.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -11,57 +17,88 @@
 
 namespace {
 
+/**
+ * @brief 描述由循环头 PHI、回边更新和退出比较组成的规范归纳变量。
+ */
 struct CanonicalIV {
-    PhiInst *phi = nullptr;
-    Value *init = nullptr;
-    Instruction *next = nullptr;
-    int step = 0;
-    ICmpInst *latchCmp = nullptr;
-    ICmpInst::ICmpOp exitPred = ICmpInst::ICMP_SLT;
-    Value *bound = nullptr;
+    PhiInst *phi = nullptr;                             ///< 循环头中的归纳变量 PHI。
+    Value *init = nullptr;                              ///< 来自循环预头的初始值。
+    Instruction *next = nullptr;                        ///< 回边上生成下一归纳值的指令。
+    int step = 0;                                       ///< 每次迭代的常量步长。
+    ICmpInst *latchCmp = nullptr;                        ///< 控制回边或退出的比较指令。
+    ICmpInst::ICmpOp exitPred = ICmpInst::ICMP_SLT;     ///< 归一到继续迭代方向的比较谓词。
+    Value *bound = nullptr;                             ///< 与归纳变量比较的循环边界。
 };
 
+/**
+ * @brief 描述边界检查分支中执行工作路径与跳过路径的对应关系。
+ */
 struct BranchShape {
-    BasicBlock *work = nullptr;
-    BasicBlock *skip = nullptr; // nullptr means header jumps directly to latch.
-    bool workOnTrue = false;
+    BasicBlock *work = nullptr;     ///< 检查通过后执行实际工作的基本块。
+    BasicBlock *skip = nullptr;     ///< 跳过工作的基本块；头块直达回边时为 nullptr。
+    bool workOnTrue = false;        ///< 条件为 true 时是否进入工作路径。
 };
 
+/**
+ * @brief 表示由循环不变量基值与常量偏移构成的简单仿射地址。
+ */
 struct AffineExpr {
-    Value *base = nullptr;
-    int64_t offset = 0;
+    Value *base = nullptr;      ///< 不随当前循环变化的基础值。
+    int64_t offset = 0;         ///< 相对基础值的有符号常量偏移。
 };
 
+/**
+ * @brief 表示 `ivCoeff * IV + sum(coeff * value) + constant` 的整数线性式。
+ */
 struct LinearExpr {
-    int ivCoeff = 0;
-    std::vector<std::pair<Value *, int>> terms;
-    int64_t constant = 0;
+    int ivCoeff = 0;                                  ///< 目标归纳变量的系数。
+    std::vector<std::pair<Value *, int>> terms;        ///< 其他循环不变量及其整数系数。
+    int64_t constant = 0;                             ///< 线性式中的常数项。
 };
 
+/**
+ * @brief 描述在循环头先检查条件、回边再更新的旋转循环归纳变量与 CFG。
+ */
 struct RotatedIV {
-    PhiInst *phi = nullptr;
-    Value *init = nullptr;
-    Instruction *next = nullptr;
-    BasicBlock *preheader = nullptr;
-    BasicBlock *header = nullptr;
-    BasicBlock *latch = nullptr;
-    BasicBlock *bodyEntry = nullptr;
-    BasicBlock *exit = nullptr;
-    ICmpInst *headerCmp = nullptr;
-    Value *bound = nullptr;
+    PhiInst *phi = nullptr;             ///< 循环头中的归纳变量 PHI。
+    Value *init = nullptr;              ///< 预头提供的初始值。
+    Instruction *next = nullptr;        ///< 回边生成的下一迭代值。
+    BasicBlock *preheader = nullptr;     ///< 唯一循环预头。
+    BasicBlock *header = nullptr;        ///< 执行范围检查的循环头。
+    BasicBlock *latch = nullptr;         ///< 更新归纳变量并形成回边的基本块。
+    BasicBlock *bodyEntry = nullptr;     ///< 范围检查通过后的循环体入口。
+    BasicBlock *exit = nullptr;          ///< 范围检查失败时到达的循环出口。
+    ICmpInst *headerCmp = nullptr;        ///< 循环头控制分支所用的比较指令。
+    Value *bound = nullptr;              ///< 循环头比较使用的迭代上界。
 };
 
+/**
+ * @brief 保存由入口保护条件推导出的归纳变量线性下界或上界。
+ */
 struct GuardBound {
-    enum Kind { LowerInclusive, UpperExclusive } kind;
-    LinearExpr expr;
+    /** @brief 保护条件提供的边界种类。 */
+    enum Kind {
+        LowerInclusive,    ///< 闭区间下界：归纳变量不小于该表达式。
+        UpperExclusive     ///< 开区间上界：归纳变量小于该表达式。
+    } kind;                ///< 当前保护条件的边界种类。
+    LinearExpr expr;       ///< 保护条件蕴含的线性边界表达式。
 };
 
+/**
+ * @brief 描述入口保护分支及其高概率安全方向。
+ */
 struct GuardBranch {
-    BranchInst *branch = nullptr;
-    ICmpInst *cmp = nullptr;
-    bool hotOnTrue = false;
+    BranchInst *branch = nullptr;    ///< 承载入口保护条件的条件分支。
+    ICmpInst *cmp = nullptr;         ///< 分支使用的整数比较。
+    bool hotOnTrue = false;          ///< true 边是否通向受保护的正常执行路径。
 };
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopInvariant(Value *value, const Loop &loop) {
     if (dynamic_cast<Constant *>(value) || dynamic_cast<GlobalVariable *>(value) ||
         dynamic_cast<Argument *>(value))
@@ -70,6 +107,12 @@ bool isLoopInvariant(Value *value, const Loop &loop) {
     return inst && inst->parent_ && !loop.blocks.count(inst->parent_);
 }
 
+/**
+ * @brief 收集或查找 getConstInt 所需的信息。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool getConstInt(Value *value, int &out) {
     auto *ci = dynamic_cast<ConstantInt *>(value);
     if (!ci)
@@ -78,6 +121,12 @@ bool getConstInt(Value *value, int &out) {
     return true;
 }
 
+/**
+ * @brief 实现 phiIncomingIndex 对应的局部分析或变换辅助逻辑。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param pred 前驱基本块。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 int phiIncomingIndex(PhiInst *phi, BasicBlock *pred) {
     for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
@@ -86,6 +135,13 @@ int phiIncomingIndex(PhiInst *phi, BasicBlock *pred) {
     return -1;
 }
 
+/**
+ * @brief 实现 setPhiIncomingValue 对应的局部分析或变换辅助逻辑。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param pred 前驱基本块。
+ * @param val 待检查或映射的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool setPhiIncomingValue(PhiInst *phi, BasicBlock *pred, Value *val) {
     int idx = phiIncomingIndex(phi, pred);
     if (idx < 0)
@@ -94,6 +150,12 @@ bool setPhiIncomingValue(PhiInst *phi, BasicBlock *pred, Value *val) {
     return true;
 }
 
+/**
+ * @brief 查询 PHI 在指定前驱边上的入值。
+ * @param phi 待查询的 PHI 指令。
+ * @param pred 指定的前驱基本块。
+ * @return 找到时返回对应入值，否则返回 nullptr。
+ */
 Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
     for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
@@ -102,6 +164,13 @@ Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
     return nullptr;
 }
 
+/**
+ * @brief 判断 isOnlyIVUpdateAndLatchCmp 所描述的结构、合法性或安全条件是否成立。
+ * @param latch 循环回边基本块。
+ * @param ivNext 参数 `ivNext`，用于本函数的分析、匹配或 IR 构造。
+ * @param latchCmp 参数 `latchCmp`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isOnlyIVUpdateAndLatchCmp(BasicBlock *latch, Instruction *ivNext,
                                ICmpInst *latchCmp) {
     std::vector<Instruction *> body;
@@ -113,6 +182,12 @@ bool isOnlyIVUpdateAndLatchCmp(BasicBlock *latch, Instruction *ivNext,
     return body.size() == 2 && body[0] == ivNext && body[1] == latchCmp;
 }
 
+/**
+ * @brief 判断 isPureSkipBlock 所描述的结构、合法性或安全条件是否成立。
+ * @param block 目标或待检查的基本块。
+ * @param latch 循环回边基本块。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isPureSkipBlock(BasicBlock *block, BasicBlock *latch) {
     auto *term = dynamic_cast<BranchInst *>(block->get_terminator());
     if (!term || term->num_ops() != 1 || term->get_operand(0) != latch)
@@ -133,6 +208,13 @@ bool isPureSkipBlock(BasicBlock *block, BasicBlock *latch) {
     return true;
 }
 
+/**
+ * @brief 判断 isWorkBlock 所描述的结构、合法性或安全条件是否成立。
+ * @param block 目标或待检查的基本块。
+ * @param latch 循环回边基本块。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isWorkBlock(BasicBlock *block, BasicBlock *latch, const Loop &loop) {
     if (!block || block == latch || !loop.isInLoop(block))
         return false;
@@ -140,17 +222,35 @@ bool isWorkBlock(BasicBlock *block, BasicBlock *latch, const Loop &loop) {
     return term && term->num_ops() == 1 && term->get_operand(0) == latch;
 }
 
+/**
+ * @brief 判断 isUnconditionalTo 所描述的结构、合法性或安全条件是否成立。
+ * @param block 目标或待检查的基本块。
+ * @param target 参数 `target`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isUnconditionalTo(BasicBlock *block, BasicBlock *target) {
     auto *term = dynamic_cast<BranchInst *>(block->get_terminator());
     return term && term->num_ops() == 1 && term->get_operand(0) == target;
 }
 
+/**
+ * @brief 判断 isSkipSuccessor 所描述的结构、合法性或安全条件是否成立。
+ * @param block 目标或待检查的基本块。
+ * @param latch 循环回边基本块。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSkipSuccessor(BasicBlock *block, BasicBlock *latch, const Loop &loop) {
     if (block == latch)
         return true;
     return block && loop.isInLoop(block) && isPureSkipBlock(block, latch);
 }
 
+/**
+ * @brief 实现 negateCmp 对应的局部分析或变换辅助逻辑。
+ * @param pred 前驱基本块。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 ICmpInst::ICmpOp negateCmp(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_EQ:
@@ -170,6 +270,11 @@ ICmpInst::ICmpOp negateCmp(ICmpInst::ICmpOp pred) {
     }
 }
 
+/**
+ * @brief 实现 swapCmp 对应的局部分析或变换辅助逻辑。
+ * @param pred 前驱基本块。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 ICmpInst::ICmpOp swapCmp(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_EQ:
@@ -188,6 +293,13 @@ ICmpInst::ICmpOp swapCmp(ICmpInst::ICmpOp pred) {
     }
 }
 
+/**
+ * @brief 实现 addLinearTerm 对应的局部分析或变换辅助逻辑。
+ * @param expr 参数 `expr`，用于本函数的分析、匹配或 IR 构造。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param coeff 参数 `coeff`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void addLinearTerm(LinearExpr &expr, Value *value, int coeff) {
     if (coeff == 0)
         return;
@@ -202,6 +314,15 @@ void addLinearTerm(LinearExpr &expr, Value *value, int coeff) {
     expr.terms.push_back({value, coeff});
 }
 
+/**
+ * @brief 实现 parseLinearExpr 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @param depth 递归分析深度，用于限制搜索开销。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool parseLinearExpr(Value *value, const Loop &loop, Value *iv, LinearExpr &out,
                      int depth = 0) {
     if (!value || depth > 8 || value->type_->tid_ != Type::IntegerTyID)
@@ -246,6 +367,12 @@ bool parseLinearExpr(Value *value, const Loop &loop, Value *iv, LinearExpr &out,
     return out.ivCoeff >= -1 && out.ivCoeff <= 1;
 }
 
+/**
+ * @brief 实现 subLinearExpr 对应的局部分析或变换辅助逻辑。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LinearExpr subLinearExpr(const LinearExpr &lhs, const LinearExpr &rhs) {
     LinearExpr out = lhs;
     out.ivCoeff -= rhs.ivCoeff;
@@ -255,11 +382,25 @@ LinearExpr subLinearExpr(const LinearExpr &lhs, const LinearExpr &rhs) {
     return out;
 }
 
+/**
+ * @brief 实现 addLinearConstant 对应的局部分析或变换辅助逻辑。
+ * @param expr 参数 `expr`，用于本函数的分析、匹配或 IR 构造。
+ * @param delta 参数 `delta`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LinearExpr addLinearConstant(LinearExpr expr, int64_t delta) {
     expr.constant += delta;
     return expr;
 }
 
+/**
+ * @brief 在指定基本块中物化线性表达式的常量项和各 SSA 项。
+ * @param expr 待生成的线性表达式。
+ * @param ty 生成结果的整数类型。
+ * @param bb 指令插入基本块。
+ * @param module 所属模块，用于构造常量。
+ * @return 物化后的 IR 值。
+ */
 Value *materializeLinearExpr(const LinearExpr &expr, Type *ty, BasicBlock *bb,
                              Instruction *insertBefore) {
     if (expr.ivCoeff != 0)
@@ -305,6 +446,13 @@ Value *materializeLinearExpr(const LinearExpr &expr, Type *ty, BasicBlock *bb,
     return current;
 }
 
+/**
+ * @brief 计算 decomposeInvariantAffine 所描述的派生信息，供合法性或收益判断使用。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool decomposeInvariantAffine(Value *value, const Loop &loop, AffineExpr &out) {
     if (!value || value->type_->tid_ != Type::IntegerTyID ||
         !isLoopInvariant(value, loop))
@@ -344,6 +492,15 @@ bool decomposeInvariantAffine(Value *value, const Loop &loop, AffineExpr &out) {
     return true;
 }
 
+/**
+ * @brief 物化循环不变仿射表达式，并附加一个常量偏移量。
+ * @param expr 待生成的仿射表达式。
+ * @param extraDelta 额外加入的常量偏移。
+ * @param ty 结果整数类型。
+ * @param block 指令插入基本块。
+ * @param module 所属模块。
+ * @return 生成的仿射 IR 值。
+ */
 Value *materializeAffine(const AffineExpr &expr, int64_t extraDelta, Type *ty,
                          BasicBlock *bb, Instruction *insertBefore) {
     const int64_t total = expr.offset + extraDelta;
@@ -360,6 +517,15 @@ Value *materializeAffine(const AffineExpr &expr, int64_t extraDelta, Type *ty,
     return adj;
 }
 
+/**
+ * @brief 匹配 CanonicalIV 所描述的 IR 结构并提取结果。
+ * @param header 循环头基本块。
+ * @param preheader 循环预头基本块。
+ * @param latch 循环回边基本块。
+ * @param loop 待检查或变换的循环。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchCanonicalIV(BasicBlock *header, BasicBlock *preheader, BasicBlock *latch,
                       const Loop &loop, CanonicalIV &out) {
     auto *latchTerm = dynamic_cast<BranchInst *>(latch->get_terminator());
@@ -435,6 +601,14 @@ bool matchCanonicalIV(BasicBlock *header, BasicBlock *preheader, BasicBlock *lat
     return false;
 }
 
+/**
+ * @brief 匹配 BranchShape 所描述的 IR 结构并提取结果。
+ * @param header 循环头基本块。
+ * @param latch 循环回边基本块。
+ * @param loop 待检查或变换的循环。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchBranchShape(BasicBlock *header, BasicBlock *latch, const Loop &loop,
                       BranchShape &out) {
     auto *headerTerm = dynamic_cast<BranchInst *>(header->get_terminator());
@@ -466,6 +640,18 @@ bool matchBranchShape(BasicBlock *header, BasicBlock *latch, const Loop &loop,
     return false;
 }
 
+/**
+ * @brief 根据循环内范围保护条件计算规范 IV 的收紧边界。
+ * @param iv 规范归纳变量描述。
+ * @param guardCmp 待移出循环的保护比较。
+ * @param workOnTrue 比较为真时是否进入有效工作路径。
+ * @param loop 当前循环，用于判断表达式不变性。
+ * @param module 所属模块。
+ * @param insertionBlock 收紧边界的插入基本块。
+ * @param insertBefore 新指令必须插入到该指令之前。
+ * @param DT 支配树，用于验证边界操作数在插入点可用。
+ * @return 能够推导时返回新边界，否则返回 nullptr。
+ */
 Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
                            bool workOnTrue, const Loop &loop, Module *module,
                            BasicBlock *insertionBlock, Instruction *insertBefore,
@@ -490,9 +676,8 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
         return inst->parent_ == insertionBlock ||
                DT.dominates(inst->parent_, insertionBlock);
     };
-    // A dedicated loop preheader is after the zero-trip guard.  Loop-invariant
-    // only means "defined outside the loop"; it does not imply that a value
-    // dominates this earlier guard block.
+    // 专用 preheader 位于零次迭代保护之后。“循环不变量”只说明值定义在循环外，
+    // 并不保证它支配更早的保护块，因此移动检查前必须显式验证支配关系。
     if (!dominatesInsertion(limitExpr) || !dominatesInsertion(iv.bound) ||
         !dominatesInsertion(iv.init))
         return nullptr;
@@ -541,6 +726,12 @@ Value *buildTightenedBound(const CanonicalIV &iv, ICmpInst *guardCmp,
     return tightened;
 }
 
+/**
+ * @brief 匹配 RotatedIV 所描述的 IR 结构并提取结果。
+ * @param loop 待检查或变换的循环。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchRotatedIV(Loop &loop, RotatedIV &out) {
     BasicBlock *header = loop.header;
     BasicBlock *preheader = loop.preheader;
@@ -629,6 +820,14 @@ bool matchRotatedIV(Loop &loop, RotatedIV &out) {
     return false;
 }
 
+/**
+ * @brief 匹配 GuardChain 所描述的 IR 结构并提取结果。
+ * @param entry 参数 `entry`，用于本函数的分析、匹配或 IR 构造。
+ * @param latch 循环回边基本块。
+ * @param loop 待检查或变换的循环。
+ * @param guards 参数 `guards`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchGuardChain(BasicBlock *entry, BasicBlock *latch, const Loop &loop,
                      std::vector<GuardBranch> &guards) {
     guards.clear();
@@ -663,11 +862,22 @@ bool matchGuardChain(BasicBlock *entry, BasicBlock *latch, const Loop &loop,
     return false;
 }
 
+/**
+ * @brief 判断 isHeaderPhi 所描述的结构、合法性或安全条件是否成立。
+ * @param shape 参数 `shape`，用于本函数的分析、匹配或 IR 构造。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isHeaderPhi(const RotatedIV &shape, Value *value) {
     auto *phi = dynamic_cast<PhiInst *>(value);
     return phi && phi->parent_ == shape.header;
 }
 
+/**
+ * @brief 判断 isTrivialRotatedLatch 所描述的结构、合法性或安全条件是否成立。
+ * @param shape 参数 `shape`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isTrivialRotatedLatch(const RotatedIV &shape) {
     std::unordered_set<Instruction *> incomingUpdates;
     for (auto *inst : shape.header->instr_list_) {
@@ -715,6 +925,14 @@ bool isTrivialRotatedLatch(const RotatedIV &shape) {
     return true;
 }
 
+/**
+ * @brief 实现 deriveGuardBound 对应的局部分析或变换辅助逻辑。
+ * @param guard 参数 `guard`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool deriveGuardBound(const GuardBranch &guard, const Loop &loop, PhiInst *iv,
                       GuardBound &out) {
     ICmpInst::ICmpOp pred =
@@ -760,6 +978,16 @@ bool deriveGuardBound(const GuardBranch &guard, const Loop &loop, PhiInst *iv,
     }
 }
 
+/**
+ * @brief 使用 min 或 max 组合当前边界与新的保护边界。
+ * @param current 已累计的边界；为空时直接采用 candidate。
+ * @param candidate 新推导出的候选边界。
+ * @param kind 指定取下界最大值还是上界最小值。
+ * @param ty 合并结果的整数类型。
+ * @param bb 新 compare/select 指令的插入基本块。
+ * @param insertBefore 新指令必须插入到该指令之前。
+ * @return 合并后的边界值。
+ */
 Value *combineBound(Value *current, Value *candidate, GuardBound::Kind kind,
                     Type *ty, BasicBlock *bb, Instruction *insertBefore) {
     if (!current)
@@ -775,6 +1003,15 @@ Value *combineBound(Value *current, Value *candidate, GuardBound::Kind kind,
     return sel;
 }
 
+/**
+ * @brief 构造收紧后初值相对原初值的差值。
+ * @param newInit 收紧后的循环初值。
+ * @param origInit 原循环初值。
+ * @param ty 差值的整数类型。
+ * @param bb 指令插入基本块。
+ * @param insertBefore 新指令必须插入到该指令之前。
+ * @return 表示 newInit-origInit 的 IR 值。
+ */
 Value *buildDelta(Value *newInit, Value *origInit, Type *ty, BasicBlock *bb,
                   Instruction *insertBefore) {
     if (newInit == origInit)
@@ -788,6 +1025,15 @@ Value *buildDelta(Value *newInit, Value *origInit, Type *ty, BasicBlock *bb,
     return delta;
 }
 
+/**
+ * @brief 物化初值移动量乘以伴随递推步长后的补偿值。
+ * @param delta 控制 IV 的初值移动量。
+ * @param step 伴随 PHI 每轮的常量步长。
+ * @param ty 结果整数类型。
+ * @param bb 指令插入基本块。
+ * @param insertBefore 新指令必须插入到该指令之前。
+ * @return 缩放后的补偿值。
+ */
 Value *materializeScaledDelta(Value *delta, int64_t step, Type *ty, BasicBlock *bb,
                               Instruction *insertBefore) {
     if (!delta || step == 0)
@@ -801,6 +1047,13 @@ Value *materializeScaledDelta(Value *delta, int64_t step, Type *ty, BasicBlock *
     return mul;
 }
 
+/**
+ * @brief 实现 rebaseCompanionPhis 对应的局部分析或变换辅助逻辑。
+ * @param loopShape 参数 `loopShape`，用于本函数的分析、匹配或 IR 构造。
+ * @param delta 参数 `delta`，用于本函数的分析、匹配或 IR 构造。
+ * @param insertBefore 参数 `insertBefore`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rebaseCompanionPhis(const RotatedIV &loopShape, Value *delta,
                          Instruction *insertBefore) {
     if (!delta)
@@ -871,6 +1124,12 @@ bool rebaseCompanionPhis(const RotatedIV &loopShape, Value *delta,
     return true;
 }
 
+/**
+ * @brief 尝试执行 TightenMonotoneGuardLoop 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool tryTightenMonotoneGuardLoop(Loop &loop, Module *module) {
     RotatedIV shape;
     if (!matchRotatedIV(loop, shape))
@@ -945,11 +1204,22 @@ bool tryTightenMonotoneGuardLoop(Loop &loop, Module *module) {
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void inductiveRangeCheckElimination::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses inductiveRangeCheckElimination::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *func : module->function_list_) {
@@ -960,6 +1230,12 @@ PreservedAnalyses inductiveRangeCheckElimination::execute(Module *module, Analys
                    : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool inductiveRangeCheckElimination::runOnFunction(Function *func,
                                                     AnalysisManager &AM) {
     if (func->basic_blocks_.empty())
@@ -983,9 +1259,19 @@ bool inductiveRangeCheckElimination::runOnFunction(Function *func,
     return changed;
 }
 
+/**
+ * @brief 尝试执行 TightenLoop 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool inductiveRangeCheckElimination::tryTightenLoop(
     Loop &loop, Module *module, const LoopInfo &LI,
     const DominatorTreeAnalysis &DT) {
+    // 先尝试单调保护链的专用快速路径，再匹配旋转循环的入口保护和循环内检查。
+    // 只有入口条件、归纳步长与仿射边界共同覆盖完整迭代域时才收紧循环范围。
     const bool debug = std::getenv("DEBUG_INDUCTIVE_RANGE") != nullptr;
     auto reject = [&](const char *reason) {
         if (debug)
@@ -1016,9 +1302,8 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
     if (!preTerm || !headerTerm || headerTerm->num_ops() != 3)
         return reject("non-conditional-entry-or-header");
 
-    // LoopRotate preserves a dedicated preheader and leaves the zero-trip
-    // condition in its unique outside predecessor.  Accept the old direct
-    // guard shape as well so this analysis is independent of scheduling.
+    // LoopRotate 会保留专用 preheader，并把零次迭代保护留在其唯一环外前驱。
+    // 同时接受直接保护和旋转后保护，使本分析不依赖 Pass 调度先后。
     BasicBlock *guardBlock = preheader;
     BranchInst *guardTerm = preTerm;
     BasicBlock *guardContinue = header;
@@ -1069,10 +1354,9 @@ bool inductiveRangeCheckElimination::tryTightenLoop(
         iv.latchCmp->set_operand(1, tightened);
     else
         iv.latchCmp->set_operand(0, tightened);
-    // The tightened iteration domain is exactly the subset on which the work
-    // successor is taken.  Make that proof explicit so CFG cleanup removes
-    // the skip path and repeat scheduling cannot wrap the same bound in an
-    // unbounded chain of equivalent min/max selects.
+    // 收紧后的迭代域恰好等于原 work 分支成立的范围，故可把 header 条件
+    // 固定到 work 边。这样 CFGSimplify 会删除 skip 路径，也避免重复调度
+    // 不断在同一边界外包裹等价的 min/max select。
     headerTerm->set_operand(
         0, new ConstantInt(module->int1_ty_, shape.workOnTrue ? 1 : 0));
     if (debug)

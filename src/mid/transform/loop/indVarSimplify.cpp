@@ -1,3 +1,9 @@
+/**
+ * @file indVarSimplify.cpp
+ * @brief 归纳变量化简：识别并规范化循环归纳变量，消除可推导的派生递推与冗余循环外使用。
+ * @details 先描述 PHI 递推，再证明循环次数和退出值；替换循环外使用时保持 LCSSA 与语义标志不被加强。
+ */
+
 #include "../../../include/mid/opt/indVarSimplify.hpp"
 
 #include "../../../include/mid/analysis/analysisManager.hpp"
@@ -16,30 +22,53 @@
 
 namespace {
 
+/**
+ * @brief 汇总一个循环归纳变量的递推关系及其循环内外使用点。
+ */
 struct Recurrence {
-    PhiInst *phi = nullptr;
-    BinaryInst *update = nullptr;
-    Value *start = nullptr;
-    Value *step = nullptr;
-    bool subtractStep = false;
-    std::vector<Use> insideUses;
-    std::vector<Use> outsideUses;
+    PhiInst *phi = nullptr;                 ///< 循环头中承载当前归纳值的 PHI。
+    BinaryInst *update = nullptr;           ///< 回边上计算下一归纳值的加减指令。
+    Value *start = nullptr;                 ///< 从预头进入 PHI 的初始值。
+    Value *step = nullptr;                  ///< 每次迭代使用的步长值。
+    bool subtractStep = false;              ///< 为 true 时递推形式为 `phi - step`。
+    std::vector<Use> insideUses;             ///< 位于当前循环内的 PHI 使用点。
+    std::vector<Use> outsideUses;            ///< 位于当前循环外的 PHI 使用点。
 };
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_INDVAR_SIMPLIFY") != nullptr;
 }
 
+/**
+ * @brief 判断 isI32 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isI32(Value *value) {
     auto *type = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
     return type && type->num_bits_ == 32;
 }
 
+/**
+ * @brief 判断 isZero 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isZero(Value *value) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     return constant && constant->value_ == 0;
 }
 
+/**
+ * @brief 计算 computeConstantTripCount 所描述的派生信息，供合法性或收益判断使用。
+ * @param control 参数 `control`，用于本函数的分析、匹配或 IR 构造。
+ * @param tripCount 参数 `tripCount`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool computeConstantTripCount(const InductionDescriptor &control,
                               long long &tripCount) {
     auto *start = dynamic_cast<ConstantInt *>(control.start);
@@ -95,6 +124,13 @@ bool computeConstantTripCount(const InductionDescriptor &control,
     return true;
 }
 
+/**
+ * @brief 实现 continuationIsTrue 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param control 参数 `control`，用于本函数的分析、匹配或 IR 构造。
+ * @param continuesOnTrue 参数 `continuesOnTrue`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool continuationIsTrue(const Loop &loop, const InductionDescriptor &control,
                         bool &continuesOnTrue) {
     BasicBlock *guard = control.guardPosition == InductionGuardPosition::Header
@@ -117,6 +153,12 @@ bool continuationIsTrue(const Loop &loop, const InductionDescriptor &control,
     return true;
 }
 
+/**
+ * @brief 判断 canonicalizeConstantControl 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool canonicalizeConstantControl(Loop &loop, Module *module) {
     const InductionDescriptor *control = loop.getInductionDescriptor();
     if (!control || !module || !loop.preheader || !loop.singleLatch())
@@ -174,6 +216,12 @@ bool canonicalizeConstantControl(Loop &loop, Module *module) {
     return true;
 }
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopInvariant(Value *value, const Loop &loop) {
     if (dynamic_cast<Constant *>(value) ||
         dynamic_cast<Argument *>(value) ||
@@ -183,6 +231,13 @@ bool isLoopInvariant(Value *value, const Loop &loop) {
     return inst && !loop.blocks.count(inst->parent_);
 }
 
+/**
+ * @brief 判断 isLoopInvariantExpression 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @param visiting 参数 `visiting`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopInvariantExpression(Value *value, const Loop &loop,
                                std::set<Value *> &visiting) {
     if (isLoopInvariant(value, loop))
@@ -210,6 +265,14 @@ bool isLoopInvariantExpression(Value *value, const Loop &loop,
     return true;
 }
 
+/**
+ * @brief 收集或查找 getIncomingValues 所需的信息。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param start 参数 `start`，用于本函数的分析、匹配或 IR 构造。
+ * @param latchValue 参数 `latchValue`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool getIncomingValues(PhiInst *phi, const Loop &loop, Value *&start,
                        Value *&latchValue) {
     start = nullptr;
@@ -230,6 +293,16 @@ bool getIncomingValues(PhiInst *phi, const Loop &loop, Value *&start,
     return start && latchValue;
 }
 
+/**
+ * @brief 匹配 Update 所描述的 IR 结构并提取结果。
+ * @param latchValue 参数 `latchValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param update 参数 `update`，用于本函数的分析、匹配或 IR 构造。
+ * @param step 参数 `step`，用于本函数的分析、匹配或 IR 构造。
+ * @param subtractStep 参数 `subtractStep`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchUpdate(Value *latchValue, PhiInst *phi, const Loop &loop,
                  BinaryInst *&update, Value *&step, bool &subtractStep) {
     update = dynamic_cast<BinaryInst *>(latchValue);
@@ -255,6 +328,12 @@ bool matchUpdate(Value *latchValue, PhiInst *phi, const Loop &loop,
     return isLoopInvariant(step, loop);
 }
 
+/**
+ * @brief 实现 onlyUsedBy 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param expectedUser 参数 `expectedUser`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool onlyUsedBy(Value *value, Instruction *expectedUser) {
     if (!value || !expectedUser || value->use_list_.empty())
         return false;
@@ -265,6 +344,13 @@ bool onlyUsedBy(Value *value, Instruction *expectedUser) {
     return true;
 }
 
+/**
+ * @brief 匹配 Recurrence 所描述的 IR 结构并提取结果。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchRecurrence(PhiInst *phi, const Loop &loop,
                      Recurrence &recurrence) {
     if (!phi || !isI32(phi))
@@ -304,6 +390,11 @@ bool matchRecurrence(PhiInst *phi, const Loop &loop,
     return true;
 }
 
+/**
+ * @brief 判断 isDeadExceptForLiveOut 所描述的结构、合法性或安全条件是否成立。
+ * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isDeadExceptForLiveOut(const Recurrence &recurrence) {
     if (!onlyUsedBy(recurrence.update, recurrence.phi))
         return false;
@@ -314,10 +405,22 @@ bool isDeadExceptForLiveOut(const Recurrence &recurrence) {
     return true;
 }
 
+/**
+ * @brief 实现 wrappedI32 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 int wrappedI32(std::uint32_t value) {
     return static_cast<std::int32_t>(value);
 }
 
+/**
+ * @brief 计算常量起点、常量步长递推在循环退出时的 i32 终值。
+ * @param recurrence 待求值的归纳递推描述。
+ * @param tripCount 已证明的循环迭代次数。
+ * @param module 所属模块，用于取得 i32 类型并构造常量。
+ * @return 可完全常量折叠时返回退出常量，否则返回 nullptr。
+ */
 ConstantInt *foldConstantExit(const Recurrence &recurrence,
                               long long tripCount, Module *module) {
     auto *start = dynamic_cast<ConstantInt *>(recurrence.start);
@@ -334,6 +437,12 @@ ConstantInt *foldConstantExit(const Recurrence &recurrence,
     return new ConstantInt(module->int32_ty_, wrappedI32(result));
 }
 
+/**
+ * @brief 判断 hasFreeExitMaterialization 所描述的结构、合法性或安全条件是否成立。
+ * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
+ * @param tripCount 参数 `tripCount`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasFreeExitMaterialization(const Recurrence &recurrence,
                                 long long tripCount) {
     return tripCount == 0 ||
@@ -341,6 +450,14 @@ bool hasFreeExitMaterialization(const Recurrence &recurrence,
             dynamic_cast<ConstantInt *>(recurrence.step));
 }
 
+/**
+ * @brief 在循环 preheader 中物化递推执行 tripCount 轮后的退出值。
+ * @param recurrence 待物化的归纳递推描述。
+ * @param tripCount 已证明的循环迭代次数。
+ * @param loop 递推所属循环，用于确定插入位置。
+ * @param module 所属模块，用于构造常量和算术指令。
+ * @return 成功时返回退出值；缺少合法插入点时返回 nullptr。
+ */
 Value *materializeExitValue(const Recurrence &recurrence,
                             long long tripCount, const Loop &loop,
                             Module *module) {
@@ -380,6 +497,13 @@ Value *materializeExitValue(const Recurrence &recurrence,
     return result;
 }
 
+/**
+ * @brief 实现 equivalentInvariant 对应的局部分析或变换辅助逻辑。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool equivalentInvariant(Value *lhs, Value *rhs,
                          ScalarEvolution &scalarEvolution) {
     if (lhs == rhs)
@@ -391,6 +515,13 @@ bool equivalentInvariant(Value *lhs, Value *rhs,
     return scalarEvolution.getSCEV(lhs) == scalarEvolution.getSCEV(rhs);
 }
 
+/**
+ * @brief 实现 equivalentStep 对应的局部分析或变换辅助逻辑。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool equivalentStep(const Recurrence &lhs, const Recurrence &rhs,
                     ScalarEvolution &scalarEvolution) {
     auto *lhsConstant = dynamic_cast<ConstantInt *>(lhs.step);
@@ -406,6 +537,13 @@ bool equivalentStep(const Recurrence &lhs, const Recurrence &rhs,
            equivalentInvariant(lhs.step, rhs.step, scalarEvolution);
 }
 
+/**
+ * @brief 实现 equivalentRecurrence 对应的局部分析或变换辅助逻辑。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool equivalentRecurrence(const Recurrence &lhs, const Recurrence &rhs,
                           ScalarEvolution &scalarEvolution) {
     return lhs.phi->type_ == rhs.phi->type_ &&
@@ -413,6 +551,14 @@ bool equivalentRecurrence(const Recurrence &lhs, const Recurrence &rhs,
            equivalentStep(lhs, rhs, scalarEvolution);
 }
 
+/**
+ * @brief 实现 constantStartDelta 对应的局部分析或变换辅助逻辑。
+ * @param leader 参数 `leader`，用于本函数的分析、匹配或 IR 构造。
+ * @param derived 参数 `derived`，用于本函数的分析、匹配或 IR 构造。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @param delta 参数 `delta`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool constantStartDelta(const Recurrence &leader,
                         const Recurrence &derived,
                         ScalarEvolution &scalarEvolution,
@@ -427,6 +573,13 @@ bool constantStartDelta(const Recurrence &leader,
            delta <= std::numeric_limits<int>::max();
 }
 
+/**
+ * @brief 原地执行 replacementDoesNotStrengthenSemantics 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param leader 参数 `leader`，用于本函数的分析、匹配或 IR 构造。
+ * @param redundant 参数 `redundant`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool replacementDoesNotStrengthenSemantics(const Recurrence &leader,
                                            const Recurrence &redundant,
                                            const Loop &loop) {
@@ -443,6 +596,11 @@ bool replacementDoesNotStrengthenSemantics(const Recurrence &leader,
            isZero(control->start);
 }
 
+/**
+ * @brief 实现 swapPredicate 对应的局部分析或变换辅助逻辑。
+ * @param predicate 参数 `predicate`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp predicate) {
     switch (predicate) {
     case ICmpInst::ICMP_UGT: return ICmpInst::ICMP_ULT;
@@ -457,6 +615,15 @@ ICmpInst::ICmpOp swapPredicate(ICmpInst::ICmpOp predicate) {
     }
 }
 
+/**
+ * @brief 实现 proveRangeComparison 对应的局部分析或变换辅助逻辑。
+ * @param predicate 参数 `predicate`，用于本函数的分析、匹配或 IR 构造。
+ * @param minimum 参数 `minimum`，用于本函数的分析、匹配或 IR 构造。
+ * @param maximum 参数 `maximum`，用于本函数的分析、匹配或 IR 构造。
+ * @param constant 参数 `constant`，用于本函数的分析、匹配或 IR 构造。
+ * @param result 用于写回匹配或计算结果的输出参数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool proveRangeComparison(ICmpInst::ICmpOp predicate, long long minimum,
                           long long maximum, long long constant,
                           bool &result) {
@@ -526,6 +693,14 @@ bool proveRangeComparison(ICmpInst::ICmpOp predicate, long long minimum,
     }
 }
 
+/**
+ * @brief 收集或查找 getRecurrenceRange 所需的信息。
+ * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
+ * @param tripCount 参数 `tripCount`，用于本函数的分析、匹配或 IR 构造。
+ * @param minimum 参数 `minimum`，用于本函数的分析、匹配或 IR 构造。
+ * @param maximum 参数 `maximum`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool getRecurrenceRange(const Recurrence &recurrence, long long tripCount,
                         long long &minimum, long long &maximum) {
     if (tripCount <= 0)
@@ -552,6 +727,13 @@ bool getRecurrenceRange(const Recurrence &recurrence, long long tripCount,
     return true;
 }
 
+/**
+ * @brief 实现 simplifyRangeUsers 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool simplifyRangeUsers(Loop &loop, ScalarEvolution &scalarEvolution,
                         Module *module) {
     auto tripCount = scalarEvolution.getConstantTripCount(&loop);
@@ -641,6 +823,12 @@ bool simplifyRangeUsers(Loop &loop, ScalarEvolution &scalarEvolution,
     return changed;
 }
 
+/**
+ * @brief 查找 header PHI 来自循环 preheader 的初始入值。
+ * @param phi 待查询的 header PHI。
+ * @param loop PHI 所属循环。
+ * @return 找到时返回初始入值，否则返回 nullptr。
+ */
 Value *preheaderIncomingValue(PhiInst *phi, const Loop &loop) {
     if (!phi || !loop.preheader)
         return nullptr;
@@ -651,6 +839,11 @@ Value *preheaderIncomingValue(PhiInst *phi, const Loop &loop) {
     return nullptr;
 }
 
+/**
+ * @brief 原地执行 rewriteFirstIterationExitValues 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rewriteFirstIterationExitValues(Loop &loop) {
     if (!loop.header || !loop.preheader)
         return false;
@@ -702,6 +895,12 @@ bool rewriteFirstIterationExitValues(Loop &loop) {
     return changed;
 }
 
+/**
+ * @brief 实现 eliminateCongruentIVs 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool eliminateCongruentIVs(Loop &loop,
                            ScalarEvolution &scalarEvolution) {
     std::vector<Recurrence> recurrences;
@@ -827,6 +1026,13 @@ bool eliminateCongruentIVs(Loop &loop,
     return changed;
 }
 
+/**
+ * @brief 原地执行 rewriteConstantExitValues 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rewriteConstantExitValues(Loop &loop, ScalarEvolution &scalarEvolution,
                                Module *module) {
     auto tripCount = scalarEvolution.getConstantTripCount(&loop);
@@ -874,11 +1080,19 @@ bool rewriteConstantExitValues(Loop &loop, ScalarEvolution &scalarEvolution,
     return changed;
 }
 
+/**
+ * @brief 实现 simplifyLoopOnce 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param scalarEvolution 参数 `scalarEvolution`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool simplifyLoopOnce(Loop &loop, ScalarEvolution &scalarEvolution,
                       Module *module) {
-    // Each transformation can change the recurrence graph consumed by the
-    // following one.  Return after the first mutation so the caller rebuilds
-    // LoopInfo and ScalarEvolution before continuing.
+    // 各子变换都可能改变 PHI 递推图，因此一次只提交第一项成功改写。
+    // 调用方随后重建 LoopInfo 和 ScalarEvolution，再从规范化控制流开始下一轮。
+    // 任一子变换都会改变后续规则读取的递推图。首次改写后立即返回，
+    // 由调用方重建 LoopInfo 和 ScalarEvolution，再开始下一轮匹配。
     if (canonicalizeConstantControl(loop, module))
         return true;
     if (rewriteFirstIterationExitValues(loop))
@@ -892,11 +1106,22 @@ bool simplifyLoopOnce(Loop &loop, ScalarEvolution &scalarEvolution,
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void IndVarSimplify::execute(Module *module) {
     AnalysisManager analysisManager;
     execute(module, analysisManager);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param analysisManager 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses IndVarSimplify::execute(Module *module,
                                           AnalysisManager &analysisManager) {
     bool changed = false;
@@ -912,6 +1137,12 @@ PreservedAnalyses IndVarSimplify::execute(Module *module,
     return preserved;
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param analysisManager 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool IndVarSimplify::runOnFunction(Function *func,
                                    AnalysisManager &analysisManager) {
     if (!func || func->basic_blocks_.empty())

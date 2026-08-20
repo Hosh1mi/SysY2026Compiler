@@ -1,3 +1,10 @@
+/**
+ * @file simpleLoopUnswitch.cpp
+ * @brief 简单循环反切换：把循环不变量条件移到循环外并克隆循环版本，消除循环体内重复分支。
+ *        把循环内不变的分支条件移到循环外，克隆出"条件为真"和"条件为假"两个循环版本，循环体内的分支随即变成确定路径，被后续 CFGSimplify 删除。
+ * @details 限制循环体大小、单函数版本数和代码增长；克隆前确认条件循环不变且两版本 CFG/PHI 均可完整修复。
+ */
+
 #include "../../../include/mid/opt/simpleLoopUnswitch.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -13,12 +20,23 @@ constexpr int MAX_UNSWITCH_INSTS = 64;
 constexpr int MAX_UNSWITCH_PER_FUNC = 8;
 constexpr int MAX_UNSWITCH_GROWTH_PER_FUNC = 192;
 
+/**
+ * @brief 查询循环版本克隆阶段的值映射。
+ * @param v 待重映射的原值。
+ * @param m 原值到克隆值的映射表。
+ * @return 命中时返回克隆值，否则返回原值。
+ */
 Value *mapValue(Value *v, const std::unordered_map<Value *, Value *> &m) {
     auto it = m.find(v);
     return it == m.end() ? v : it->second;
 }
 
 // 删除 bb 的 terminator 并解除其 CFG 出边（参照 loopRotate 同名逻辑）
+/**
+ * @brief 原地执行 removeTerminatorAndCfgEdges 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param bb 目标或待修改的基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void removeTerminatorAndCfgEdges(BasicBlock *bb) {
     auto *term = bb->get_terminator();
     std::vector<BasicBlock *> succs = bb->succ_bbs_;
@@ -30,6 +48,12 @@ void removeTerminatorAndCfgEdges(BasicBlock *bb) {
 }
 
 // 从 succ 的所有 phi 中删除来自 pred 的入边对
+/**
+ * @brief 原地执行 removeIncomingFromPhis 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param succ 后继基本块。
+ * @param pred 前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void removeIncomingFromPhis(BasicBlock *succ, BasicBlock *pred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -43,6 +67,11 @@ void removeIncomingFromPhis(BasicBlock *succ, BasicBlock *pred) {
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void SimpleLoopUnswitch::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
@@ -50,6 +79,12 @@ void SimpleLoopUnswitch::execute(Module *module) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses SimpleLoopUnswitch::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;
@@ -60,6 +95,11 @@ PreservedAnalyses SimpleLoopUnswitch::execute(Module *module, AnalysisManager &A
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool SimpleLoopUnswitch::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty())
         return false;
@@ -100,6 +140,13 @@ bool SimpleLoopUnswitch::runOnFunction(Function *func) {
 
 // 逐类型克隆（参照 InlineExpand::cloneCalleeIntoCaller；phi 由调用方
 // 延迟回填）。不支持的类型返回 nullptr，调用方据此放弃整个 unswitch。
+/**
+ * @brief 克隆 unswitch 循环版本中的一条受支持指令。
+ * @param oldInst 待克隆的原指令。
+ * @param newBB 克隆指令的目标基本块。
+ * @param valMap 原值到当前循环版本值的映射。
+ * @return 成功时返回克隆指令，不支持该类型时返回 nullptr。
+ */
 Instruction *SimpleLoopUnswitch::cloneInst(
     Instruction *oldInst, BasicBlock *newBB,
     std::unordered_map<Value *, Value *> &valMap) {
@@ -156,9 +203,19 @@ Instruction *SimpleLoopUnswitch::cloneInst(
     return nullptr;
 }
 
+/**
+ * @brief 尝试执行 Unswitch 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param remainingGrowth 参数 `remainingGrowth`，用于本函数的分析、匹配或 IR 构造。
+ * @param clonedInsts 参数 `clonedInsts`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
                                      int remainingGrowth,
                                      int *clonedInsts) {
+    // 先找循环不变量条件并检查代码增长预算，再验证 LCSSA 外部使用和可克隆指令。
+    // 最后在预头分流到两个固定条件版本，使循环体内分支能够被 CFGSimplify 删除。
     if (clonedInsts) *clonedInsts = 0;
     if (!loop.children.empty())
         return false;
@@ -240,7 +297,13 @@ bool SimpleLoopUnswitch::tryUnswitch(Loop &loop, Function *func,
         newBlocks.push_back(nb);
     }
 
-    struct PhiFixup { PhiInst *newPhi; PhiInst *oldPhi; };
+    /**
+     * @brief 记录克隆循环中尚待复制操作数的 PHI 对应关系。
+     */
+    struct PhiFixup {
+        PhiInst *newPhi;  ///< 新循环副本中创建的 PHI。
+        PhiInst *oldPhi;  ///< 原循环中提供操作数和前驱关系的 PHI。
+    };
     std::vector<PhiFixup> fixups;
 
     for (auto *bb : loop.blocksOrdered) {

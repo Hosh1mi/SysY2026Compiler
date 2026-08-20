@@ -1,3 +1,9 @@
+/**
+ * @file parallelizeLoops.cpp
+ * @brief 循环并行化：依据别名和依赖分析把独立循环或波前迭代改写为并行运行时调用。
+ * @details 依赖分析证明迭代独立后才生成 doall；有规则距离依赖时使用波前调度，并保留串行回退条件。
+ */
+
 #include "../../../include/mid/opt/parallelizeLoops.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/affineAnalysis.hpp"
@@ -11,26 +17,49 @@
 
 namespace {
 
+/**
+ * @brief 判断 isParDebugEnabled 所描述的结构、合法性或安全条件是否成立。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isParDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_PARALLEL") != nullptr;
     return enabled;
 }
 
+/**
+ * @brief 生成 debugPar 对应的调试诊断，不参与程序语义。
+ * @param msg 参数 `msg`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void debugPar(const std::string &msg) {
     if (isParDebugEnabled())
         std::cerr << "[Parallelize] " << msg << "\n";
 }
 
+/**
+ * @brief 生成 debugWavefront 对应的调试诊断，不参与程序语义。
+ * @param msg 参数 `msg`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void debugWavefront(const std::string &msg) {
     if (std::getenv("DEBUG_WAVEFRONT"))
         std::cerr << "[WavefrontParallelize] " << msg << "\n";
 }
 
-// GEP 链回溯到基址
+/**
+ * @brief 穿过 GEP、bitcast 等派生关系取得内存访问的根对象。
+ * @param ptr 待追溯的指针值。
+ * @return 别名分析识别出的底层对象。
+ */
 Value *gepRootBase(Value *ptr) {
     return ArgumentAliasAnalysis::underlyingObject(ptr);
 }
 
+/**
+ * @brief 判断 isAcceptedMemoryRoot 所描述的结构、合法性或安全条件是否成立。
+ * @param root 参数 `root`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isAcceptedMemoryRoot(Value *root) {
     if (dynamic_cast<GlobalVariable *>(root)) return true;
     auto *alloca = dynamic_cast<AllocaInst *>(root);
@@ -40,14 +69,31 @@ bool isAcceptedMemoryRoot(Value *root) {
     return arg && dynamic_cast<PointerType *>(arg->type_);
 }
 
+/**
+ * @brief 实现 valueName 对应的局部分析或变换辅助逻辑。
+ * @param v 待检查或映射的 IR 值。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 std::string valueName(Value *v) {
     return v && !v->name_.empty() ? v->name_ : "<unnamed>";
 }
 
+/**
+ * @brief 实现 loopName 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 std::string loopName(const Loop &loop) {
     return loop.header ? loop.header->name_ : "<no-header>";
 }
 
+/**
+ * @brief 实现 valueDependsOn 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param target 参数 `target`，用于本函数的分析、匹配或 IR 构造。
+ * @param visited 递归遍历使用的已访问集合，用于避免环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool valueDependsOn(Value *value, Value *target,
                     std::set<Value *> &visited) {
     if (value == target) return true;
@@ -61,12 +107,29 @@ bool valueDependsOn(Value *value, Value *target,
     return false;
 }
 
+/**
+ * @brief 判断 isDescendantOrSelf 所描述的结构、合法性或安全条件是否成立。
+ * @param candidate 参数 `candidate`，用于本函数的分析、匹配或 IR 构造。
+ * @param ancestor 参数 `ancestor`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isDescendantOrSelf(const Loop *candidate, const Loop *ancestor) {
     for (const Loop *cursor = candidate; cursor; cursor = cursor->parent)
         if (cursor == ancestor) return true;
     return false;
 }
 
+/**
+ * @brief 判断 sameAccessIsInjective 所描述的结构、合法性或安全条件是否成立。
+ * @param access 参数 `access`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param loopIV 参数 `loopIV`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopStart 参数 `loopStart`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopBound 参数 `loopBound`，用于本函数的分析、匹配或 IR 构造。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @param affine 参数 `affine`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool sameAccessIsInjective(Instruction *access, Loop &loop,
                            PhiInst *loopIV, Value *loopStart,
                            Value *loopBound, LoopInfo &LI,
@@ -142,11 +205,23 @@ bool sameAccessIsInjective(Instruction *access, Loop &loop,
     return false;
 }
 
+/**
+ * @brief 实现 containsPtr 对应的局部分析或变换辅助逻辑。
+ * @param values 参数 `values`，用于本函数的分析、匹配或 IR 构造。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 template <typename T>
 bool containsPtr(const std::vector<T *> &values, T *value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
 
+/**
+ * @brief 实现 addUniquePtr 对应的局部分析或变换辅助逻辑。
+ * @param values 参数 `values`，用于本函数的分析、匹配或 IR 构造。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 template <typename T>
 bool addUniquePtr(std::vector<T *> &values, T *value) {
     if (containsPtr(values, value))
@@ -155,11 +230,23 @@ bool addUniquePtr(std::vector<T *> &values, T *value) {
     return true;
 }
 
+/**
+ * @brief 判断 isScalarExpansionScratch 所描述的结构、合法性或安全条件是否成立。
+ * @param root 参数 `root`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isScalarExpansionScratch(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     return alloca && alloca->isLoopExpansionScratch();
 }
 
+/**
+ * @brief 实现 rootsNoAlias 对应的局部分析或变换辅助逻辑。
+ * @param a 参数 `a`，用于本函数的分析、匹配或 IR 构造。
+ * @param b 参数 `b`，用于本函数的分析、匹配或 IR 构造。
+ * @param argAA 参数 `argAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rootsNoAlias(Value *a, Value *b, const ArgumentAliasAnalysis &argAA) {
     if (!a || !b || a == b) return false;
     if (dynamic_cast<GlobalVariable *>(a) && dynamic_cast<GlobalVariable *>(b))
@@ -169,6 +256,14 @@ bool rootsNoAlias(Value *a, Value *b, const ArgumentAliasAnalysis &argAA) {
     return argAA.noAlias(a, b);
 }
 
+/**
+ * @brief 判断 hasProvenSafeMemoryRoots 所描述的结构、合法性或安全条件是否成立。
+ * @param stores 参数 `stores`，用于本函数的分析、匹配或 IR 构造。
+ * @param accesses 参数 `accesses`，用于本函数的分析、匹配或 IR 构造。
+ * @param argAA 参数 `argAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasProvenSafeMemoryRoots(
     const std::vector<Instruction *> &stores,
     const std::vector<Instruction *> &accesses,
@@ -197,6 +292,15 @@ bool hasProvenSafeMemoryRoots(
     return true;
 }
 
+/**
+ * @brief 合并两个已在有符号模范围内的并行部分和，并恢复标准余数范围。
+ * @param builder IR 指令构造器。
+ * @param module 所属模块。
+ * @param p0 第一部分结果。
+ * @param p1 第二部分结果。
+ * @param mod 正模数常量。
+ * @return 不使用高代价 srem 的等价合并结果。
+ */
 Value *createModuloPartialMerge(IRStmtBuilder *builder, Module *module,
                                 Value *p0, Value *p1, ConstantInt *mod) {
     auto *zero = new ConstantInt(module->int32_ty_, 0);
@@ -222,11 +326,25 @@ Value *createModuloPartialMerge(IRStmtBuilder *builder, Module *module,
     return builder->create_isrem(merged, mod);
 }
 
+/**
+ * @brief 判断 definedInLoop 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @param blocks 相关基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool definedInLoop(Value *v, const std::set<BasicBlock *> &blocks) {
     auto *inst = dynamic_cast<Instruction *>(v);
     return inst && blocks.count(inst->parent_);
 }
 
+/**
+ * @brief 原地执行 replaceUsesOutsideOutlinedLoop 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param oldValue 参数 `oldValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param newValue 参数 `newValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param blocks 相关基本块集合。
+ * @param outlinedBody 参数 `outlinedBody`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceUsesOutsideOutlinedLoop(Value *oldValue, Value *newValue,
                                     const std::set<BasicBlock *> &blocks,
                                     Function *outlinedBody) {
@@ -243,6 +361,12 @@ void replaceUsesOutsideOutlinedLoop(Value *oldValue, Value *newValue,
 
 // ScalarExpansion scratch：每个父循环迭代先清零、后累加、再写回。
 // 若某个并行循环内完整使用该 scratch，可在 worker 内改成线程私有 alloca。
+/**
+ * @brief 判断 isPrivatizableScratch 所描述的结构、合法性或安全条件是否成立。
+ * @param root 参数 `root`，用于本函数的分析、匹配或 IR 构造。
+ * @param blocks 相关基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
     if (!isScalarExpansionScratch(root)) return false;
     for (auto &use : root->use_list_) {
@@ -252,17 +376,38 @@ bool isPrivatizableScratch(Value *root, const std::set<BasicBlock *> &blocks) {
     return true;
 }
 
+/**
+ * @brief 实现 scratchBytes 对应的局部分析或变换辅助逻辑。
+ * @param root 参数 `root`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 long long scratchBytes(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     if (!alloca) return -1;
     return typeStorageBytes(alloca->allocated_type());
 }
 
+/**
+ * @brief 取得可私有化 scratch 根 alloca 的分配类型。
+ * @param root 待检查的内存根对象。
+ * @return root 为 alloca 时返回其分配类型，否则返回 nullptr。
+ */
 Type *scratchAllocaType(Value *root) {
     auto *alloca = dynamic_cast<AllocaInst *>(root);
     return alloca ? alloca->allocated_type() : nullptr;
 }
 
+/**
+ * @brief 判断 isAllowedReductionTerm 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @param accumulator 参数 `accumulator`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivPhi 参数 `ivPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivNext 参数 `ivNext`，用于本函数的分析、匹配或 IR 构造。
+ * @param visiting 参数 `visiting`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isAllowedReductionTerm(Value *value, const Loop &loop,
                             PhiInst *accumulator, PhiInst *ivPhi,
                             Instruction *ivNext,
@@ -356,11 +501,23 @@ bool isAllowedReductionTerm(Value *value, const Loop &loop,
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void ParallelizeLoops::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 匹配 Shape 所描述的 IR 结构并提取结果。
+ * @param loop 待检查或变换的循环。
+ * @param shape 参数 `shape`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
                                   std::string *reason) {
     auto fail = [&](const std::string &why) {
@@ -381,10 +538,13 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
         return c && c->value_ == 1;
     };
 
+    /**
+     * @brief 保存并行化候选循环中一个步长为一的整数归纳变量。
+     */
     struct IVCandidate {
-        PhiInst *phi = nullptr;
-        Value *init = nullptr;
-        Instruction *next = nullptr;
+        PhiInst *phi = nullptr;         ///< 循环头中的候选归纳变量 PHI。
+        Value *init = nullptr;          ///< 预头提供的归纳变量初始值。
+        Instruction *next = nullptr;    ///< 回边生成下一归纳值的更新指令。
     };
     std::vector<IVCandidate> ivCandidates;
     for (auto inst : loop.header->instr_list_) {
@@ -459,12 +619,26 @@ bool ParallelizeLoops::matchShape(Loop &loop, LoopShape &shape,
     return true;
 }
 
+/**
+ * @brief 判断 isLegalDoall 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @param shape 参数 `shape`，用于本函数的分析、匹配或 IR 构造。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @param argAA 参数 `argAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param privatize 参数 `privatize`，用于本函数的分析、匹配或 IR 构造。
+ * @param reductions 参数 `reductions`，用于本函数的分析、匹配或 IR 构造。
+ * @param scalarReductions 参数 `scalarReductions`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
                                     Function *func, AnalysisManager *AM,
                                     const ArgumentAliasAnalysis &argAA,
                                     std::set<Value *> *privatize,
                                     std::vector<Reduction> *reductions,
                                     std::vector<ScalarReduction> *scalarReductions) {
+    // 合法性分三层：过滤调用/alloca，识别可私有化状态和归约，最后证明跨迭代访存无冲突。
+    // 任一内存根、PHI 或依赖无法分类时都拒绝并行化，不能依赖运行时输入碰巧无冲突。
     auto fail = [&](const std::string &why) {
         debugPar("reject func=" + func->name_ + " loop=" + loopName(loop) +
                  ": " + why);
@@ -885,11 +1059,9 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             return fail("store address does not vary with loop IV");
     }
 
-    // TriangleInterchange has already proved that every same-root read is from
-    // the current cell or an earlier wave.  Re-running a direction-vector test
-    // here loses the nested-loop inequalities used by that proof, so consume
-    // the narrowly-scoped coincidence certificate instead.  Unmarked loops
-    // retain the ordinary DOALL checks below.
+    // TriangleInterchange 已证明同根读取只来自当前单元或更早波次。若在这里重做
+    // 方向向量检查，会丢失该证明依赖的嵌套循环不等式，因此仅对带精确标记的循环
+    // 复用 coincidence 证书；未标记循环仍执行下面的普通 DOALL 检查。
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
 
     auto basePriv = [&](Instruction *acc) {
@@ -932,10 +1104,8 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
         }
     }
 
-    // A constant-size loop must amortize worker dispatch, range splitting and
-    // the final join.  Tiny DOALL loops are often just boundary copies or
-    // initialization and lose substantially even though dependence analysis
-    // proves them parallel-safe.
+    // 常量规模循环必须能摊销工作线程唤醒、区间切分和最终汇合成本。很小的 DOALL
+    // 往往只是边界复制或初始化，即使依赖分析证明安全，并行化也会明显变慢。
     auto *ci = dynamic_cast<ConstantInt *>(shape.init);
     auto *cb = dynamic_cast<ConstantInt *>(shape.bound);
     constexpr long long kMinLeafParallelTripCount = 2048;
@@ -954,11 +1124,24 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
     return true;
 }
 
+/**
+ * @brief 原地执行 transform 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @param shape 参数 `shape`，用于本函数的分析、匹配或 IR 构造。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param privatize 参数 `privatize`，用于本函数的分析、匹配或 IR 构造。
+ * @param reductions 参数 `reductions`，用于本函数的分析、匹配或 IR 构造。
+ * @param scalarReductions 参数 `scalarReductions`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
                                  Function *func, Module *module,
                                  const std::set<Value *> &privatize,
                                  const std::vector<Reduction> &reductions,
                                  const std::vector<ScalarReduction> &scalarReductions) {
+    // 将循环体提取为 worker 后，主函数只负责计算任务区间、调用并行运行时和合并归约。
+    // 需要私有化的 scratch/标量状态作为 worker 参数传递，禁止线程共享可写临时对象。
     (void)reductions;  // IV-varying reductions need no privatization
     int id = (int)bodies_.size();
     std::vector<ScalarReduction> scalarReds = scalarReductions;
@@ -1224,6 +1407,12 @@ void ParallelizeLoops::transform(Loop &loop, const LoopShape &shape,
              " header=" + loop.header->name_ + " id=" + std::to_string(id));
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses ParallelizeLoops::execute(Module *module,
                                             AnalysisManager &AM) {
     bodies_.clear();
@@ -1264,14 +1453,9 @@ PreservedAnalyses ParallelizeLoops::execute(Module *module,
                 if (!isLegalDoall(*loop, shape, func, &AM, argAA, &privatize,
                                    &reductions, &scalarReductions))
                     continue;
-                // A nested leaf loop would invoke the persistent-worker
-                // protocol once per parent iteration.  Besides overwhelming
-                // useful work with synchronization, rapidly publishing live-in
-                // contexts is a poor fit for this whole-region outliner.  Keep
-                // the existing reduction case, and otherwise require a nested
-                // loop *nest*: its child-loop work amortizes one dispatch and
-                // the complete region has already passed the same dependence
-                // and live-out checks as a top-level DOALL loop.
+                // 并行化嵌套叶子循环会在父循环每轮都触发一次常驻线程协议，频繁发布
+                // live-in 上下文和同步会吞没有效工作。归约循环仍保留；其他情况要求
+                // 候选自身还含子循环，使一次调度能由整片嵌套区域的工作量摊销。
                 if (loop->depth != 0 && reductions.empty() &&
                     scalarReductions.empty() &&
                     loop->children.empty() &&

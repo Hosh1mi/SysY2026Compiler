@@ -1,3 +1,9 @@
+/**
+ * @file loopRotate.cpp
+ * @brief 循环旋转：旋转循环 CFG，把循环条件调整到更适合后续优化的规范位置。
+ * @details 克隆头部可安全执行的指令到入口检查块，使首次迭代与回边共享条件，同时修复退出 PHI。
+ */
+
 #include "../../../include/mid/opt/loopRotate.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
@@ -5,6 +11,11 @@
 #include <cstdlib>
 #include <set>
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopRotate::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
@@ -12,6 +23,12 @@ void LoopRotate::execute(Module *module) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopRotate::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;
@@ -22,11 +39,23 @@ PreservedAnalyses LoopRotate::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 查询循环旋转克隆阶段的值映射。
+ * @param value 待重映射的原值。
+ * @param valueMap 原值到克隆值的映射表。
+ * @return 命中时返回克隆值，否则返回原值。
+ */
 static Value *remapValue(Value *value, const std::map<Value *, Value *> &valueMap) {
     auto it = valueMap.find(value);
     return it == valueMap.end() ? value : it->second;
 }
 
+/**
+ * @brief 查询 PHI 来自指定前驱的入值。
+ * @param phi 待查询的 PHI 指令。
+ * @param pred 指定前驱基本块。
+ * @return 找到时返回对应值，否则返回 nullptr。
+ */
 static Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
     for (unsigned i = 0; i < phi->num_ops(); i += 2) {
         if (phi->get_operand(i + 1) == pred)
@@ -35,6 +64,11 @@ static Value *incomingFrom(PhiInst *phi, BasicBlock *pred) {
     return nullptr;
 }
 
+/**
+ * @brief 判断 isSupportedHeaderInst 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isSupportedHeaderInst(Instruction *inst) {
     if (inst->is_phi() || inst->isTerminator())
         return false;
@@ -45,6 +79,11 @@ static bool isSupportedHeaderInst(Instruction *inst) {
     return false;
 }
 
+/**
+ * @brief 原地执行 removeTerminatorAndCfgEdges 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param bb 目标或待修改的基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void removeTerminatorAndCfgEdges(BasicBlock *bb) {
     auto *term = bb->get_terminator();
     std::vector<BasicBlock *> succs = bb->succ_bbs_;
@@ -55,6 +94,14 @@ static void removeTerminatorAndCfgEdges(BasicBlock *bb) {
         bb->delete_instr(term);
 }
 
+/**
+ * @brief 原地执行 replaceWithConditionalBranch 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param bb 目标或待修改的基本块。
+ * @param cond 参数 `cond`，用于本函数的分析、匹配或 IR 构造。
+ * @param trueSucc 参数 `trueSucc`，用于本函数的分析、匹配或 IR 构造。
+ * @param falseSucc 参数 `falseSucc`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void replaceWithConditionalBranch(BasicBlock *bb, Value *cond,
                                          BasicBlock *trueSucc,
                                          BasicBlock *falseSucc) {
@@ -62,6 +109,13 @@ static void replaceWithConditionalBranch(BasicBlock *bb, Value *cond,
     new BranchInst(cond, trueSucc, falseSucc, bb);
 }
 
+/**
+ * @brief 实现 placeBlockBefore 对应的局部分析或变换辅助逻辑。
+ * @param func 待分析或改写的函数。
+ * @param block 目标或待检查的基本块。
+ * @param before 参数 `before`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void placeBlockBefore(Function *func, BasicBlock *block, BasicBlock *before) {
     auto &bbs = func->basic_blocks_;
     auto blockIt = std::find(bbs.begin(), bbs.end(), block);
@@ -75,6 +129,14 @@ static void placeBlockBefore(Function *func, BasicBlock *block, BasicBlock *befo
         bbs.push_back(block);
 }
 
+/**
+ * @brief 判断 isHeaderLocalUse 所描述的结构、合法性或安全条件是否成立。
+ * @param def 参数 `def`，用于本函数的分析、匹配或 IR 构造。
+ * @param user 参数 `user`，用于本函数的分析、匹配或 IR 构造。
+ * @param header 循环头基本块。
+ * @param exit 参数 `exit`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isHeaderLocalUse(Instruction *def, Instruction *user,
                              BasicBlock *header, BasicBlock *exit) {
     if (user->parent_ == header)
@@ -84,6 +146,12 @@ static bool isHeaderLocalUse(Instruction *def, Instruction *user,
     return false;
 }
 
+/**
+ * @brief 判断 isInvariantForLoop 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isInvariantForLoop(Value *value, const Loop &loop) {
     if (dynamic_cast<Constant *>(value) || dynamic_cast<GlobalVariable *>(value) ||
         dynamic_cast<Argument *>(value))
@@ -96,6 +164,11 @@ static bool isInvariantForLoop(Value *value, const Loop &loop) {
 // while loop.  One branch must be a side-effect-free skip and the other a
 // memory/call work block; both rejoin the unique latch directly.  This is the
 // source form consumed by inductiveRangeCheckElimination after rotation.
+/**
+ * @brief 判断 hasTightenableDomainGuard 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool hasTightenableDomainGuard(const Loop &loop) {
     if (!loop.canonicalIV || !loop.children.empty())
         return false;
@@ -161,6 +234,11 @@ static bool hasTightenableDomainGuard(const Loop &loop) {
            (trueKind == 1 && falseKind == 0);
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRotate::runOnFunction(Function *func) {
     for (auto *bb : func->basic_blocks_) {
         for (auto *inst : bb->instr_list_) {
@@ -197,6 +275,13 @@ bool LoopRotate::runOnFunction(Function *func) {
     return changed;
 }
 
+/**
+ * @brief 克隆循环头中可安全复制的标量计算指令。
+ * @param inst 待克隆的原指令。
+ * @param dest 克隆指令的目标基本块。
+ * @param valueMap 原值到当前旋转版本值的映射。
+ * @return 成功时返回克隆指令，不支持该指令类型时返回 nullptr。
+ */
 Instruction *LoopRotate::cloneInstruction(
     Instruction *inst, BasicBlock *dest,
     const std::map<Value *, Value *> &valueMap) {
@@ -216,6 +301,13 @@ Instruction *LoopRotate::cloneInstruction(
     return nullptr;
 }
 
+/**
+ * @brief 为指定循环退出边创建专用中间块。
+ * @param func 所属函数。
+ * @param pred 原退出边的前驱基本块。
+ * @param exit 原退出目标块。
+ * @return 新建并跳向 exit 的边分裂块。
+ */
 BasicBlock *LoopRotate::splitExitEdge(Function *func, BasicBlock *pred,
                                       BasicBlock *exit) {
     auto *split = new BasicBlock(func->parent_,
@@ -226,22 +318,26 @@ BasicBlock *LoopRotate::splitExitEdge(Function *func, BasicBlock *pred,
     return split;
 }
 
+/**
+ * @brief 原地执行 rotateLoop 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
+    // 旋转分为预检、克隆头部计算、重连入口/回边和修复退出 PHI 四步。
+    // 所有可失败条件在改 CFG 前完成，避免留下只旋转了一半的循环。
     if (!loop || !loop->header || !loop->preheader)
         return false;
-    // Calls are control and memory barriers whose continuation can carry
-    // values through exit phis.  The current cloning/remapping logic handles
-    // only the header's scalar expressions, so do not rotate a loop that
-    // contains a call.
+    // 调用既是控制/内存屏障，其返回值还可能经出口 PHI 继续存活；当前克隆器只会
+    // 重映射 header 中的标量表达式，因此含调用的循环不能安全旋转。
     for (auto *bb : loop->blocks)
         for (auto *inst : bb->instr_list_)
             if (inst->is_call())
                 return false;
-    // Keep simple canonical while loops in the form consumed directly by
-    // vectorization and IV strength reduction.  A canonical IV alone is not a
-    // reason to reject rotation for a multi-block body: internal control flow
-    // already prevents those simple-loop consumers from matching, while
-    // rotation exposes a guarded do-while form to the structured unroller.
+    // 简单规范 while 形态可直接被向量化和 IV 强度削弱使用，不应无谓旋转。
+    // 多块循环则本就无法匹配这些简单消费者，旋转后反而能向结构化展开暴露
+    // 带入口保护的 do-while 形态，所以仅在缺少可收紧域保护时保留规范循环。
     if (loop->hasCanonicalIV() && !hasTightenableDomainGuard(*loop) &&
         !std::getenv("EXP_ROTATE_IV"))
         return false;
@@ -376,9 +472,8 @@ bool LoopRotate::rotateLoop(Loop *loop, Function *func) {
 
     BasicBlock *preExit = splitExitEdge(func, preheader, exitSucc);
     BasicBlock *latchExit = splitExitEdge(func, latch, exitSucc);
-    // Keep the rotated loop in simplify form.  The original preheader becomes
-    // the zero-trip guard, so its continue edge needs a new dedicated
-    // single-successor preheader rather than targeting the loop body directly.
+    // 原 preheader 旋转后承担零次迭代保护，不能再直接作为循环入口。为继续边新建
+    // 单后继 preheader，使旋转后的循环仍保持 simplify form，方便后续 Pass 匹配。
     auto *rotatedPreheader = new BasicBlock(
         func->parent_, continueSucc->name_ + ".preheader", func);
     placeBlockBefore(func, rotatedPreheader, continueSucc);

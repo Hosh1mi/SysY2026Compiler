@@ -1,3 +1,9 @@
+/**
+ * @file loopMemoryScalarPromotion.cpp
+ * @brief 循环内存标量化：把循环内对不变地址的反复读写提升为标量 SSA 状态，并在边界同步内存。
+ * @details 仅提升循环不变且无冲突别名的地址；预头加载、循环内标量更新和所有出口回写必须成套生成。
+ */
+
 #include "../../../include/mid/opt/loopMemoryScalarPromotion.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/basicBlock.hpp"
@@ -54,10 +60,21 @@
 
 namespace {
 
+/**
+ * @brief 判断 isScalarType 所描述的结构、合法性或安全条件是否成立。
+ * @param ty 相关 IR 类型。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isScalarType(Type *ty) {
     return ty && (ty->tid_ == Type::IntegerTyID || ty->tid_ == Type::FloatTyID);
 }
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopInvariant(Value *value, const Loop &loop) {
     if (!value) return false;
     if (dynamic_cast<Constant *>(value) || dynamic_cast<Argument *>(value) ||
@@ -68,6 +85,12 @@ bool isLoopInvariant(Value *value, const Loop &loop) {
     return !inst || !loop.blocks.count(inst->parent_);
 }
 
+/**
+ * @brief 实现 exitsAreDominatedByPreheader 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool exitsAreDominatedByPreheader(const Loop &loop,
                                   const DominatorTreeAnalysis &DT) {
     Function *func = loop.header ? loop.header->parent_ : nullptr;
@@ -80,13 +103,21 @@ bool exitsAreDominatedByPreheader(const Loop &loop,
     return true;
 }
 
+/**
+ * @brief 记录循环中可提升到标量 PHI 的固定地址及其精确访问次数。
+ */
 struct Candidate {
-    Value *ptr = nullptr;
-    Type *elemTy = nullptr;
-    int exactLoads = 0;
-    int exactStores = 0;
+    Value *ptr = nullptr;      ///< 在循环内保持不变的候选内存地址。
+    Type *elemTy = nullptr;    ///< 该地址所指向的标量元素类型。
+    int exactLoads = 0;        ///< 直接从该地址读取的 load 数量。
+    int exactStores = 0;       ///< 直接写入该地址的 store 数量。
 };
 
+/**
+ * @brief 判断 hasDedicatedPhiFreeExits 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasDedicatedPhiFreeExits(const Loop &loop) {
     for (auto *exit : loop.exits) {
         for (auto *pred : exit->pre_bbs_) {
@@ -102,6 +133,13 @@ bool hasDedicatedPhiFreeExits(const Loop &loop) {
     return true;
 }
 
+/**
+ * @brief 原地执行 replaceBranchTarget 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param pred 前驱基本块。
+ * @param oldTarget 需要替换的原分支目标。
+ * @param newTarget 替换后的新分支目标。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
                          BasicBlock *newTarget) {
     auto *term = pred->get_terminator();
@@ -115,11 +153,22 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldTarget,
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopMemoryScalarPromotion::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopMemoryScalarPromotion::execute(Module *module,
                                                      AnalysisManager &AM) {
     BasicAliasAnalysis BAA;
@@ -139,6 +188,13 @@ PreservedAnalyses LoopMemoryScalarPromotion::execute(Module *module,
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopMemoryScalarPromotion::runOnFunction(Function *func,
                                               const BasicAliasAnalysis &BAA,
                                               AnalysisManager &AM) {
@@ -174,9 +230,18 @@ bool LoopMemoryScalarPromotion::runOnFunction(Function *func,
     return changed;
 }
 
+/**
+ * @brief 尝试执行 Promote 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopMemoryScalarPromotion::tryPromote(Loop &loop,
                                            const BasicAliasAnalysis &BAA,
                                            const DominatorTreeAnalysis &DT) {
+    // 第一遍按不变地址聚合 load/store，第二遍用 ModRef 排除别名写入并选择收益最大候选。
+    // 最终以“预头加载—循环内标量槽—所有出口回写”成套替换，不能遗漏任一退出边。
     if (!loop.preheader || loop.exits.empty() ||
         !exitsAreDominatedByPreheader(loop, DT) || !hasDedicatedPhiFreeExits(loop))
         return false;
@@ -317,9 +382,8 @@ bool LoopMemoryScalarPromotion::tryPromote(Loop &loop,
         Value *needsWriteback = nullptr;
         if (compareFinalValue) {
             finalValue = new LoadInst(slot, check);
-            // Reloading here avoids keeping %init live across the whole loop.
-            // Alias safety guarantees the original cell is unchanged until this
-            // writeback edge, so this is the same value loaded in the preheader.
+            // 写回边重新加载初值，可避免让 preheader 的 %init 跨整个循环
+            // 保持活跃。别名检查已证明原单元此前未被其他指令修改。
             auto *initialValue = new LoadInst(best->ptr, check);
             needsWriteback = new ICmpInst(ICmpInst::ICMP_NE, finalValue,
                                           initialValue, check);

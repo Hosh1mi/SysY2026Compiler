@@ -1,3 +1,9 @@
+/**
+ * @file loopVectorize.cpp
+ * @brief 循环向量化：识别可向量化循环并生成适配 Cortex-A53 NEON 的四路向量循环与标量尾循环。
+ * @details 以四 lane NEON 为目标，先证明连续访问和无循环携带依赖，再生成向量主循环及覆盖剩余元素的标量尾循环。
+ */
+
 #include "../../../include/mid/opt/loopVectorize.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/intrinsics.hpp"
@@ -12,11 +18,22 @@ static const int VECTORIZE_FACTOR = 4;
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopVectorize::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
     BasicAliasAnalysis &BAA = AM.getBasicAA(module);
     auto functions = module->function_list_;
@@ -31,6 +48,12 @@ PreservedAnalyses LoopVectorize::execute(Module *module, AnalysisManager &AM) {
 // 循环不变值判断
 // =====================================================================
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param val 待检查或映射的 IR 值。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopVectorize::isLoopInvariant(Value *val,
                                      const std::set<BasicBlock*> &loopBlocks) {
     if (dynamic_cast<Constant*>(val))       return true;
@@ -43,6 +66,15 @@ bool LoopVectorize::isLoopInvariant(Value *val,
     return !loopBlocks.count(inst->parent_);
 }
 
+/**
+ * @brief 收集或查找 getLoopPhiIncoming 所需的信息。
+ * @param loop 待检查或变换的循环。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param initVal 参数 `initVal`，用于本函数的分析、匹配或 IR 构造。
+ * @param latchVal 参数 `latchVal`，用于本函数的分析、匹配或 IR 构造。
+ * @param latchBB 参数 `latchBB`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi,
                                Value *&initVal, Value *&latchVal,
                                BasicBlock *&latchBB) {
@@ -65,6 +97,13 @@ static bool getLoopPhiIncoming(const Loop &loop, PhiInst *phi,
     return initVal && latchVal && latchBB;
 }
 
+/**
+ * @brief 计算 decomposePointerOffset 所描述的派生信息，供合法性或收益判断使用。
+ * @param ptr 参数 `ptr`，用于本函数的分析、匹配或 IR 构造。
+ * @param basePhi 参数 `basePhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param offset 参数 `offset`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool decomposePointerOffset(Value *ptr, PhiInst *basePhi, int &offset) {
     offset = 0;
     Value *cur = ptr;
@@ -79,6 +118,13 @@ static bool decomposePointerOffset(Value *ptr, PhiInst *basePhi, int &offset) {
     return true;
 }
 
+/**
+ * @brief 匹配 IVPlusConstant 所描述的 IR 结构并提取结果。
+ * @param val 待检查或映射的 IR 值。
+ * @param ivPhi 参数 `ivPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param offset 参数 `offset`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool matchIVPlusConstant(Value *val, PhiInst *ivPhi, int &offset) {
     if (val == ivPhi) {
         offset = 0;
@@ -103,6 +149,14 @@ static bool matchIVPlusConstant(Value *val, PhiInst *ivPhi, int &offset) {
     return false;
 }
 
+/**
+ * @brief 计算 computeGEPIndexStride 所描述的派生信息，供合法性或收益判断使用。
+ * @param gep 参数 `gep`，用于本函数的分析、匹配或 IR 构造。
+ * @param varyPos 参数 `varyPos`，用于本函数的分析、匹配或 IR 构造。
+ * @param scalarTy 参数 `scalarTy`，用于本函数的分析、匹配或 IR 构造。
+ * @param laneStride 参数 `laneStride`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
                                   Type *scalarTy, int &laneStride) {
     Type *curTy = static_cast<PointerType*>(gep->get_operand(0)->type_)->contained_;
@@ -130,6 +184,14 @@ static bool computeGEPIndexStride(GetElementPtrInst *gep, unsigned varyPos,
     return false;
 }
 
+/**
+ * @brief 原地执行 rewritePhiIncoming 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newVal 参数 `newVal`，用于本函数的分析、匹配或 IR 构造。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void rewritePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
                                Value *newVal, BasicBlock *newPred) {
     for (unsigned i = 0; i < phi->num_ops(); i += 2) {
@@ -144,6 +206,12 @@ static void rewritePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
 // 寻找归纳变量
 // =====================================================================
 
+/**
+ * @brief 收集或查找 findInductionVar 所需的信息。
+ * @param loop 待检查或变换的循环。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
     // Look for a phi in the header with integer type
     for (auto inst : loop.header->instr_list_) {
@@ -191,6 +259,13 @@ bool LoopVectorize::findInductionVar(const Loop &loop, InductionVar &iv) {
     return false;
 }
 
+/**
+ * @brief 分析 ReductionLoop 的结构、递推或依赖信息。
+ * @param loop 待检查或变换的循环。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @param group 参数 `group`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &iv,
                                          ReductionGroup &group) {
     const bool debugReduction =
@@ -237,10 +312,13 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
         cmpInst->get_operand(0) != iv.phi)
         return reject("non-canonical-loop-condition");
 
+    /**
+     * @brief 描述可在向量循环中按固定元素步长递推的指针 PHI。
+     */
     struct PointerPhiInfo {
-        PhiInst *phi = nullptr;
-        Value *initVal = nullptr;
-        int totalStep = 0;
+        PhiInst *phi = nullptr;     ///< 原标量循环中的指针 PHI。
+        Value *initVal = nullptr;   ///< 从循环预头进入的初始指针。
+        int totalStep = 0;          ///< 单次标量迭代对应的总元素偏移。
     };
 
     std::vector<PointerPhiInfo> pointerPhis;
@@ -639,10 +717,22 @@ bool LoopVectorize::analyzeReductionLoop(const Loop &loop, const InductionVar &i
 // 分析循环中步长为 1 的连续内存访问
 // =====================================================================
 
+/**
+ * @brief 构造 emitReductionVectorizedLoop 所描述的新 IR，并返回或记录构造结果。
+ * @param loop 待检查或变换的循环。
+ * @param iv 参数 `iv`，用于本函数的分析、匹配或 IR 构造。
+ * @param group 参数 `group`，用于本函数的分析、匹配或 IR 构造。
+ * @param vecWidth 参数 `vecWidth`，用于本函数的分析、匹配或 IR 构造。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopVectorize::emitReductionVectorizedLoop(
     const Loop &loop, const InductionVar &iv, const ReductionGroup &group,
     int vecWidth, Function *func, Module *module)
 {
+    // 归约向量循环分别维护向量累加器和标量尾状态；主循环结束后先横向归约，
+    // 再把结果作为尾循环初值，确保非 VF 整倍数的元素仍按原顺序覆盖。
     const bool debugReduction =
         std::getenv("DEBUG_LOOP_VECTORIZE_REDUCTION") != nullptr;
     BasicBlock *preheader = loop.preheader;
@@ -1163,6 +1253,14 @@ void LoopVectorize::emitReductionVectorizedLoop(
 
 namespace {
 
+/**
+ * @brief 原地执行 replacePhiIncoming 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newValue 参数 `newValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replacePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
                         Value *newValue, BasicBlock *newPred) {
     for (unsigned i = 0; i < phi->num_ops(); i += 2) {
@@ -1175,9 +1273,18 @@ void replacePhiIncoming(PhiInst *phi, BasicBlock *oldPred,
 
 } // namespace
 
+/**
+ * @brief 构造 emitVectorizedLoop 所描述的新 IR，并返回或记录构造结果。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopVectorize::emitVectorizedLoop(
     const LoopVectorizationAnalysis::Plan &plan, Function *func,
     Module *module) {
+    // 发射顺序为运行时守卫、向量主循环、标量尾循环和统一出口。
+    // 原标量值到向量值的映射按定义顺序建立，store 延后到对应向量值可用后提交。
     using AddressKind = LoopVectorizationAnalysis::AddressKind;
 
     BasicBlock *preheader = plan.preheader;
@@ -1276,15 +1383,11 @@ bool LoopVectorize::emitVectorizedLoop(
         initialAddressForGroup[access.addressGroup] = initialPointer;
     }
 
-    // Hoist the signed-overflow proof and profitable-entry test out of the
-    // vector loop.  Proving `init + minimumTrip - 1 < bound` also proves that
-    // `bound - vectorTrip` is representable.  Once entered, therefore,
-    // `iv <= bound - vectorTrip` is exactly the scalar `iv < bound` condition
-    // for every lane.  Constant initial values make the entry test a single
-    // comparison, which is the common canonical-loop form.
-    // A rotated one-block loop tests the incremented IV at the bottom.  Keep
-    // at least one scalar iteration for its epilogue; entering it with
-    // IV==bound would execute an extra iteration.
+    // 把有符号溢出证明和收益门槛检查提升到向量循环之外。证明
+    // `init + minimumTrip - 1 < bound` 也同时保证 `bound - vectorTrip` 可表示；
+    // 进入向量路径后，`iv <= bound - vectorTrip` 才与每个 lane 的标量条件等价。
+    // 对底部检查递增后 IV 的单块旋转循环，还必须至少保留一次标量尾迭代，
+    // 否则以 IV==bound 进入尾循环会多执行一轮。
     const int scalarTail = plan.rotatedSingleBlock ? 1 : 0;
     const int minimumTrip =
         std::max(vectorTrip + scalarTail, plan.minimumTripCount);
@@ -1338,11 +1441,10 @@ bool LoopVectorize::emitVectorizedLoop(
     insertBeforePreheaderTerminator(vectorEnd);
 
     if (!plan.runtimeMemoryChecks.empty()) {
-        // The access range is [start, start + (bound - init)).  Comparing
-        // half-open ranges with unsigned pointer order is sufficient for the
-        // target's flat address space.  These GEPs are deliberately not
-        // inbounds: on the vector-bypass path a wrapped trip value must remain
-        // defined, while canEnterVector prevents that path reaching vecHeader.
+        // 每组访问范围为 [start, start + (bound - init))。目标采用平坦地址空间，
+        // 用无符号指针序比较两个半开区间即可检查不相交。这里故意不用 inbounds GEP：
+        // 绕过向量路径时即便 trip 回绕也必须保持 IR 有定义，而 canEnterVector 会阻止
+        // 该状态真正进入 vecHeader。
         auto *span = new BinaryInst(module->int32_ty_, Instruction::Sub,
                                     plan.induction.bound,
                                     plan.induction.init, preheader, true);
@@ -1435,9 +1537,12 @@ bool LoopVectorize::emitVectorizedLoop(
         return result;
     };
 
+    /**
+     * @brief 暂存尚未插入向量循环体的向量写入值与目标地址。
+     */
     struct PendingStore {
-        Value *value = nullptr;
-        Value *pointer = nullptr;
+        Value *value = nullptr;     ///< 待写出的向量值。
+        Value *pointer = nullptr;   ///< 对应向量 store 的起始地址。
     };
     std::vector<PendingStore> pendingStores;
 
@@ -1488,11 +1593,9 @@ bool LoopVectorize::emitVectorizedLoop(
                            vectorPointerType(access.scalarType), vecBody);
     };
 
-    // Keep independent UF-part loads together.  On an in-order target this
-    // exposes enough work to cover load-to-use latency before arithmetic, and
-    // it also keeps the values distinct through register allocation so the
-    // machine scheduler can retain that ordering.  Dependence legality and
-    // terminal-store ordering were proved when the plan was built.
+    // 将不同展开分片的独立 load 集中发射。在顺序执行的 A53 上，这能用其他加载
+    // 覆盖 load-to-use 延迟；同时让各值在寄存器分配期间保持独立，便于后端维持
+    // 调度次序。依赖合法性和末端 store 顺序已在构造计划时证明。
     for (int part = 0; part < UF; ++part) {
         auto &vectorValues = partVectorValues[part];
         auto &vectorAddresses = partVectorAddresses[part];
@@ -1661,9 +1764,8 @@ bool LoopVectorize::emitVectorizedLoop(
     }
     new BranchInst(vecHeader, vecBody);
 
-    // The original scalar loop is the epilogue.  The preheader can bypass the
-    // vector loop when the subtraction is unsafe or fewer than vectorTrip
-    // iterations remain, so merge both entry states explicitly in scalarPH.
+    // 原标量循环充当尾循环。若减法不安全或剩余迭代不足 vectorTrip，preheader 会
+    // 直接绕过向量循环，因此必须在 scalarPH 中显式合并“原初值”和“向量终值”。
     auto *scalarIV = PhiInst::create_phi(module->int32_ty_, scalarPH);
     scalarPH->add_instruction_front(scalarIV);
     scalarIV->addIncoming(plan.induction.init, preheader);
@@ -1690,8 +1792,18 @@ bool LoopVectorize::emitVectorizedLoop(
     return true;
 }
 
+/**
+ * @brief 尝试执行 Vectorize 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
                                  const BasicAliasAnalysis &BAA) {
+    // 归约循环使用专用发射器；其他循环先由 LoopVectorizationAnalysis 构造完整计划。
+    // 计划包含依赖合法性、访存连续性、向量宽度、展开因子和成本，发射阶段不再猜测。
     InductionVar reductionIV;
     if (findInductionVar(loop, reductionIV)) {
         ReductionGroup reduction;
@@ -1730,6 +1842,12 @@ bool LoopVectorize::tryVectorize(Loop &loop, Function *func, Module *module,
 // 对函数运行向量化
 // =====================================================================
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopVectorize::runOnFunction(Function *func, const BasicAliasAnalysis &BAA) {
     if (func->basic_blocks_.empty()) return;
 

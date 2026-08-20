@@ -1,3 +1,9 @@
+/**
+ * @file loopInterchange.cpp
+ * @brief 循环交换：依据循环形状与内存依赖合法性交换嵌套循环次序，以改善局部性或暴露并行性。
+ * @details 循环交换必须保持词典序依赖合法；克隆/下沉指令前验证副作用、外部使用和退出值可用性。
+ */
+
 #include "../../../include/mid/opt/loopInterchange.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/argumentAliasAnalysis.hpp"
@@ -19,10 +25,19 @@
 
 namespace {
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_LOOP_INTERCHANGE") != nullptr;
 }
 
+/**
+ * @brief 实现 storeSlice 对应的局部分析或变换辅助逻辑。
+ * @param B 参数 `B`，用于本函数的分析、匹配或 IR 构造。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 std::vector<Instruction *> storeSlice(BasicBlock *B) {
     std::set<Instruction *> inW;
     std::vector<Instruction *> work;
@@ -43,6 +58,11 @@ std::vector<Instruction *> storeSlice(BasicBlock *B) {
     return W;
 }
 
+/**
+ * @brief 判断 isCloneableType 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isCloneableType(Instruction *inst) {
     return dynamic_cast<BinaryInst *>(inst) || dynamic_cast<UnaryInst *>(inst) ||
            dynamic_cast<ICmpInst *>(inst)   || dynamic_cast<FCmpInst *>(inst) ||
@@ -52,22 +72,34 @@ bool isCloneableType(Instruction *inst) {
            dynamic_cast<StoreInst *>(inst);
 }
 
+/**
+ * @brief 判断 isDiscardablePureInstruction 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isDiscardablePureInstruction(Instruction *inst) {
     return inst && !inst->isTerminator() && !inst->is_store() &&
            !inst->is_call();
 }
 
+/**
+ * @brief 判断 isSafeOutsideSunkLoop 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSafeOutsideSunkLoop(Instruction *inst) {
-    // Instructions interleaved with the cloned store slice remain outside the
-    // newly-created inner loop.  They must neither observe memory modified by
-    // the slice nor have side effects.  Dependence closure puts every value
-    // needed by the slice into the slice itself; the IV-use check below then
-    // proves the remaining computations invariant with respect to the loop
-    // being sunk.
+    // 与待克隆 store 切片交错的其他指令会留在新内层循环之外，所以既不能观察
+    // 切片修改的内存，也不能自身有副作用。依赖闭包会把切片所需定义全部纳入，
+    // 后续 IV-use 检查再证明余下计算对被下沉循环不变。
     return inst && !inst->isTerminator() && !inst->is_load() &&
            !inst->is_store() && !inst->is_call();
 }
 
+/**
+ * @brief 实现 latchHasSideEffects 对应的局部分析或变换辅助逻辑。
+ * @param latch 循环回边基本块。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool latchHasSideEffects(BasicBlock *latch) {
     if (!latch) return true;
     for (auto *inst : latch->instr_list_) {
@@ -77,6 +109,11 @@ bool latchHasSideEffects(BasicBlock *latch) {
     return false;
 }
 
+/**
+ * @brief 实现 deleteUnusedPureInstructions 对应的局部分析或变换辅助逻辑。
+ * @param bb 目标或待修改的基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void deleteUnusedPureInstructions(BasicBlock *bb) {
     if (!bb) return;
     bool changed = true;
@@ -96,10 +133,32 @@ void deleteUnusedPureInstructions(BasicBlock *bb) {
 
 using ValMap = std::unordered_map<Value *, Value *>;
 
+/**
+ * @brief 前向声明：重映射交换切片中的值，必要时递归克隆其定义。
+ * @param v 待重映射的原值。
+ * @param dest 克隆指令的目标基本块。
+ * @param vm 原值到克隆值的映射表。
+ * @param unionW 需要随 K 维移动的完整指令切片。
+ * @param kIV 原 K 维归纳变量。
+ * @param localk 交换后当前位置对应的 K 值。
+ * @param ok 写回克隆过程是否成功。
+ * @return 重映射后的值；失败时返回 nullptr。
+ */
 Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
                     const std::set<Instruction *> &unionW, PhiInst *kIV,
                     Value *localk, bool &ok);
 
+/**
+ * @brief 把可移动 store 切片中的一条指令克隆到交换后的目标块。
+ * @param orig 待克隆的原指令。
+ * @param dest 克隆指令的目标基本块。
+ * @param vm 原值到克隆值的映射表。
+ * @param unionW 需要随 K 维移动的完整指令切片。
+ * @param kIV 原 K 维归纳变量。
+ * @param localk 交换后当前位置对应的 K 值。
+ * @param ok 写回克隆是否仍然成功。
+ * @return 成功时返回克隆指令，否则返回 nullptr。
+ */
 Instruction *cloneInstInto(Instruction *orig, BasicBlock *dest, ValMap &vm,
                            const std::set<Instruction *> &unionW, PhiInst *kIV,
                            Value *localk, bool &ok) {
@@ -142,6 +201,17 @@ Instruction *cloneInstInto(Instruction *orig, BasicBlock *dest, ValMap &vm,
     return cl;
 }
 
+/**
+ * @brief 将切片操作数重映射到交换后的循环位置，必要时递归克隆其定义。
+ * @param v 待重映射的原值。
+ * @param dest 克隆指令的目标基本块。
+ * @param vm 原值到克隆值的映射表。
+ * @param unionW 需要移动的指令切片。
+ * @param kIV 原 K 维归纳变量。
+ * @param localk 交换后对应的 K 值。
+ * @param ok 写回递归克隆是否成功。
+ * @return 重映射后的值；失败时返回 nullptr。
+ */
 Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
                     const std::set<Instruction *> &unionW, PhiInst *kIV,
                     Value *localk, bool &ok) {
@@ -158,6 +228,13 @@ Value *cloneValInto(Value *v, BasicBlock *dest, ValMap &vm,
     return v;   
 }
 
+/**
+ * @brief 原地执行 replaceBranchTarget 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param pred 前驱基本块。
+ * @param oldT 参数 `oldT`，用于本函数的分析、匹配或 IR 构造。
+ * @param newT 参数 `newT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     auto *term = pred->get_terminator();
     for (unsigned i = 0; i < term->num_ops(); i++)
@@ -168,6 +245,13 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     newT->add_pre_basic_block(pred);
 }
 
+/**
+ * @brief 原地执行 retargetPhiPred 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param succ 后继基本块。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -177,6 +261,14 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
     }
 }
 
+/**
+ * @brief 原地执行 applyParallelSink 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param func 待分析或改写的函数。
+ * @param K 参数 `K`，用于本函数的分析、匹配或 IR 构造。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @param newLoopHeaders 参数 `newLoopHeaders`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyParallelSink(Function *func, Loop *K,
                        const DominatorTreeAnalysis &DT,
                        std::vector<BasicBlock *> &newLoopHeaders) {
@@ -228,11 +320,9 @@ bool applyParallelSink(Function *func, Loop *K,
     }
     if (storeBlocks.empty()) return reject("loop has no movable store slice");
 
-    // A value feeding the store may have been hoisted to a nested-loop
-    // preheader.  Such a value is still evaluated once per K iteration and
-    // must therefore move with K.  Close the slice over non-phi definitions
-    // inside K instead of relying on a particular block layout produced by
-    // LICM.
+    // store 的输入可能已被 LICM 提升到嵌套循环 preheader，但它仍是每个 K 迭代
+    // 计算一次，必须随 K 一起移动。因此对 K 内非 PHI 定义求依赖闭包，不能依赖
+    // LICM 恰好生成的基本块布局。
     std::vector<Instruction *> dependencyWork(unionW.begin(), unionW.end());
     while (!dependencyWork.empty()) {
         Instruction *value = dependencyWork.back();
@@ -417,8 +507,18 @@ bool applyParallelSink(Function *func, Loop *K,
 // new outer header (mOuter), while the old header becomes the entry to the
 // interchanged body.  Guards that depend on K remain in their body blocks.
 
+/**
+ * @brief 原地执行 applyInterchange 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param func 待分析或改写的函数。
+ * @param K 参数 `K`，用于本函数的分析、匹配或 IR 构造。
+ * @param M 参数 `M`，用于本函数的分析、匹配或 IR 构造。
+ * @param newOuterHeader 参数 `newOuterHeader`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyInterchange(Function *func, Loop *K, Loop *M,
                       BasicBlock *&newOuterHeader) {
+    // 交换不是简单互换两个 header：需要重建外/内层入口、回边和退出关系，
+    // 并按新前驱重写两层 PHI。旧块只在所有新边就绪后才清理。
     Module *module = func->parent_;
     auto reject = [&](const char *reason) {
         if (debugEnabled())
@@ -453,11 +553,9 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
         mPreBranch->get_operand(0) != mHeader || kBodySucc != mPre)
         return reject("loops are not a directly nested guarded pair");
 
-    // This CFG rewrite moves the inner preheader outside K and turns the old
-    // inner latch into the new outer-loop control block.  Therefore the
-    // connecting block must contain no per-K work, and the latch must contain
-    // only the inner induction update.  If either block also contains loop
-    // body work, a correct interchange must split/clone it before retargeting.
+    // 交换后内层 preheader 移到 K 外，旧内层 latch 变成新外层控制块。
+    // 因此连接块不能含每轮 K 的计算，latch 也只能含归纳更新；否则必须先
+    // 分裂/克隆这些工作，不能直接重定向边。
     for (auto *inst : mPre->instr_list_)
         if (inst != mPreBranch)
             return reject("inner preheader contains outer-iteration work");
@@ -527,9 +625,8 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
         mOuter->add_instruction(phi);
     }
 
-    // The inner loop guard becomes the guard of the new outer loop.  Keeping
-    // it in the old header would merely skip the body once the inner IV is out
-    // of range; the old outer loop would continue to advance forever.
+    // 原内层 guard 必须迁移为新外层 guard；若仍留在旧 header，内层 IV
+    // 越界后只会跳过 body，而旧外层循环会继续推进并无法终止。
     mHeader->remove_instr(mGuard);
     mOuter->add_instruction(mGuard);
     for (auto *succ : std::vector<BasicBlock *>(mHeader->succ_bbs_)) {
@@ -608,7 +705,7 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
         if (exitSucc)     replaceBranchTarget(mLatch, exitSucc,     kExit);
     }
 
-    // Update phis in blocks whose predecessors changed
+    // 前驱改变后同步改写 PHI 的 predecessor 操作数，保持 value/block 成对。
     retargetPhiPred(kExit, kHeader, mLatch);
     retargetPhiPred(kLatch, mLatch, mHeader);
     for (auto *phi : mPhis)
@@ -620,6 +717,11 @@ bool applyInterchange(Function *func, Loop *K, Loop *M,
 }
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopInterchange::execute(Module *module) {
     AnalysisManager AM;
     ArgumentAliasAnalysis argAA;
@@ -632,6 +734,12 @@ void LoopInterchange::execute(Module *module) {
     argAA_ = nullptr;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopInterchange::execute(Module *module, AnalysisManager &AM) {
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
@@ -645,7 +753,15 @@ PreservedAnalyses LoopInterchange::execute(Module *module, AnalysisManager &AM) 
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
+    // 两阶段分别尝试把并行循环下沉、把携带归约的循环上浮。
+    // 每次 CFG 改写后清空分析并按受影响 header 重建邻域，避免复用旧 Loop*。
     bool everChanged = false;
     LoopInfo &initialLoopInfo = AM.getLoopInfo(func);
     AffectedLoopWorklist sinkWorklist;
@@ -703,9 +819,8 @@ bool LoopInterchange::runOnFunction(Function *func, AnalysisManager &AM) {
                 std::cerr << "[LoopInterchange] applyParallelSink bailed\n";
         }
 
-        // Phase 2: parallel float — K carries dependence, M (child) is parallel.
-        // Interchange K and M so the reduction loop moves closer to innermost,
-        // reducing the reuse distance of the reduction variable.
+        // 第二阶段：K 携带依赖而子循环 M 可并行。交换后归约循环更靠内，
+        // 缩短归约变量复用距离，同时把并行维提升到外层。
         if (!transformed) {
             while (Loop *K = floatWorklist.take(LI)) {
                 ParallelFloatAnalysisResult analysis =

@@ -1,3 +1,9 @@
+/**
+ * @file scalarExpansion.cpp
+ * @brief 标量扩展：为循环携带标量创建按迭代索引访问的临时数组，解除可证明的伪依赖。
+ * @details 把标量状态按迭代编号展开到临时数组前，需证明迭代计数、存储生命周期和新增空间成本均可接受。
+ */
+
 #include "../../../include/mid/opt/scalarExpansion.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
 #include "../../../include/mid/ir/constant.hpp"
@@ -9,12 +15,25 @@
 
 namespace {
 
+/**
+ * @brief 判断 isScratchAlloca 所描述的结构、合法性或安全条件是否成立。
+ * @param alloca 参数 `alloca`，用于本函数的分析、匹配或 IR 构造。
+ * @param size 参数 `size`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isScratchAlloca(AllocaInst *alloca, int size) {
     if (!alloca || !alloca->isLoopExpansionScratch()) return false;
     auto *arr = dynamic_cast<ArrayType *>(alloca->allocated_type());
     return arr && static_cast<int>(arr->num_elements_) == size;
 }
 
+/**
+ * @brief 在函数入口查找尺寸匹配且当前无 use 的标量展开 scratch。
+ * @param func 待搜索的函数。
+ * @param size 所需数组元素数量。
+ * @param reserved 本轮已占用、不可复用的 scratch 集合。
+ * @return 找到时返回可复用 alloca，否则返回 nullptr。
+ */
 AllocaInst *findUnusedScratch(Function *func, int size,
                               const std::set<AllocaInst *> &reserved) {
     if (!func || func->basic_blocks_.empty()) return nullptr;
@@ -28,6 +47,13 @@ AllocaInst *findUnusedScratch(Function *func, int size,
     return nullptr;
 }
 
+/**
+ * @brief 在函数入口创建并标记一个标量展开临时数组。
+ * @param func 目标函数。
+ * @param size 临时数组元素数量。
+ * @param counter 用于生成唯一名称的计数器。
+ * @return 新建的 scratch alloca。
+ */
 AllocaInst *createScratch(Function *func, int size, int &counter) {
     Module *module = func->parent_;
     auto *arr = module->get_array_type(module->int32_ty_, size);
@@ -39,6 +65,11 @@ AllocaInst *createScratch(Function *func, int size, int &counter) {
     return alloca;
 }
 
+/**
+ * @brief 查找基本块中的第一条非 PHI 指令。
+ * @param bb 待搜索的基本块。
+ * @return 找到时返回指令，否则返回 nullptr。
+ */
 Instruction *firstNonPhi(BasicBlock *bb) {
     for (auto *inst : bb->instr_list_) {
         if (!inst->is_phi()) return inst;
@@ -46,6 +77,11 @@ Instruction *firstNonPhi(BasicBlock *bb) {
     return nullptr;
 }
 
+/**
+ * @brief 从循环 header 条件分支中取得位于循环内的主体入口。
+ * @param loop 待分析的循环。
+ * @return 找到时返回循环内后继，否则返回 nullptr。
+ */
 BasicBlock *loopBodyEntry(Loop *loop) {
     if (!loop || !loop->header) return nullptr;
     auto *br = dynamic_cast<BranchInst *>(loop->header->get_terminator());
@@ -57,6 +93,13 @@ BasicBlock *loopBodyEntry(Loop *loop) {
     return nullptr;
 }
 
+/**
+ * @brief 原地执行 replaceBranchTarget 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param pred 前驱基本块。
+ * @param oldT 参数 `oldT`，用于本函数的分析、匹配或 IR 构造。
+ * @param newT 参数 `newT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     auto *term = pred ? pred->get_terminator() : nullptr;
     if (!term || !term->is_br()) return;
@@ -74,6 +117,13 @@ void replaceBranchTarget(BasicBlock *pred, BasicBlock *oldT, BasicBlock *newT) {
     newT->add_pre_basic_block(pred);
 }
 
+/**
+ * @brief 原地执行 retargetPhiPred 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param succ 后继基本块。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -84,6 +134,15 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
     }
 }
 
+/**
+ * @brief 在指定指令前插入 scratch[index] 的地址计算。
+ * @param scratch 临时数组 alloca。
+ * @param zero 数组首维使用的零下标。
+ * @param index 元素下标。
+ * @param bb 指令所属基本块。
+ * @param before 插入位置。
+ * @return 新建并插入的 GEP 指令。
+ */
 GetElementPtrInst *insertScratchGEP(AllocaInst *scratch, Value *zero,
                                     Value *index, BasicBlock *bb,
                                     Instruction *before) {
@@ -92,6 +151,15 @@ GetElementPtrInst *insertScratchGEP(AllocaInst *scratch, Value *zero,
     return gep;
 }
 
+/**
+ * @brief 在指定指令前插入对 scratch[index] 的读取。
+ * @param scratch 临时数组 alloca。
+ * @param zero 数组首维使用的零下标。
+ * @param index 元素下标。
+ * @param bb 指令所属基本块。
+ * @param before 插入位置。
+ * @return 新建并插入的 load 指令。
+ */
 LoadInst *insertScratchLoad(AllocaInst *scratch, Value *zero, Value *index,
                             BasicBlock *bb, Instruction *before) {
     auto *gep = insertScratchGEP(scratch, zero, index, bb, before);
@@ -100,6 +168,15 @@ LoadInst *insertScratchLoad(AllocaInst *scratch, Value *zero, Value *index,
     return load;
 }
 
+/**
+ * @brief 原地执行 insertScratchStore 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param scratch 参数 `scratch`，用于本函数的分析、匹配或 IR 构造。
+ * @param zero 参数 `zero`，用于本函数的分析、匹配或 IR 构造。
+ * @param index 参数 `index`，用于本函数的分析、匹配或 IR 构造。
+ * @param stored 参数 `stored`，用于本函数的分析、匹配或 IR 构造。
+ * @param bb 目标或待修改的基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void insertScratchStore(AllocaInst *scratch, Value *zero, Value *index,
                         Value *stored, BasicBlock *bb) {
     auto *term = bb->get_terminator();
@@ -109,23 +186,48 @@ void insertScratchStore(AllocaInst *scratch, Value *zero, Value *index,
     bb->add_instruction_before_terminator(store);
 }
 
+/**
+ * @brief 关联一个可跨展开迭代分布的标量归约与其临时存储数组。
+ */
 struct DistributedReduction {
-    ScalarReductionInfo reduction;
-    AllocaInst *scratch = nullptr;
+    ScalarReductionInfo reduction;       ///< 原循环中的标量归约描述。
+    AllocaInst *scratch = nullptr;        ///< 保存各展开分片局部结果的临时数组。
 };
 
+/**
+ * @brief 汇总新建计数循环的控制流基本块和归纳变量。
+ */
 struct CountedLoopBlocks {
-    BasicBlock *header = nullptr;
-    BasicBlock *body = nullptr;
-    BasicBlock *latch = nullptr;
-    PhiInst *iv = nullptr;
+    BasicBlock *header = nullptr;    ///< 执行迭代条件判断的循环头。
+    BasicBlock *body = nullptr;      ///< 执行每次迭代有效工作的循环体。
+    BasicBlock *latch = nullptr;     ///< 更新归纳变量并跳回头部的回边块。
+    PhiInst *iv = nullptr;           ///< 新计数循环的归纳变量 PHI。
 };
 
+/**
+ * @brief 创建带唯一编号名称的标量展开基本块。
+ * @param module 所属模块。
+ * @param func 所属函数。
+ * @param tag 基本块名称前缀。
+ * @param counter 唯一编号计数器。
+ * @return 新建基本块。
+ */
 BasicBlock *newBlock(Module *module, Function *func, const std::string &tag,
                      int &counter) {
     return new BasicBlock(module, tag + "." + std::to_string(counter++), func);
 }
 
+/**
+ * @brief 构造 createCountedLoop 所描述的新 IR，并返回或记录构造结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param func 待分析或改写的函数。
+ * @param prefix 参数 `prefix`，用于本函数的分析、匹配或 IR 构造。
+ * @param bound 参数 `bound`，用于本函数的分析、匹配或 IR 构造。
+ * @param predecessor 前驱基本块。
+ * @param exit 参数 `exit`，用于本函数的分析、匹配或 IR 构造。
+ * @param counter 参数 `counter`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 CountedLoopBlocks createCountedLoop(Module *module, Function *func,
                                     const std::string &prefix, Value *bound,
                                     BasicBlock *predecessor, BasicBlock *exit,
@@ -152,6 +254,14 @@ CountedLoopBlocks createCountedLoop(Module *module, Function *func,
     return loop;
 }
 
+/**
+ * @brief 原地执行 replaceUsesInLoop 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param oldPhi 参数 `oldPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param replacement 参数 `replacement`，用于本函数的分析、匹配或 IR 构造。
+ * @param deadStore 参数 `deadStore`，用于本函数的分析、匹配或 IR 构造。
+ * @param parentLoop 参数 `parentLoop`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void replaceUsesInLoop(PhiInst *oldPhi, Value *replacement, StoreInst *deadStore,
                        Loop *parentLoop) {
     auto uses = oldPhi->use_list_;
@@ -165,11 +275,22 @@ void replaceUsesInLoop(PhiInst *oldPhi, Value *replacement, StoreInst *deadStore
 
 using ValueMap = std::unordered_map<Value *, Value *>;
 
+/**
+ * @brief 查询标量展开克隆阶段的值映射。
+ * @param value 待重映射的原值。
+ * @param map 原值到克隆值的映射表。
+ * @return 命中时返回克隆值，否则返回原值。
+ */
 Value *remapValue(Value *value, const ValueMap &map) {
     auto found = map.find(value);
     return found == map.end() ? value : found->second;
 }
 
+/**
+ * @brief 判断 isCloneableBodyInstruction 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isCloneableBodyInstruction(Instruction *inst) {
     return dynamic_cast<BinaryInst *>(inst) ||
            dynamic_cast<UnaryInst *>(inst) ||
@@ -184,6 +305,13 @@ bool isCloneableBodyInstruction(Instruction *inst) {
            dynamic_cast<SelectInst *>(inst);
 }
 
+/**
+ * @brief 克隆归约循环主体中的一条受支持纯指令。
+ * @param orig 待克隆的原指令。
+ * @param dest 克隆指令的目标基本块。
+ * @param map 已建立的值映射。
+ * @return 成功时返回克隆指令，不支持该类型时返回 nullptr。
+ */
 Instruction *cloneBodyInstruction(Instruction *orig, BasicBlock *dest,
                                   const ValueMap &map) {
     auto R = [&](Value *value) { return remapValue(value, map); };
@@ -229,6 +357,15 @@ Instruction *cloneBodyInstruction(Instruction *orig, BasicBlock *dest,
     return clone;
 }
 
+/**
+ * @brief 递归克隆生成归约初值所需的纯表达式依赖树。
+ * @param value 待克隆或复用的原值。
+ * @param dest 克隆指令的目标基本块。
+ * @param map 原值到克隆值的缓存映射。
+ * @param visiting 当前递归栈，用于拒绝值环。
+ * @param scope 限定需要克隆定义的循环范围。
+ * @return 克隆或复用后的值；遇到不支持依赖时返回 nullptr。
+ */
 Value *clonePureValue(Value *value, BasicBlock *dest, ValueMap &map,
                       std::set<Value *> &visiting, Loop *scope) {
     if (!value) return nullptr;
@@ -259,12 +396,22 @@ Value *clonePureValue(Value *value, BasicBlock *dest, ValueMap &map,
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void ScalarExpansion::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration()) runOnFunction(func);
     }
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void ScalarExpansion::runOnFunction(Function *func) {
     for (int iter = 0; iter < 32; iter++) {
         LoopInfo LI;
@@ -295,6 +442,12 @@ void ScalarExpansion::runOnFunction(Function *func) {
     }
 }
 
+/**
+ * @brief 判断 isLegalAndProfitable 所描述的结构、合法性或安全条件是否成立。
+ * @param info 参数 `info`，用于本函数的分析、匹配或 IR 构造。
+ * @param IA 参数 `IA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool ScalarExpansion::isLegalAndProfitable(const ScalarReductionNestInfo &info,
                                            LoopInterchangeAnalysis &IA) {
     PhiInst *L_iv = info.inner_loop->getInductionIV();
@@ -304,7 +457,15 @@ bool ScalarExpansion::isLegalAndProfitable(const ScalarReductionNestInfo &info,
     return IA.estimateCost(geps, L_iv, P_iv).profitable();
 }
 
+/**
+ * @brief 原地执行 apply 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param info 参数 `info`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module) {
+    // 先验证整个待复制区域，再分配或复用 scratch；此前不得改动 CFG。
+    // 随后按迭代索引展开标量状态、克隆内层体并在父循环出口归并最终值。
     Loop *P = info.parent_loop;
     Loop *L = info.inner_loop;
     Function *func = P->header->parent_;
@@ -333,8 +494,8 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
     }
     if (originalBlocks.empty()) return false;
 
-    // Validate the complete clone before changing CFG or allocating scratch;
-    // a failed transform must leave no partial distribution behind.
+    // 修改 CFG 或分配 scratch 前先验证整个克隆区域；失败候选不能留下
+    // 部分循环分布结果或无用临时数组。
     for (auto *bb : originalBlocks) {
         auto *term = dynamic_cast<BranchInst *>(bb->get_terminator());
         if (!term) return false;
@@ -411,9 +572,8 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
     clearIV->add_phi_pair_operand(clearNext, clearLatch);
     new BranchInst(clearHeader, clearLatch);
 
-    // The old inner dimension becomes outer; the old parent dimension becomes
-    // inner.  Clone the complete old inner body so conditional merges and
-    // arbitrary internal CFG remain in SSA form.
+    // 交换执行维度：原内层成为外层，原父维成为内层。必须克隆完整的旧内层 CFG，
+    // 而不只是算术指令，才能保留条件汇合和任意内部控制流的 SSA 结构。
     auto *outerIV = PhiInst::create_phi(i32, outerHeader);
     outerIV->add_phi_pair_operand(zero, clearHeader);
     outerHeader->add_instruction_front(outerIV);
@@ -562,7 +722,7 @@ bool ScalarExpansion::apply(const ScalarReductionNestInfo &info, Module *module)
     storeIV->add_phi_pair_operand(storeNext, storeLatch);
     new BranchInst(storeHeader, storeLatch);
 
-    // Commit only after the replacement nest is complete.
+    // 替代循环巢、值映射和出口结果全部就绪后，最后才切换旧入口完成提交。
     preTerm->set_operand(0, clearHeader);
     P_preheader->remove_succ_basic_block(P->header);
     P->header->remove_pre_basic_block(P_preheader);

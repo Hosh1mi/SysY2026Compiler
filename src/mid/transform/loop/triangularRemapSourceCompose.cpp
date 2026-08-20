@@ -1,3 +1,9 @@
+/**
+ * @file triangularRemapSourceCompose.cpp
+ * @brief 三角重映射源组合：按需合成有序三角拷贝的数据来源，改写消费者载入以绕过可消除的中间副本。
+ * @details 沿有序拷贝链追踪元素来源，只版本化已匹配的消费者载入，并为无法证明的路径保留原读取。
+ */
+
 // Demand-driven lowering for a proven sequence of ordered triangular copies.
 // The original consumer is preserved; only its matched array load is versioned.
 
@@ -20,16 +26,30 @@
 
 namespace {
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_TRIANGULAR_REMAP_SOURCE") != nullptr;
 }
 
+/**
+ * @brief 旁路连续 bitcast，取得未转换的源值。
+ * @param value 待追溯的值。
+ * @return 最内层非 bitcast 值。
+ */
 Value *stripBitcast(Value *value) {
     while (auto *bitcast = dynamic_cast<Bitcast *>(value))
         value = bitcast->get_operand(0);
     return value;
 }
 
+/**
+ * @brief 穿过 bitcast 和 GEP 链取得指针的根对象。
+ * @param value 待追溯的指针值。
+ * @return 最外层根对象。
+ */
 Value *pointerRoot(Value *value) {
     value = stripBitcast(value);
     while (auto *gep = dynamic_cast<GetElementPtrInst *>(value))
@@ -37,15 +57,33 @@ Value *pointerRoot(Value *value) {
     return value;
 }
 
+/**
+ * @brief 判断 isI32 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isI32(Value *value, Module *module) {
     return value && value->type_ == module->int32_ty_;
 }
 
+/**
+ * @brief 判断 isConstant 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param expected 参数 `expected`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isConstant(Value *value, int expected) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     return constant && constant->value_ == expected;
 }
 
+/**
+ * @brief 匹配 AddOne 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchAddOne(Value *value, Value *base) {
     auto *add = dynamic_cast<BinaryInst *>(value);
     if (!add || !add->is_add())
@@ -54,6 +92,14 @@ bool matchAddOne(Value *value, Value *base) {
            (add->get_operand(1) == base && isConstant(add->get_operand(0), 1));
 }
 
+/**
+ * @brief 匹配 ScaledPlus 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param scaled 参数 `scaled`，用于本函数的分析、匹配或 IR 构造。
+ * @param unit 参数 `unit`，用于本函数的分析、匹配或 IR 构造。
+ * @param scaleOut 参数 `scaleOut`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchScaledPlus(Value *value, Value *scaled, Value *unit,
                      Value **scaleOut) {
     auto *add = dynamic_cast<BinaryInst *>(value);
@@ -80,6 +126,13 @@ bool matchScaledPlus(Value *value, Value *scaled, Value *unit,
     return true;
 }
 
+/**
+ * @brief 匹配 TriangularBound 所描述的 IR 结构并提取结果。
+ * @param bound 参数 `bound`，用于本函数的分析、匹配或 IR 构造。
+ * @param outerIV 参数 `outerIV`，用于本函数的分析、匹配或 IR 构造。
+ * @param rowsize 参数 `rowsize`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchTriangularBound(Value *bound, Value *outerIV, Value *rowsize) {
     auto *select = dynamic_cast<SelectInst *>(bound);
     if (!select)
@@ -102,13 +155,22 @@ bool matchTriangularBound(Value *bound, Value *outerIV, Value *rowsize) {
     return false;
 }
 
+/**
+ * @brief 描述一维平坦数组或二维数组中的单个元素地址计算。
+ */
 struct ElementAccess {
-    GetElementPtrInst *gep = nullptr;
-    Value *base = nullptr;
-    Value *index = nullptr;
-    bool flat = true;
+    GetElementPtrInst *gep = nullptr;  ///< 生成元素地址的 GEP 指令。
+    Value *base = nullptr;             ///< GEP 的数组或平坦缓冲区基址。
+    Value *index = nullptr;            ///< 去除零维索引后的实际元素下标。
+    bool flat = true;                  ///< 是否使用单下标平坦指针形式。
 };
 
+/**
+ * @brief 实现 parseElementAccess 对应的局部分析或变换辅助逻辑。
+ * @param pointer 参数 `pointer`，用于本函数的分析、匹配或 IR 构造。
+ * @param access 参数 `access`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool parseElementAccess(Value *pointer, ElementAccess &access) {
     auto *gep = dynamic_cast<GetElementPtrInst *>(stripBitcast(pointer));
     if (!gep)
@@ -134,6 +196,12 @@ bool parseElementAccess(Value *pointer, ElementAccess &access) {
     return true;
 }
 
+/**
+ * @brief 实现 globalArrayExtent 对应的局部分析或变换辅助逻辑。
+ * @param root 参数 `root`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 int globalArrayExtent(Value *root, Module *module) {
     auto *global = dynamic_cast<GlobalVariable *>(root);
     auto *pointerType = global
@@ -149,6 +217,13 @@ int globalArrayExtent(Value *root, Module *module) {
     return static_cast<int>(arrayType->num_elements_);
 }
 
+/**
+ * @brief 实现 valueAvailableAt 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param block 目标或待检查的基本块。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool valueAvailableAt(Value *value, BasicBlock *block,
                       const DominatorTreeAnalysis &DT) {
     auto *instruction = dynamic_cast<Instruction *>(value);
@@ -160,6 +235,11 @@ bool valueAvailableAt(Value *value, BasicBlock *block,
            DT.dominates(instruction->parent_, block);
 }
 
+/**
+ * @brief 原地执行 removeTerminatorAndEdges 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param block 目标或待检查的基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void removeTerminatorAndEdges(BasicBlock *block) {
     auto *terminator = block ? block->get_terminator() : nullptr;
     if (!terminator)
@@ -171,6 +251,13 @@ void removeTerminatorAndEdges(BasicBlock *block) {
     block->delete_instr(terminator);
 }
 
+/**
+ * @brief 原地执行 retargetPhiPredecessor 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param block 目标或待检查的基本块。
+ * @param oldPredecessor 参数 `oldPredecessor`，用于本函数的分析、匹配或 IR 构造。
+ * @param newPredecessor 参数 `newPredecessor`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void retargetPhiPredecessor(BasicBlock *block, BasicBlock *oldPredecessor,
                             BasicBlock *newPredecessor) {
     for (auto *instruction : block->instr_list_) {
@@ -184,6 +271,13 @@ void retargetPhiPredecessor(BasicBlock *block, BasicBlock *oldPredecessor,
     }
 }
 
+/**
+ * @brief 实现 redirectEdge 对应的局部分析或变换辅助逻辑。
+ * @param from 参数 `from`，用于本函数的分析、匹配或 IR 构造。
+ * @param oldTarget 需要替换的原分支目标。
+ * @param newTarget 替换后的新分支目标。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
                   BasicBlock *newTarget) {
     auto *branch = from
@@ -201,25 +295,38 @@ void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
     newTarget->add_pre_basic_block(from);
 }
 
+/**
+ * @brief 判断 hasPhi 所描述的结构、合法性或安全条件是否成立。
+ * @param block 目标或待检查的基本块。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasPhi(BasicBlock *block) {
     return block && !block->instr_list_.empty() &&
            block->instr_list_.front()->is_phi();
 }
 
+/**
+ * @brief 汇总三角矩阵重映射双层循环的控制变量和唯一数据搬运访问。
+ */
 struct RemapPattern {
-    Loop *outer = nullptr;
-    Loop *inner = nullptr;
-    PhiInst *outerIV = nullptr;
-    PhiInst *innerIV = nullptr;
-    Value *rowsize = nullptr;
-    Value *colsize = nullptr;
-    Value *matrixBase = nullptr;
-    Value *matrixRoot = nullptr;
-    bool matrixFlat = true;
-    LoadInst *load = nullptr;
-    StoreInst *store = nullptr;
+    Loop *outer = nullptr;          ///< 重映射过程的外层循环。
+    Loop *inner = nullptr;          ///< 执行单行元素搬运的内层循环。
+    PhiInst *outerIV = nullptr;     ///< 外层行索引归纳变量。
+    PhiInst *innerIV = nullptr;     ///< 内层列索引归纳变量。
+    Value *rowsize = nullptr;       ///< 当前重映射行对应的有效长度。
+    Value *colsize = nullptr;       ///< 原矩阵的列数或行跨度。
+    Value *matrixBase = nullptr;    ///< 元素 GEP 直接使用的矩阵基址。
+    Value *matrixRoot = nullptr;    ///< 穿过地址转换后用于别名分析的根对象。
+    bool matrixFlat = true;         ///< 矩阵地址是否采用平坦单下标形式。
+    LoadInst *load = nullptr;       ///< 从原位置读取元素的唯一 load。
+    StoreInst *store = nullptr;     ///< 将元素写入重映射位置的唯一 store。
 };
 
+/**
+ * @brief 判断 isNonTrappingStructuralInstruction 所描述的结构、合法性或安全条件是否成立。
+ * @param instruction 待分析或改写的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isNonTrappingStructuralInstruction(Instruction *instruction) {
     if (!instruction)
         return false;
@@ -234,6 +341,13 @@ bool isNonTrappingStructuralInstruction(Instruction *instruction) {
            (binary->is_add() || binary->is_sub() || binary->is_mul());
 }
 
+/**
+ * @brief 匹配 Remap 所描述的 IR 结构并提取结果。
+ * @param outer 参数 `outer`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchRemap(Loop *outer, Module *module, RemapPattern &pattern) {
     if (!outer || outer->children.size() != 1 || !outer->canonicalIV ||
         !outer->preheader || !outer->singleLatch() || !outer->singleExit())
@@ -314,6 +428,11 @@ bool matchRemap(Loop *outer, Module *module, RemapPattern &pattern) {
     return pattern.matrixRoot != nullptr;
 }
 
+/**
+ * @brief 判断 hasLiveOutValue 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasLiveOutValue(Loop *loop) {
     for (auto *block : loop->blocksOrdered) {
         for (auto *instruction : block->instr_list_) {
@@ -327,6 +446,15 @@ bool hasLiveOutValue(Loop *loop) {
     return false;
 }
 
+/**
+ * @brief 匹配 RowsizeLoad 所描述的 IR 结构并提取结果。
+ * @param rowsize 参数 `rowsize`，用于本函数的分析、匹配或 IR 构造。
+ * @param index 参数 `index`，用于本函数的分析、匹配或 IR 构造。
+ * @param baseOut 参数 `baseOut`，用于本函数的分析、匹配或 IR 构造。
+ * @param rootOut 参数 `rootOut`，用于本函数的分析、匹配或 IR 构造。
+ * @param flatOut 参数 `flatOut`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchRowsizeLoad(Value *rowsize, PhiInst *index, Value **baseOut,
                       Value **rootOut, bool *flatOut) {
     auto *load = dynamic_cast<LoadInst *>(rowsize);
@@ -340,6 +468,13 @@ bool matchRowsizeLoad(Value *rowsize, PhiInst *index, Value **baseOut,
     return *rootOut != nullptr;
 }
 
+/**
+ * @brief 匹配 ExtentDivision 所描述的 IR 结构并提取结果。
+ * @param colsize 参数 `colsize`，用于本函数的分析、匹配或 IR 构造。
+ * @param rowsize 参数 `rowsize`，用于本函数的分析、匹配或 IR 构造。
+ * @param extentOut 参数 `extentOut`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchExtentDivision(Value *colsize, Value *rowsize, Value **extentOut) {
     auto *division = dynamic_cast<BinaryInst *>(colsize);
     if (!division || !division->is_div() ||
@@ -349,6 +484,12 @@ bool matchExtentDivision(Value *colsize, Value *rowsize, Value **extentOut) {
     return true;
 }
 
+/**
+ * @brief 实现 loopBodyHasOnlyRowsizeRead 对应的局部分析或变换辅助逻辑。
+ * @param top 参数 `top`，用于本函数的分析、匹配或 IR 构造。
+ * @param remap 参数 `remap`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool loopBodyHasOnlyRowsizeRead(Loop *top, const RemapPattern &remap) {
     for (auto *block : top->blocksOrdered) {
         if (remap.outer->isInLoop(block))
@@ -364,6 +505,11 @@ bool loopBodyHasOnlyRowsizeRead(Loop *top, const RemapPattern &remap) {
     return true;
 }
 
+/**
+ * @brief 实现 simpleConsumerPreheader 对应的局部分析或变换辅助逻辑。
+ * @param consumer 参数 `consumer`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool simpleConsumerPreheader(Loop *consumer) {
     BasicBlock *preheader = consumer ? consumer->preheader : nullptr;
     if (!preheader || hasPhi(preheader) || preheader->instr_list_.size() != 1)
@@ -373,6 +519,13 @@ bool simpleConsumerPreheader(Loop *consumer) {
            branch->get_operand(0) == consumer->header;
 }
 
+/**
+ * @brief 实现 callMayAccessMatrix 对应的局部分析或变换辅助逻辑。
+ * @param call 参数 `call`，用于本函数的分析、匹配或 IR 构造。
+ * @param matrixRoot 参数 `matrixRoot`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool callMayAccessMatrix(CallInst *call, Value *matrixRoot,
                         const BasicAliasAnalysis &BAA) {
     if (!call)
@@ -391,11 +544,18 @@ bool callMayAccessMatrix(CallInst *call, Value *matrixRoot,
         if (BAA.alias(argument, matrixRoot) != AliasResult::NoAlias)
             return true;
     }
-    // SysY declarations are runtime interfaces.  Without a pointer argument
-    // they have no route to a source-level array object.
+    // SysY 外部声明都是运行时接口；若调用没有任何可能别名到 matrixRoot 的指针参数，
+    // 就没有途径访问源语言中的该数组对象。
     return false;
 }
 
+/**
+ * @brief 实现 matrixUnobservedAfter 对应的局部分析或变换辅助逻辑。
+ * @param start 参数 `start`，用于本函数的分析、匹配或 IR 构造。
+ * @param matrixRoot 参数 `matrixRoot`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matrixUnobservedAfter(BasicBlock *start, Value *matrixRoot,
                            const BasicAliasAnalysis &BAA) {
     std::queue<BasicBlock *> worklist;
@@ -422,12 +582,26 @@ bool matrixUnobservedAfter(BasicBlock *start, Value *matrixRoot,
     return true;
 }
 
+/**
+ * @brief 描述紧随重映射之后、可直接改读源矩阵的单循环消费者。
+ */
 struct ConsumerPattern {
-    Loop *loop = nullptr;
-    LoadInst *load = nullptr;
-    BasicBlock *bodyEntry = nullptr;
+    Loop *loop = nullptr;               ///< 顺序遍历重映射结果的消费者循环。
+    LoadInst *load = nullptr;           ///< 消费者中读取重映射矩阵的唯一 load。
+    BasicBlock *bodyEntry = nullptr;     ///< 条件成立时进入的消费者循环体入口。
 };
 
+/**
+ * @brief 匹配 Consumer 所描述的 IR 结构并提取结果。
+ * @param loop 待检查或变换的循环。
+ * @param length 参数 `length`，用于本函数的分析、匹配或 IR 构造。
+ * @param matrixRoot 参数 `matrixRoot`，用于本函数的分析、匹配或 IR 构造。
+ * @param fastOrigin 参数 `fastOrigin`，用于本函数的分析、匹配或 IR 构造。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param consumer 参数 `consumer`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
                    BasicBlock *fastOrigin, const DominatorTreeAnalysis &DT,
                    const BasicAliasAnalysis &BAA,
@@ -497,22 +671,36 @@ bool matchConsumer(Loop *loop, Value *length, Value *matrixRoot,
     return true;
 }
 
+/**
+ * @brief 描述“生成行长序列、重映射矩阵、顺序消费矩阵”的完整可组合模式。
+ */
 struct Pattern {
-    Loop *sequence = nullptr;
-    RemapPattern remap;
-    ConsumerPattern consumer;
-    Value *length = nullptr;
-    Value *extent = nullptr;
-    Value *rowsizeBase = nullptr;
-    Value *rowsizeRoot = nullptr;
-    bool rowsizeFlat = true;
-    int rowsizeExtent = -1;
-    int matrixExtent = -1;
+    Loop *sequence = nullptr;       ///< 生成每行长度信息的前置循环。
+    RemapPattern remap;             ///< 中间矩阵重映射循环的匹配结果。
+    ConsumerPattern consumer;       ///< 可改为直接读取源矩阵的后继消费者。
+    Value *length = nullptr;        ///< 行长序列与消费者循环共用的元素总数。
+    Value *extent = nullptr;        ///< 重映射矩阵可访问的总元素范围。
+    Value *rowsizeBase = nullptr;   ///< 行长表元素 GEP 直接使用的基址。
+    Value *rowsizeRoot = nullptr;   ///< 行长表用于别名分析的根对象。
+    bool rowsizeFlat = true;        ///< 行长表是否采用平坦单下标形式。
+    int rowsizeExtent = -1;         ///< 静态可知的行长表元素容量。
+    int matrixExtent = -1;          ///< 静态可知的矩阵元素容量。
 };
 
+/**
+ * @brief 匹配 Pattern 所描述的 IR 结构并提取结果。
+ * @param function 待分析或改写的函数。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @param DT 参数 `DT`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchPattern(Function *function, LoopInfo &LI,
                   const DominatorTreeAnalysis &DT,
                   const BasicAliasAnalysis &BAA, Pattern &pattern) {
+    // 沿“有序重映射序列 → 相邻消费者”匹配整条数据流，并证明中间矩阵之后不可观察。
+    // 所有长度、extent、全局数组界限和支配条件确认后，才记录可版本化的消费者。
     Module *module = function->parent_;
     for (Loop *top : LI.topLevelLoops()) {
         if (!top || top->children.size() != 1 || !top->canonicalIV ||
@@ -581,6 +769,14 @@ bool matchPattern(Function *function, LoopInfo &LI,
     return false;
 }
 
+/**
+ * @brief 按一维平坦或数组首维形式构造元素地址。
+ * @param base 数组或平坦缓冲区基址。
+ * @param index 元素索引。
+ * @param flat 为 true 时使用单下标，否则使用 {0,index}。
+ * @param block 指令插入基本块。
+ * @return 新建的元素 GEP 指令。
+ */
 GetElementPtrInst *elementGEP(Value *base, Value *index, bool flat,
                               BasicBlock *block) {
     if (flat)
@@ -589,10 +785,21 @@ GetElementPtrInst *elementGEP(Value *base, Value *index, bool flat,
     return new GetElementPtrInst(base, {zero, index}, block);
 }
 
+/**
+ * @brief 保存运行期边界守卫构造完成后可进入快速路径的基本块。
+ */
 struct GuardBlocks {
-    BasicBlock *ready = nullptr;
+    BasicBlock *ready = nullptr;  ///< 所有安全检查通过后的快速路径前驱块。
 };
 
+/**
+ * @brief 构造 buildGuard 所描述的新 IR，并返回或记录构造结果。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @param function 待分析或改写的函数。
+ * @param fastTarget 参数 `fastTarget`，用于本函数的分析、匹配或 IR 构造。
+ * @param counter 参数 `counter`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 GuardBlocks buildGuard(Pattern &pattern, Function *function,
                        BasicBlock *fastTarget, int &counter) {
     Module *module = function->parent_;
@@ -663,12 +870,23 @@ GuardBlocks buildGuard(Pattern &pattern, Function *function,
     return GuardBlocks{ready};
 }
 
+/**
+ * @brief 汇总按重映射关系追踪源元素所生成的 CFG 入口、出口和结果地址。
+ */
 struct TraceBlocks {
-    BasicBlock *entry = nullptr;
-    BasicBlock *done = nullptr;
-    Value *sourcePointer = nullptr;
+    BasicBlock *entry = nullptr;   ///< 源位置追踪循环的入口块。
+    BasicBlock *done = nullptr;    ///< 追踪完成并产生结果地址的汇合块。
+    Value *sourcePointer = nullptr; ///< 在 done 块可用的原始矩阵元素地址。
 };
 
+/**
+ * @brief 构造 buildTrace 所描述的新 IR，并返回或记录构造结果。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @param function 待分析或改写的函数。
+ * @param merge 参数 `merge`，用于本函数的分析、匹配或 IR 构造。
+ * @param counter 参数 `counter`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 TraceBlocks buildTrace(Pattern &pattern, Function *function,
                        BasicBlock *merge, int &counter) {
     Module *module = function->parent_;
@@ -792,9 +1010,20 @@ TraceBlocks buildTrace(Pattern &pattern, Function *function,
     return TraceBlocks{entry, done, sourcePointer};
 }
 
+/**
+ * @brief 实现 versionConsumer 对应的局部分析或变换辅助逻辑。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @param guard 参数 `guard`，用于本函数的分析、匹配或 IR 构造。
+ * @param consumerEntry 参数 `consumerEntry`，用于本函数的分析、匹配或 IR 构造。
+ * @param function 待分析或改写的函数。
+ * @param counter 参数 `counter`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void versionConsumer(Pattern &pattern, GuardBlocks guard,
                      BasicBlock *consumerEntry, Function *function,
                      int &counter) {
+    // 克隆消费者控制流时，仅把匹配到的矩阵 load 改为按来源追踪得到的值。
+    // 未命中的指令沿用普通值映射，原消费者则保留为守卫失败时的完整回退版本。
     Module *module = function->parent_;
     Type *i1 = module->int1_ty_;
     auto *falseValue = new ConstantInt(i1, 0);
@@ -843,7 +1072,15 @@ void versionConsumer(Pattern &pattern, GuardBlocks guard,
     pattern.consumer.load->set_operand(0, pointer);
 }
 
+/**
+ * @brief 原地执行 applyTransform 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param function 待分析或改写的函数。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyTransform(Function *function, Pattern &pattern) {
+    // 保留原消费者作为回退路径，新建守卫后只版本化已匹配的 load 来源追踪路径。
+    // 因此运行时条件不满足时仍执行原程序，不会依赖特定输入才能保持正确。
     auto *preheaderBranch = dynamic_cast<BranchInst *>(
         pattern.sequence->preheader->get_terminator());
     if (!preheaderBranch || preheaderBranch->num_ops() != 1 ||
@@ -865,6 +1102,11 @@ bool applyTransform(Function *function, Pattern &pattern) {
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void TriangularRemapSourceCompose::execute(Module *module) {
     AnalysisManager AM;
     for (auto *function : module->function_list_) {
@@ -873,6 +1115,12 @@ void TriangularRemapSourceCompose::execute(Module *module) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses
 TriangularRemapSourceCompose::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
@@ -883,6 +1131,12 @@ TriangularRemapSourceCompose::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param function 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool TriangularRemapSourceCompose::runOnFunction(Function *function,
                                                  AnalysisManager &AM) {
     if (!function || function->basic_blocks_.empty())

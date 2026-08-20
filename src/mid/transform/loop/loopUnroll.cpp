@@ -1,3 +1,9 @@
+/**
+ * @file loopUnroll.cpp
+ * @brief 循环展开：实现完整展开、定因子展开及多种 CFG 形态的循环展开，并处理余数迭代。
+ * @details 根据循环状态、体积和向量操作选择因子，并分别处理结构化循环、一般 CFG、do-while 与余数路径。
+ */
+
 #include "../../../include/mid/opt/loopUnroll.hpp"
 #include "../../../include/mid/opt/lcssa.hpp"
 #include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
@@ -16,30 +22,49 @@ static thread_local const DominatorTreeAnalysis *gLoopUnrollDomTree = nullptr;
 static const int DEFAULT_UNROLL_FACTOR = 4;
 static const int MAX_STRUCTURED_LOOP_INSTS = 24;
 
+/**
+ * @brief 汇总循环体规模、内存操作和循环携带状态，用于选择展开因子。
+ */
 struct UnrollCost {
-    int bodyInstructions = 0;
-    int memoryOperations = 0;
-    bool hasVectorOperations = false;
-    int integerStates = 0;
-    int pointerStates = 0;
-    int floatingStates = 0;
-    int vectorStates = 0;
+    int bodyInstructions = 0;          ///< 不含终结指令的循环体指令数。
+    int memoryOperations = 0;          ///< 循环体中的 load/store 数量。
+    bool hasVectorOperations = false;  ///< 循环体是否已经包含向量指令。
+    int integerStates = 0;             ///< 整数类型的循环携带状态数量。
+    int pointerStates = 0;             ///< 指针类型的循环携带状态数量。
+    int floatingStates = 0;            ///< 浮点类型的循环携带状态数量。
+    int vectorStates = 0;              ///< 向量类型的循环携带状态数量。
 };
 
+/**
+ * @brief 保存展开时可合并处理的模递推及其范围证明信息。
+ */
 struct UnrolledModuloRecurrence {
-    PhiInst *state = nullptr;
-    BinaryInst *remainder = nullptr;
-    ConstantInt *modulus = nullptr;
-    std::vector<ModuloRecurrenceAnalysis::SignedTerm> contributionTerms;
-    std::set<Instruction *> updateChain;
-    long long contributionLower = 0;
-    long long contributionUpper = 0;
-    long long prefixLower = 0;
-    long long prefixUpper = 0;
-    long long finalLower = 0;
-    long long finalUpper = 0;
+    PhiInst *state = nullptr;        ///< 承载模递推状态的循环头 PHI。
+    BinaryInst *remainder = nullptr; ///< 对下一状态取模的余数指令。
+    ConstantInt *modulus = nullptr;  ///< 余数指令使用的常量模数。
+    std::vector<ModuloRecurrenceAnalysis::SignedTerm> contributionTerms; ///< 单轮状态增量的带符号项。
+    std::set<Instruction *> updateChain; ///< 从状态 PHI 到余数指令的更新链。
+    long long contributionLower = 0; ///< 单轮增量的已证明下界。
+    long long contributionUpper = 0; ///< 单轮增量的已证明上界。
+    long long prefixLower = 0;       ///< 展开组内中间前缀状态的最小偏移。
+    long long prefixUpper = 0;       ///< 展开组内中间前缀状态的最大偏移。
+    long long finalLower = 0;        ///< 合并整组更新后被除数的下界。
+    long long finalUpper = 0;        ///< 合并整组更新后被除数的上界。
 };
 
+/**
+ * @brief 构造 prepareModuloRecurrence 所描述的新 IR，并返回或记录构造结果。
+ * @param state 参数 `state`，用于本函数的分析、匹配或 IR 构造。
+ * @param remainder 参数 `remainder`，用于本函数的分析、匹配或 IR 构造。
+ * @param initialValue 参数 `initialValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param updateBlocks 参数 `updateBlocks`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopStates 参数 `loopStates`，用于本函数的分析、匹配或 IR 构造。
+ * @param inductionState 参数 `inductionState`，用于本函数的分析、匹配或 IR 构造。
+ * @param unrollFactor 参数 `unrollFactor`，用于本函数的分析、匹配或 IR 构造。
+ * @param allowExternalUses 参数 `allowExternalUses`，用于本函数的分析、匹配或 IR 构造。
+ * @param result 用于写回匹配或计算结果的输出参数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool prepareModuloRecurrence(
     PhiInst *state, BinaryInst *remainder, Value *initialValue,
     const std::set<BasicBlock *> &updateBlocks,
@@ -97,6 +122,14 @@ static bool prepareModuloRecurrence(
     return true;
 }
 
+/**
+ * @brief 判断 isMustExecuteModuloRecurrence 所描述的结构、合法性或安全条件是否成立。
+ * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param latch 循环回边基本块。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isMustExecuteModuloRecurrence(
     const UnrolledModuloRecurrence &recurrence, const Loop &loop,
     Function *func, BasicBlock *latch) {
@@ -117,6 +150,16 @@ static bool isMustExecuteModuloRecurrence(
     return true;
 }
 
+/**
+ * @brief 用至多一次正向和一次负向修正代替已知范围内的取模。
+ * @param dividend 待归约的值。
+ * @param lower dividend 的已证明下界。
+ * @param upper dividend 的已证明上界。
+ * @param modulus 正模数。
+ * @param module 所属模块。
+ * @param block 指令插入基本块。
+ * @return 与 dividend%modulus 等价的有界修正结果。
+ */
 static Value *buildBoundedModulo(Value *dividend, long long lower,
                                  long long upper, int modulus,
                                  Module *module, BasicBlock *block) {
@@ -141,6 +184,13 @@ static Value *buildBoundedModulo(Value *dividend, long long lower,
     return adjusted;
 }
 
+/**
+ * @brief 计算 computeBoundAdjustment 所描述的派生信息，供合法性或收益判断使用。
+ * @param iterations 参数 `iterations`，用于本函数的分析、匹配或 IR 构造。
+ * @param stride 参数 `stride`，用于本函数的分析、匹配或 IR 构造。
+ * @param adjustment 参数 `adjustment`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool computeBoundAdjustment(int iterations, int stride,
                                    int &adjustment) {
     long long wide = static_cast<long long>(iterations) * stride;
@@ -155,6 +205,14 @@ static bool computeBoundAdjustment(int iterations, int stride,
 // dynamic, guard the unrolled path so a wrapped adjusted bound cannot turn a
 // zero-trip loop into a very large loop.  The original loop remains the
 // fallback and therefore handles every value outside this safe interval.
+/**
+ * @brief 构造 bound-adjustment 在 i32 中不发生回绕的运行时保护。
+ * @param bound 原循环动态边界。
+ * @param adjustment 展开主循环需要扣除的边界调整量。
+ * @param module 所属模块。
+ * @param block 保护比较的插入基本块。
+ * @return 需要保护时返回比较条件；adjustment 为零时返回 nullptr。
+ */
 static Value *buildBoundAdjustmentGuard(Value *bound, int adjustment,
                                         Module *module, BasicBlock *block) {
     if (adjustment > 0) {
@@ -172,6 +230,14 @@ static Value *buildBoundAdjustmentGuard(Value *bound, int adjustment,
     return nullptr;
 }
 
+/**
+ * @brief 将循环继续条件与可选安全保护合并。
+ * @param condition 原循环继续条件。
+ * @param guard 可选的额外安全条件。
+ * @param module 所属模块。
+ * @param block AND 指令的插入基本块。
+ * @return guard 为空时返回 condition，否则返回 guard&&condition。
+ */
 static Value *guardCondition(Value *condition, Value *guard, Module *module,
                              BasicBlock *block) {
     if (!guard)
@@ -186,6 +252,11 @@ static Value *guardCondition(Value *condition, Value *guard, Module *module,
 // independent work for the dual-issue core without multiplying memory traffic
 // or pointer live ranges.  General scalar loops retain the four-way default;
 // vector or high pointer-pressure loops use two-way unrolling.
+/**
+ * @brief 实现 chooseUnrollFactor 对应的局部分析或变换辅助逻辑。
+ * @param cost 参数 `cost`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 static int chooseUnrollFactor(const UnrollCost &cost) {
     if (cost.bodyInstructions <= 0)
         return 0;
@@ -208,11 +279,9 @@ static int chooseUnrollFactor(const UnrollCost &cost) {
     bool registerOnly =
         cost.memoryOperations == 0 && cost.pointerStates == 0;
     if (!registerOnly) {
-        // Keep memory-loop growth conservative.  Replicating a large scalar
-        // memory body increases A53 load/store pressure and code footprint;
-        // the scheduler cannot recover that cost.  This retains the previous
-        // eight-instruction eligibility boundary while still using the common
-        // pressure model to select two-way versus four-way expansion.
+        // 内存循环要保守控制代码膨胀：复制较大的标量访存主体会同时增加 A53 的
+        // load/store 压力和指令缓存占用，调度器无法弥补。这里保留 8 条指令门槛，
+        // 再用统一压力模型在 2 路与 4 路展开间选择。
         if (cost.bodyInstructions > 8)
             return 0;
         int factor =
@@ -247,6 +316,13 @@ static int chooseUnrollFactor(const UnrollCost &cost) {
     return 0;
 }
 
+/**
+ * @brief 计算 countLoopStates 所描述的派生信息，供合法性或收益判断使用。
+ * @param headerPhis 参数 `headerPhis`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivPhi 参数 `ivPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param cost 参数 `cost`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void countLoopStates(const std::vector<PhiInst *> &headerPhis,
                             PhiInst *ivPhi, UnrollCost &cost) {
     for (auto *phi : headerPhis) {
@@ -271,6 +347,13 @@ static void countLoopStates(const std::vector<PhiInst *> &headerPhis,
     }
 }
 
+/**
+ * @brief 生成 debugStructuredReject 对应的调试诊断，不参与程序语义。
+ * @param func 待分析或改写的函数。
+ * @param loop 待检查或变换的循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool debugStructuredReject(Function *func, Loop &loop,
                                   const char *reason) {
     if (std::getenv("DEBUG_LOOP_UNROLL")) {
@@ -281,6 +364,13 @@ static bool debugStructuredReject(Function *func, Loop &loop,
     return false;
 }
 
+/**
+ * @brief 生成 debugCFGRegionReject 对应的调试诊断，不参与程序语义。
+ * @param func 待分析或改写的函数。
+ * @param loop 待检查或变换的循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool debugCFGRegionReject(Function *func, Loop &loop,
                                  const char *reason) {
     if (std::getenv("DEBUG_LOOP_UNROLL")) {
@@ -296,6 +386,12 @@ static bool debugCFGRegionReject(Function *func, Loop &loop,
 // any load in the second iteration, sink it next to the second store.  This
 // exposes both load/compute chains to the machine scheduler without changing
 // memory order unless the crossed accesses are proven disjoint.
+/**
+ * @brief 实现 clusterTwoVectorStores 对应的局部分析或变换辅助逻辑。
+ * @param body 参数 `body`，用于本函数的分析、匹配或 IR 构造。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool clusterTwoVectorStores(BasicBlock *body,
                                    BasicAliasAnalysis &BAA) {
     if (!body) return false;
@@ -326,6 +422,13 @@ static bool clusterTwoVectorStores(BasicBlock *body,
 
 // ── Instruction cloning ───────────────────────────────────────────────────
 
+/**
+ * @brief 克隆展开副本中的一条受支持指令并重映射操作数。
+ * @param orig 待克隆的原指令。
+ * @param destBB 克隆指令的目标基本块。
+ * @param vmap 原值到当前展开副本值的映射。
+ * @return 成功时返回克隆指令，不支持该类型时返回 nullptr。
+ */
 Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
                                     const std::unordered_map<Value *, Value *> &vmap) {
     auto remap = [&](Value *v) -> Value * {
@@ -447,6 +550,13 @@ Instruction *LoopUnroll::cloneInst(Instruction *orig, BasicBlock *destBB,
     return nullptr; // unsupported (phi, branch, call, alloca …)
 }
 
+/**
+ * @brief 在 CFG 区域克隆中重映射普通值或基本块操作数。
+ * @param val 待重映射的值。
+ * @param valueMap 原值到克隆值的映射。
+ * @param bbMap 原基本块到克隆基本块的映射。
+ * @return 对应克隆值；基本块尚未映射时返回 nullptr，循环外值返回自身。
+ */
 static Value *mapLoopValue(
     Value *val,
     const std::unordered_map<Value *, Value *> &valueMap,
@@ -460,6 +570,11 @@ static Value *mapLoopValue(
     return val;
 }
 
+/**
+ * @brief 判断 isCloneableForUnroll 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isCloneableForUnroll(Instruction *inst) {
     return dynamic_cast<BinaryInst *>(inst) ||
            dynamic_cast<UnaryInst *>(inst) ||
@@ -476,6 +591,12 @@ static bool isCloneableForUnroll(Instruction *inst) {
            dynamic_cast<SelectInst *>(inst);
 }
 
+/**
+ * @brief 实现 dependsOnAlloca 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param visited 递归遍历使用的已访问集合，用于避免环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool dependsOnAlloca(Value *value, std::set<Value *> &visited) {
     if (!value || !visited.insert(value).second)
         return false;
@@ -493,11 +614,24 @@ static bool dependsOnAlloca(Value *value, std::set<Value *> &visited) {
     return false;
 }
 
+/**
+ * @brief 实现 dependsOnAlloca 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool dependsOnAlloca(Value *value) {
     std::set<Value *> visited;
     return dependsOnAlloca(value, visited);
 }
 
+/**
+ * @brief 判断 hasEntryLowerBoundGuard 所描述的结构、合法性或安全条件是否成立。
+ * @param preheader 循环预头基本块。
+ * @param header 循环头基本块。
+ * @param bound 参数 `bound`，用于本函数的分析、匹配或 IR 构造。
+ * @param init 参数 `init`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool hasEntryLowerBoundGuard(BasicBlock *preheader, BasicBlock *header,
                                     Value *bound, ConstantInt *init) {
     auto *br = dynamic_cast<BranchInst *>(preheader ? preheader->get_terminator() : nullptr);
@@ -542,6 +676,11 @@ static bool hasEntryLowerBoundGuard(BasicBlock *preheader, BasicBlock *header,
     return (headerOnTrue && provesOnTrue()) || (headerOnFalse && provesOnFalse());
 }
 
+/**
+ * @brief 判断 hasNestedLoopBackedge 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool hasNestedLoopBackedge(const Loop &loop) {
     for (auto *bb : loop.blocksOrdered) {
         auto *br = dynamic_cast<BranchInst *>(bb->get_terminator());
@@ -556,14 +695,22 @@ static bool hasNestedLoopBackedge(const Loop &loop) {
     return false;
 }
 
+/**
+ * @brief 判断 isProfitableCFGRegionUnroll 所描述的结构、合法性或安全条件是否成立。
+ * @param loop 待检查或变换的循环。
+ * @param bodyInstCount 参数 `bodyInstCount`，用于本函数的分析、匹配或 IR 构造。
+ * @param condBranchBlocks 参数 `condBranchBlocks`，用于本函数的分析、匹配或 IR 构造。
+ * @param memoryOps 参数 `memoryOps`，用于本函数的分析、匹配或 IR 构造。
+ * @param vectorOps 参数 `vectorOps`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isProfitableCFGRegionUnroll(const Loop &loop, int bodyInstCount,
                                         int condBranchBlocks, int memoryOps,
                                         int vectorOps) {
     if (bodyInstCount <= 0) return false;
 
-    // CFG-region unroll clones whole inner control flow.  On Cortex-A53 this is
-    // only worthwhile when the cloned region exposes real memory/vector work;
-    // pure scalar branch nests usually lose to I-cache/BTB pressure.
+    // CFG 区域展开会复制完整的内部控制流；在 Cortex-A53 上，只有区域中包含足够
+    // 访存或向量工作时才可能摊平开销。纯标量分支嵌套通常会败给 I-cache/BTB 压力。
     if (hasNestedLoopBackedge(loop) && memoryOps == 0 && vectorOps == 0)
         return false;
 
@@ -575,6 +722,14 @@ static bool isProfitableCFGRegionUnroll(const Loop &loop, int bodyInstCount,
 
 // ── Core unrolling ────────────────────────────────────────────────────────
 
+/**
+ * @brief 尝试执行 Unroll 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
                            BasicAliasAnalysis &BAA) {
     // Only handle simple 2-BB loops: header + latch
@@ -703,11 +858,9 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     // Determine which branch successor is the body vs exit
     auto *headerBr = header->get_terminator();
     if (!headerBr || !headerBr->is_br() || headerBr->num_ops() != 3) return false;
-    // The compare selected above must be the loop's actual continue
-    // condition.  A header may contain auxiliary range/overflow compares
-    // combined by an `and`; adjusting one of those as if it were the branch
-    // condition discards the other guard and can turn a bounded loop into an
-    // effectively unbounded one.
+    // 选中的比较必须就是分支使用的循环继续条件。header 中还可能有范围/溢出比较
+    // 经 and 合成保护条件；若只调整其中一个比较，会丢失其他保护，甚至把有界循环
+    // 变成实际上不会退出的循环。
     if (headerBr->get_operand(0) != cmpInst) return false;
     auto *trueSucc = static_cast<BasicBlock *>(headerBr->get_operand(1));
     auto *falseSucc = static_cast<BasicBlock *>(headerBr->get_operand(2));
@@ -770,10 +923,8 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     if (!computeBoundAdjustment(N - 1, s, adj))
         return false;
 
-    // Guard against integer underflow: if the loop bound is smaller than the
-    // adjustment, bound - adj would go negative and wrap to a huge unsigned
-    // value (e.g. 0xFFFFFFFF for -1), making the main loop condition always
-    // true → infinite loop with out-of-bounds memory access.
+    // 防止边界下溢：若 bound 小于 adj，bound-adj 会回绕成巨大的无符号值
+    // （例如 -1 变成 0xFFFFFFFF），主循环条件可能恒真并导致越界死循环。
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
         if (cb->value_ < adj) return false;
     }
@@ -855,7 +1006,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
         phiToMain[phi] = mainPhi;
     }
 
-    // Condition in headerMain: iv < bound - adj  (same icmp op, adjusted bound)
+    // 主展开循环使用收紧后的边界 bound-adj，确保一次进入就能完整执行 N 个迭代。
     PhiInst *ivMain = phiToMain[ivPhi];
     ICmpInst *cmpMain;
     if (ivIsLeft)
@@ -869,16 +1020,15 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             buildBoundAdjustmentGuard(bound, adj, module, headerMain),
             module, headerMain);
 
-    // 3. Build unrolledBody: N copies of the latch (non-terminator instructions)
+    // 构造展开主体：按 SSA 数据依赖顺序复制 N 份 latch 普通指令。
     BasicBlock *unrolledBody = new BasicBlock(module, "unroll_body", func);
 
-    // Initial value map: header phis → their main-loop phi counterparts
+    // 初始值映射把原 header PHI 指向主展开循环中的对应 PHI。
     std::unordered_map<Value *, Value *> iterMap;
     for (auto phi : headerPhis)
         iterMap[phi] = phiToMain[phi];
 
-    // Also seed with any latch-defined values that feed back into phis,
-    // so iterations chain correctly
+    // curPhiVals 记录每个循环携带状态在当前展开轮次的值，使相邻副本正确串接。
     std::unordered_map<PhiInst *, Value *> curPhiVals;
     for (auto phi : headerPhis)
         curPhiVals[phi] = phiToMain[phi];
@@ -925,13 +1075,9 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             }
         }
 
-        // Update iterMap for next iteration: replace each phi's "current" value
-        // with what comes out of the latch update this iteration.
-        //
-        // localMap miss is ambiguous:
-        //   A. latch value is loop-invariant (defined outside) → reuse as-is
-        //   B. latch value is loop-local but clone failed to map it → bug
-        // Treating both as "keep curPhiVals" produces self-phi backedges.
+        // 用本轮 latch 更新结果推进各 PHI 的当前值。localMap 未命中有两种含义：
+        // 循环外定义是不变量，可直接复用；循环内定义未映射则说明克隆失败。
+        // 若混为“保留 curPhiVals”，会生成自引用的 PHI 回边。
         bool remapFailure = false;
         for (auto phi : headerPhis) {
             if (iter < N - 1 && modularRecurrenceIndex.count(phi))
@@ -954,7 +1100,7 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
                     remapFailure = true;
                     break;
                 }
-                // Constant / argument / global / outer-loop value: invariant.
+                // 常量、参数、全局量或外层循环值均可作为当前循环不变量直接复用。
                 nextValue = lv;
             }
 
@@ -1026,7 +1172,16 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     return true;
 }
 
+/**
+ * @brief 尝试执行 UnrollStructured 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module) {
+    // 结构化路径先计算展开因子和主循环边界，再按 lane 顺序克隆循环体。
+    // 原迭代次数不能整除因子时保留余数路径，退出 PHI 必须合并主循环与尾循环结果。
     if (loop.blocks.size() <= 2)
         return false;
     if (loop.blocks.size() > 4)
@@ -1438,6 +1593,13 @@ bool LoopUnroll::tryUnrollStructured(Loop &loop, Function *func, Module *module)
     return true;
 }
 
+/**
+ * @brief 尝试执行 UnrollStatefulWhileCFGRegion 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                                                  Module *module) {
     if (loop.blocks.size() <= 2)
@@ -1580,7 +1742,13 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
                                      memoryOps, vectorOps))
         return debugCFGRegionReject(func, loop, "stateful-profitability");
 
-    struct OutsideUse { Instruction *user; unsigned idx; };
+    /**
+     * @brief 记录展开区域内定义在循环外的一个普通使用点。
+     */
+    struct OutsideUse {
+        Instruction *user;  ///< 使用循环内定义值的循环外指令。
+        unsigned idx;       ///< 该值在 user 操作数表中的下标。
+    };
     std::map<Value *, std::vector<OutsideUse>> liveOuts;
     auto collectLiveOut = [&](Instruction *inst) {
         for (const auto &use : inst->use_list_) {
@@ -1919,7 +2087,16 @@ bool LoopUnroll::tryUnrollStatefulWhileCFGRegion(Loop &loop, Function *func,
     return true;
 }
 
+/**
+ * @brief 尝试执行 UnrollCFGRegion 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) {
+    // 一般 CFG 路径把整个循环区域视为克隆单元，而不是只复制单个 body 块。
+    // 每一份副本都有独立值映射；跨副本回边和所有 side-exit PHI 在末尾统一补齐。
     if (loop.blocks.size() <= 4)
         return false;
 
@@ -2038,7 +2215,13 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
                                      memoryOps, vectorOps))
         return debugCFGRegionReject(func, loop, "profitability");
 
-    struct OutsideUse { Instruction *user; unsigned idx; };
+    /**
+     * @brief 记录展开区域内定义在循环外的一个普通使用点。
+     */
+    struct OutsideUse {
+        Instruction *user;  ///< 使用循环内定义值的循环外指令。
+        unsigned idx;       ///< 该值在 user 操作数表中的下标。
+    };
     std::map<Value *, std::vector<OutsideUse>> liveOuts;
     for (auto *bb : loop.blocksOrdered) {
         for (auto *inst : bb->instr_list_) {
@@ -2419,6 +2602,13 @@ bool LoopUnroll::tryUnrollCFGRegion(Loop &loop, Function *func, Module *module) 
 //   remCheck:    cmp(iv_N, bound) ? B（余数 1..N-1 次）: exit（余数 0 次）
 //   B:           phi 入边改为 [init, checkBlock], [iv_N 等, remCheck]
 //   exit:        来自 B 的 live-out 补 [主循环末值, remCheck] 入边
+/**
+ * @brief 尝试执行 UnrollDoWhile 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     if (loop.blocks.size() != 1) return false;
 
@@ -2570,7 +2760,13 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
     // ── 循环外使用清点：只允许 (a) exitBB 中的 phi（入边=header），
     //    (b) 其他位置的使用（exitBB 唯一出口支配它们，事后补 phi）─────
-    struct OutsideUse { Instruction *user; unsigned idx; };
+    /**
+     * @brief 记录完全展开后需要由出口 PHI 修复的循环外使用点。
+     */
+    struct OutsideUse {
+        Instruction *user;  ///< 使用原循环内定义值的循环外指令。
+        unsigned idx;       ///< 该值在 user 操作数表中的下标。
+    };
     std::map<Value *, std::vector<OutsideUse>> liveOuts; // 需补 phi 的值
     for (auto inst : header->instr_list_) {
         if (inst == cmpInst || inst->isTerminator()) continue;
@@ -2731,10 +2927,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     for (auto *phi : headerPhis)
         curPhiVals[phi] = phiToMain[phi];
 
-    // For a guarded register-only loop, compute the unrolled iterations'
-    // state-independent expressions before updating loop-carried scalar
-    // states.  This keeps only the final contributions live, while exposing
-    // the two long arithmetic chains to instruction scheduling.
+    // 对带保护且仅用寄存器的循环，先生成各展开轮次中与状态无关的表达式，再集中
+    // 更新循环携带状态。这样只让最终贡献保持活跃，也向调度器暴露可并行的长算术链。
     std::set<Instruction *> deferredStateUpdates;
     if (dynamicStride && (N == 2 || N == 4 || N == 8) &&
         unrollCost.memoryOperations == 0) {
@@ -2763,13 +2957,9 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
     std::set<Instruction *> modularUpdateInstructions;
 
-    // For an unrolled recurrence
-    //   state.next = (state + contribution) % M
-    // combine the first N-1 contributions behind one remainder.  The final
-    // iteration stays in its original form because rotated loops may export
-    // an intermediate value from that iteration to the dedicated exit block.
-    // This preserves that live-out mapping while shortening the serial
-    // remainder chain from N steps to two.
+    // 对 `state.next = (state + contribution) % M` 递推，把前 N-1 轮贡献合并后
+    // 只取一次余数。最后一轮保持原形，因为旋转循环可能把该轮中间值导出到专用出口；
+    // 这样既保住 live-out 映射，又把串行余数链从 N 步缩短为两步。
     if (!deferredStateUpdates.empty() && N > 2) {
         for (auto *phi : headerPhis) {
             if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
@@ -2835,9 +3025,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
         std::vector<std::unordered_map<Value *, Value *>> iterationMaps;
         iterationMaps.reserve(N);
 
-        // Materialize the next IVs first, then clone independent instructions
-        // in lockstep across iterations.  The resulting order interleaves
-        // equal-depth operations from the two dependency chains.
+        // 先物化各轮的新 IV，再跨轮次同步克隆独立指令，使两条依赖链中深度相同的
+        // 运算交错排列，给顺序执行后端留下更多可调度空间。
         Value *ivBack = getBackVal(ivPhi);
         for (int iter = 0; iter < N; ++iter) {
             std::unordered_map<Value *, Value *> localMap = iterMap;
@@ -2903,10 +3092,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
             modularPrefixStates[recurrence.state] = combined;
         }
 
-        // Then emit each recurrence update in iteration order so its exact
-        // scalar semantics remain unchanged.  Modular recurrences defer their
-        // private update chain until the final iteration; that iteration uses
-        // the safely combined prefix state above.
+        // 随后按原迭代次序生成各递推更新，保持精确标量语义。模递推把私有更新链
+        // 延迟到最后一轮，并以刚安全合并出的前缀状态作为该轮输入。
         for (int iter = 0; iter < N; ++iter) {
             auto &localMap = iterationMaps[iter];
             if (iter == N - 1)
@@ -3017,8 +3204,8 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
     }
 
     // 9. 其他循环外使用：在 exitBB 顶部补汇合 phi 后改写
-    // Preserve the source instruction order; pointer-key order changes under
-    // ASLR and `add_instruction_front` would otherwise expose that variation.
+    // 按源指令顺序创建出口 PHI；若按指针键排序，ASLR 会改变顺序，而连续
+    // add_instruction_front 会把这种差异暴露为不稳定的 IR 输出。
     for (auto *val : header->instr_list_) {
         auto liveOutIt = liveOuts.find(val);
         if (liveOutIt == liveOuts.end()) continue;
@@ -3036,7 +3223,15 @@ bool LoopUnroll::tryUnrollDoWhile(Loop &loop, Function *func, Module *module) {
 
 // ── Entry points ──────────────────────────────────────────────────────────
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
+    // 按由内到外顺序尝试五种形态：简单循环、结构化循环、有状态 while、
+    // 一般 CFG 区域和 do-while；同一循环命中一种后不再尝试后续实现。
     if (func->basic_blocks_.empty()) return false;
 
     DominatorTreeAnalysis DT;
@@ -3086,6 +3281,11 @@ bool LoopUnroll::runOnFunction(Function *func, BasicAliasAnalysis &BAA) {
     return changed;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopUnroll::execute(Module *module) {
     BasicAliasAnalysis BAA;
     BAA.analyze(module);

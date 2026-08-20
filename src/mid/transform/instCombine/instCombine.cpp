@@ -1,3 +1,9 @@
+/**
+ * @file instCombine.cpp
+ * @brief 实现 InstCombine 工作列表驱动器，反复调度局部指令化简并安全替换旧值。
+ * @details 工作列表只提交语义等价替换，并把受影响的用户重新入队；删除旧指令前同步维护 use-list。
+ */
+
 #include "../../../include/mid/opt/instCombine.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "instCombineInternal.hpp"
@@ -19,6 +25,11 @@ thread_local DominatorTreeAnalysis *gInstCombineDominatorTree = nullptr;
 // (Simpler than full dominator analysis and correct for the common
 //  "computed before branch, used only in one successor" case.)
 
+/**
+ * @brief 判断 isSinkableOp 所描述的结构、合法性或安全条件是否成立。
+ * @param op 待检查的操作码或操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 static bool isSinkableOp(Instruction::OpID op) {
     switch (op) {
         case Instruction::Add: case Instruction::Sub: case Instruction::Mul:
@@ -36,6 +47,11 @@ static bool isSinkableOp(Instruction::OpID op) {
     }
 }
 
+/**
+ * @brief 在支配与唯一使用条件满足时把纯指令下沉到使用点之前。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 static void trySinkInstruction(Instruction *inst) {
     if (inst->use_list_.size() != 1) return;
 
@@ -55,9 +71,8 @@ static void trySinkInstruction(Instruction *inst) {
     // Don't sink terminators or non-sinkable instructions
     if (inst->isTerminator() || !isSinkableOp(inst->op_id_)) return;
 
-    // Safety: user's block must have inst's block as its only predecessor.
-    // This guarantees inst dominates user — every path to user must have
-    // already executed inst.
+    // 下沉的支配性保证：用户块必须只有 inst 所在块这一个前驱。
+    // 这样所有到达用户的路径都已经执行过 inst，不会出现未定义值。
     if (user_bb->pre_bbs_.size() != 1 || user_bb->pre_bbs_[0] != inst_bb)
         return;
 
@@ -66,15 +81,32 @@ static void trySinkInstruction(Instruction *inst) {
     user_bb->add_instruction_before_inst(inst, user);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void InstCombine::execute(Module *module) {
     AnalysisManager AM;
     runPass(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses InstCombine::execute(Module *module, AnalysisManager &AM) {
     return runPass(module, AM).preserved;
 }
 
+/**
+ * @brief 运行一次 InstCombine 并汇总 IR 与语义事实的变化。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 PassRunResult InstCombine::runPass(Module *module, AnalysisManager &AM) {
     bool changed = false;
     auto functions = module->function_list_;
@@ -86,7 +118,16 @@ PassRunResult InstCombine::runPass(Module *module, AnalysisManager &AM) {
                              : PreservedAnalyses::all()};
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
+    // 核心流程：先把现存指令加入工作列表，再按 opcode 尝试局部替换；
+    // 每次成功替换后重新调度用户和操作数，使新暴露的模式继续化简。
+    // 两类预算限制最坏编译时间；范围分析在首次改写后丢弃，避免使用陈旧事实。
     auto countInstructions = [&]() -> size_t {
         size_t total = 0;
         for (auto *bb : func->basic_blocks_)
@@ -103,12 +144,9 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
     };
 
     const size_t initialInstrCount = countInstructions();
-    // RangeAnalysis is invalidated after every replacement because its
-    // predicate facts may reference the replaced instruction. Rebuilding it
-    // for every local fold is prohibitively expensive on large generated
-    // functions. Keep the range-assisted
-    // combines for normal functions, while large functions use the always-safe
-    // local combines.
+    // 范围事实可能直接引用被替换的指令，任意一次改写都会让 RangeAnalysis
+    // 过期。普通函数在首次改写前使用一次范围分析；大函数只启用无需全局
+    // 范围事实的局部规则，避免每次折叠都重建整函数分析。
     constexpr size_t kRangeAnalysisInstructionLimit = 1024;
     const bool useRangeAnalysis =
         AM && initialInstrCount <= kRangeAnalysisInstructionLimit;
@@ -280,6 +318,8 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
         }
 
         if (replacement) {
+            // 先快照用户和指令操作数，再统一替换 use 并删除旧指令；删除后原
+            // use-list 已不可遍历。最后重新入队这些邻居，形成局部定点迭代。
             // Bound every successful rewrite, including replacement by an
             // existing value or a constant.  Counting only newly-created
             // instructions leaves constant-rewrite cycles constrained solely
@@ -301,12 +341,9 @@ bool InstCombine::runOnFunction(Function *func, AnalysisManager *AM) {
             inst->replace_all_use_with(replacement);
             inst->parent_->delete_instr(inst);
             if (useRangeAnalysis && gInstCombineRangeAnalysis) {
-                // The first rewrite can invalidate predicate operands and
-                // interprocedural summaries.  Drop all cached range analyses
-                // once, then finish this worklist with local combines.  A
-                // later InstCombine invocation may build one fresh analysis;
-                // rebuilding whole-function post-dominance after every local
-                // replacement is both unnecessary and a compile-time hazard.
+                // 首次替换后谓词操作数和过程间摘要都可能失效。这里一次性清空
+                // 范围缓存，本轮剩余工作只做局部化简；后续 InstCombine 轮次
+                // 可以重新构建新分析，避免每次替换都付出整函数分析成本。
                 AM->clearRangeAnalyses();
                 gInstCombineRangeAnalysis = nullptr;
             }

@@ -1,3 +1,9 @@
+/**
+ * @file loopSkewing.cpp
+ * @brief 循环倾斜：依据仿射依赖距离对循环迭代域做倾斜变换，为并行化或向量化创造合法次序。
+ * @details 从仿射访问计算依赖距离并选择倾斜系数；只有变换后的距离保持词典序为正时生成新迭代域。
+ */
+
 #include "../../../include/mid/opt/loopSkewing.hpp"
 
 #include "../../../include/mid/analysis/analysisManager.hpp"
@@ -19,10 +25,21 @@
 
 namespace {
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_LOOP_SKEWING") != nullptr;
 }
 
+/**
+ * @brief 生成 reject 对应的调试诊断，不参与程序语义。
+ * @param loop 待检查或变换的循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @param output 可选的诊断信息输出参数。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void reject(const Loop &loop, const std::string &reason,
             std::string *output) {
     if (output) *output = reason;
@@ -31,11 +48,24 @@ void reject(const Loop &loop, const std::string &reason,
                   << ": " << reason << "\n";
 }
 
+/**
+ * @brief 判断 isI32 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isI32(Value *value) {
     auto *type = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
     return type && type->num_bits_ == 32;
 }
 
+/**
+ * @brief 实现 affineInOuter 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param outerIV 参数 `outerIV`，用于本函数的分析、匹配或 IR 构造。
+ * @param coefficient 参数 `coefficient`，用于本函数的分析、匹配或 IR 构造。
+ * @param offset 参数 `offset`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool affineInOuter(Value *value, PhiInst *outerIV, long long &coefficient,
                    long long &offset) {
     if (value == outerIV) {
@@ -72,6 +102,13 @@ bool affineInOuter(Value *value, PhiInst *outerIV, long long &coefficient,
     return coefficient >= -1 && coefficient <= 1;
 }
 
+/**
+ * @brief 在加减表达式中查找唯一的外层 header PHI 来源。
+ * @param value 待分析的表达式值。
+ * @param outer 目标外层循环。
+ * @param visited 已访问值集合，用于避免递归环。
+ * @return 找到唯一来源时返回该 PHI，否则返回 nullptr。
+ */
 PhiInst *findParentPhi(Value *value, Loop *outer,
                        std::set<Value *> &visited) {
     if (!value || !outer || !visited.insert(value).second)
@@ -87,6 +124,14 @@ PhiInst *findParentPhi(Value *value, Loop *outer,
     return lhs ? lhs : rhs;
 }
 
+/**
+ * @brief 实现 edgeProvesAtLeast 对应的局部分析或变换辅助逻辑。
+ * @param source 参数 `source`，用于本函数的分析、匹配或 IR 构造。
+ * @param target 参数 `target`，用于本函数的分析、匹配或 IR 构造。
+ * @param subject 参数 `subject`，用于本函数的分析、匹配或 IR 构造。
+ * @param threshold 参数 `threshold`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool edgeProvesAtLeast(BasicBlock *source, BasicBlock *target,
                        Value *subject, long long threshold) {
     if (!source || !target || !subject) return false;
@@ -124,6 +169,13 @@ bool edgeProvesAtLeast(BasicBlock *source, BasicBlock *target,
     return knownLower >= threshold;
 }
 
+/**
+ * @brief 实现 incomingIsNonNegative 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param source 参数 `source`，用于本函数的分析、匹配或 IR 构造。
+ * @param target 参数 `target`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool incomingIsNonNegative(Value *value, BasicBlock *source,
                            BasicBlock *target) {
     if (auto *constant = dynamic_cast<ConstantInt *>(value))
@@ -147,6 +199,11 @@ bool incomingIsNonNegative(Value *value, BasicBlock *source,
     return edgeProvesAtLeast(source, target, subject, required);
 }
 
+/**
+ * @brief 实现 phiIsNonNegative 对应的局部分析或变换辅助逻辑。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool phiIsNonNegative(PhiInst *phi) {
     if (!phi || !phi->parent_ || phi->num_ops() == 0)
         return false;
@@ -159,12 +216,22 @@ bool phiIsNonNegative(PhiInst *phi) {
     return true;
 }
 
+/**
+ * @brief 实现 provePositiveStart 对应的局部分析或变换辅助逻辑。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool provePositiveStart(const LoopSkewPlan &plan) {
     if (plan.outerCoefficient != 1 || plan.offset < 1)
         return false;
     return phiIsNonNegative(plan.outerIV);
 }
 
+/**
+ * @brief 实现 preheaderProvesNonEmpty 对应的局部分析或变换辅助逻辑。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool preheaderProvesNonEmpty(const LoopSkewPlan &plan) {
     if (!plan.preheader || plan.preheader->pre_bbs_.size() != 1)
         return false;
@@ -179,6 +246,11 @@ bool preheaderProvesNonEmpty(const LoopSkewPlan &plan) {
            compare->get_operand(1) == plan.innerBound;
 }
 
+/**
+ * @brief 判断 hasUnsupportedUses 所描述的结构、合法性或安全条件是否成立。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool hasUnsupportedUses(const LoopSkewPlan &plan) {
     for (const Use &use : plan.innerIV->use_list_) {
         auto *user = use.user_;
@@ -195,6 +267,11 @@ bool hasUnsupportedUses(const LoopSkewPlan &plan) {
     return false;
 }
 
+/**
+ * @brief 查找基本块中第一条非 PHI 指令。
+ * @param block 待搜索的基本块。
+ * @return 找到时返回指令；基本块仅含 PHI 时返回 nullptr。
+ */
 Instruction *firstNonPhi(BasicBlock *block) {
     for (auto *instruction : block->instr_list_)
         if (!instruction->is_phi()) return instruction;
@@ -203,8 +280,16 @@ Instruction *firstNonPhi(BasicBlock *block) {
 
 } // namespace
 
+/**
+ * @brief 分析 LoopSkew 的结构、递推或依赖信息。
+ * @param inner 待分析的内层循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 成功时返回分析或变换计划，失败时返回空值。
+ */
 std::optional<LoopSkewPlan> analyzeLoopSkew(Loop &inner,
                                             std::string *reason) {
+    // 分析阶段从内层控制 IV 提取关于外层 IV 的仿射起点和边界，
+    // 再用依赖距离求合法倾斜系数；仅生成计划，不在证明过程中修改 CFG。
     if (!inner.parent) {
         reject(inner, "no parent loop", reason);
         return std::nullopt;
@@ -286,7 +371,15 @@ std::optional<LoopSkewPlan> analyzeLoopSkew(Loop &inner,
     return plan;
 }
 
+/**
+ * @brief 原地执行 applyLoopSkew 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyLoopSkew(const LoopSkewPlan &plan, Module *module) {
+    // 计划已经给出新起点/边界的仿射表达式；此处只负责物化它们并重写控制 PHI。
+    // 重连回边后同步更新退出 PHI，保证循环外观察到的仍是原迭代域最后状态。
     if (!plan.inner || !plan.innerIV || !plan.innerUpdate ||
         !plan.innerCompare || !plan.preheader || !plan.latch || !module)
         return false;
@@ -343,18 +436,26 @@ bool applyLoopSkew(const LoopSkewPlan &plan, Module *module) {
 
 namespace {
 
+/**
+ * @brief 描述将矩形循环嵌套改写为按加权波前执行所需的完整计划。
+ */
 struct RectangularWavefrontPlan {
-    std::vector<Loop *> nest;
-    std::vector<const InductionDescriptor *> controls;
-    std::vector<long long> weights;
-    std::vector<Instruction *> accesses;
-    BasicBlock *cell = nullptr;
-    BasicBlock *preheader = nullptr;
-    BasicBlock *exit = nullptr;
-    Value *start = nullptr;
-    Value *bound = nullptr;
+    std::vector<Loop *> nest;                              ///< 从外到内排列的矩形循环层级。
+    std::vector<const InductionDescriptor *> controls;     ///< 各层循环的归纳变量描述。
+    std::vector<long long> weights;                        ///< 各层坐标对波前编号的权重。
+    std::vector<Instruction *> accesses;                   ///< 参与依赖距离检查的内存访问。
+    BasicBlock *cell = nullptr;                            ///< 执行单个迭代空间单元的基本块。
+    BasicBlock *preheader = nullptr;                       ///< 最外层循环预头。
+    BasicBlock *exit = nullptr;                            ///< 整个循环嵌套的唯一出口。
+    Value *start = nullptr;                                ///< 波前编号的起始值。
+    Value *bound = nullptr;                                ///< 波前编号的开区间上界。
 };
 
+/**
+ * @brief 实现 lexPositive 对应的局部分析或变换辅助逻辑。
+ * @param distance 参数 `distance`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool lexPositive(const std::vector<long long> &distance) {
     for (long long component : distance) {
         if (component != 0) return component > 0;
@@ -362,12 +463,23 @@ bool lexPositive(const std::vector<long long> &distance) {
     return false;
 }
 
+/**
+ * @brief 实现 allZero 对应的局部分析或变换辅助逻辑。
+ * @param distance 参数 `distance`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool allZero(const std::vector<long long> &distance) {
     for (long long component : distance)
         if (component != 0) return false;
     return true;
 }
 
+/**
+ * @brief 判断 sameValue 所描述的结构、合法性或安全条件是否成立。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool sameValue(Value *lhs, Value *rhs) {
     if (lhs == rhs) return true;
     auto *lc = dynamic_cast<ConstantInt *>(lhs);
@@ -375,6 +487,13 @@ bool sameValue(Value *lhs, Value *rhs) {
     return lc && rc && lc->value_ == rc->value_;
 }
 
+/**
+ * @brief 实现 deriveScheduleWeights 对应的局部分析或变换辅助逻辑。
+ * @param deps 参数 `deps`，用于本函数的分析、匹配或 IR 构造。
+ * @param dimensions 参数 `dimensions`，用于本函数的分析、匹配或 IR 构造。
+ * @param weights 参数 `weights`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool deriveScheduleWeights(const std::vector<std::vector<long long>> &deps,
                            size_t dimensions,
                            std::vector<long long> &weights) {
@@ -413,6 +532,15 @@ bool deriveScheduleWeights(const std::vector<std::vector<long long>> &deps,
     return weights.back() == 1;
 }
 
+/**
+ * @brief 分析 RectangularWavefront 的结构、递推或依赖信息。
+ * @param outer 参数 `outer`，用于本函数的分析、匹配或 IR 构造。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @param argAlias 参数 `argAlias`，用于本函数的分析、匹配或 IR 构造。
+ * @param basicAA 参数 `basicAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 成功时返回分析或变换计划，失败时返回空值。
+ */
 std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
     Loop &outer, LoopInfo &LI, const ArgumentAliasAnalysis &argAlias,
     const BasicAliasAnalysis &basicAA, std::string &reason) {
@@ -544,8 +672,8 @@ std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
             __int128 waveDistance =
                 static_cast<__int128>(plan.weights[0]) * distance[0] +
                 static_cast<__int128>(plan.weights[1]) * distance[1];
-            // Equal-wave dependences are legal only within one (i,j) lane;
-            // that lane executes the original innermost loop serially.
+            // 同一波次中的依赖只能落在同一个 (i,j) lane 内，因为该 lane 仍按原顺序
+            // 串行执行最内层循环；跨 lane 的零距离波次依赖会破坏执行次序。
             if (waveDistance < 0 ||
                 (waveDistance == 0 &&
                  (distance[0] != 0 || distance[1] != 0 ||
@@ -563,16 +691,38 @@ std::optional<RectangularWavefrontPlan> analyzeRectangularWavefront(
     return plan;
 }
 
+/**
+ * @brief 生成两个有符号整数值的最小值选择表达式。
+ * @param lhs 左操作数。
+ * @param rhs 右操作数。
+ * @param block 指令插入基本块。
+ * @return select(lhs<rhs, lhs, rhs) 的结果值。
+ */
 Value *emitSelectMin(Value *lhs, Value *rhs, BasicBlock *block) {
     auto *cmp = new ICmpInst(ICmpInst::ICMP_SLT, lhs, rhs, block);
     return new SelectInst(cmp, lhs, rhs, block);
 }
 
+/**
+ * @brief 生成两个有符号整数值的最大值选择表达式。
+ * @param lhs 左操作数。
+ * @param rhs 右操作数。
+ * @param block 指令插入基本块。
+ * @return select(lhs>rhs, lhs, rhs) 的结果值。
+ */
 Value *emitSelectMax(Value *lhs, Value *rhs, BasicBlock *block) {
     auto *cmp = new ICmpInst(ICmpInst::ICMP_SGT, lhs, rhs, block);
     return new SelectInst(cmp, lhs, rhs, block);
 }
 
+/**
+ * @brief 生成对正除数取数学下整的有符号除法。
+ * @param value 被除数。
+ * @param divisor 正常量除数。
+ * @param module 所属模块。
+ * @param block 指令插入基本块。
+ * @return floor(value/divisor) 对应的 IR 值。
+ */
 Value *emitFloorDiv(Value *value, long long divisor, Module *module,
                     BasicBlock *block) {
     if (divisor == 1) return value;
@@ -593,6 +743,14 @@ Value *emitFloorDiv(Value *value, long long divisor, Module *module,
     return new SelectInst(adjust, minusOne, q, block);
 }
 
+/**
+ * @brief 生成对正除数取数学上整的有符号除法。
+ * @param value 被除数。
+ * @param divisor 正常量除数。
+ * @param module 所属模块。
+ * @param block 指令插入基本块。
+ * @return ceil(value/divisor) 对应的 IR 值。
+ */
 Value *emitCeilDiv(Value *value, long long divisor, Module *module,
                    BasicBlock *block) {
     if (divisor == 1) return value;
@@ -611,6 +769,14 @@ Value *emitCeilDiv(Value *value, long long divisor, Module *module,
     return new SelectInst(adjust, plusOne, q, block);
 }
 
+/**
+ * @brief 在波前新 CFG 中递归重建无副作用的循环内表达式。
+ * @param value 待重建的原值。
+ * @param block 新指令的插入基本块。
+ * @param map 原值到新值的缓存映射。
+ * @param nestBlocks 原循环嵌套包含的基本块集合。
+ * @return 重建或可直接复用的值；遇到内存、副作用或 PHI 时返回 nullptr。
+ */
 Value *rematerialize(Value *value, BasicBlock *block,
                      std::unordered_map<Value *, Value *> &map,
                      const std::set<BasicBlock *> &nestBlocks) {
@@ -655,6 +821,15 @@ Value *rematerialize(Value *value, BasicBlock *block,
     return nullptr;
 }
 
+/**
+ * @brief 在矩形波前退出处递归构造原循环值的最终迭代结果。
+ * @param value 待恢复的原循环值。
+ * @param plan 已验证的矩形波前计划。
+ * @param block 最终值的插入基本块。
+ * @param cache 已物化结果缓存。
+ * @param visiting 当前递归栈，用于拒绝无法解析的值环。
+ * @return 可恢复时返回最终值，否则返回 nullptr。
+ */
 Value *materializeFinalValue(
     Value *value, const RectangularWavefrontPlan &plan, BasicBlock *block,
     std::unordered_map<Value *, Value *> &cache,
@@ -703,9 +878,8 @@ Value *materializeFinalValue(
             return false;
         };
 
-        // The fast path is entered only for a non-empty common domain. For
-        // an LCSSA merge between an empty-loop value and a completed-loop
-        // value, select the latter before recursively materializing it.
+        // 快速路径只会在公共迭代域非空时进入。若 LCSSA PHI 合并“空循环值”和
+        // “完整执行值”，应先选后者再递归物化，避免错误采用未执行路径的入值。
         for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
             std::set<Value *> seen;
             if (!dependsOnCompletedIteration(
@@ -761,6 +935,12 @@ Value *materializeFinalValue(
     return nullptr;
 }
 
+/**
+ * @brief 查询 PHI 来自指定前驱的入值。
+ * @param phi 待查询的 PHI 指令。
+ * @param predecessor 指定前驱基本块。
+ * @return 找到时返回对应值，否则返回 nullptr。
+ */
 Value *phiIncomingFrom(PhiInst *phi, BasicBlock *predecessor) {
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
         if (phi->get_operand(i + 1) == predecessor)
@@ -768,6 +948,13 @@ Value *phiIncomingFrom(PhiInst *phi, BasicBlock *predecessor) {
     return nullptr;
 }
 
+/**
+ * @brief 判断 isUnitPointerRecurrence 所描述的结构、合法性或安全条件是否成立。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param preheader 循环预头基本块。
+ * @param initial 参数 `initial`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isUnitPointerRecurrence(PhiInst *phi, BasicBlock *preheader,
                              Value *&initial) {
     initial = phiIncomingFrom(phi, preheader);
@@ -780,9 +967,19 @@ bool isUnitPointerRecurrence(PhiInst *phi, BasicBlock *preheader,
            one->value_ == 1;
 }
 
+/**
+ * @brief 原地执行 applyRectangularWavefront 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param function 待分析或改写的函数。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param newLoopHeaders 参数 `newLoopHeaders`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
                                Function *function, Module *module,
                                std::vector<BasicBlock *> &newLoopHeaders) {
+    // 用 schedule 权重建立按波次推进的外层，再在每个波次枚举合法点。
+    // 依赖顺序由计划保证；提交阶段负责克隆计算单元和重建所有跨层 PHI。
     std::vector<BasicBlock *> createdBlocks;
     auto fail = [&](const std::string &reason) {
         if (debugEnabled())
@@ -962,9 +1159,8 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
         normalized[1] = remainder;
         new BranchInst(cell, laneBody);
     } else {
-        // Schedule only the outer two coordinates. Equal-wave dependences in
-        // the third coordinate remain ordered by this original serial loop,
-        // preserving the unit-stride memory traversal.
+        // 波次调度只重排外层两个坐标；第三维的同波次依赖继续由原串行内层循环
+        // 保序，同时保留该维度的单位步长内存访问。
         normalized[1] = remainder;
         new BranchInst(innerHeader, laneBody);
 
@@ -1134,7 +1330,15 @@ bool applyRectangularWavefront(const RectangularWavefrontPlan &plan,
 
 } // namespace
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param function 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
+    // 优先尝试矩形波前计划，失败后再尝试普通双层倾斜。
+    // 任一计划提交后立即刷新循环/别名分析，只重新访问受影响邻域。
     if (std::getenv("DISABLE_LOOP_SKEWING")) return false;
     BasicAliasAnalysis localBasicAA;
     BasicAliasAnalysis *basicAA = nullptr;
@@ -1227,11 +1431,22 @@ bool LoopSkewing::runOnFunction(Function *function, AnalysisManager *AM) {
     return changed;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopSkewing::execute(Module *module) {
     for (auto *function : module->function_list_)
         if (!function->is_declaration()) runOnFunction(function, nullptr);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopSkewing::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto *function : module->function_list_)

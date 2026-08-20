@@ -1,3 +1,9 @@
+/**
+ * @file loopRepFold.cpp
+ * @brief 循环重复折叠：识别可求和、仿射或模递推循环，并以等价闭式表达式折叠重复迭代。
+ * @details 依次尝试仿射求和、模递推和可求和表达式；只有循环次数、活跃输出和溢出语义均可证明时折叠。
+ */
+
 #include "../../../include/mid/opt/loopRepFold.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/analysis/recurrenceAnalysis.hpp"
@@ -15,42 +21,62 @@
 
 namespace {
 
+/**
+ * @brief 判断 isLoopRepFoldDebugEnabled 所描述的结构、合法性或安全条件是否成立。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopRepFoldDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_LOOP_REPFOLD") != nullptr;
     return enabled;
 }
 
+/**
+ * @brief 生成 debugReject 对应的调试诊断，不参与程序语义。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugReject(const char *reason) {
     if (isLoopRepFoldDebugEnabled())
         std::cerr << "[LoopRepFold] affine reject: " << reason << "\n";
     return false;
 }
 
+/**
+ * @brief 保存可用闭式求和替代的模递推循环及其贡献表达式参数。
+ * @details 单次贡献可包含仿射条件选择、线性项和整除项；状态更新最终对
+ *          outerModulus 取模。
+ */
 struct SummableModularRecurrenceMatch {
-    PhiInst *induction = nullptr;
-    PhiInst *state = nullptr;
-    Value *start = nullptr;
-    Value *bound = nullptr;
-    Value *step = nullptr;
-    Value *initial = nullptr;
-    BinaryInst *stateRemainder = nullptr;
-    Value *remainderBase = nullptr;
-    int affineSelectionEnabled = 0;
-    int lhsMultiplier = 1;
-    int lhsConstant = 0;
-    int rhsMultiplier = 1;
-    int rhsConstant = 0;
-    int trueUsesRight = 1;
-    int linearMultiplier = 0;
-    int multiplier = 0;
-    int divisor = 0;
-    int quotientMultiplier = 0;
-    int contributionConstant = 0;
-    int innerModulus = 0;
-    int additiveConstant = 0;
-    int outerModulus = 0;
+    PhiInst *induction = nullptr;          ///< 控制循环迭代的归纳变量 PHI。
+    PhiInst *state = nullptr;              ///< 承载模递推状态的 PHI。
+    Value *start = nullptr;                ///< 归纳变量初始值。
+    Value *bound = nullptr;                ///< 归纳变量开区间上界。
+    Value *step = nullptr;                 ///< 归纳变量的正步长。
+    Value *initial = nullptr;              ///< 模递推状态的初始值。
+    BinaryInst *stateRemainder = nullptr;  ///< 计算下一状态最终余数的指令。
+    Value *remainderBase = nullptr;        ///< 去除外层加法常数后的余数被除数。
+    int affineSelectionEnabled = 0;        ///< 是否启用两个仿射分支间的条件选择。
+    int lhsMultiplier = 1;                 ///< 条件选择左侧仿射式的归纳变量系数。
+    int lhsConstant = 0;                   ///< 条件选择左侧仿射式的常数项。
+    int rhsMultiplier = 1;                 ///< 条件选择右侧仿射式的归纳变量系数。
+    int rhsConstant = 0;                   ///< 条件选择右侧仿射式的常数项。
+    int trueUsesRight = 1;                 ///< 条件为真时是否选择右侧仿射式。
+    int linearMultiplier = 0;              ///< 单次贡献中直接线性项的系数。
+    int multiplier = 0;                    ///< 整除项被除数中归纳变量的系数。
+    int divisor = 0;                       ///< 整除项使用的常量除数。
+    int quotientMultiplier = 0;            ///< 整除结果对单次贡献的系数。
+    int contributionConstant = 0;          ///< 单次贡献表达式的常数项。
+    int innerModulus = 0;                  ///< 单次贡献内部取模使用的模数。
+    int additiveConstant = 0;              ///< 与旧状态及贡献共同相加的常数。
+    int outerModulus = 0;                  ///< 每轮状态更新最终使用的模数。
 };
 
+/**
+ * @brief 实现 constantI32 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param result 用于写回匹配或计算结果的输出参数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool constantI32(Value *value, int &result) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     if (!constant || constant->value_ < std::numeric_limits<int>::min() ||
@@ -60,6 +86,13 @@ bool constantI32(Value *value, int &result) {
     return true;
 }
 
+/**
+ * @brief 实现 flattenAdd 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param terms 参数 `terms`，用于本函数的分析、匹配或 IR 构造。
+ * @param constant 参数 `constant`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool flattenAdd(Value *value, std::vector<Value *> &terms,
                 long long &constant) {
     if (auto *integer = dynamic_cast<ConstantInt *>(value)) {
@@ -75,6 +108,13 @@ bool flattenAdd(Value *value, std::vector<Value *> &terms,
     return true;
 }
 
+/**
+ * @brief 匹配 AddConstant 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @param constant 参数 `constant`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchAddConstant(Value *value, Value *base, int constant) {
     auto *add = dynamic_cast<BinaryInst *>(value);
     if (!add) return false;
@@ -91,6 +131,14 @@ bool matchAddConstant(Value *value, Value *base, int constant) {
            -static_cast<std::int64_t>(candidate) == constant;
 }
 
+/**
+ * @brief 匹配 CompareConstant 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param predicate 参数 `predicate`，用于本函数的分析、匹配或 IR 构造。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchCompareConstant(Value *value, ICmpInst::ICmpOp predicate,
                           Value *lhs, int rhs) {
     auto *compare = dynamic_cast<ICmpInst *>(value);
@@ -104,6 +152,15 @@ bool matchCompareConstant(Value *value, ICmpInst::ICmpOp predicate,
 // buildBoundedModulo for (base + additive) % modulus.  All intermediate nodes
 // must be private to the lowering, so replacing base by a congruent fast-path
 // representative cannot change any independently observable value.
+/**
+ * @brief 匹配 ExitModuloReconstruction 所描述的 IR 结构并提取结果。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @param additive 参数 `additive`，用于本函数的分析、匹配或 IR 构造。
+ * @param modulus 参数 `modulus`，用于本函数的分析、匹配或 IR 构造。
+ * @param exit 参数 `exit`，用于本函数的分析、匹配或 IR 构造。
+ * @param chain 参数 `chain`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchExitModuloReconstruction(
     Value *base, int additive, int modulus, BasicBlock *exit,
     std::unordered_set<Instruction *> &chain) {
@@ -240,6 +297,13 @@ bool matchExitModuloReconstruction(
     return true;
 }
 
+/**
+ * @brief 匹配 SummableContribution 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param induction 参数 `induction`，用于本函数的分析、匹配或 IR 构造。
+ * @param match 参数 `match`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchSummableContribution(Value *value, PhiInst *induction,
                                SummableModularRecurrenceMatch &match) {
     SummableExpressionAnalysis::LinearFloorExpression expression;
@@ -261,6 +325,12 @@ bool matchSummableContribution(Value *value, PhiInst *induction,
     return true;
 }
 
+/**
+ * @brief 分析 SummableModularRecurrence 的结构、递推或依赖信息。
+ * @param loop 待检查或变换的循环。
+ * @param match 参数 `match`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool analyzeSummableModularRecurrence(
     Loop &loop, SummableModularRecurrenceMatch &match) {
     auto reject = [&](const char *reason) {
@@ -337,10 +407,8 @@ bool analyzeSummableModularRecurrence(
     }
     if (!matchSummableContribution(contribution, match.induction, match))
         return reject("contribution-shape");
-    // The helper combines contributions mathematically modulo outerModulus.
-    // Prove that the original i32 add tree cannot wrap once the state is in
-    // the signed remainder range; otherwise wrapping by 2^32 would change the
-    // residue for a general modulus.
+    // 辅助函数是在 outerModulus 意义下合并各项贡献的；因此必须先证明原来的
+    // i32 加法树不会溢出。否则一旦发生 2^32 回绕，对任意模数取模的结果就可能改变。
     std::int64_t minimumDividend =
         -static_cast<std::int64_t>(match.outerModulus - 1) -
         static_cast<std::int64_t>(match.innerModulus - 1) +
@@ -359,6 +427,12 @@ bool analyzeSummableModularRecurrence(
 
 // ── 辅助检查 ────────────────────────────────────────────────────────────────
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param val 待检查或映射的 IR 值。
+ * @param blocks 相关基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
     if (dynamic_cast<Constant *>(val)) return true;
     if (dynamic_cast<GlobalVariable *>(val)) return true;
@@ -369,6 +443,15 @@ bool LoopRepFold::isLoopInvariant(Value *val, const std::set<BasicBlock *> &bloc
 }
 
 // 判断 phi 是否为：常量初始值（来自 preheader），每次 latch 时 += 常量正步长
+/**
+ * @brief 判断 isCountingIV 所描述的结构、合法性或安全条件是否成立。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param latch 循环回边基本块。
+ * @param init 参数 `init`，用于本函数的分析、匹配或 IR 构造。
+ * @param stride 参数 `stride`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop, BasicBlock *latch,
                                long long *init, long long *stride) {
     if (phi->type_->tid_ != Type::IntegerTyID) return false;
@@ -408,12 +491,30 @@ bool LoopRepFold::isCountingIV(PhiInst *phi, const Loop &loop, BasicBlock *latch
 
 // 仿射求和闭式折叠：total += a*i+b（界/初值/步长全常量）→ 直接算出常量结果，
 // 把出口处对 total_phi 的使用替换为该常量并整体删除循环。
+/**
+ * @brief 尝试执行 FoldAffineSum 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param SE 参数 `SE`，用于本函数的分析、匹配或 IR 构造。
+ * @param latch 循环回边基本块。
+ * @param ivPhi 参数 `ivPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalPhi 参数 `totalPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopExit 参数 `loopExit`，用于本函数的分析、匹配或 IR 构造。
+ * @param bound 参数 `bound`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalInit 参数 `totalInit`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalLatch 参数 `totalLatch`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivInit 参数 `ivInit`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivStride 参数 `ivStride`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *SE,
                                    BasicBlock *latch, PhiInst *ivPhi,
                                    PhiInst *totalPhi, BasicBlock *loopExit,
                                    Value *bound, Value *totalInit,
                                    Value *totalLatch, long long ivInit,
                                    long long ivStride) {
+    // 把累加器回边拆成“旧值 + 关于计数 IV 的仿射贡献”，再由 SCEV 求总和。
+    // 闭式值先在预头物化，确认所有出口使用可替换后才旁路并删除原循环。
     if (!SE) return debugReject("missing scalar evolution");
     if (loop.singleLatch() != latch) return debugReject("single latch mismatch");
     if (loop.singleExit() != loopExit) return debugReject("single exit mismatch");
@@ -519,6 +620,21 @@ bool LoopRepFold::tryFoldAffineSum(Loop &loop, Module *module, ScalarEvolution *
 //   total0 >= 0 && N >= 1 && N <= (INT_MAX - m)/c
 // 守卫成立时走快路径 total_final = (total0 % m + c*N) % m（全 i32 不溢出，且
 // 被除数恒非负 ⇒ C 截断取模 == 数学取模 ⇒ 与逐次迭代严格相等）；否则走原循环。
+/**
+ * @brief 尝试执行 FoldModularRecurrence 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param latch 循环回边基本块。
+ * @param ivPhi 参数 `ivPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalPhi 参数 `totalPhi`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopExit 参数 `loopExit`，用于本函数的分析、匹配或 IR 构造。
+ * @param bound 参数 `bound`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalInit 参数 `totalInit`，用于本函数的分析、匹配或 IR 构造。
+ * @param totalLatch 参数 `totalLatch`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivInit 参数 `ivInit`，用于本函数的分析、匹配或 IR 构造。
+ * @param ivStride 参数 `ivStride`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
                                            BasicBlock *latch, PhiInst *ivPhi,
                                            PhiInst *totalPhi, BasicBlock *loopExit,
@@ -579,11 +695,22 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     if (loopExit->pre_bbs_.size() != 1 || loopExit->pre_bbs_[0] != loop.header)
         return reject("exit-is-not-dedicated");
 
-    enum class ExitIncomingKind { State, Induction, Invariant };
+    /**
+     * @brief 区分快速路径需要为出口 PHI 构造的入值来源。
+     */
+    enum class ExitIncomingKind {
+        State,      ///< 折叠后的最终递推状态。
+        Induction,  ///< 折叠后的最终归纳变量值。
+        Invariant   ///< 可直接沿用的循环不变量。
+    };
+
+    /**
+     * @brief 记录一个出口 PHI 及其原循环头入值的快速路径修复方案。
+     */
     struct ExitPhiPlan {
-        PhiInst *phi;
-        Value *headerIncoming;
-        ExitIncomingKind kind;
+        PhiInst *phi;                 ///< 待增加快速路径入边的出口 PHI。
+        Value *headerIncoming;        ///< 原循环头边为该 PHI 提供的入值。
+        ExitIncomingKind kind;        ///< 快速路径上应采用的入值类别。
     };
     std::vector<ExitPhiPlan> exitPhiPlans;
     PhiInst *stateExitPhi = nullptr;
@@ -711,6 +838,11 @@ bool LoopRepFold::tryFoldModularRecurrence(Loop &loop, Module *module,
     return true;
 }
 
+/**
+ * @brief 获取或创建可求和模递推使用的内部辅助函数声明。
+ * @param module 待查询或插入声明的模块。
+ * @return 模块中的 __compiler.summable_mod_sum 函数声明。
+ */
 Function *LoopRepFold::getSummableModSumDeclaration(Module *module) {
     if (summableModSumDecl_)
         return summableModSumDecl_;
@@ -726,6 +858,12 @@ Function *LoopRepFold::getSummableModSumDeclaration(Module *module) {
     return summableModSumDecl_;
 }
 
+/**
+ * @brief 尝试执行 FoldSummableModularRecurrence 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
                                                    Module *module) {
     auto reject = [&](const char *reason) {
@@ -788,8 +926,8 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
             match.outerModulus, exit, remainderExitChain))
         return reject("unsupported-remainder-export");
 
-    // The fast path exports only the accumulator.  Any other loop-defined
-    // value escaping would require reconstructing its exact final iteration.
+    // 快速路径只负责导出累加器。若还有其他循环内定义的值逃逸，就必须精确重建
+    // 它在最后一次迭代中的取值，当前变换无法保证这一点，因此直接拒绝。
     for (auto *instruction : loop.header->instr_list_) {
         if (instruction == match.state) continue;
         for (const auto &use : instruction->use_list_) {
@@ -819,11 +957,22 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
         }
     }
 
-    enum class ExitValueKind { StateResult, RemainderBase, Invariant };
+    /**
+     * @brief 区分仿射闭式快速路径上的出口值来源。
+     */
+    enum class ExitValueKind {
+        StateResult,   ///< 闭式计算出的最终模递推状态。
+        RemainderBase, ///< 去除加法常数后的余数基础值。
+        Invariant      ///< 原样沿用的循环不变量。
+    };
+
+    /**
+     * @brief 记录出口 PHI 在闭式快速路径上需要补充的入值类别。
+     */
     struct ExitPhiPlan {
-        PhiInst *phi;
-        Value *incoming;
-        ExitValueKind kind;
+        PhiInst *phi;         ///< 待增加快速路径入边的出口 PHI。
+        Value *incoming;      ///< 原循环路径提供的入值。
+        ExitValueKind kind;   ///< 快速路径应物化的对应值类别。
     };
     std::vector<ExitPhiPlan> exitPlans;
     PhiInst *remainderBaseExitPhi = nullptr;
@@ -943,8 +1092,8 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
         preheader->add_instruction_before_terminator(instruction);
     for (Instruction *instruction : affineSafetyInstructions)
         preheader->add_instruction_before_terminator(instruction);
-    // The guard's AND chain was created without insertion.  Insert it in
-    // dependency order by walking backwards from the final node.
+    // 上面的 AND 链仅创建了指令、尚未插入基本块。这里从最终条件反向收集，
+    // 再按依赖顺序插入，保证每个操作数都先于使用它的 AND 指令定义。
     std::vector<Instruction *> guardChain;
     for (Value *cursor = guard;;) {
         auto *binary = dynamic_cast<BinaryInst *>(cursor);
@@ -1060,7 +1209,16 @@ bool LoopRepFold::tryFoldSummableModularRecurrence(Loop &loop,
 
 // ── 主变换 ──────────────────────────────────────────────────────────────────
 
+/**
+ * @brief 尝试执行 Fold 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param SE 参数 `SE`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
+    // 调度顺序从专用的可求和模递推开始，再检查通用闭式折叠所需的唯一退出。
+    // 各实现共享“循环次数必须唯一、活跃输出必须可重建、无额外副作用”的前提。
     if (isLoopRepFoldDebugEnabled())
         std::cerr << "[LoopRepFold] inspect header=" << loop.header->name_
                   << " blocks=" << loop.blocks.size() << "\n";
@@ -1073,12 +1231,9 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (mode_ == LoopRepFoldMode::Aggressive &&
         tryFoldSummableModularRecurrence(loop, module))
         return true;
-    // Every supported closed form summarizes the number of iterations implied
-    // by the header condition.  An additional exiting edge (for example a
-    // while-body break) can terminate earlier, so the summary is invalid even
-    // when all scalar updates otherwise match.  Check this before dispatching
-    // to any folding mode; individual realizers must never infer unique
-    // control flow merely from a single latch or a single destination block.
+    // 所有闭式计算都以 header 条件推导出的迭代次数为准。额外退出边（如循环体内
+    // break）可能提前终止，即使标量更新完全匹配也不能使用该摘要。因此必须在分派
+    // 任一折叠模式前统一验证唯一退出，不能只凭单 latch 或单目标块推断控制流。
     if (loop.exiting.size() != 1 || loop.exiting.front() != loop.header ||
         loop.exits.size() != 1)
         return debugReject("loop does not have a unique header exit");
@@ -1160,9 +1315,8 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
     if (ivInit != 0 || ivStride != 1)
         return false;
 
-    // 6. The accumulator must participate in the in-loop update.  Its exact
-    // use chain is validated below; requiring every immediate user to be a
-    // phi rejects the canonical `next = total + invariant` form.
+    // 6. 累加器必须真正参与循环内更新。下面会验证完整 use 链；不能要求它的直接
+    // 用户全是 PHI，否则会错误拒绝规范的 `next = total + invariant` 形式。
     int bodyUses = 0;
     for (auto &use : total_phi->use_list_) {
         auto *user = use.user_;
@@ -1221,9 +1375,8 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         };
         if (!isAcc(total_latch)) return false;
 
-        // The recursive proof above identifies the one update chain reaching
-        // the latch.  A second in-loop use of the accumulator could affect
-        // control or another live value and must not be summarized away.
+        // 上面的递归匹配只证明了通向 latch 的唯一更新链。若累加器在循环内还有
+        // 第二条用途，它可能参与控制流或生成其他活跃值，不能被摘要计算直接消去。
         for (const Use &use : total_phi->use_list_) {
             auto *user = use.user_;
             if (user && loop.blocks.count(user->parent_) &&
@@ -1254,8 +1407,8 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
         }
     }
 
-    // Folding adds latch as a new predecessor of loop_exit. Existing exit phis
-    // must therefore be extendable before any CFG mutation happens.
+    // 折叠后 latch 会成为 loop_exit 的新前驱。必须在修改 CFG 之前确认所有出口 PHI
+    // 都能为这个新前驱补出合法入值，避免改到一半才发现 SSA 无法修复。
     for (auto *inst : loop_exit->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);
@@ -1388,6 +1541,12 @@ bool LoopRepFold::tryFold(Loop &loop, Module *module, ScalarEvolution *SE) {
 
 // ── 函数级 / 模块级入口 ─────────────────────────────────────────────────────
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopRepFold::runOnFunction(Function *func, AnalysisManager *AM) {
     if (func->basic_blocks_.empty() || !AM) return;
     modFolded_.clear();
@@ -1422,11 +1581,22 @@ void LoopRepFold::runOnFunction(Function *func, AnalysisManager *AM) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopRepFold::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopRepFold::execute(Module *module, AnalysisManager &AM) {
     summableModSumDecl_ = nullptr;
     std::vector<Function *> functions = module->function_list_;

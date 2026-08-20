@@ -1,3 +1,9 @@
+/**
+ * @file instCombineCmpSelect.cpp
+ * @brief 实现整数/浮点比较和 select 的规范化、常量折叠以及谓词等价改写。
+ * @details 比较谓词随操作数交换同步翻转；select 折叠只在条件或两分支等价得到证明时进行。
+ */
+
 #include "instCombineInternal.hpp"
 #include "../../../include/mid/ir/intrinsics.hpp"
 
@@ -7,6 +13,11 @@
 // getSwappedPredicate — icmp predicate after swapping operands
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 返回交换比较操作数后语义等价的比较谓词。
+ * @param op 待检查的操作码或操作数。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
     switch (op) {
         case ICmpInst::ICMP_EQ:  return ICmpInst::ICMP_EQ;
@@ -27,6 +38,11 @@ ICmpInst::ICmpOp getSwappedPredicate(ICmpInst::ICmpOp op) {
 
 namespace {
 
+/**
+ * @brief 收集或查找 getSwappedFPredicate 所需的信息。
+ * @param op 待检查的操作码或操作数。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 FCmpInst::FCmpOp getSwappedFPredicate(FCmpInst::FCmpOp op) {
     switch (op) {
         case FCmpInst::FCMP_OEQ: case FCmpInst::FCMP_UEQ: return op;
@@ -43,11 +59,20 @@ FCmpInst::FCmpOp getSwappedFPredicate(FCmpInst::FCmpOp op) {
     }
 }
 
+/**
+ * @brief 描述形如 `base * scale` 或 `base << log2(scale)` 的正比例整数表达式。
+ */
 struct ScaledValue {
-    Value *base = nullptr;
-    long long scale = 1;
+    Value *base = nullptr;    ///< 去除常量比例因子后的基础值。
+    long long scale = 1;      ///< 严格为正的整数比例因子。
 };
 
+/**
+ * @brief 实现 parsePositiveScale 对应的局部分析或变换辅助逻辑。
+ * @param v 待检查或映射的 IR 值。
+ * @param out 参数 `out`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool parsePositiveScale(Value *v, ScaledValue &out) {
     if (!v) return false;
 
@@ -75,6 +100,14 @@ bool parsePositiveScale(Value *v, ScaledValue &out) {
     return true;
 }
 
+/**
+ * @brief 判断 isSourceNonNegative 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @param ctx 参数 `ctx`，用于本函数的分析、匹配或 IR 构造。
+ * @param assuming 参数 `assuming`，用于本函数的分析、匹配或 IR 构造。
+ * @param depth 递归分析深度，用于限制搜索开销。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSourceNonNegative(Value *v, BasicBlock *ctx,
                          std::vector<Value *> &assuming, int depth) {
     if (!v || depth > 12) return false;
@@ -138,11 +171,25 @@ bool isSourceNonNegative(Value *v, BasicBlock *ctx,
     return ok;
 }
 
+/**
+ * @brief 判断 isSourceNonNegative 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @param ctx 参数 `ctx`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSourceNonNegative(Value *v, BasicBlock *ctx) {
     std::vector<Value *> assuming;
     return isSourceNonNegative(v, ctx, assuming, 0);
 }
 
+/**
+ * @brief 计算 inferSignedLowerBound 所描述的派生信息，供合法性或收益判断使用。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param ctx 参数 `ctx`，用于本函数的分析、匹配或 IR 构造。
+ * @param lower 参数 `lower`，用于本函数的分析、匹配或 IR 构造。
+ * @param depth 递归分析深度，用于限制搜索开销。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool inferSignedLowerBound(Value *value, BasicBlock *ctx,
                            long long &lower, int depth) {
     if (!value || depth > 8)
@@ -207,8 +254,12 @@ bool inferSignedLowerBound(Value *value, BasicBlock *ctx,
     return true;
 }
 
-// Dominated false-edge: if k1*x < B failed and x≥0 and k2≥k1, then k2*x < B is false.
-// Relies on signed overflow being undefined at source level (SysY / C signed arith).
+/**
+ * @brief 利用支配当前块的失败比较，折叠具有更大正比例系数的比较。
+ * @param inst 待处理的有符号小于比较指令，形式应为 k2*x < B。
+ * @return 若前驱已证明 k1*x < B 为假且 k2>=k1，则返回 false 常量；否则返回 nullptr。
+ * @details 证明还要求 x 非负，并要求比例乘法按当前 IR 语义不会产生可观察回绕。
+ */
 Value *foldScaledCompareFromPred(ICmpInst *inst) {
     if (!inst || inst->icmp_op_ != ICmpInst::ICMP_SLT || !inst->parent_)
         return nullptr;
@@ -252,7 +303,14 @@ Value *foldScaledCompareFromPred(ICmpInst *inst) {
 //   - foldICmpAddSub: fold add/sub±C into predicate / RHS constant
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 ICmp 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitICmp(ICmpInst *inst) {
+    // 比较先规范化操作数和谓词，再利用常量、值事实及支配分支证明结果。
+    // 保留 min/max 等后续模式依赖的规范比较形状，避免局部折叠破坏更大收益。
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
     Type *ty = inst->type_;
@@ -404,8 +462,8 @@ Value* visitICmp(ICmpInst *inst) {
     if (auto *folded = foldScaledCompareFromPred(inst))
         return folded;
 
-    // Keep the canonical compare feeding a signed min/max select intact.
-    // Rewriting x < C-x into a scaled compare before visiting the select
+    // 若比较直接驱动有符号 min/max 形态的 select，则保留其规范结构。
+    // 过早把 x < C-x 改成缩放比较会破坏随后对整个 select 模式的识别。
     // obscures both the min/max identity and its range-derived simplification.
     for (const Use &use : inst->use_list_) {
         auto *select = dynamic_cast<SelectInst *>(use.user_);
@@ -429,6 +487,11 @@ Value* visitICmp(ICmpInst *inst) {
 //   - No self-compare fold: NaN makes x==x false under ordered predicates
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FCmp 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFCmp(FCmpInst *inst) {
     Value *x = inst->get_operand(0);
     Value *y = inst->get_operand(1);
@@ -472,7 +535,14 @@ Value* visitFCmp(FCmpInst *inst) {
 //                                 select c,0,1 → zext (xor c,1)
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 Select 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitSelect(SelectInst *inst) {
+    // 先折叠确定条件和相同分支，再识别布尔扩展及范围修正模式。
+    // 创建的新比较/算术指令放在 select 前，保证定义支配替换后的所有使用。
     Value *cond  = inst->get_operand(0);
     Value *tval  = inst->get_operand(1);
     Value *fval  = inst->get_operand(2);

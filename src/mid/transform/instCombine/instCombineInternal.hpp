@@ -1,3 +1,9 @@
+/**
+ * @file instCombineInternal.hpp
+ * @brief 提供 InstCombine 各子模块共享的常量构造、位宽查询、值事实和指令创建辅助函数。
+ * @details 辅助函数采用保守证明策略：无法证明范围、整除或无溢出条件时必须返回失败并保留原表达式。
+ */
+
 #pragma once
 #include "../../../include/mid/ir/ir.hpp"
 #include "../../../include/mid/analysis/constantEvaluator.hpp"
@@ -8,28 +14,61 @@
 
 // ── Constant helpers ──────────────────────────────────────────────────
 
+/**
+ * @brief 尝试把 IR 值识别为整数常量。
+ * @param v 待检查或映射的 IR 值。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 inline ConstantInt* as_const_int(Value* v) {
     return dynamic_cast<ConstantInt*>(v);
 }
 
+/**
+ * @brief 尝试把 IR 值识别为浮点常量。
+ * @param v 待检查或映射的 IR 值。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 inline ConstantFloat* as_const_float(Value* v) {
     return dynamic_cast<ConstantFloat*>(v);
 }
 
+/**
+ * @brief 判断给定值是否为整数或浮点常量。
+ * @param v 待检查或映射的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool is_constant(Value* v) {
     return as_const_int(v) || as_const_float(v);
 }
 
 // ── Constant creators ─────────────────────────────────────────────────
 
+/**
+ * @brief 创建指定类型和数值的整数常量。
+ * @param ty 相关 IR 类型。
+ * @param v 新常量保存的整数值。
+ * @return 返回新分配的整数常量，所有权按现有 IR 常量管理约定移交。
+ */
 inline ConstantInt* make_const_int(Type* ty, int v) {
     return new ConstantInt(ty, v);
 }
 
+/**
+ * @brief 创建指定类型和数值的浮点常量。
+ * @param ty 相关 IR 类型。
+ * @param v 新常量保存的浮点值。
+ * @return 返回新分配的浮点常量，所有权按现有 IR 常量管理约定移交。
+ */
 inline ConstantFloat* make_const_float(Type* ty, float v) {
     return new ConstantFloat(ty, v);
 }
 
+/**
+ * @brief 判断 sameConstantValue 所描述的结构、合法性或安全条件是否成立。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool sameConstantValue(Value *lhs, Value *rhs) {
     if (lhs == rhs) return true;
     auto *li = dynamic_cast<ConstantInt *>(lhs);
@@ -41,6 +80,12 @@ inline bool sameConstantValue(Value *lhs, Value *rhs) {
     return dynamic_cast<ConstantZero *>(lhs) && dynamic_cast<ConstantZero *>(rhs);
 }
 
+/**
+ * @brief 判断 sameInstructionShape 所描述的结构、合法性或安全条件是否成立。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
     if (!lhs || !rhs) return false;
     if (lhs->op_id_ != rhs->op_id_ || lhs->num_ops() != rhs->num_ops())
@@ -64,10 +109,20 @@ inline bool sameInstructionShape(Instruction *lhs, Instruction *rhs) {
 
 // ── Power-of-two helpers ──────────────────────────────────────────────
 
+/**
+ * @brief 判断 isPowerOfTwo 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool isPowerOfTwo(int v) {
     return v > 0 && (v & (v - 1)) == 0;
 }
 
+/**
+ * @brief 计算正二次幂整数以 2 为底的对数。
+ * @param v 已由调用方确认的正二次幂整数。
+ * @return 返回满足 v = 2^result 的指数。
+ */
 inline int log2Int(int v) {
     int r = 0;
     while (v >>= 1) ++r;
@@ -75,6 +130,12 @@ inline int log2Int(int v) {
 }
 
 // 能否证明 v = 2^k？如能证明则设置 k 并返回 true。
+/**
+ * @brief 判断 isKnownPowerOfTwo 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @param k 参数 `k`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool isKnownPowerOfTwo(Value *v, int &k) {
     if (auto *ci = dynamic_cast<ConstantInt*>(v)) {
         if (ci->value_ > 0 && isPowerOfTwo(ci->value_)) {
@@ -113,6 +174,12 @@ inline bool isKnownPowerOfTwo(Value *v, int &k) {
 // variables, etc.) these functions naturally cover more cases.
 
 extern thread_local DominatorTreeAnalysis *gInstCombineDominatorTree;
+/**
+ * @brief 判断 isKnownNonNegative 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param context 参数 `context`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool isKnownNonNegative(Value *value, BasicBlock *context = nullptr) {
     return ValueFacts::isKnownNonNegative(value, context,
                                           gInstCombineDominatorTree);
@@ -120,11 +187,23 @@ inline bool isKnownNonNegative(Value *value, BasicBlock *context = nullptr) {
 using ValueFacts::isKnownMultipleOf;
 using ValueFacts::knownAbsBound;
 
+/**
+ * @brief 实现 copySemFlags 对应的局部分析或变换辅助逻辑。
+ * @param from 参数 `from`，用于本函数的分析、匹配或 IR 构造。
+ * @param to 参数 `to`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void copySemFlags(Value *from, Value *to) {
     if (from && to)
         to->copySemFlagsFrom(from);
 }
 
+/**
+ * @brief 实现 setSemFlagIfMissing 对应的局部分析或变换辅助逻辑。
+ * @param v 待检查或映射的 IR 值。
+ * @param flag 参数 `flag`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool setSemFlagIfMissing(Value *v, SemFlag flag) {
     if (!v || v->hasSemFlag(flag))
         return false;
@@ -132,6 +211,13 @@ inline bool setSemFlagIfMissing(Value *v, SemFlag flag) {
     return true;
 }
 
+/**
+ * @brief 判断 operandsAreDisjointBits 所描述的结构、合法性或安全条件是否成立。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @param ctx 参数 `ctx`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool operandsAreDisjointBits(Value *lhs, Value *rhs, BasicBlock *ctx) {
     auto *cr = dynamic_cast<ConstantInt *>(rhs);
     if (cr && cr->value_ > 0) {
@@ -148,6 +234,11 @@ inline bool operandsAreDisjointBits(Value *lhs, Value *rhs, BasicBlock *ctx) {
     return false;
 }
 
+/**
+ * @brief 实现 stampOrDisjoint 对应的局部分析或变换辅助逻辑。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void stampOrDisjoint(BinaryInst *inst) {
     if (!inst || inst->op_id_ != Instruction::Or) return;
     if (operandsAreDisjointBits(inst->get_operand(0), inst->get_operand(1),
@@ -155,6 +246,11 @@ inline void stampOrDisjoint(BinaryInst *inst) {
         inst->setSemFlag(SemFlag::Disjoint);
 }
 
+/**
+ * @brief 实现 stampAshrExact 对应的局部分析或变换辅助逻辑。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void stampAshrExact(BinaryInst *inst) {
     if (!inst || inst->op_id_ != Instruction::AShr) return;
     auto *shift = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -163,6 +259,11 @@ inline void stampAshrExact(BinaryInst *inst) {
         inst->setSemFlag(SemFlag::Exact);
 }
 
+/**
+ * @brief 判断 canProveAddOneNoWrap 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool canProveAddOneNoWrap(BinaryInst *inst) {
     if (!inst || inst->op_id_ != Instruction::Add || !inst->parent_)
         return false;
@@ -188,6 +289,11 @@ inline bool canProveAddOneNoWrap(BinaryInst *inst) {
     return false;
 }
 
+/**
+ * @brief 实现 stampAddNoWrap 对应的局部分析或变换辅助逻辑。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void stampAddNoWrap(BinaryInst *inst) {
     if (!inst || inst->op_id_ != Instruction::Add) return;
     auto *rhs = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -199,7 +305,14 @@ inline void stampAddNoWrap(BinaryInst *inst) {
         inst->setSemFlag(SemFlag::NoUnsignedWrap);
 }
 
+/**
+ * @brief 实现 stampIntegerFacts 对应的局部分析或变换辅助逻辑。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void stampIntegerFacts(BinaryInst *inst) {
+    // 这里只记录已经由控制流或值事实证明的语义，不直接改写表达式。
+    // 后续 combine 可依赖这些标志做更强变换，但缺少证明时必须保持未标记状态。
     if (!inst || inst->type_->tid_ != Type::IntegerTyID) return;
     switch (inst->op_id_) {
     case Instruction::Add:
@@ -216,6 +329,11 @@ inline void stampIntegerFacts(BinaryInst *inst) {
     }
 }
 
+/**
+ * @brief 实现 stampIntegerFacts 对应的局部分析或变换辅助逻辑。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 inline void stampIntegerFacts(Instruction *inst) {
     stampIntegerFacts(dynamic_cast<BinaryInst *>(inst));
 }
@@ -224,6 +342,13 @@ inline void stampIntegerFacts(Instruction *inst) {
 // If this BB is reached via  br (icmp eq (srem v, C), 0), this_bb, other
 // then v % C == 0, i.e. v is a multiple of C.
 // Returns true when C is itself a multiple of 2^k.
+/**
+ * @brief 判断 isKnownMultipleOfFromBranch 所描述的结构、合法性或安全条件是否成立。
+ * @param v 待检查或映射的 IR 值。
+ * @param k 参数 `k`，用于本函数的分析、匹配或 IR 构造。
+ * @param ctx 参数 `ctx`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 inline bool isKnownMultipleOfFromBranch(Value *v, int k, BasicBlock *ctx) {
     int mask = (1 << k) - 1;
     for (auto *pred : ctx->pre_bbs_) {

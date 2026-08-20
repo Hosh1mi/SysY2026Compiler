@@ -1,3 +1,9 @@
+/**
+ * @file loopFusion.cpp
+ * @brief 循环融合：在边界一致且依赖合法时融合相邻循环，减少循环控制和中间内存访问。
+ * @details 先验证相邻形状和边界，再检查标量交叉使用、调用纯度与内存依赖，最后统一重连 CFG 与 PHI。
+ */
+
 #include "../../../include/mid/opt/loopFusion.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
@@ -15,9 +21,18 @@
 
 namespace {
 
+/**
+ * @brief 判断是否启用循环融合调试诊断。
+ * @return 设置 DEBUG_LOOP_FUSION 环境变量时返回 true。
+ */
 bool debugEnabled() { return std::getenv("DEBUG_LOOP_FUSION") != nullptr; }
 
 // 可无副作用上提到 preheader 的纯指令（无内存访问、无调用、非 phi）。
+/**
+ * @brief 判断 isHoistableInst 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isHoistableInst(Instruction *inst) {
     return dynamic_cast<BinaryInst *>(inst) ||
            dynamic_cast<UnaryInst *>(inst) ||
@@ -31,20 +46,40 @@ bool isHoistableInst(Instruction *inst) {
            dynamic_cast<SelectInst *>(inst);
 }
 
+/**
+ * @brief 沿连续 GEP 的基址操作数追溯内存访问根对象。
+ * @param ptr 待追溯的指针值。
+ * @return 最外层非 GEP 基址值。
+ */
 Value *rootBase(Value *ptr) {
     while (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr))
         ptr = gep->get_operand(0);
     return ptr;
 }
 
-enum class BaseRelation { NoAlias, MayAlias, MustAlias };
-
-struct Access {
-    GetElementPtrInst *gep = nullptr;
-    Value *base = nullptr;
-    bool isStore = false;
+/**
+ * @brief 表示两个内存访问根对象之间的别名关系。
+ */
+enum class BaseRelation {
+    NoAlias,    ///< 根对象确定互不重叠。
+    MayAlias,   ///< 无法证明是否重叠。
+    MustAlias   ///< 根对象确定相同。
 };
 
+/**
+ * @brief 描述循环融合依赖检查中的一次 load 或 store 内存访问。
+ */
+struct Access {
+    GetElementPtrInst *gep = nullptr;    ///< 计算本次访问地址的 GEP。
+    Value *base = nullptr;               ///< 穿过 GEP 后得到的根对象。
+    bool isStore = false;                ///< 为 true 时该访问会写入内存。
+};
+
+/**
+ * @brief 取得 load 或 store 指令访问的指针操作数。
+ * @param inst 待检查的内存指令。
+ * @return load/store 的地址；其他指令返回 nullptr。
+ */
 Value *accessPtr(Instruction *inst) {
     if (auto *st = dynamic_cast<StoreInst *>(inst))
         return st->get_operand(1);
@@ -53,6 +88,11 @@ Value *accessPtr(Instruction *inst) {
     return nullptr;
 }
 
+/**
+ * @brief 收集或查找 collectAccesses 所需的信息。
+ * @param L 待检查或变换的循环。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 std::vector<Access> collectAccesses(Loop *L) {
     std::vector<Access> accs;
     for (auto *bb : L->blocksOrdered) {
@@ -70,11 +110,24 @@ std::vector<Access> collectAccesses(Loop *L) {
 }
 
 // v 是否定义在 L 的某个块内。
+/**
+ * @brief 判断 definedInLoop 所描述的结构、合法性或安全条件是否成立。
+ * @param L 待检查或变换的循环。
+ * @param v 待检查或映射的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool definedInLoop(Loop *L, Value *v) {
     auto *inst = dynamic_cast<Instruction *>(v);
     return inst && inst->parent_ && L->blocks.count(inst->parent_);
 }
 
+/**
+ * @brief 原地执行 retargetPhiPred 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param succ 后继基本块。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred) {
     for (auto *inst : succ->instr_list_) {
         if (!inst->is_phi()) break;
@@ -86,6 +139,11 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred, BasicBlock *newPred)
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopFusion::execute(Module *module) {
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
@@ -101,6 +159,12 @@ void LoopFusion::execute(Module *module) {
     basicAA_ = nullptr;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopFusion::execute(Module *module, AnalysisManager &AM) {
     ArgumentAliasAnalysis argAA;
     argAA.analyze(module);
@@ -116,7 +180,15 @@ PreservedAnalyses LoopFusion::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::runOnFunction(Function *func, AnalysisManager *AM) {
+    // 每个候选对依次经过形状、边界、调用纯度、标量使用、内存依赖和收益检查。
+    // 融合会使 LoopInfo 失效，因此一次只提交一对循环，再用受影响 header 重建工作列表。
     bool everChanged = false;
     LoopInfo localLoopInfo;
     LoopInfo *loopInfo = nullptr;
@@ -203,6 +275,11 @@ bool LoopFusion::runOnFunction(Function *func, AnalysisManager *AM) {
     return everChanged;
 }
 
+/**
+ * @brief 分析 Shape 的结构、递推或依赖信息。
+ * @param L 待检查或变换的循环。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LoopFusion::Shape LoopFusion::analyzeShape(Loop *L) const {
     Shape s;
     if (!L || !L->hasCanonicalIV()) return s;
@@ -265,6 +342,14 @@ LoopFusion::Shape LoopFusion::analyzeShape(Loop *L) const {
     return s;
 }
 
+/**
+ * @brief 沿第一循环出口后的简单 CFG 链寻找相邻同级循环。
+ * @param s1 第一循环的规范形态描述。
+ * @param L1 第一循环。
+ * @param LI 当前函数的循环信息。
+ * @param chain 写回两个循环之间可旁路或移动的基本块链。
+ * @return 找到时返回相邻同级循环，否则返回 nullptr。
+ */
 Loop *LoopFusion::walkToSibling(const Shape &s1, Loop *L1, LoopInfo &LI,
                                 std::vector<BasicBlock *> &chain) const {
     std::map<BasicBlock *, Loop *> preMap;
@@ -295,6 +380,12 @@ Loop *LoopFusion::walkToSibling(const Shape &s1, Loop *L1, LoopInfo &LI,
     return nullptr;
 }
 
+/**
+ * @brief 判断 boundsEqual 所描述的结构、合法性或安全条件是否成立。
+ * @param s1 参数 `s1`，用于本函数的分析、匹配或 IR 构造。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::boundsEqual(const Shape &s1, const Shape &s2) const {
     if (s1.bound == s2.bound) return true;
     auto *c1 = dynamic_cast<ConstantInt *>(s1.bound);
@@ -302,6 +393,17 @@ bool LoopFusion::boundsEqual(const Shape &s1, const Shape &s2) const {
     return c1 && c2 && c1->value_ == c2->value_;
 }
 
+/**
+ * @brief 实现 planChainMotion 对应的局部分析或变换辅助逻辑。
+ * @param L1 第一个循环。
+ * @param L2 第二个循环。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @param chain 参数 `chain`，用于本函数的分析、匹配或 IR 构造。
+ * @param bypassPhis 参数 `bypassPhis`，用于本函数的分析、匹配或 IR 构造。
+ * @param hoist 参数 `hoist`，用于本函数的分析、匹配或 IR 构造。
+ * @param sink 参数 `sink`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::planChainMotion(
     Loop *L1, Loop *L2, const Shape &s2,
     const std::vector<BasicBlock *> &chain,
@@ -328,9 +430,8 @@ bool LoopFusion::planChainMotion(
             if (inst == X->get_terminator()) continue;
 
             if (auto *phi = dynamic_cast<PhiInst *>(inst)) {
-                // Every block on the bridge has one predecessor.  Its phi is
-                // therefore only an LCSSA/edge forwarding node and can be
-                // replaced by the sole incoming value before the bridge dies.
+                // 桥接块只有一个前驱，其中的 PHI 只是 LCSSA/边转发节点。
+                // 在桥接块删除前，可安全地用唯一 incoming 值旁路该 PHI。
                 if (phi->num_ops() != 2 ||
                     phi->get_operand(1) != X->pre_bbs_.front())
                     return false;
@@ -367,10 +468,9 @@ bool LoopFusion::planChainMotion(
         }
     }
 
-    // A value that needs L1's final state cannot initialize or execute inside
-    // L2 after fusion: there L1 has only advanced to the current iteration.
-    // It also cannot feed an E2 phi, because sunk instructions are placed in
-    // E2 and therefore do not dominate E2's incoming edges.
+    // 依赖 L1 最终状态的值不能在融合后的 L2 内初始化或执行，因为此时 L1
+    // 只推进到当前迭代；它也不能作为 E2 PHI 入值，因为下沉到 E2 的定义
+    // 不支配 E2 的 incoming 边。
     auto invalidDependentUse = [&](Value *value) {
         for (const auto &use : value->use_list_) {
             auto *user = use.user_;
@@ -390,9 +490,8 @@ bool LoopFusion::planChainMotion(
         if (invalidDependentUse(inst))
             return false;
 
-    // Hoisted bridge values must not depend on a sunk bridge value.  The
-    // classification above is transitive in dominance order; keep this final
-    // assertion-like check defensive against malformed, non-dominating SSA.
+    // 上提值不能依赖下沉值。虽然前面的分类按支配顺序传播依赖，这里仍做
+    // 防御检查，拒绝不满足支配关系的异常 SSA。
     std::set<Instruction *> sunkSet(sink.begin(), sink.end());
     for (auto *inst : hoist) {
         for (unsigned i = 0; i < inst->num_ops(); ++i) {
@@ -405,6 +504,12 @@ bool LoopFusion::planChainMotion(
     return true;
 }
 
+/**
+ * @brief 判断 callsArePure 所描述的结构、合法性或安全条件是否成立。
+ * @param L1 第一个循环。
+ * @param L2 第二个循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
     for (auto *L : {L1, L2})
         for (auto *bb : L->blocksOrdered)
@@ -419,6 +524,12 @@ bool LoopFusion::callsArePure(Loop *L1, Loop *L2) const {
     return true;
 }
 
+/**
+ * @brief 实现 noScalarCrossUse 对应的局部分析或变换辅助逻辑。
+ * @param L1 第一个循环。
+ * @param L2 第二个循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::noScalarCrossUse(Loop *L1, Loop *L2) const {
     for (auto *bb : L2->blocksOrdered)
         for (auto *inst : bb->instr_list_)
@@ -428,6 +539,11 @@ bool LoopFusion::noScalarCrossUse(Loop *L1, Loop *L2) const {
     return true;
 }
 
+/**
+ * @brief 实现 headerContentSimple 对应的局部分析或变换辅助逻辑。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::headerContentSimple(const Shape &s2) const {
     // L2.header 将被删除，内容只允许 phi + guard + 终止指令。
     for (auto *inst : s2.header->instr_list_) {
@@ -446,6 +562,15 @@ bool LoopFusion::headerContentSimple(const Shape &s2) const {
 //                             否则初值在 preheader 入边上无定义）；
 //   两个循环体（非 header）内 → while 形下不可能支配 L2.header，防御性拒绝；
 //   其余（两循环之外）       → 到达 L2 的路径必过 L1.preheader，必支配之。
+/**
+ * @brief 实现 phiInitsAvailable 对应的局部分析或变换辅助逻辑。
+ * @param L1 第一个循环。
+ * @param s1 参数 `s1`，用于本函数的分析、匹配或 IR 构造。
+ * @param L2 第二个循环。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @param chain 参数 `chain`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::phiInitsAvailable(Loop *L1, const Shape &s1, Loop *L2,
                                    const Shape &s2,
                                    const std::vector<BasicBlock *> &chain) const {
@@ -473,6 +598,15 @@ bool LoopFusion::phiInitsAvailable(Loop *L1, const Shape &s1, Loop *L2,
     return true;
 }
 
+/**
+ * @brief 实现 exitUsesAvailable 对应的局部分析或变换辅助逻辑。
+ * @param L1 第一个循环。
+ * @param s1 参数 `s1`，用于本函数的分析、匹配或 IR 构造。
+ * @param L2 第二个循环。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @param chain 参数 `chain`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::exitUsesAvailable(Loop *L1, const Shape &s1, Loop *L2,
                                    const Shape &s2,
                                    const std::vector<BasicBlock *> &chain) const {
@@ -506,6 +640,13 @@ bool LoopFusion::exitUsesAvailable(Loop *L1, const Shape &s1, Loop *L2,
     return true;
 }
 
+/**
+ * @brief 实现 memoryLegal 对应的局部分析或变换辅助逻辑。
+ * @param L1 第一个循环。
+ * @param L2 第二个循环。
+ * @param AA 参数 `AA`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopFusion::memoryLegal(Loop *L1, Loop *L2, AffineAnalysis &AA) const {
     std::vector<Access> a1 = collectAccesses(L1);
     std::vector<Access> a2 = collectAccesses(L2);
@@ -562,6 +703,13 @@ bool LoopFusion::memoryLegal(Loop *L1, Loop *L2, AffineAnalysis &AA) const {
     return true;
 }
 
+/**
+ * @brief 判断融合是否会阻断已经证明有利的循环交换方案。
+ * @param L1 第一候选循环。
+ * @param L2 第二候选循环。
+ * @param IA 循环交换收益与合法性分析。
+ * @return 应拒绝融合时返回原因字符串，融合不影响既有方案时返回 nullptr。
+ */
 const char *LoopFusion::profitabilityRejection(
     Loop *L1, Loop *L2, LoopInterchangeAnalysis &IA) const {
     // LoopInterchange 紧随本 pass。若任一原循环已经有由依赖与 stride
@@ -579,12 +727,25 @@ const char *LoopFusion::profitabilityRejection(
     return nullptr;
 }
 
+/**
+ * @brief 原地执行 applyFusion 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param func 待分析或改写的函数。
+ * @param s1 参数 `s1`，用于本函数的分析、匹配或 IR 构造。
+ * @param s2 参数 `s2`，用于本函数的分析、匹配或 IR 构造。
+ * @param chain 参数 `chain`，用于本函数的分析、匹配或 IR 构造。
+ * @param bypassPhis 参数 `bypassPhis`，用于本函数的分析、匹配或 IR 构造。
+ * @param hoist 参数 `hoist`，用于本函数的分析、匹配或 IR 构造。
+ * @param sink 参数 `sink`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopFusion::applyFusion(
     Function *func, const Shape &s1, const Shape &s2,
     const std::vector<BasicBlock *> &chain,
     const std::vector<PhiInst *> &bypassPhis,
     const std::vector<Instruction *> &hoist,
     const std::vector<Instruction *> &sink) {
+    // 到达这里时所有合法性检查均已完成。提交顺序先搬移链上纯指令，
+    // 再把第二个循环体接入第一个循环，最后重定向出口 PHI 并删除失效块。
     BasicBlock *P1 = s1.preheader;
     BasicBlock *H1 = s1.header;
     BasicBlock *Lat1 = s1.latch;

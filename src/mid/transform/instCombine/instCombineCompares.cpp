@@ -1,3 +1,9 @@
+/**
+ * @file instCombineCompares.cpp
+ * @brief 实现比较指令与加减表达式之间的跨指令折叠。
+ * @details 跨加减折叠会检查常量是否仍处于 i32 可表示范围，防止溢出改变有符号比较结果。
+ */
+
 #include "instCombineInternal.hpp"
 
 #include <cstdint>
@@ -13,7 +19,14 @@
 //     same for unsigned predicates
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 把比较两侧的常量加减折叠到比较常量中。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* foldICmpAddSub(ICmpInst *inst) {
+    // 将比较一侧的常量加减搬到另一侧前，必须用更宽整数计算新常量；
+    // 若结果超出 i32，重写可能跨过有符号边界，因此直接放弃。
     Value *lhs = inst->get_operand(0);
     Value *rhs = inst->get_operand(1);
     ICmpInst::ICmpOp pred = inst->icmp_op_;

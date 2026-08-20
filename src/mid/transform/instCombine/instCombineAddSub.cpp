@@ -1,3 +1,9 @@
+/**
+ * @file instCombineAddSub.cpp
+ * @brief 实现整数与浮点加减法的常量折叠、恒等式、重结合及目标友好形式化简。
+ * @details 重点处理常量归一到右侧、恒等式、重结合与无溢出标志；有符号溢出条件不明确时不做越界改写。
+ */
+
 #include "instCombineInternal.hpp"
 
 #include <cmath>
@@ -15,7 +21,14 @@
 //   - Side effect: stamp NSW/NUW on add x,1 when dominated by x<bound
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 Add 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitAdd(BinaryInst *inst) {
+    // 先处理常量与恒等式，再尝试重结合和跨指令模式。
+    // 新建替换指令时必须继承可证明的语义标志，不能凭代数形式假设无溢出。
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
 
@@ -77,7 +90,8 @@ Value* visitAdd(BinaryInst *inst) {
         }
     }
 
-    // x + (0 - y)  /  (0 - y) + x  →  x - y
+    // 消去显式负号：无论负值位于哪一侧，都统一为更直接的减法。
+    // x + (0 - y) / (0 - y) + x → x - y
     {
         auto tryNeg = [&](Value *negCandidate, Value *other) -> Value* {
             auto *neg = dynamic_cast<Instruction*>(negCandidate);
@@ -146,6 +160,11 @@ Value* visitAdd(BinaryInst *inst) {
 //   - A53-friendly: (x<<k)-x → mul x, 2^k-1
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 Sub 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitSub(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
@@ -210,7 +229,7 @@ Value* visitSub(BinaryInst *inst) {
         }
     }
 
-    // x - (0 - y) → x + y
+    // 减去负数改为加法，减少一条中间求负指令：x - (0 - y) → x + y。
     {
         auto *yi = dynamic_cast<Instruction*>(y);
         if (yi && yi->is_sub()) {
@@ -225,9 +244,8 @@ Value* visitSub(BinaryInst *inst) {
         }
     }
 
-    // x - (x + y) → 0 - y ;  x - (y + x) → 0 - y
-    // x - (x - y) → y
-    // (x + y) - x → y ;  (y + x) - x → y
+    // 利用 SSA 操作数同一性消去公共项；这些规则不重新排列不同的求值。
+    // x-(x+y)→-y，x-(x-y)→y，(x+y)-x→y。
     {
         auto *yi = dynamic_cast<Instruction*>(y);
         if (yi && yi->is_add()) {
@@ -279,6 +297,11 @@ Value* visitSub(BinaryInst *inst) {
 //   - fneg(x) + fneg(y) → fneg(x + y)
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FAdd 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFAdd(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::FloatTyID) return nullptr;
 
@@ -337,6 +360,11 @@ Value* visitFAdd(BinaryInst *inst) {
 //   - fsub x, fneg(y) → fadd x, y
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FSub 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFSub(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::FloatTyID) return nullptr;
 
@@ -388,6 +416,11 @@ Value* visitFSub(BinaryInst *inst) {
 //   - fneg(fsub(x, y)) → fsub(y, x)
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 FNeg 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitFNeg(UnaryInst *inst) {
     if (inst->type_->tid_ != Type::FloatTyID) return nullptr;
 

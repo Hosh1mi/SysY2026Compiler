@@ -1,3 +1,9 @@
+/**
+ * @file linearRecurrenceFold.cpp
+ * @brief 线性递推折叠：识别有限维线性递推，并用快速矩阵幂或闭式计算替换逐次循环。
+ * @details 先把状态写成有限维线性系统，再选择闭式或矩阵幂；守卫路径保留零次迭代和异常边界语义。
+ */
+
 #include "../../../include/mid/opt/linearRecurrenceFold.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
@@ -19,21 +25,49 @@ constexpr int kMaxDim = 4;
 
 constexpr int kMatPowMinTrip = 256;
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     static bool on = std::getenv("DEBUG_LINEAR_RECURRENCE") != nullptr;
     return on;
 }
 
+/**
+ * @brief 生成 reject 对应的调试诊断，不参与程序语义。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool reject(const char *reason) {
     if (debugEnabled())
         std::cerr << "[LinearRecurrenceFold] reject: " << reason << "\n";
     return false;
 }
 
+/**
+ * @brief 在 Z/2^32Z 环中执行无符号乘法。
+ * @param a 左操作数。
+ * @param b 右操作数。
+ * @return 按 2^32 自然回绕的乘积。
+ */
 uint32_t mulu(uint32_t a, uint32_t b) { return a * b; }
+
+/**
+ * @brief 在 Z/2^32Z 环中执行无符号加法。
+ * @param a 左操作数。
+ * @param b 右操作数。
+ * @return 按 2^32 自然回绕的和。
+ */
 uint32_t addu(uint32_t a, uint32_t b) { return a + b; }
 
 // Modular inverse for odd uint32 (R = Z/2^32Z units include odds).
+/**
+ * @brief 实现 modInverseOdd 对应的局部分析或变换辅助逻辑。
+ * @param a 参数 `a`，用于本函数的分析、匹配或 IR 构造。
+ * @param inv 参数 `inv`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool modInverseOdd(uint32_t a, uint32_t &inv) {
     if ((a & 1u) == 0u)
         return false;
@@ -50,12 +84,20 @@ bool modInverseOdd(uint32_t a, uint32_t &inv) {
 
 using CoeffVec = std::array<int32_t, kMaxDim>;
 
+/**
+ * @brief 表示线性递推状态向量上的一个模 2^32 线性形式。
+ */
 struct LinearForm {
-    CoeffVec c{};
-    int dim = 0;
-    bool valid = false;
+    CoeffVec c{};        ///< 各状态分量的系数，未使用位置保持为零。
+    int dim = 0;         ///< 当前线性形式实际使用的状态维数。
+    bool valid = false;  ///< 表达式是否成功归约为受支持的线性形式。
 };
 
+/**
+ * @brief 实现 zeroForm 对应的局部分析或变换辅助逻辑。
+ * @param dim 参数 `dim`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LinearForm zeroForm(int dim) {
     LinearForm f;
     f.dim = dim;
@@ -63,6 +105,12 @@ LinearForm zeroForm(int dim) {
     return f;
 }
 
+/**
+ * @brief 实现 addForms 对应的局部分析或变换辅助逻辑。
+ * @param a 参数 `a`，用于本函数的分析、匹配或 IR 构造。
+ * @param b 参数 `b`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LinearForm addForms(const LinearForm &a, const LinearForm &b) {
     if (!a.valid || !b.valid || a.dim != b.dim)
         return {};
@@ -73,6 +121,12 @@ LinearForm addForms(const LinearForm &a, const LinearForm &b) {
     return r;
 }
 
+/**
+ * @brief 实现 scaleForm 对应的局部分析或变换辅助逻辑。
+ * @param a 参数 `a`，用于本函数的分析、匹配或 IR 构造。
+ * @param s 参数 `s`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 LinearForm scaleForm(const LinearForm &a, int32_t s) {
     if (!a.valid)
         return {};
@@ -83,6 +137,12 @@ LinearForm scaleForm(const LinearForm &a, int32_t s) {
     return r;
 }
 
+/**
+ * @brief 实现 formsEqual 对应的局部分析或变换辅助逻辑。
+ * @param a 参数 `a`，用于本函数的分析、匹配或 IR 构造。
+ * @param b 参数 `b`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool formsEqual(const LinearForm &a, const LinearForm &b) {
     if (!a.valid || !b.valid || a.dim != b.dim)
         return false;
@@ -92,17 +152,26 @@ bool formsEqual(const LinearForm &a, const LinearForm &b) {
     return true;
 }
 
+/**
+ * @brief 描述可折叠循环的有限维线性状态转移系统 `x' = A*x`。
+ */
 struct System {
-    int dim = 0;
-    PhiInst *iv = nullptr;
-    Value *bound = nullptr;
-    std::vector<PhiInst *> state;          // size dim
-    std::vector<Value *> x0;              // preheader inits
-    int32_t A[kMaxDim][kMaxDim]{};        // row i = coeffs of state[i]'
-    LinearForm live;                      // single escaping linear form
-    Instruction *liveRoot = nullptr;      // IR value equal to live^T x_n
+    int dim = 0;                              ///< 状态向量及转移矩阵的实际维数。
+    PhiInst *iv = nullptr;                    ///< 控制循环次数的归纳变量 PHI。
+    Value *bound = nullptr;                   ///< 归纳变量的循环上界。
+    std::vector<PhiInst *> state;             ///< 按矩阵行顺序排列的状态 PHI，共 dim 个。
+    std::vector<Value *> x0;                  ///< 各状态从预头进入循环的初始值。
+    int32_t A[kMaxDim][kMaxDim]{};            ///< 转移矩阵；第 i 行生成下一次 state[i]。
+    LinearForm live;                          ///< 唯一逃逸结果对应的状态线性形式。
+    Instruction *liveRoot = nullptr;          ///< 在原 IR 中计算 `live^T * x_n` 的根指令。
 };
 
+/**
+ * @brief 判断 isLoopInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param val 待检查或映射的 IR 值。
+ * @param blocks 相关基本块集合。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
     if (dynamic_cast<Constant *>(val))
         return true;
@@ -118,6 +187,14 @@ bool isLoopInvariant(Value *val, const std::set<BasicBlock *> &blocks) {
 
 // Express v as linear combination of state PHIs (homogeneous). Intermediate
 // values inside the loop are followed; constants must be zero.
+/**
+ * @brief 实现 expressInState 对应的局部分析或变换辅助逻辑。
+ * @param v 待检查或映射的 IR 值。
+ * @param sys 参数 `sys`，用于本函数的分析、匹配或 IR 构造。
+ * @param blocks 相关基本块集合。
+ * @param memo 参数 `memo`，用于本函数的分析、匹配或 IR 构造。
+ * @return 成功时返回分析或变换计划，失败时返回空值。
+ */
 std::optional<LinearForm>
 expressInState(Value *v, const System &sys, const std::set<BasicBlock *> &blocks,
                std::map<Value *, LinearForm> &memo) {
@@ -206,6 +283,13 @@ expressInState(Value *v, const System &sys, const std::set<BasicBlock *> &blocks
     return std::nullopt;
 }
 
+/**
+ * @brief 构造 buildMatrix 所描述的新 IR，并返回或记录构造结果。
+ * @param sys 参数 `sys`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @param latch 循环回边基本块。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool buildMatrix(System &sys, Loop &loop, BasicBlock *latch) {
     std::map<Value *, LinearForm> memo;
     for (int i = 0; i < sys.dim; ++i) {
@@ -235,6 +319,12 @@ bool buildMatrix(System &sys, Loop &loop, BasicBlock *latch) {
 }
 
 // c^T A == λ c^T ?
+/**
+ * @brief 收集或查找 findLeftEigen 所需的信息。
+ * @param sys 参数 `sys`，用于本函数的分析、匹配或 IR 构造。
+ * @param lambdaOut 参数 `lambdaOut`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool findLeftEigen(const System &sys, int32_t &lambdaOut) {
     const int d = sys.dim;
     uint32_t v[kMaxDim]{};
@@ -301,6 +391,13 @@ bool findLeftEigen(const System &sys, int32_t &lambdaOut) {
     return true;
 }
 
+/**
+ * @brief 生成 max(bound, 0)，作为线性递推的非负迭代次数。
+ * @param module 所属模块，用于构造常量和类型。
+ * @param bb 指令插入基本块。
+ * @param bound 原循环上界。
+ * @return 表示非负迭代次数的 IR 值。
+ */
 Value *emitNonNegTripManual(Module *module, BasicBlock *bb, Value *bound) {
     auto *i32 = module->int32_ty_;
     auto *zero = new ConstantInt(i32, 0);
@@ -311,6 +408,13 @@ Value *emitNonNegTripManual(Module *module, BasicBlock *bb, Value *bound) {
     return sel;
 }
 
+/**
+ * @brief 生成初始状态与出口系数向量的点积 c^T*x0。
+ * @param module 所属模块。
+ * @param bb 指令插入基本块。
+ * @param sys 已分析的线性递推系统。
+ * @return 点积对应的 IR 值。
+ */
 Value *emitDotManual(Module *module, BasicBlock *bb, const System &sys) {
     auto *i32 = module->int32_ty_;
     Value *acc = nullptr;
@@ -341,6 +445,15 @@ Value *emitDotManual(Module *module, BasicBlock *bb, const System &sys) {
 }
 
 // λ^n * s0. Special-case λ==2 with guarded shl.
+/**
+ * @brief 生成 s0*lambda^n 的闭式计算代码。
+ * @param module 所属模块。
+ * @param bb 指令插入基本块。
+ * @param s0 线性型的初始值。
+ * @param lambda 左特征值。
+ * @param n 递推执行次数。
+ * @return 闭式计算结果；无法生成时返回 nullptr。
+ */
 Value *emitScalePow(Module *module, BasicBlock *bb, Value *s0, int32_t lambda,
                     Value *n) {
     auto *i32 = module->int32_ty_;
@@ -416,14 +529,27 @@ Value *emitScalePow(Module *module, BasicBlock *bb, Value *s0, int32_t lambda,
     return out;
 }
 
+/**
+ * @brief 汇总矩阵快速幂循环生成后的结果值及其入口、汇合基本块。
+ */
 struct MatPowLoopEmit {
-    Value *result = nullptr;
-    BasicBlock *header = nullptr; // preheader should branch here
-    BasicBlock *after = nullptr;  // defines result; already branches to exit
+    Value *result = nullptr;       ///< 快速幂循环计算出的最终线性递推结果。
+    BasicBlock *header = nullptr;  ///< 新循环入口，原预头应改为跳转到此处。
+    BasicBlock *after = nullptr;   ///< 定义 result 并已连接原出口的循环后继块。
 };
 
 // Emit y = A^n x0 via a compact binary-exponentiation loop, then result = c·y.
 // CFG: PH -> header <-> body; header -> after -> exit.
+/**
+ * @brief 构造 emitMatPowLoop 所描述的新 IR，并返回或记录构造结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param func 待分析或改写的函数。
+ * @param PH 参数 `PH`，用于本函数的分析、匹配或 IR 构造。
+ * @param sys 参数 `sys`，用于本函数的分析、匹配或 IR 构造。
+ * @param n 参数 `n`，用于本函数的分析、匹配或 IR 构造。
+ * @param exit 参数 `exit`，用于本函数的分析、匹配或 IR 构造。
+ * @return 返回计算、分析或构造得到的结果。
+ */
 MatPowLoopEmit emitMatPowLoop(Module *module, Function *func, BasicBlock *PH,
                               const System &sys, Value *n, BasicBlock *exit) {
     MatPowLoopEmit out;
@@ -535,9 +661,15 @@ MatPowLoopEmit emitMatPowLoop(Module *module, Function *func, BasicBlock *PH,
     return out;
 }
 
+/**
+ * @brief 收集或查找 collectLiveOut 所需的信息。
+ * @param sys 参数 `sys`，用于本函数的分析、匹配或 IR 构造。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool collectLiveOut(System &sys, Loop &loop) {
-    // All outside uses of state (or of values only defined from state) must
-    // collapse to a single linear form root.
+    // 状态及其线性派生值的所有循环外使用，最终必须汇聚到唯一线性根；
+    // 否则无法用一个闭式结果同时替代多个独立可观察值。
     std::map<Value *, LinearForm> memo;
     std::set<Instruction *> linearInsts;
     std::vector<Instruction *> candidates;
@@ -588,8 +720,8 @@ bool collectLiveOut(System &sys, Loop &loop) {
         }
     }
 
-    // Escaping roots: linear values used by a non-linear outside user
-    // (call/ret/store/icmp/...) or used outside exit in a non-linear way.
+    // 找到被非线性外部用户（call/ret/store/icmp 等）消费的线性值，
+    // 它们就是必须由闭式计算重建的逃逸根。
     std::vector<Instruction *> roots;
     for (auto *inst : linearInsts) {
         bool escapes = false;
@@ -643,6 +775,16 @@ bool collectLiveOut(System &sys, Loop &loop) {
     return true;
 }
 
+/**
+ * @brief 原地执行 rewriteAndDeleteLoop 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param folded 参数 `folded`，用于本函数的分析、匹配或 IR 构造。
+ * @param liveRoot 参数 `liveRoot`，用于本函数的分析、匹配或 IR 构造。
+ * @param newTarget 替换后的新分支目标。
+ * @param exitPred 参数 `exitPred`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
                           Instruction *liveRoot, BasicBlock *newTarget,
                           BasicBlock *exitPred) {
@@ -659,7 +801,7 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     if (preheaderBr->get_operand(0) != loop.header)
         return reject("preheader does not target header");
 
-    // Replace all uses of liveRoot with folded, then drop the dead sum tree.
+    // 先把唯一活跃根替换为闭式结果，再删除失去使用的 LCSSA/求和树。
     std::vector<std::pair<Instruction *, unsigned>> uses;
     for (auto &use : liveRoot->use_list_) {
         auto *user = use.user_;
@@ -701,7 +843,7 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
     else
         exit->add_pre_basic_block(PH);
 
-    // Fix / remove exit phis that referenced the deleted loop.
+    // 原循环将被旁路，删除其退出 incoming，并折叠因此退化的 exit PHI。
     std::vector<Instruction *> exitPhis;
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi())
@@ -744,6 +886,15 @@ bool rewriteAndDeleteLoop(Loop &loop, Module *module, Value *folded,
 //   header/.../exit(liveRoot) -> join
 //   matpow.after(folded) -> join
 //   join: phi [liveRoot, exit], [folded, after] ; rest of former exit tail
+/**
+ * @brief 原地执行 rewriteMatPowGuarded 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param trip 参数 `trip`，用于本函数的分析、匹配或 IR 构造。
+ * @param liveRoot 参数 `liveRoot`，用于本函数的分析、匹配或 IR 构造。
+ * @param mp 参数 `mp`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
                           Instruction *liveRoot, MatPowLoopEmit &mp) {
     BasicBlock *PH = loop.preheader;
@@ -767,7 +918,8 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
     auto *i32 = module->int32_ty_;
     std::string baseName = exit->name_;
 
-    // Split exit: keep liveRoot and everything before it; move the rest to join.
+    // 分裂 exit：liveRoot 及其之前的定义留在原块，后续指令移动到 join，
+    // 使原循环路径与矩阵幂路径能在 join 用 PHI 合并结果。
     auto *join = new BasicBlock(module, baseName + ".linrec.join", func);
     std::vector<Instruction *> toMove;
     bool seenLive = false;
@@ -789,8 +941,8 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
         join->add_instruction(inst);
     }
 
-    // The moved terminator still jumps to the old successor, but that successor
-    // now has predecessor `join` instead of `exit`. Retarget PHI incomings.
+    // 移动后的 terminator 仍跳向原后继，但实际前驱已由 exit 变为 join；
+    // 必须同步改写后继 PHI 的 predecessor，否则 CFG 与 SSA 不一致。
     auto *movedTerm = join->get_terminator();
     if (movedTerm && movedTerm->is_br()) {
         for (unsigned oi = 0; oi < movedTerm->num_ops(); ++oi) {
@@ -857,7 +1009,15 @@ bool rewriteMatPowGuarded(Loop &loop, Module *module, Value *trip,
 
 } // namespace
 
+/**
+ * @brief 尝试执行 Fold 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
+    // 将 header PHI 分为计数 IV 和有限维状态，验证每个回边值都能写成线性组合。
+    // 随后根据维数和迭代次数选择闭式或矩阵幂，并保留零次迭代的守卫路径。
     if (!loop.preheader)
         return reject("no preheader");
     BasicBlock *latch = loop.singleLatch();
@@ -993,7 +1153,7 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
                                   nullptr))
             return false;
     } else {
-        // Constant short trip: keep the original add loop (matpow too heavy).
+        // 常量短循环保留原逐次加法，矩阵幂的构造和运行开销无法摊薄。
         if (auto *ci = dynamic_cast<ConstantInt *>(bound)) {
             long long t = ci->value_;
             if (t < 0)
@@ -1009,12 +1169,12 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
 
         if (auto *ci = dynamic_cast<ConstantInt *>(bound)) {
             (void)ci;
-            // Known-large trip: replace the loop entirely.
+            // 已知大迭代次数：完全旁路原循环，只保留矩阵幂路径。
             if (!rewriteAndDeleteLoop(loop, module, mp.result, sys.liveRoot,
                                       mp.header, mp.after))
                 return false;
         } else {
-            // Dynamic trip: short → original loop, long → matpow.
+            // 动态迭代次数：运行时分流，短路径走原循环，长路径走矩阵幂。
             if (!rewriteMatPowGuarded(loop, module, trip, sys.liveRoot, mp))
                 return false;
         }
@@ -1026,6 +1186,12 @@ bool LinearRecurrenceFold::tryFold(Loop &loop, Module *module) {
     return true;
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LinearRecurrenceFold::runOnFunction(Function *func, AnalysisManager *AM) {
     if (!func || func->is_declaration() || !AM)
         return;
@@ -1055,11 +1221,22 @@ void LinearRecurrenceFold::runOnFunction(Function *func, AnalysisManager *AM) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LinearRecurrenceFold::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LinearRecurrenceFold::execute(Module *module,
                                                 AnalysisManager &AM) {
     for (auto *func : module->function_list_) {

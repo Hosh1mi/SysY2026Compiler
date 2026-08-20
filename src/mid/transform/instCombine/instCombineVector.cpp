@@ -1,3 +1,9 @@
+/**
+ * @file instCombineVector.cpp
+ * @brief 实现向量常量、构造、抽取、插入、广播与归约指令的规范化和折叠。
+ * @details 所有折叠都校验向量类型与 lane 数；常量零向量按元素类型构造，避免整数/浮点零混用。
+ */
+
 // Vector IR canonicalization and constant folding shared by source vectors
 // and vectors synthesized by loop/SLP transforms.
 
@@ -8,12 +14,24 @@
 
 namespace {
 
+/**
+ * @brief 构造与向量元素类型匹配的零常量。
+ * @param type 向量的标量元素类型，当前支持整数和浮点类型。
+ * @return 新建的整数零或浮点零常量。
+ */
 Constant *zeroLane(Type *type) {
     if (type->tid_ == Type::FloatTyID)
         return new ConstantFloat(type, 0.0f);
     return new ConstantInt(type, 0);
 }
 
+/**
+ * @brief 实现 lanesOf 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param type 相关 IR 类型。
+ * @param lanes 参数 `lanes`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool lanesOf(Value *value, VectorType *type, std::vector<Constant *> &lanes) {
     if (auto *vector = dynamic_cast<ConstantVector *>(value)) {
         if (vector->type_ != type ||
@@ -31,6 +49,14 @@ bool lanesOf(Value *value, VectorType *type, std::vector<Constant *> &lanes) {
     return true;
 }
 
+/**
+ * @brief 判断 isSplat 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param type 相关 IR 类型。
+ * @param integerValue 参数 `integerValue`，用于本函数的分析、匹配或 IR 构造。
+ * @param floatValue 参数 `floatValue`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSplat(Value *value, VectorType *type, int integerValue,
              float floatValue) {
     std::vector<Constant *> lanes;
@@ -50,6 +76,14 @@ bool isSplat(Value *value, VectorType *type, int integerValue,
     return true;
 }
 
+/**
+ * @brief 对一个整数向量 lane 执行常量二元运算折叠。
+ * @param op 需要折叠的整数二元操作码。
+ * @param lhs 左侧 lane 常量。
+ * @param rhs 右侧 lane 常量。
+ * @param type 折叠结果的标量整数类型。
+ * @return 折叠成功时返回新常量；操作数类型或操作码不受支持时返回 nullptr。
+ */
 Constant *foldIntegerLane(Instruction::OpID op, Constant *lhs,
                           Constant *rhs, Type *type) {
     auto *left = dynamic_cast<ConstantInt *>(lhs);
@@ -95,6 +129,14 @@ Constant *foldIntegerLane(Instruction::OpID op, Constant *lhs,
     return new ConstantInt(type, result);
 }
 
+/**
+ * @brief 对一个浮点向量 lane 执行常量二元运算折叠。
+ * @param op 需要折叠的浮点二元操作码。
+ * @param lhs 左侧 lane 常量。
+ * @param rhs 右侧 lane 常量。
+ * @param type 折叠结果的标量浮点类型。
+ * @return 折叠成功时返回新浮点常量；类型不匹配或求值器拒绝时返回 nullptr。
+ */
 Constant *foldFloatLane(Instruction::OpID op, Constant *lhs,
                         Constant *rhs, Type *type) {
     auto *left = dynamic_cast<ConstantFloat *>(lhs);
@@ -108,6 +150,11 @@ Constant *foldFloatLane(Instruction::OpID op, Constant *lhs,
     return new ConstantFloat(type, result);
 }
 
+/**
+ * @brief 构造所有 lane 均为对应元素类型零值的常量向量。
+ * @param type 目标向量类型，决定元素类型和 lane 数量。
+ * @return 新建的全零常量向量。
+ */
 ConstantVector *zeroVector(VectorType *type) {
     std::vector<Constant *> lanes(type->num_elements_);
     for (Constant *&lane : lanes)
@@ -117,7 +164,14 @@ ConstantVector *zeroVector(VectorType *type) {
 
 } // namespace
 
+/**
+ * @brief 化简或逐 lane 折叠向量二元运算。
+ * @param inst 待处理的向量二元指令。
+ * @return 成功时返回等价的常量向量或原操作数；没有可用化简时返回 nullptr。
+ */
 Value *visitVectorBinary(BinaryInst *inst) {
+    // 常量向量逐 lane 求值，任一 lane 无法安全折叠就放弃整个向量。
+    // 非常量情形只应用与标量类型无关的零元、单位元和自消去规则。
     auto *type = dynamic_cast<VectorType *>(inst->type_);
     if (!type || inst->get_operand(0)->type_ != type ||
         inst->get_operand(1)->type_ != type)
@@ -127,6 +181,8 @@ Value *visitVectorBinary(BinaryInst *inst) {
     std::vector<Constant *> rhs;
     if (lanesOf(inst->get_operand(0), type, lhs) &&
         lanesOf(inst->get_operand(1), type, rhs)) {
+        // 两侧都是常量向量时逐 lane 折叠；任何 lane 不支持该操作就整体放弃，
+        // 不能生成一部分常量、一部分未定义的混合结果。
         std::vector<Constant *> folded;
         folded.reserve(type->num_elements_);
         for (unsigned lane = 0; lane < type->num_elements_; ++lane) {
@@ -179,6 +235,11 @@ Value *visitVectorBinary(BinaryInst *inst) {
     return nullptr;
 }
 
+/**
+ * @brief 折叠常量向量插入，并消除对同一 lane 的重复覆盖写入。
+ * @param inst 待处理的 insertelement 指令。
+ * @return 成功时返回折叠后的常量向量或新插入指令；无法化简时返回 nullptr。
+ */
 Value *visitInsertElement(InsertElementInst *inst) {
     auto *type = dynamic_cast<VectorType *>(inst->type_);
     auto *index = dynamic_cast<ConstantInt *>(inst->get_operand(2));
@@ -199,6 +260,7 @@ Value *visitInsertElement(InsertElementInst *inst) {
                                     previous->get_operand(2))
                               : nullptr;
     if (previousIndex && previousIndex->value_ == index->value_) {
+        // 同一 lane 的后一次插入完全覆盖前一次插入，旁路被覆盖的中间节点。
         auto *replacement = new InsertElementInst(
             previous->get_operand(0), inst->get_operand(1),
             inst->get_operand(2), inst->parent_, true);
@@ -208,6 +270,11 @@ Value *visitInsertElement(InsertElementInst *inst) {
     return nullptr;
 }
 
+/**
+ * @brief 折叠向量元素抽取，并沿 insert/shuffle 追溯实际来源 lane。
+ * @param inst 待处理的 extractelement 指令。
+ * @return 成功时返回对应常量、已插入的标量或新的抽取指令；无法化简时返回 nullptr。
+ */
 Value *visitExtractElement(ExtractElementInst *inst) {
     auto *type = dynamic_cast<VectorType *>(inst->get_operand(0)->type_);
     auto *index = dynamic_cast<ConstantInt *>(inst->get_operand(1));
@@ -224,6 +291,7 @@ Value *visitExtractElement(ExtractElementInst *inst) {
         auto *insertIndex = dynamic_cast<ConstantInt *>(
             insert->get_operand(2));
         if (insertIndex) {
+            // 抽取刚写入的同一 lane 时可直接转发标量值。
             if (insertIndex->value_ == index->value_)
                 return insert->get_operand(1);
             auto *replacement = new ExtractElementInst(
@@ -254,6 +322,11 @@ Value *visitExtractElement(ExtractElementInst *inst) {
     return nullptr;
 }
 
+/**
+ * @brief 消除恒等向量重排，或在两个输入均为常量时按掩码折叠结果。
+ * @param inst 待处理的 shufflevector 指令。
+ * @return 成功时返回原输入向量或折叠后的常量向量；无法化简时返回 nullptr。
+ */
 Value *visitShuffleVector(ShuffleVectorInst *inst) {
     auto *type = dynamic_cast<VectorType *>(inst->type_);
     if (!type || inst->mask().size() != type->num_elements_)

@@ -1,13 +1,30 @@
+/**
+ * @file loopInvariantCodeMotion.cpp
+ * @brief 循环不变量外提：将循环内可安全提前执行的不变量指令移动到循环预头。
+ * @details 候选必须循环不变、可投机执行或保证必执行；移动到预头后清理退化 PHI 并失效相关分析。
+ */
+
 #include "../../../include/mid/opt/loopInvariantCodeMotion.hpp"
 #include "../../../include/mid/analysis/analysisManager.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 #include <algorithm>
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LICM::execute(Module *module) {
     AnalysisManager AM;
     execute(module, AM);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
     bool changed = false;
     for (auto func : module->function_list_) {
@@ -20,6 +37,13 @@ PreservedAnalyses LICM::execute(Module *module, AnalysisManager &AM) {
 
 // ── Invariance / safety checks ─────────────────────────────────────────────
 
+/**
+ * @brief 判断 isInvariant 所描述的结构、合法性或安全条件是否成立。
+ * @param val 待检查或映射的 IR 值。
+ * @param loopBlocks 循环所包含的基本块集合。
+ * @param toHoist 参数 `toHoist`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
                        const std::set<Instruction*>& toHoist) {
     if (dynamic_cast<Constant*>(val) ||
@@ -33,6 +57,14 @@ bool LICM::isInvariant(Value *val, const std::set<BasicBlock*>& loopBlocks,
     return !loopBlocks.count(inst->parent_);
 }
 
+/**
+ * @brief 判断 isSafeToHoist 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @param loop 待检查或变换的循环。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
                          const BasicAliasAnalysis &BAA, const LoopInfo &LI) {
     if (inst->is_phi() || inst->is_br() || inst->is_ret() ||
@@ -81,6 +113,13 @@ bool LICM::isSafeToHoist(Instruction *inst, const Loop &loop,
 
 // ── Hoisting ──────────────────────────────────────────────────────────────
 
+/**
+ * @brief 在单个循环上运行本变换。
+ * @param loop 待检查或变换的循环。
+ * @param BAA 参数 `BAA`，用于本函数的分析、匹配或 IR 构造。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA,
                      const LoopInfo &LI) {
     BasicBlock *preheader = loop.preheader;
@@ -136,6 +175,11 @@ bool LICM::runOnLoop(const Loop &loop, const BasicAliasAnalysis *BAA,
     return changed;
 }
 
+/**
+ * @brief 实现 eliminateTrivialHeaderPhis 对应的局部分析或变换辅助逻辑。
+ * @param loop 待检查或变换的循环。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     // 单 latch 是 LoopSimplify 的后置条件；多 latch 时"来自 latch 的入边"
     // 不唯一，保守跳过
@@ -184,6 +228,12 @@ bool LICM::eliminateTrivialHeaderPhis(const Loop &loop) {
     return anyChanged;
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LICM::runOnFunction(Function *func, AnalysisManager &AM) {
     if (func->basic_blocks_.empty()) return false;
 

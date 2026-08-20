@@ -1,3 +1,9 @@
+/**
+ * @file loopDeletion.cpp
+ * @brief 循环删除：证明循环无可观察副作用且退出值可替代后删除整个无用循环。
+ * @details 只有循环体无可观察副作用、退出唯一且所有活跃值可替代时才断开回边并交给后续 CFG 清理。
+ */
+
 #include "../../../include/mid/opt/loopDeletion.hpp"
 #include "../../../include/mid/ir/instruction.hpp"
 
@@ -6,6 +12,11 @@
 #include <iostream>
 #include <vector>
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopDeletion::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration())
@@ -13,6 +24,12 @@ void LoopDeletion::execute(Module *module) {
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopDeletion::execute(Module *module, AnalysisManager &AM) {
     (void)AM;
     bool changed = false;
@@ -23,6 +40,11 @@ PreservedAnalyses LoopDeletion::execute(Module *module, AnalysisManager &AM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopDeletion::runOnFunction(Function *func) {
     if (func->basic_blocks_.empty())
         return false;
@@ -60,6 +82,12 @@ bool LoopDeletion::runOnFunction(Function *func) {
     return changed;
 }
 
+/**
+ * @brief 尝试执行 Delete 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
     // 1. 结构要求：真 preheader（单后继无条件 br）+ 单一 exit
     BasicBlock *preheader = loop.preheader;
@@ -152,11 +180,16 @@ bool LoopDeletion::tryDelete(Loop &loop, Function *func) {
     return true;
 }
 
+/**
+ * @brief 尝试执行 BreakSingleIterationBackedge 匹配或变换；前置条件不满足时不提交改写。
+ * @param loop 待检查或变换的循环。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
                                                     Function *func) {
-    // Restrict the rewrite to the canonical two-block while form:
-    // preheader -> header -> latch -> header, with header -> exit.  In
-    // particular, an independently conditional latch must not be replaced.
+    // 仅处理规范两块 while：preheader→header→latch→header，且 header→exit。
+    // 若 latch 自己还有条件分支，就不能把它当作确定的单次执行路径。
     BasicBlock *preheader = loop.preheader;
     BasicBlock *latch = loop.singleLatch();
     BasicBlock *exit = loop.singleExit();
@@ -178,8 +211,8 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         latchBr->get_operand(0) != loop.header)
         return false;
 
-    // LoopInfo proves init=0, step=+1 and a signed-less-than header guard.
-    // A constant bound of one therefore proves exactly one body execution.
+    // LoopInfo 已证明初值为 0、步长为 +1，且 header 使用有符号小于比较；
+    // 因而常量上界 1 能严格证明循环体恰好执行一次。
     if (!loop.hasCanonicalIV()) return false;
     auto *bound = dynamic_cast<ConstantInt *>(loop.tripCount);
     auto *compare = dynamic_cast<ICmpInst *>(headerBr->get_operand(0));
@@ -192,10 +225,13 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         if (use.user_ != headerBr) return false;
     }
 
+    /**
+     * @brief 保存单次迭代循环头 PHI 在进入前与执行后的两个可选值。
+     */
     struct PhiInfo {
-        PhiInst *phi = nullptr;
-        Value *initial = nullptr;
-        Value *afterIteration = nullptr;
+        PhiInst *phi = nullptr;             ///< 待替换并随循环删除的循环头 PHI。
+        Value *initial = nullptr;           ///< 来自循环预头的零次迭代值。
+        Value *afterIteration = nullptr;    ///< 来自回边的一次迭代后值。
     };
     std::vector<PhiInfo> phis;
     for (auto *inst : loop.header->instr_list_) {
@@ -217,9 +253,8 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         phis.push_back({phi, initial, afterIteration});
     }
 
-    // Keep the simultaneous substitution simple and dominance-safe.  Normal
-    // induction/reduction updates are instructions in the latch, not direct
-    // references to another header phi.
+    // 限制 PHI 之间不能直接互相引用，使后续同步替换保持简单且满足支配关系；
+    // 正常归纳/归约更新应由 latch 指令产生，而不是直接引用另一个 header PHI。
     for (const auto &info : phis) {
         for (const auto &other : phis) {
             if (info.initial == other.phi ||
@@ -228,8 +263,8 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         }
     }
 
-    // LCSSA is established before LoopDeletion.  Require every outside use
-    // of a header phi to be an exit phi on the edge that will move to latch.
+    // LoopDeletion 前已建立 LCSSA；header PHI 的循环外使用必须是对应退出边
+    // 上的 exit PHI，才能把该 incoming 安全迁移到 latch。
     for (const auto &info : phis) {
         for (const auto &use : info.phi->use_list_) {
             auto *user = use.user_;
@@ -247,8 +282,8 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
         std::cerr << "[LoopDeletion] break-single-iteration-backedge func="
                   << func->name_ << " header=" << loop.header->name_ << "\n";
 
-    // During the only body execution, every header phi has its preheader
-    // value.  After that execution, its live-out value is the latch incoming.
+    // 唯一一次循环体执行期间，header PHI 等于 preheader 初值；执行结束后，
+    // 循环外可见的终值则是 latch 入值，因此内外 use 必须分别替换。
     for (const auto &info : phis) {
         std::vector<std::pair<Instruction *, unsigned>> insideUses;
         std::vector<std::pair<Instruction *, unsigned>> outsideUses;
@@ -268,8 +303,8 @@ bool LoopDeletion::tryBreakSingleIterationBackedge(Loop &loop,
             user->set_operand(operand, info.afterIteration);
     }
 
-    // The exiting edge moves from header to latch.  Values defined in header
-    // still dominate latch; phi live-outs were rewritten above.
+    // 退出边由 header 移到 latch；header 中定义的普通值仍支配 latch，而 PHI 的
+    // live-out 已在上面改写，所以此时只需更新出口 PHI 的前驱块。
     for (auto *inst : exit->instr_list_) {
         if (!inst->is_phi()) break;
         auto *phi = static_cast<PhiInst *>(inst);

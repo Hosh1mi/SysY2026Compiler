@@ -1,3 +1,9 @@
+/**
+ * @file instCombineShifts.cpp
+ * @brief 实现左移、逻辑右移和算术右移的常量折叠与连续移位合并。
+ * @details 移位量必须在位宽范围内；连续移位合并时同时检查总移位量和算术/逻辑右移语义。
+ */
+
 #include "instCombineInternal.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -9,6 +15,11 @@
 //   - Non-commutative: never swap operands (shl C,x ≠ shl x,C)
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 Shl 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitShl(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
@@ -66,7 +77,14 @@ Value* visitShl(BinaryInst *inst) {
 //   - Mask: (x<<C)>>>C → and x, (2^(bits-C)-1)  (high bits cleared)
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 LShr 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitLShr(BinaryInst *inst) {
+    // 合并连续移位时先检查总移位量；识别 (x << C) >>> C 时生成低位掩码，
+    // 不能把逻辑右移与保留符号位的算术右移规则混用。
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);
 
@@ -114,7 +132,7 @@ Value* visitLShr(BinaryInst *inst) {
             auto *c1 = as_const_int(inner->get_operand(1));
             if (c1 && c1->value_ == cy->value_ &&
                 cy->value_ > 0 && cy->value_ < (int)bits) {
-                // C in [1, bits): bits-C in [1, bits-1], so 1u<<(bits-C) is defined.
+                // 已证明 C∈[1,bits)，因此 bits-C 仍在合法移位范围内，掩码构造不会越界。
                 uint32_t mask = (1u << (bits - cy->value_)) - 1u;
                 auto *andInst = new BinaryInst(ty, Instruction::And,
                     inner->get_operand(0),
@@ -138,6 +156,11 @@ Value* visitLShr(BinaryInst *inst) {
 //   - Side effect: stamp Exact when shifted value is multiple of 2^amt
 // ═══════════════════════════════════════════════════════════════════════
 
+/**
+ * @brief 对 AShr 类指令执行局部规范化、常量折叠和代数化简。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 成功时返回对应对象指针；无法匹配或构造时可能返回 nullptr。
+ */
 Value* visitAShr(BinaryInst *inst) {
     if (inst->type_->tid_ != Type::IntegerTyID) return nullptr;
     stampIntegerFacts(inst);

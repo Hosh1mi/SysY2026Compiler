@@ -1,3 +1,9 @@
+/**
+ * @file triangleInterchange.cpp
+ * @brief 三角波前交换：识别三角迭代域并改写为按波前遍历的循环次序，同时保持仿射依赖顺序。
+ * @details 识别三角域的行/距离变量，用仿射访问证明新波前只读取当前或更早波次，再克隆计算单元。
+ */
+
 // TriangleInterchange recognizes the two-level triangular loop used by a
 // wavefront dynamic program.  For a domain such as
 //
@@ -38,8 +44,16 @@ namespace {
 
 using ValueMap = std::unordered_map<Value *, Value *>;
 
+/**
+ * @brief 将调度索引递归归约为归纳变量上的仿射表达式，并缓存分析结果。
+ */
 class ScheduleAffineAnalyzer {
 public:
+    /**
+     * @brief 分析指定 IR 值对应的调度仿射表达式。
+     * @param value 待分析的整数 IR 值。
+     * @return 可表示为常量、归纳变量及常量乘加时返回有效表达式，否则返回无效表达式。
+     */
     AffineExpr analyze(Value *value) {
         auto found = cache_.find(value);
         if (found != cache_.end()) return found->second;
@@ -73,14 +87,25 @@ public:
     }
 
 private:
-    std::map<Value *, AffineExpr> cache_;
-    std::set<Value *> visiting_;
+    std::map<Value *, AffineExpr> cache_;  ///< 已完成分析的 IR 值及其仿射结果。
+    std::set<Value *> visiting_;           ///< 当前递归栈中的值，用于拒绝循环依赖。
 };
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_TRIANGLE_INTERCHANGE") != nullptr;
 }
 
+/**
+ * @brief 生成 debugReject 对应的调试诊断，不参与程序语义。
+ * @param function 待分析或改写的函数。
+ * @param loop 待检查或变换的循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void debugReject(Function *function, Loop *loop, const std::string &reason) {
     if (!debugEnabled()) return;
     std::cerr << "[TriangleInterchange] reject func=" << function->name_
@@ -89,11 +114,21 @@ void debugReject(Function *function, Loop *loop, const std::string &reason) {
               << ": " << reason << "\n";
 }
 
+/**
+ * @brief 判断 isI32 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isI32(Value *value) {
     auto *type = value ? dynamic_cast<IntegerType *>(value->type_) : nullptr;
     return type && type->num_bits_ == 32;
 }
 
+/**
+ * @brief 穿过 GEP 和 bitcast 追溯三角循环内存访问的根对象。
+ * @param pointer 待追溯的指针值。
+ * @return 最外层根对象。
+ */
 Value *rootBase(Value *pointer) {
     Value *value = pointer;
     while (true) {
@@ -109,16 +144,34 @@ Value *rootBase(Value *pointer) {
     }
 }
 
+/**
+ * @brief 判断 sameAffine 所描述的结构、合法性或安全条件是否成立。
+ * @param lhs 表达式左操作数。
+ * @param rhs 表达式右操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool sameAffine(const AffineExpr &lhs, const AffineExpr &rhs) {
     return lhs.valid && rhs.valid && (lhs - rhs).isZero();
 }
 
+/**
+ * @brief 判断 isDescendantOf 所描述的结构、合法性或安全条件是否成立。
+ * @param candidate 参数 `candidate`，用于本函数的分析、匹配或 IR 构造。
+ * @param ancestor 参数 `ancestor`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isDescendantOf(Loop *candidate, Loop *ancestor) {
     for (Loop *loop = candidate; loop; loop = loop->parent)
         if (loop == ancestor) return true;
     return false;
 }
 
+/**
+ * @brief 查询 PHI 来自指定前驱的入值。
+ * @param phi 待查询的 PHI 指令。
+ * @param predecessor 指定前驱基本块。
+ * @return 找到时返回对应值，否则返回 nullptr。
+ */
 Value *incomingValue(PhiInst *phi, BasicBlock *predecessor) {
     if (!phi || !predecessor) return nullptr;
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2)
@@ -127,6 +180,12 @@ Value *incomingValue(PhiInst *phi, BasicBlock *predecessor) {
     return nullptr;
 }
 
+/**
+ * @brief 匹配 esSubOne 所描述的 IR 结构并提取结果。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param lhs 表达式左操作数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchesSubOne(Value *value, Value *lhs) {
     auto *sub = dynamic_cast<BinaryInst *>(value);
     auto *one = sub ? dynamic_cast<ConstantInt *>(sub->get_operand(1)) : nullptr;
@@ -134,6 +193,11 @@ bool matchesSubOne(Value *value, Value *lhs) {
            one->value_ == 1;
 }
 
+/**
+ * @brief 实现 preheaderProvesPositiveBound 对应的局部分析或变换辅助逻辑。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool preheaderProvesPositiveBound(const TriangleSchedulePlan &plan) {
     if (!plan.outerPreheader || plan.outerPreheader->pre_bbs_.size() != 1)
         return false;
@@ -151,6 +215,12 @@ bool preheaderProvesPositiveBound(const TriangleSchedulePlan &plan) {
            one->value_ == 1;
 }
 
+/**
+ * @brief 匹配 DescendingOuter 所描述的 IR 结构并提取结果。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchDescendingOuter(const TriangleSchedulePlan &plan,
                           std::string &reason) {
     Loop *outer = plan.outer;
@@ -195,6 +265,12 @@ bool matchDescendingOuter(const TriangleSchedulePlan &plan,
     return true;
 }
 
+/**
+ * @brief 匹配 Triangle 所描述的 IR 结构并提取结果。
+ * @param inner 待分析的内层循环。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 成功时返回分析或变换计划，失败时返回空值。
+ */
 std::optional<TriangleSchedulePlan>
 matchTriangle(Loop &inner, std::string &reason) {
     if (!inner.parent || !inner.preheader || !inner.singleLatch() ||
@@ -283,6 +359,14 @@ matchTriangle(Loop &inner, std::string &reason) {
     return plan;
 }
 
+/**
+ * @brief 实现 proveEarlierWave 对应的局部分析或变换辅助逻辑。
+ * @param delta 参数 `delta`，用于本函数的分析、匹配或 IR 构造。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopInfo 参数 `loopInfo`，用于本函数的分析、匹配或 IR 构造。
+ * @param affine 参数 `affine`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool proveEarlierWave(const AffineExpr &delta, const TriangleSchedulePlan &plan,
                       const LoopInfo &loopInfo,
                       ScheduleAffineAnalyzer &affine) {
@@ -315,6 +399,15 @@ bool proveEarlierWave(const AffineExpr &delta, const TriangleSchedulePlan &plan,
     return false;
 }
 
+/**
+ * @brief 实现 proveWavefrontDependences 对应的局部分析或变换辅助逻辑。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param loopInfo 参数 `loopInfo`，用于本函数的分析、匹配或 IR 构造。
+ * @param affine 参数 `affine`，用于本函数的分析、匹配或 IR 构造。
+ * @param argAlias 参数 `argAlias`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool proveWavefrontDependences(const TriangleSchedulePlan &plan,
                                const LoopInfo &loopInfo,
                                ScheduleAffineAnalyzer &affine,
@@ -405,6 +498,11 @@ bool proveWavefrontDependences(const TriangleSchedulePlan &plan,
     return true;
 }
 
+/**
+ * @brief 判断 isCloneableInstruction 所描述的结构、合法性或安全条件是否成立。
+ * @param instruction 待分析或改写的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isCloneableInstruction(Instruction *instruction) {
     return dynamic_cast<BinaryInst *>(instruction) ||
            dynamic_cast<UnaryInst *>(instruction) ||
@@ -420,11 +518,24 @@ bool isCloneableInstruction(Instruction *instruction) {
            dynamic_cast<SelectInst *>(instruction);
 }
 
+/**
+ * @brief 查询三角循环克隆阶段的值映射。
+ * @param value 待重映射的原值。
+ * @param map 原值到克隆值的映射表。
+ * @return 命中时返回克隆值，否则返回原值。
+ */
 Value *remap(Value *value, const ValueMap &map) {
     auto found = map.find(value);
     return found == map.end() ? value : found->second;
 }
 
+/**
+ * @brief 克隆三角单元计算区域中的一条受支持指令。
+ * @param original 待克隆的原指令。
+ * @param destination 克隆指令的目标基本块。
+ * @param map 已建立的值映射。
+ * @return 成功时返回克隆指令，不支持该类型时返回 nullptr。
+ */
 Instruction *cloneInstruction(Instruction *original, BasicBlock *destination,
                               const ValueMap &map) {
     auto R = [&](Value *value) { return remap(value, map); };
@@ -474,6 +585,13 @@ Instruction *cloneInstruction(Instruction *original, BasicBlock *destination,
     return clone;
 }
 
+/**
+ * @brief 实现 validateCloneRegion 对应的局部分析或变换辅助逻辑。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param cellBlocks 参数 `cellBlocks`，用于本函数的分析、匹配或 IR 构造。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool validateCloneRegion(const TriangleSchedulePlan &plan,
                          const std::set<BasicBlock *> &cellBlocks,
                          std::string &reason) {
@@ -514,6 +632,14 @@ bool validateCloneRegion(const TriangleSchedulePlan &plan,
     return true;
 }
 
+/**
+ * @brief 实现 validateExternalValue 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param cellBlocks 参数 `cellBlocks`，用于本函数的分析、匹配或 IR 构造。
+ * @param visiting 参数 `visiting`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool validateExternalValue(Value *value, const TriangleSchedulePlan &plan,
                            const std::set<BasicBlock *> &cellBlocks,
                            std::set<Value *> &visiting) {
@@ -540,6 +666,15 @@ bool validateExternalValue(Value *value, const TriangleSchedulePlan &plan,
     return true;
 }
 
+/**
+ * @brief 在新波前单元中递归物化原外层循环定义的纯表达式。
+ * @param value 待物化的原值。
+ * @param destination 新指令的目标基本块。
+ * @param plan 已验证的三角调度计划。
+ * @param cellBlocks 原单元计算区域的基本块集合。
+ * @param map 原值到物化值的缓存映射。
+ * @return 物化或可直接复用的值；无法安全克隆时返回 nullptr。
+ */
 Value *materializeExternal(Value *value, BasicBlock *destination,
                            const TriangleSchedulePlan &plan,
                            const std::set<BasicBlock *> &cellBlocks,
@@ -562,8 +697,17 @@ Value *materializeExternal(Value *value, BasicBlock *destination,
     return clone;
 }
 
+/**
+ * @brief 原地执行 applyTriangle 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param plan 参数 `plan`，用于本函数的分析、匹配或 IR 构造。
+ * @param function 待分析或改写的函数。
+ * @param newLoopHeaders 参数 `newLoopHeaders`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
                    std::vector<BasicBlock *> &newLoopHeaders) {
+    // 在创建波前 CFG 前，先验证整个 cell 区域可克隆，且所有外部值可在新位置重物化。
+    // 新循环以 wave 保持依赖次序、lane 枚举同一波次的独立单元，随后统一修复活跃输出。
     Module *module = function->parent_;
     std::set<BasicBlock *> cellBlocks;
     for (auto *block : plan.inner->blocksOrdered)
@@ -754,6 +898,12 @@ bool applyTriangle(const TriangleSchedulePlan &plan, Function *function,
 
 } // namespace
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param function 待分析或改写的函数。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool TriangleInterchange::runOnFunction(Function *function,
                                         AnalysisManager *AM) {
     ArgumentAliasAnalysis argumentAlias;
@@ -814,11 +964,22 @@ bool TriangleInterchange::runOnFunction(Function *function,
     return everChanged;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void TriangleInterchange::execute(Module *module) {
     for (auto *function : module->function_list_)
         if (!function->is_declaration()) runOnFunction(function, nullptr);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses TriangleInterchange::execute(Module *module,
                                                AnalysisManager &AM) {
     bool changed = false;

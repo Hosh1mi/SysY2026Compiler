@@ -1,3 +1,9 @@
+/**
+ * @file triangularPanelize.cpp
+ * @brief 三角分块（Panel 化）：把已证明合法的三角标量递推分块为多向量面板，保持前缀归约顺序。
+ * @details 面板内相邻 j 值向量化，而 k 前缀归约保持顺序；不满足二维 i32 基址或最小规模时放弃。
+ */
+
 // This pass converts a proved triangular scalar recurrence into a multi-vector
 // panel.  The prefix reduction stays ordered in k while executing adjacent,
 // independent j values in vectors; intra-panel dependences remain scalar.
@@ -18,17 +24,29 @@ constexpr int kPanelWidth = 12;
 constexpr int kVectorsPerPanel = kPanelWidth / kVectorWidth;
 constexpr unsigned kMinimumRowExtent = 64;
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     return std::getenv("DEBUG_TRIANGULAR_PANELIZE") != nullptr;
 }
 
+/**
+ * @brief 描述可分块执行的三角循环及其行、列索引关系。
+ */
 struct Pattern {
-    Loop *outer = nullptr;
-    PhiInst *j = nullptr;
-    Value *row = nullptr;
-    Value *base = nullptr;
+    Loop *outer = nullptr;   ///< 包含目标内层三角循环的外层循环。
+    PhiInst *j = nullptr;    ///< 目标循环的列方向归纳变量。
+    Value *row = nullptr;    ///< 决定当前三角行有效列数的行索引。
+    Value *base = nullptr;   ///< 面板化内存访问所使用的根地址。
 };
 
+/**
+ * @brief 旁路最多若干层只有一个入值的转发 PHI。
+ * @param value 待剥离转发层的值。
+ * @return 第一个不是单入值 PHI 的实际值。
+ */
 Value *stripSingleIncomingPhi(Value *value) {
     for (int depth = 0; depth < 8; ++depth) {
         auto *phi = dynamic_cast<PhiInst *>(value);
@@ -38,6 +56,12 @@ Value *stripSingleIncomingPhi(Value *value) {
     return value;
 }
 
+/**
+ * @brief 判断 isSubOne 所描述的结构、合法性或安全条件是否成立。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isSubOne(Value *value, Value *base) {
     auto *sub = dynamic_cast<BinaryInst *>(value);
     auto *one = sub && sub->is_sub()
@@ -46,6 +70,11 @@ bool isSubOne(Value *value, Value *base) {
     return sub && sub->get_operand(0) == base && one && one->value_ == 1;
 }
 
+/**
+ * @brief 判断 isTwoDimensionalI32Base 所描述的结构、合法性或安全条件是否成立。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isTwoDimensionalI32Base(Value *base) {
     auto *pointer = base ? dynamic_cast<PointerType *>(base->type_) : nullptr;
     auto *row = pointer ? dynamic_cast<ArrayType *>(pointer->contained_)
@@ -55,13 +84,29 @@ bool isTwoDimensionalI32Base(Value *base) {
            static_cast<IntegerType *>(row->contained_)->num_bits_ == 32;
 }
 
+/**
+ * @brief 匹配 esGEP 所描述的 IR 结构并提取结果。
+ * @param gep 参数 `gep`，用于本函数的分析、匹配或 IR 构造。
+ * @param base 参数 `base`，用于本函数的分析、匹配或 IR 构造。
+ * @param first 参数 `first`，用于本函数的分析、匹配或 IR 构造。
+ * @param second 参数 `second`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchesGEP(GetElementPtrInst *gep, Value *base, Value *first,
                 Value *second) {
     return gep && gep->num_ops() == 3 && gep->get_operand(0) == base &&
            gep->get_operand(1) == first && gep->get_operand(2) == second;
 }
 
+/**
+ * @brief 匹配 Pattern 所描述的 IR 结构并提取结果。
+ * @param outer 参数 `outer`，用于本函数的分析、匹配或 IR 构造。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool matchPattern(Loop *outer, Pattern &pattern) {
+    // 匹配严格限制为两层三角计数循环和单一 i32 归约，随后核对二维数组访问形状。
+    // Pattern 只保存经验证的定义和边界，真正的向量面板 CFG 由 applyPattern 创建。
     if (!outer || outer->children.size() != 1 || !outer->preheader ||
         !outer->canonicalIV || !outer->singleLatch() ||
         !outer->singleExit())
@@ -179,6 +224,13 @@ bool matchPattern(Loop *outer, Pattern &pattern) {
     return true;
 }
 
+/**
+ * @brief 实现 redirectEdge 对应的局部分析或变换辅助逻辑。
+ * @param from 参数 `from`，用于本函数的分析、匹配或 IR 构造。
+ * @param oldTarget 需要替换的原分支目标。
+ * @param newTarget 替换后的新分支目标。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
                   BasicBlock *newTarget) {
     auto *term = from ? from->get_terminator() : nullptr;
@@ -192,6 +244,14 @@ void redirectEdge(BasicBlock *from, BasicBlock *oldTarget,
     newTarget->add_pre_basic_block(from);
 }
 
+/**
+ * @brief 生成 base 加常量偏移的列索引。
+ * @param module 所属模块。
+ * @param base 基础索引值。
+ * @param offset 常量偏移；为零时不生成指令。
+ * @param block 指令插入基本块。
+ * @return 偏移后的索引值。
+ */
 Value *addOffset(Module *module, Value *base, int offset,
                  BasicBlock *block) {
     if (offset == 0) return base;
@@ -200,11 +260,26 @@ Value *addOffset(Module *module, Value *base, int offset,
                           base, constant, block);
 }
 
+/**
+ * @brief 构造二维矩阵指定行列元素的地址。
+ * @param base 矩阵基址。
+ * @param row 行索引。
+ * @param column 列索引。
+ * @param block 指令插入基本块。
+ * @return 新建的二维 GEP 指令。
+ */
 GetElementPtrInst *matrixAddress(Value *base, Value *row, Value *column,
                                  BasicBlock *block) {
     return new GetElementPtrInst(base, {row, column}, block);
 }
 
+/**
+ * @brief 将标量广播到固定宽度向量的所有 lane。
+ * @param module 所属模块。
+ * @param scalar 待广播的标量值。
+ * @param block 指令插入基本块。
+ * @return 由 insertelement 链构成的广播向量。
+ */
 Value *emitSplat(Module *module, Value *scalar, BasicBlock *block) {
     auto *vectorType = module->get_vector_type(module->int32_ty_,
                                                 kVectorWidth);
@@ -216,7 +291,15 @@ Value *emitSplat(Module *module, Value *scalar, BasicBlock *block) {
     return vector;
 }
 
+/**
+ * @brief 原地执行 applyPattern 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param pattern 参数 `pattern`，用于本函数的分析、匹配或 IR 构造。
+ * @param blockCounter 参数 `blockCounter`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyPattern(const Pattern &pattern, int &blockCounter) {
+    // 创建面板主循环、多个向量 lane 和标量余数路径；k 方向归约仍保持串行顺序。
+    // 新 CFG 完成后再把原循环入口切换过来，并在出口恢复最终标量累加值。
     Loop *outer = pattern.outer;
     Function *function = outer->header->parent_;
     Module *module = function->parent_;
@@ -265,6 +348,7 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
                                   pattern.row, panelHeader);
     new BranchInst(hasPanel, panelInit, scalarEntry, panelHeader);
 
+    // 每个 panel 一次加载多个相邻向量作为累加初值，列方向连续访问保持单位步长。
     std::array<Value *, kVectorsPerPanel> initialVectors{};
     for (int part = 0; part < kVectorsPerPanel; ++part) {
         Value *column = addOffset(module, panelJ, part * kVectorWidth,
@@ -292,6 +376,8 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
                                    prefixHeader);
     new BranchInst(hasPrefix, prefixBody, finalize, prefixHeader);
 
+    // k 方向仍逐项执行前缀归约，但同一个 rowFactor 会广播到 panel 的所有列，
+    // 从而并行更新多个向量累加器而不改变归约次序。
     auto *rowFactorPointer = matrixAddress(pattern.base, pattern.row,
                                            prefixK, prefixBody);
     auto *rowFactor = new LoadInst(rowFactorPointer, prefixBody);
@@ -324,6 +410,8 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
                                                  prefixBody);
     new BranchInst(prefixHeader, prefixBody);
 
+    // 向量前缀只包含 panel 之前的贡献。先抽取各 lane，再按列顺序补上 panel 内部
+    // 的三角依赖，保证后面的列能看到前面列刚计算出的结果。
     std::array<Value *, kPanelWidth> external{};
     for (int lane = 0; lane < kPanelWidth; ++lane) {
         auto *index = new ConstantInt(module->int32_ty_,
@@ -369,6 +457,7 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
 
     new BranchInst(originalHeader, scalarEntry);
 
+    // 新 CFG 构造完成后才提交入口切换，并让原标量循环从 panelJ 开始处理余数列。
     pattern.j->set_operand(incomingIndex, panelJ);
     pattern.j->set_operand(incomingIndex + 1, scalarEntry);
     redirectEdge(preheader, originalHeader, panelHeader);
@@ -378,6 +467,11 @@ bool applyPattern(const Pattern &pattern, int &blockCounter) {
 
 } // namespace
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param function 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool TriangularPanelize::runOnFunction(Function *function) {
     bool changed = false;
     int blockCounter = 0;
@@ -403,11 +497,22 @@ bool TriangularPanelize::runOnFunction(Function *function) {
     return changed;
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void TriangularPanelize::execute(Module *module) {
     for (auto *function : module->function_list_)
         if (!function->is_declaration()) runOnFunction(function);
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses TriangularPanelize::execute(Module *module,
                                               AnalysisManager &AM) {
     (void)AM;

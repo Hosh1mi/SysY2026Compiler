@@ -1,3 +1,9 @@
+/**
+ * @file loopInvariantReduction.cpp
+ * @brief 循环不变量归约：识别含循环不变量部分的归约表达式，并拆分或重写递推以减少循环内计算。
+ * @details 先匹配归约链并验证私有存储与 CFG，再把不变量部分移到外层，避免改变浮点或有序归约语义。
+ */
+
 #include "../../../include/mid/opt/loopInvariantReduction.hpp"
 #include "../../../include/mid/opt/cfgUtils.hpp"
 #include "../../../include/mid/analysis/loopInfo.hpp"
@@ -16,17 +22,32 @@ namespace {
 
 using ValueMap = std::unordered_map<Value *, Value *>;
 
+/**
+ * @brief 读取调试开关并判断是否输出诊断信息。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool debugEnabled() {
     static bool enabled = std::getenv("DEBUG_LOOP_INVARIANT_REDUCTION") != nullptr;
     return enabled;
 }
 
+/**
+ * @brief 生成 debugReject 对应的调试诊断，不参与程序语义。
+ * @param func 待分析或改写的函数。
+ * @param reason 拒绝变换或匹配失败的原因。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void debugReject(Function *func, const char *reason) {
     if (!debugEnabled()) return;
     std::cerr << "[LoopInvariantReduction] reject "
               << (func ? func->name_ : "<null>") << ": " << reason << "\n";
 }
 
+/**
+ * @brief 生成 debugApply 对应的调试诊断，不参与程序语义。
+ * @param func 待分析或改写的函数。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void debugApply(Function *func) {
     if (!debugEnabled()) return;
     std::cerr << "[LoopInvariantReduction] apply "
@@ -34,11 +55,22 @@ void debugApply(Function *func) {
               << ": hoisted private stores and extracted rowSum\n";
 }
 
+/**
+ * @brief 查询克隆值映射，未命中的循环外值保持不变。
+ * @param value 待重映射的原值。
+ * @param map 原值到克隆值的映射表。
+ * @return 映射存在时返回克隆值，否则返回原值。
+ */
 Value *remap(Value *value, const ValueMap &map) {
     auto it = map.find(value);
     return it == map.end() ? value : it->second;
 }
 
+/**
+ * @brief 判断 isCloneable 所描述的结构、合法性或安全条件是否成立。
+ * @param inst 待分析、化简或克隆的指令。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isCloneable(Instruction *inst) {
     return dynamic_cast<BinaryInst *>(inst) ||
            dynamic_cast<UnaryInst *>(inst) ||
@@ -52,6 +84,13 @@ bool isCloneable(Instruction *inst) {
            dynamic_cast<Bitcast *>(inst);
 }
 
+/**
+ * @brief 克隆候选归约区域中的一条受支持指令并重映射操作数。
+ * @param orig 待克隆的原指令。
+ * @param dest 克隆指令的目标基本块。
+ * @param map 已建立的值映射。
+ * @return 成功时返回尚未插入链表的克隆指令，否则返回 nullptr。
+ */
 Instruction *cloneInstruction(Instruction *orig, BasicBlock *dest,
                               const ValueMap &map) {
     auto R = [&](Value *value) { return remap(value, map); };
@@ -98,6 +137,12 @@ Instruction *cloneInstruction(Instruction *orig, BasicBlock *dest,
     return clone;
 }
 
+/**
+ * @brief 原地执行 removeTerminatorEdges 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param bb 目标或待修改的基本块。
+ * @param term 参数 `term`，用于本函数的分析、匹配或 IR 构造。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void removeTerminatorEdges(BasicBlock *bb, BranchInst *term) {
     if (!bb || !term) return;
     for (unsigned i = 0; i < term->num_ops(); ++i) {
@@ -109,6 +154,13 @@ void removeTerminatorEdges(BasicBlock *bb, BranchInst *term) {
     bb->delete_instr(term);
 }
 
+/**
+ * @brief 原地执行 retargetPhiPred 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param succ 后继基本块。
+ * @param oldPred 需要替换的原前驱基本块。
+ * @param newPred 替换后的新前驱基本块。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred,
                      BasicBlock *newPred) {
     if (!succ) return;
@@ -122,6 +174,11 @@ void retargetPhiPred(BasicBlock *succ, BasicBlock *oldPred,
     }
 }
 
+/**
+ * @brief 实现 validateCFG 对应的局部分析或变换辅助逻辑。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool validateCFG(Function *func) {
     if (!func || func->basic_blocks_.empty()) return false;
     std::set<BasicBlock *> blocks(func->basic_blocks_.begin(),
@@ -163,6 +220,11 @@ bool validateCFG(Function *func) {
     return true;
 }
 
+/**
+ * @brief 沿 GEP 链追溯指针对应的栈上 alloca 根对象。
+ * @param value 待追溯的指针值。
+ * @return 找到时返回根 alloca；指针不是栈对象派生值时返回 nullptr。
+ */
 AllocaInst *pointerBase(Value *value) {
     std::set<Value *> seen;
     while (value && seen.insert(value).second) {
@@ -174,6 +236,11 @@ AllocaInst *pointerBase(Value *value) {
     return nullptr;
 }
 
+/**
+ * @brief 判断 isPrivateAlloca 所描述的结构、合法性或安全条件是否成立。
+ * @param alloca 参数 `alloca`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool isPrivateAlloca(AllocaInst *alloca) {
     if (!alloca) return false;
     std::queue<Value *> worklist;
@@ -207,29 +274,38 @@ bool isPrivateAlloca(AllocaInst *alloca) {
     return true;
 }
 
+/**
+ * @brief 汇总可将内层不变量归约并入外层的嵌套循环匹配结果。
+ */
 struct Candidate {
-    Function *func = nullptr;
-    Loop *outer = nullptr;
-    Loop *inner = nullptr;
-    AllocaInst *array = nullptr;
-    BasicBlock *outerBody = nullptr;
-    BasicBlock *innerPreheader = nullptr;
-    BasicBlock *innerExit = nullptr;
-    PhiInst *outerIV = nullptr;
-    PhiInst *outerSum = nullptr;
-    PhiInst *innerIV = nullptr;
-    PhiInst *innerSum = nullptr;
-    BinaryInst *innerIVUpdate = nullptr;
-    BinaryInst *innerSumUpdate = nullptr;
-    LoadInst *innerLoad = nullptr;
-    BinaryInst *oldOuterIVUpdate = nullptr;
-    ICmpInst *innerCompare = nullptr;
-    Value *innerBound = nullptr;
-    BinaryInst *oldModulo = nullptr;
-    Value *modulus = nullptr;
-    std::vector<BasicBlock *> chainBlocks;
+    Function *func = nullptr;                   ///< 候选循环所属函数。
+    Loop *outer = nullptr;                      ///< 承载最终归约结果的外层循环。
+    Loop *inner = nullptr;                      ///< 待消除或简化的内层归约循环。
+    AllocaInst *array = nullptr;                ///< 内层循环重复读取的栈数组。
+    BasicBlock *outerBody = nullptr;            ///< 从外层头进入内层前的循环体块。
+    BasicBlock *innerPreheader = nullptr;        ///< 内层循环预头。
+    BasicBlock *innerExit = nullptr;             ///< 内层循环唯一出口。
+    PhiInst *outerIV = nullptr;                  ///< 外层循环归纳变量。
+    PhiInst *outerSum = nullptr;                 ///< 外层累加状态 PHI。
+    PhiInst *innerIV = nullptr;                  ///< 内层循环归纳变量。
+    PhiInst *innerSum = nullptr;                 ///< 内层累加状态 PHI。
+    BinaryInst *innerIVUpdate = nullptr;          ///< 内层归纳变量的回边更新。
+    BinaryInst *innerSumUpdate = nullptr;         ///< 内层累加状态的回边更新。
+    LoadInst *innerLoad = nullptr;                ///< 参与内层归约的数组读取。
+    BinaryInst *oldOuterIVUpdate = nullptr;       ///< 改写前的外层归纳变量更新。
+    ICmpInst *innerCompare = nullptr;             ///< 控制内层循环退出的比较。
+    Value *innerBound = nullptr;                  ///< 内层循环的迭代上界。
+    BinaryInst *oldModulo = nullptr;              ///< 原外层累加结果上的取模指令。
+    Value *modulus = nullptr;                     ///< 归约结果使用的模数。
+    std::vector<BasicBlock *> chainBlocks;         ///< 外层体至内层预头间的直线 CFG 链。
 };
 
+/**
+ * @brief 查找基本块中具有指定前驱入边的第一个 PHI。
+ * @param bb 待搜索的基本块。
+ * @param pred 指定的前驱基本块。
+ * @return 找到时返回 PHI，否则返回 nullptr。
+ */
 PhiInst *findPhiFrom(BasicBlock *bb, BasicBlock *pred) {
     if (!bb) return nullptr;
     for (auto *inst : bb->instr_list_) {
@@ -241,6 +317,13 @@ PhiInst *findPhiFrom(BasicBlock *bb, BasicBlock *pred) {
     return nullptr;
 }
 
+/**
+ * @brief 收集或查找 findIncoming 所需的信息。
+ * @param phi 参数 `phi`，用于本函数的分析、匹配或 IR 构造。
+ * @param pred 前驱基本块。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool findIncoming(PhiInst *phi, BasicBlock *pred, Value *&value) {
     if (!phi) return false;
     for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
@@ -252,12 +335,24 @@ bool findIncoming(PhiInst *phi, BasicBlock *pred, Value *&value) {
     return false;
 }
 
+/**
+ * @brief 实现 containsOuterValue 对应的局部分析或变换辅助逻辑。
+ * @param value 待检查、映射或物化的 IR 值。
+ * @param loop 待检查或变换的循环。
+ * @param region 参数 `region`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool containsOuterValue(Value *value, Loop *loop,
                         const std::set<Instruction *> &region) {
     auto *inst = dynamic_cast<Instruction *>(value);
     return inst && loop->blocks.count(inst->parent_) && !region.count(inst);
 }
 
+/**
+ * @brief 分析 Chain 的结构、递推或依赖信息。
+ * @param c 参数 `c`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool analyzeChain(Candidate &c) {
     auto *term = dynamic_cast<BranchInst *>(c.outerBody->get_terminator());
     if (!term || term->num_ops() != 3) return false;
@@ -347,6 +442,11 @@ bool analyzeChain(Candidate &c) {
     return true;
 }
 
+/**
+ * @brief 分析 Inner 的结构、递推或依赖信息。
+ * @param c 参数 `c`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool analyzeInner(Candidate &c) {
     if (!c.inner || !c.inner->header || !c.inner->singleLatch() ||
         !c.inner->singleExit())
@@ -509,6 +609,11 @@ bool analyzeInner(Candidate &c) {
     return true;
 }
 
+/**
+ * @brief 实现 validateArrayUses 对应的局部分析或变换辅助逻辑。
+ * @param c 参数 `c`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool validateArrayUses(const Candidate &c) {
     std::set<BasicBlock *> afterOuter;
     std::queue<BasicBlock *> afterWorklist;
@@ -560,7 +665,16 @@ bool validateArrayUses(const Candidate &c) {
     return true;
 }
 
+/**
+ * @brief 收集或查找 findCandidate 所需的信息。
+ * @param func 待分析或改写的函数。
+ * @param LI 参数 `LI`，用于本函数的分析、匹配或 IR 构造。
+ * @param c 参数 `c`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool findCandidate(Function *func, LoopInfo &LI, Candidate &c) {
+    // 候选必须同时匹配双层循环 CFG、唯一外层累加 PHI、私有临时数组及内层归约链。
+    // 这里只构造完整 Candidate，不修改 IR；数组使用验证通过后才交给 applyCandidate。
     for (auto &outerPtr : LI.allLoops()) {
         auto *outer = outerPtr.get();
         if (outer->children.size() != 1 || !outer->preheader ||
@@ -608,6 +722,8 @@ bool findCandidate(Function *func, LoopInfo &LI, Candidate &c) {
         c.outerIV = outerIV;
         c.outerSum = outerSum;
 
+        // 在内层所有 load 中追踪唯一私有数组基址；出现第二个基址或非私有
+        // alloca 都会破坏后续把数组中间态替换为标量链的前提。
         AllocaInst *array = nullptr;
         for (auto *bb : inner->blocksOrdered) {
             for (auto *inst : bb->instr_list_) {
@@ -631,12 +747,20 @@ bool findCandidate(Function *func, LoopInfo &LI, Candidate &c) {
     return false;
 }
 
+/**
+ * @brief 原地执行 applyCandidate 对应的 IR/CFG 改写，并维护相关 SSA 关系。
+ * @param c 参数 `c`，用于本函数的分析、匹配或 IR 构造。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool applyCandidate(Candidate &c) {
+    // 提交阶段先建立替代循环骨架和 PHI，再克隆计算链并重连旧入口/出口。
+    // 新旧 CFG 的切换放在最后，确保此前的任何校验失败都不会留下半成品。
     Module *module = c.func->parent_;
     Type *i32 = module->int32_ty_;
     auto *one = new ConstantInt(i32, 1);
     auto *zero = new ConstantInt(i32, 0);
 
+    // 先构建尚未接入旧入口的替代循环骨架，等 PHI 和克隆链完整后再切换 CFG。
     auto *rowJoin = new BasicBlock(module, "lir.row.join", c.func);
     auto *rowPreheader = new BasicBlock(module, "lir.row.preheader", c.func);
     auto *rowHeader = new BasicBlock(module, "lir.row.header", c.func);
@@ -760,6 +884,11 @@ bool applyCandidate(Candidate &c) {
     return true;
 }
 
+/**
+ * @brief 在单个非声明函数上运行本变换。
+ * @param func 待分析或改写的函数。
+ * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
+ */
 bool runOnFunction(Function *func) {
     if (debugEnabled())
         std::cerr << "[LoopInvariantReduction] analyze "
@@ -780,12 +909,23 @@ bool runOnFunction(Function *func) {
 
 } // namespace
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
+ */
 void LoopInvariantReduction::execute(Module *module) {
     for (auto *func : module->function_list_) {
         if (!func->is_declaration()) runOnFunction(func);
     }
 }
 
+/**
+ * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
+ * @param module 待处理的 IR 模块，函数可能原地修改其内容。
+ * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
+ * @return 返回本次运行后仍然有效的分析集合。
+ */
 PreservedAnalyses LoopInvariantReduction::execute(Module *module,
                                                   AnalysisManager &AM) {
     if (debugEnabled()) std::cerr << "[LoopInvariantReduction] execute\n";
