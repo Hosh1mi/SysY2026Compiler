@@ -29,6 +29,7 @@ struct DriverOptions {
     std::string output = "-";
     int optLevel = 0;
     bool dumpIR = false;
+    bool dumpSCEV = false;
     bool dumpAST = false;
     bool verifyIR = false;
     bool dumpMachineInstr = false;
@@ -76,6 +77,8 @@ static bool parseArgs(int argc, char **argv, DriverOptions &options) {
                 return false;
         } else if (arg == "--dump-ir") {
             options.dumpIR = true;
+        } else if (arg == "--dump-scev") {
+            options.dumpSCEV = true;
         } else if (arg == "--dump-ast") {
             options.dumpAST = true;
         } else if (arg == "--verify-ir") {
@@ -292,6 +295,7 @@ int main(int argc, char **argv) {
 
     PassManager pm;
     pm.setDumpIR(options.dumpIR);
+    pm.setDumpSCEV(options.dumpSCEV);
     pm.setVerifyIR(options.verifyIR);
     buildArm64Pipeline(pm, options.optLevel, m.get());
     pm.run(m.get());

@@ -17,6 +17,7 @@ class PassManager {
     std::vector<FixedPointGroup> fixed_point_groups_;
     AnalysisManager analyses_;
     bool dump_ir_    = false;
+    bool dump_scev_  = false;
     bool verify_ir_  = false;
     LoopForm loop_form_ = LoopForm::None;
     bool building_group_ = false;
@@ -42,5 +43,6 @@ public:
     void run(Module *module);
 
     void setDumpIR(bool v)   { dump_ir_   = v; }
+    void setDumpSCEV(bool v) { dump_scev_ = v; }
     void setVerifyIR(bool v) { verify_ir_ = v; }
 };

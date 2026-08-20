@@ -25,6 +25,7 @@ gcc out.s ../lib/libsysy.a -o out
 |------|------|
 | `-O0` / `-O1` | 优化等级 |
 | `--dump-ir` | 每个 pass 前后 dump IR |
+| `--dump-scev` | 在完整 pass 流水线执行前后各 dump 一次循环 SCEV 到 stderr |
 | `--verify-ir` | 每个 pass 后校验 IR 完整性 |
 | `--dump-pre-machine-instr` | 输出 preRA 虚拟 MachineInstr（vreg defs/uses、latency），dump 到 stderr |
 | `--dump-machine-instr` | 输出每个函数的 MachineInstr 详细信息（opcode类型、defs/uses、latency、标志位），dump 到 stderr |

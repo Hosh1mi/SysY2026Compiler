@@ -147,11 +147,10 @@ static bool shouldDumpIRForPass(bool dumpIR, const std::string &passName) {
     return dumpIR && dumpIRGateAllows(passName) && dumpIRPassMatches(passName);
 }
 
-// 按环境变量要求打印 pass 前后的循环 SCEV 快照，辅助定位 trip count 变化。
+// 打印 pass 前后的循环 SCEV 快照，辅助定位 trip count 和归纳表达式变化。
 static void dumpSCEVSnapshot(Module *module, const std::string &when,
-                             const std::string &passName) {
-    const char *filter = std::getenv("DUMP_SCEV_PASS");
-    if (!passNameInCSV(filter, passName))
+                             const std::string &passName, bool enabled) {
+    if (!enabled)
         return;
 
     std::cerr << "; === SCEV " << when << " " << passName << " ===\n";
@@ -209,6 +208,10 @@ static void dumpSCEVSnapshot(Module *module, const std::string &when,
 PassRunResult PassManager::runSinglePass(Pass &pass, Module *module) {
     const bool profilePasses = std::getenv("PROFILE_PASSES") != nullptr;
     const std::string passName = pass.name();
+    // DUMP_SCEV_PASS 保留按 pass 诊断能力；--dump-scev 在 run() 的流水线
+    // 边界统一处理，避免每个 pass 都产生快照。
+    const bool dumpThisSCEV =
+        passNameInCSV(std::getenv("DUMP_SCEV_PASS"), passName);
     if (std::getenv("TRACE_PASS_PIPELINE"))
         std::cerr << "[PipelinePass] " << passName << "\n";
     const size_t beforeInsts = profilePasses ? countInstructions(module) : 0;
@@ -218,7 +221,7 @@ PassRunResult PassManager::runSinglePass(Pass &pass, Module *module) {
         std::cerr << "; === IR Before " << passName << " ===\n"
                   << module->print() << "\n";
     }
-    dumpSCEVSnapshot(module, "Before", passName);
+    dumpSCEVSnapshot(module, "Before", passName, dumpThisSCEV);
 
     PassRunResult result = pass.runPass(module, analyses_);
     const PreservedAnalyses &preserved = result.preserved;
@@ -254,7 +257,7 @@ PassRunResult PassManager::runSinglePass(Pass &pass, Module *module) {
         std::cerr << "; === IR After " << passName << " ===\n"
                   << module->print() << "\n";
     }
-    dumpSCEVSnapshot(module, "After", passName);
+    dumpSCEVSnapshot(module, "After", passName, dumpThisSCEV);
     if (profilePasses) {
         auto end = std::chrono::steady_clock::now();
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -286,6 +289,9 @@ void PassManager::ensureLoopForm(LoopForm required, Module *module) {
 
 // 顺序运行普通 pass；固定点组持续迭代到整轮无改动后继续流水线。
 void PassManager::run(Module *module) {
+    // 命令行 --dump-scev 只观察完整优化流水线的输入和输出。
+    dumpSCEVSnapshot(module, "Before", "PassPipeline", dump_scev_);
+
     const bool tracePipeline =
         dump_ir_ || std::getenv("DEBUG_LOOP_PIPELINE") != nullptr ||
         std::getenv("TRACE_PASS_PIPELINE") != nullptr;
@@ -340,4 +346,6 @@ void PassManager::run(Module *module) {
         irChangedSinceFixedPoint |= result.changed;
         i++;
     }
+
+    dumpSCEVSnapshot(module, "After", "PassPipeline", dump_scev_);
 }

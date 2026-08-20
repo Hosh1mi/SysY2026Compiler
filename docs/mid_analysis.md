@@ -42,6 +42,16 @@
 | `LoopVerify` | 校验循环规范形和 LCSSA |
 | `ConstantEvaluator`、`ValueFacts`、`loopUtils` | 常量、位事实和 SSA 使用位置辅助函数 |
 
+编译时可以通过 `--dump-scev` 在完整 pass 流水线执行前后各输出一次循环 SCEV：
+
+```bash
+build/compiler -O1 -c --dump-scev input.sy -o /tmp/out.ir \
+  2>/tmp/scev.log
+```
+
+快照包含循环深度、基本块、迭代次数、回边次数、控制归纳变量和 header PHI
+对应的 SCEV。`--dump-scev` 不改变最终 IR。
+
 ### 1.2 AnalysisManager
 
 [`analysisManager.hpp`](../src/include/mid/analysis/analysisManager.hpp) 和
