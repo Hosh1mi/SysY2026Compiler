@@ -10,8 +10,6 @@
 !lib/
 !.proto/
 !docs/
-docs/*
-!docs/*.md
 .agents/
 !test
 test/*

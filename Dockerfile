@@ -24,4 +24,3 @@ CMD ["/bin/bash"]
 
 # Commands:
 # docker build --platform linux/arm64 -t sysy-dev .; docker run -it --platform linux/arm64 -v $(pwd):/workspace sysy-dev
-# docker build --platform linux/amd64 -t sysy-dev-amd64 .; docker run -it --platform linux/amd64 -v "$(pwd)":/workspace sysy-dev-amd64

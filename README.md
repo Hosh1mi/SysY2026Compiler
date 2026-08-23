@@ -1,43 +1,45 @@
 # Compiler2026-NO_COMPILE_NO_LIFE
-## 项目运行
+
+2026年全国大学生计算机系统能力大赛-编译系统设计赛-编译系统实现赛中ARM后端赛道的国家一等奖仓库
+
+## Quick Setup
 
 ```bash
-# 项目代码会放在 /workspace 下
+# Redirects to '/workspace', mounting your current host path
+# Or on ARM machine, ignore this one
 docker build --platform linux/arm64 -t sysy-dev .; docker run -it --platform linux/arm64 -v $(pwd):/workspace sysy-dev
 
-# 在根目录下构建：
-mkdir build && cd build && cmake .. && make -j8
+# Builds from scratch
+mkdir build && cd build && cmake .. && make -j4
 
-# 生成IR:
-./compiler -c -o out.ll <testpath>
+# Compilation
+./compiler -S -o out.s <.sy path> [-O1]
 
-# 生成汇编:
-./compiler -S -o out.s <.sy path>
-
-# 编译运行:
+# Generates binary
 gcc out.s ../lib/libsysy.a -o out
-./out < <testinput>
 ```
 
-## 调试选项
+## Debugging
 
-| Flag | 作用 |
-|------|------|
-| `-O0` / `-O1` | 优化等级 |
-| `--dump-ir` | 每个 pass 前后 dump IR |
-| `--dump-scev` | 在完整 pass 流水线执行前后各 dump 一次循环 SCEV 到 stderr |
-| `--verify-ir` | 每个 pass 后校验 IR 完整性 |
-| `--dump-pre-machine-instr` | 输出 preRA 虚拟 MachineInstr（vreg defs/uses、latency），dump 到 stderr |
-| `--dump-machine-instr` | 输出每个函数的 MachineInstr 详细信息（opcode类型、defs/uses、latency、标志位），dump 到 stderr |
-
-注:`--dump-ir`为stderr实现，输出极长，使用`2>`重定向到文件里查看
-
-`--dump-machine-instr` 同样输出到 stderr，可单独使用或配合 `-S`：
 ```bash
-./compiler test.sy --dump-machine-instr 2> dump.txt   # 只 dump MachineInstr
-./compiler -S test.sy --dump-machine-instr 2> dump.txt # 同时输出汇编
+# Generates IR
+./compiler -c -o out.ll <src_path> [-O1] [--dump-ir 2> out.txt]
 ```
 
-## 项目说明
+| Flag | Effect |
+|------|--------|
+| `-S` | Generate assembly output |
+| `-c` | Generate intermediate representation |
+| `-o` | Select output file |
+| `-O0` | Disable optimization pipeline |
+| `-O1` | Enable optimization pipeline |
+| `--dump-ir` | Dump intermediate representation |
+| `--dump-scev` | Dump scalar evolution analysis |
+| `--dump-ast` | Dump abstract syntax tree |
+| `--verify-ir` | Verify intermediate representation |
+| `--dump-machine-instr` | Dump machine instructions |
+| `--dump-pre-machine-instr` | Dump pre instruction selection machine code |
 
-见`docs/`
+## Visualizer
+
+`visualizer/` is a small static website that works like `godbolt.org`.
