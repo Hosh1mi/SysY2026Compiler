@@ -8,7 +8,7 @@ enum class SignedMinMaxIntrinsic {
     SMax,
 };
 
-// 返回指定标量/向量类型的 signed min/max 声明；不存在时插入 module。
+// 返回指定类型的 signed min/max 声明；不存在时插入 module。
 Function *getOrInsertSignedMinMaxIntrinsic(Module *module,
                                            SignedMinMaxIntrinsic kind,
                                            Type *type);

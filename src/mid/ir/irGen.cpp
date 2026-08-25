@@ -1,7 +1,6 @@
 // IRGen 把前端 AST 降为未优化的中端 IR。标量局部变量先放入 entry alloca，控制语句显式
-// 建立基本块和分支，非 void 标量函数经统一 retval/return block 返回；vector、tensor 还会
-// 根据静态或动态形状选择原生向量、逐 lane 值或隐藏返回指针。后续 Mem2Reg、CFG 化简和
-// 向量优化均建立在这里生成的 use-def、类型和 CFG 关系正确的前提上。
+// 建立基本块和分支，非 void 函数经统一 retval/return block 返回；tensor 使用数组存储和
+// 隐藏返回指针。后续 Mem2Reg、CFG 化简和向量优化均依赖这里生成的 use-def 关系。
 #include "../../include/mid/ir/irGen.hpp"
 #include <iostream>
 #include <unordered_map>
@@ -28,7 +27,7 @@ Value* expectedTensorTarget = nullptr;   // 可供表达式直接写入的目标
 bool currentTensorReturn = false;        // 当前函数是否采用 tensor 隐式返回参数
 Value* tensorReturnPointer = nullptr;    // 调用者传入的 tensor 返回缓冲区
 Type* curType;                          // 当前 decl 类型
-TypeSpec curSourceType;                 // 当前 decl 的源级向量形态
+bool curSourceTensor = false;
 bool isConst;                           // 当前 decl 是否是 const
 bool useConst = false;                  // 计算是否使用常量
 std::vector<Type *> params;             // 函数形参类型表
@@ -44,24 +43,10 @@ BasicBlock *trueBB = nullptr;
 BasicBlock *falseBB = nullptr;
 BasicBlock *whileFalseBB = nullptr;     // break 目标
 bool has_br = false;                    // 当前 BB 已发射终止指令
-bool is_single_exp = false;             // 形如 "exp;" 的独立表达式语句
-Value *vectorLaneBase = nullptr;         // lane 左值所属的向量地址
-Value *vectorLaneIndex = nullptr;        // lane 左值的动态/常量下标
-VectorType *expectedVectorType = nullptr; // braced literal type hint from context
-ScalarizedVectorType *expectedScalarizedVectorType = nullptr;
-ScalarizedVectorType *currentScalarizedReturnType = nullptr;
-Value *scalarizedReturnPointer = nullptr;
-
-struct ScalarizedFunctionInfo {
-    ScalarizedVectorType *returnType = nullptr;
-    std::vector<ScalarizedVectorType *> valueParameters;
-};
 
 struct FunctionLoweringInfo {
-    ScalarizedVectorType* returnType = nullptr; // 展开向量的返回形状
     bool tensorReturn = false;                  // 是否通过隐藏指针返回 tensor
     ArrayType* tensorReturnType = nullptr;      // 已推导出的静态 tensor 返回形状
-    vector<ScalarizedVectorType *> valueParameters;
     vector<bool> tensorParameters;              // 与源级形参一一对应
 };
 
@@ -74,6 +59,8 @@ static std::unordered_map<Value*, Value*> heapTensorStorage;     // tensor/view 
 static Function* tensorMalloc = nullptr;
 static Function* tensorFree = nullptr;
 static BasicBlock* createNamedBB(Module* m, Function* func, const std::string &base);
+static Type *scalarType(Module *module, TYPE element);
+
 
 // 功能：从 tensor 指针的 pointee 中取得当前仍然静态可见的数组尾部类型。
 static ArrayType* tensorType(Value *val){
@@ -369,17 +356,17 @@ static Value *lowerTensorMatMul(GenIR *gen, Value *lhs, Value *rhs){
     Value* sum = gen->builder->create_load(sumSlot);
     sum = elementType == gen->module->int32_ty_ ? (Value*) gen->builder->create_iadd(sum, product) : (Value*) gen->builder->create_fadd(sum, product);
     gen->builder->create_store(sum, sumSlot);
-    
+
     commonIndex = gen->builder->create_iadd(commonIndex, new ConstantInt(gen->module->int32_ty_, 1));
     gen->builder->create_store(commonIndex, commonIndexSlot);
     gen->builder->create_br(commonCond);
     gen->builder->BB_ = commonEnd;
-    
+
     rowIndex = gen->builder->create_load(rowIndexSlot);
     columnIndex = gen->builder->create_load(columnIndexSlot);
     Value *resultIndex = gen->builder->create_iadd(gen->builder->create_imul(rowIndex, new ConstantInt(gen->module->int32_ty_, columns)), columnIndex);
     gen->builder->create_store(gen->builder->create_load(sumSlot), gen->builder->create_gep(resultData, {resultIndex}));
-    
+
     columnIndex = gen->builder->create_iadd(columnIndex, new ConstantInt(gen->module->int32_ty_, 1));
     gen->builder->create_store(columnIndex, columnIndexSlot);
     gen->builder->create_br(columnCond);
@@ -436,7 +423,6 @@ static bool isTensorElementwise(BinaryOp op){
            op == BinaryOp::Remainder;
 }
 
-
 // 功能：从融合表达式中选择一个 tensor 叶子，作为动态形状和布局的模型。
 static Value *tensorExpressionModel(TensorExpression *expression){
     if(expression -> kind == TensorExpression::Leaf)
@@ -471,8 +457,6 @@ static std::unique_ptr<TensorExpression> buildTensorExpression(GenIR *gen, ExprA
     expectedTensorTarget = savedTarget;
     return std::unique_ptr<TensorExpression>(new TensorExpression(recentVal, recentVal->hasSemFlag(SemFlag::SrcTensor)));
 }
-
-
 
 // 功能：为给定线性下标递归发射融合表达式的一次标量计算。
 static Value* emitTensorExpression(GenIR *gen, TensorExpression *expression, Value *index, Type *elementType){
@@ -540,587 +524,8 @@ static Value *lowerFusedTensorExpression(GenIR *gen, ExprAST *expression){
     return result;
 }
 
-static std::unordered_map<Function *, ScalarizedFunctionInfo>
-    scalarizedFunctionInfo;
-static std::vector<ScalarizedVectorType *> pendingScalarizedParameters;
-
-class ScalarizedVectorValue final : public Value {
-public:
-    ScalarizedVectorValue(ScalarizedVectorType *type,
-                          std::vector<Value *> lanes)
-        : Value(type), lanes_(std::move(lanes)) {}
-
-    std::string print() override { return "<scalarized-vector>"; }
-
-    std::vector<Value *> lanes_;
-};
-
-
-
-// scalarType：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Type *scalarType(Module *module, TYPE element) {
     return element == TYPE_INT ? module->int32_ty_ : module->float32_ty_;
-}
-
-// resolveVectorLanes：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
-static unsigned resolveVectorLanes(GenIR *gen, const TypeSpec &type) {
-    unsigned lanes = type.lanes;
-    if (!type.laneConstant.empty()) {
-        auto *constant = dynamic_cast<ConstantInt *>(
-            gen->scope.find(type.laneConstant));
-        if (!constant || constant->value_ <= 0) {
-            std::cerr << "vector width '" << type.laneConstant
-                      << "' is not a positive integer compiler constant\n";
-            std::exit(1);
-        }
-        lanes = static_cast<unsigned>(constant->value_);
-    }
-    if (lanes != 2 && lanes != 3 && lanes != 4 && lanes != 8 && lanes != 16) {
-        std::cerr << "unsupported fixed vector width " << lanes
-                  << "; expected 2, 3, 4, 8, or 16 lanes\n";
-        std::exit(1);
-    }
-    return lanes;
-}
-
-// lowerFixedType：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static Type *lowerFixedType(GenIR *gen, const TypeSpec &type) {
-    if (!type.isFixedVector())
-        return scalarType(gen->module.get(), type.element);
-    unsigned lanes = resolveVectorLanes(gen, type);
-    Type *element = scalarType(gen->module.get(), type.element);
-    if (lanes == 4)
-        return gen->module->get_vector_type(element, lanes);
-    return gen->module->get_scalarized_vector_type(element, lanes);
-}
-
-// isIntegerValueType：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
-static bool isIntegerValueType(Type *type) {
-    if (type->tid_ == Type::IntegerTyID)
-        return true;
-    auto *vector = dynamic_cast<VectorType *>(type);
-    return vector && vector->contained_->tid_ == Type::IntegerTyID;
-}
-
-
-// coerceScalar：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static Value *coerceScalar(IRStmtBuilder *builder, Module *module, Value *value,
-                           Type *target) {
-    if (value->type_ == target)
-        return value;
-    if (value->type_ == module->int32_ty_ && target == module->float32_ty_) {
-        if (auto *constant = dynamic_cast<ConstantInt *>(value))
-            return new ConstantFloat(module->float32_ty_, constant->value_);
-        return builder->create_sitofp(value, target);
-    }
-    if (value->type_ == module->float32_ty_ && target == module->int32_ty_) {
-        if (auto *constant = dynamic_cast<ConstantFloat *>(value))
-            return new ConstantInt(module->int32_ty_, (int)constant->value_);
-        return builder->create_fptosi(value, target);
-    }
-    std::cerr << "incompatible scalar/vector value in initializer or assignment\n";
-    std::exit(1);
-}
-
-// asScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *asScalarizedVector(Value *value) {
-    return dynamic_cast<ScalarizedVectorValue *>(value);
-}
-
-// splatScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *splatScalarizedVector(
-    GenIR *gen, Value *value, ScalarizedVectorType *type) {
-    value = coerceScalar(gen->builder, gen->module.get(), value,
-                         type->contained_);
-    return new ScalarizedVectorValue(
-        type, std::vector<Value *>(type->num_elements_, value));
-}
-
-// loadScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *loadScalarizedVector(
-    GenIR *gen, Value *pointer, ScalarizedVectorType *type) {
-    std::vector<Value *> lanes;
-    lanes.reserve(type->num_elements_);
-    for (unsigned lane = 0; lane < type->num_elements_; ++lane) {
-        Value *lanePointer = gen->builder->create_gep(
-            pointer, {new ConstantInt(gen->module->int32_ty_, 0),
-                      new ConstantInt(gen->module->int32_ty_, lane)});
-        lanes.push_back(gen->builder->create_load(lanePointer));
-    }
-    return new ScalarizedVectorValue(type, std::move(lanes));
-}
-
-// constantScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *constantScalarizedVector(
-    Module *module, ScalarizedVectorType *type, Constant *constant) {
-    std::vector<Value *> lanes;
-    lanes.reserve(type->num_elements_);
-    if (auto *array = dynamic_cast<ConstantArray *>(constant)) {
-        for (Constant *lane : array->const_array)
-            lanes.push_back(lane);
-    } else if (dynamic_cast<ConstantZero *>(constant)) {
-        for (unsigned lane = 0; lane < type->num_elements_; ++lane)
-            lanes.push_back(zeroScalar(module, type->contained_));
-    }
-    if (lanes.size() != type->num_elements_) {
-        std::cerr << "malformed scalarized vector constant\n";
-        std::exit(1);
-    }
-    return new ScalarizedVectorValue(type, std::move(lanes));
-}
-
-// constantFromScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ConstantArray *constantFromScalarizedVector(
-    ScalarizedVectorValue *value) {
-    std::vector<Constant *> lanes;
-    lanes.reserve(value->lanes_.size());
-    for (Value *lane : value->lanes_) {
-        auto *constant = dynamic_cast<Constant *>(lane);
-        if (!constant)
-            return nullptr;
-        lanes.push_back(constant);
-    }
-    return new ConstantArray(
-        static_cast<ScalarizedVectorType *>(value->type_), lanes);
-}
-
-// storeScalarizedVector：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static void storeScalarizedVector(GenIR *gen, Value *pointer,
-                                  ScalarizedVectorValue *value,
-                                  ScalarizedVectorType *type) {
-    if (!value || value->type_ != type) {
-        std::cerr << "scalarized vector assignment requires matching element type and width\n";
-        std::exit(1);
-    }
-    for (unsigned lane = 0; lane < type->num_elements_; ++lane) {
-        Value *lanePointer = gen->builder->create_gep(
-            pointer, {new ConstantInt(gen->module->int32_ty_, 0),
-                      new ConstantInt(gen->module->int32_ty_, lane)});
-        gen->builder->create_store(value->lanes_[lane], lanePointer);
-    }
-}
-
-// buildScalarizedVectorInitializer：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
-static ScalarizedVectorValue *buildScalarizedVectorInitializer(
-    GenIR *gen, InitValAST *init, ScalarizedVectorType *type) {
-    if (!init || (!init->isExpression() && init->elements().empty())) {
-        Value *zero = zeroScalar(gen->module.get(), type->contained_);
-        return new ScalarizedVectorValue(
-            type, std::vector<Value *>(type->num_elements_, zero));
-    }
-    if (init->isExpression()) {
-        ScalarizedVectorType *saved = expectedScalarizedVectorType;
-        expectedScalarizedVectorType = type;
-        init->expression()->accept(*gen);
-        expectedScalarizedVectorType = saved;
-        auto *value = asScalarizedVector(recentVal);
-        if (!value || value->type_ != type) {
-            std::cerr << "a fixed vector copy initializer must have the same type\n";
-            std::exit(1);
-        }
-        return value;
-    }
-    if (init->elements().size() > type->num_elements_) {
-        std::cerr << "too many elements in fixed vector initializer\n";
-        std::exit(1);
-    }
-    std::vector<Value *> lanes;
-    for (auto &item : init->elements()) {
-        if (!item->isExpression()) {
-            std::cerr << "nested braces are not valid for a one-dimensional vector\n";
-            std::exit(1);
-        }
-        item->expression()->accept(*gen);
-        if (asScalarizedVector(recentVal)) {
-            std::cerr << "a vector lane initializer must be scalar\n";
-            std::exit(1);
-        }
-        lanes.push_back(coerceScalar(gen->builder, gen->module.get(), recentVal,
-                                     type->contained_));
-    }
-    while (lanes.size() < type->num_elements_)
-        lanes.push_back(zeroScalar(gen->module.get(), type->contained_));
-    return new ScalarizedVectorValue(type, std::move(lanes));
-}
-
-// buildVectorInitializer：创建该辅助结构所需的节点，并连接操作数、基本块和终结边。
-static Value *buildVectorInitializer(GenIR *gen, InitValAST *init,
-                                     VectorType *vectorType) {
-    if (!init || (!init->isExpression() && init->elements().empty()))
-        return new ConstantZero(vectorType);
-    if (init->isExpression()) {
-        VectorType *savedExpected = expectedVectorType;
-        expectedVectorType = vectorType;
-        init->expression()->accept(*gen);
-        expectedVectorType = savedExpected;
-        if (recentVal->type_ != vectorType) {
-            std::cerr << "a fixed vector copy initializer must have the same type\n";
-            std::exit(1);
-        }
-        return recentVal;
-    }
-    if (init->elements().size() > vectorType->num_elements_) {
-        std::cerr << "too many elements in fixed vector initializer\n";
-        std::exit(1);
-    }
-
-    std::vector<Value *> lanes;
-    bool allConstant = true;
-    for (auto &item : init->elements()) {
-        if (!item->isExpression()) {
-            std::cerr << "nested braces are not valid for a one-dimensional vector\n";
-            std::exit(1);
-        }
-        item->expression()->accept(*gen);
-        Value *lane = coerceScalar(gen->builder, gen->module.get(), recentVal,
-                                   vectorType->contained_);
-        allConstant &= dynamic_cast<Constant *>(lane) != nullptr;
-        lanes.push_back(lane);
-    }
-    while (lanes.size() < vectorType->num_elements_)
-        lanes.push_back(zeroScalar(gen->module.get(), vectorType->contained_));
-
-    if (allConstant) {
-        std::vector<Constant *> constants;
-        for (auto *lane : lanes)
-            constants.push_back(static_cast<Constant *>(lane));
-        return new ConstantVector(vectorType, constants);
-    }
-
-    Value *result = new ConstantZero(vectorType);
-    for (unsigned i = 0; i < lanes.size(); ++i)
-        result = new InsertElementInst(result, lanes[i],
-                                       new ConstantInt(gen->module->int32_ty_, i),
-                                       gen->builder->BB_);
-    return result;
-}
-
-// isFloatLiteral：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
-static bool isFloatLiteral(const ExprAST *expr) {
-    if (const auto *literal = dynamic_cast<const LiteralExprAST *>(expr))
-        return std::holds_alternative<float>(literal->value);
-    if (const auto *unary = dynamic_cast<const UnaryExprAST *>(expr))
-        return isFloatLiteral(unary->operand.get());
-    return false;
-}
-
-// Infer a fixed vector type for a braced literal when no contextual type is set.
-static VectorType *inferVectorLiteralType(Module *module, InitValAST *init) {
-    if (expectedVectorType)
-        return expectedVectorType;
-    bool anyFloat = false;
-    if (init && !init->isExpression())
-        for (auto &item : init->elements())
-            anyFloat |= item && item->isExpression() &&
-                        isFloatLiteral(item->expression());
-    Type *contained = anyFloat ? module->float32_ty_ : module->int32_ty_;
-    return module->get_vector_type(contained, 4);
-}
-
-// Build a compile-time constant for a nested array-of-vectors aggregate.
-static Constant *buildConstantVectorAggregate(GenIR *gen, InitValAST *init,
-                                              Type *type) {
-    if (auto *vectorType = dynamic_cast<VectorType *>(type)) {
-        Value *value = buildVectorInitializer(gen, init, vectorType);
-        auto *constant = dynamic_cast<Constant *>(value);
-        if (!constant) {
-            std::cerr << "global vector array initializer is not constant\n";
-            std::exit(1);
-        }
-        return constant;
-    }
-
-    if (auto *vectorType = dynamic_cast<ScalarizedVectorType *>(type)) {
-        auto *value = buildScalarizedVectorInitializer(gen, init, vectorType);
-        auto *constant = constantFromScalarizedVector(value);
-        if (!constant) {
-            std::cerr << "global vector array initializer is not constant\n";
-            std::exit(1);
-        }
-        return constant;
-    }
-
-    auto *arrayType = dynamic_cast<ArrayType *>(type);
-    if (!arrayType) {
-        std::cerr << "unexpected type while initializing a vector array\n";
-        std::exit(1);
-    }
-
-    unsigned length = arrayType->num_elements_;
-    Type *elementType = arrayType->contained_;
-    std::vector<Constant *> elements;
-    if (init && init->isExpression()) {
-        std::cerr << "a nested vector array initializer must use braces\n";
-        std::exit(1);
-    }
-    if (init && !init->elements().empty()) {
-        if (init->elements().size() > length) {
-            std::cerr << "too many vectors in array initializer\n";
-            std::exit(1);
-        }
-        for (auto &item : init->elements())
-            elements.push_back(
-                buildConstantVectorAggregate(gen, item.get(), elementType));
-    }
-    while (elements.size() < length)
-        elements.push_back(new ConstantZero(elementType));
-    return new ConstantArray(arrayType, elements);
-}
-
-// Store into a local nested array-of-vectors aggregate element by element.
-static void storeLocalVectorAggregate(GenIR *gen, Value *slot, InitValAST *init,
-                                      Type *type) {
-    if (auto *vectorType = dynamic_cast<VectorType *>(type)) {
-        Value *value = init ? buildVectorInitializer(gen, init, vectorType)
-                            : (Value *)new ConstantZero(vectorType);
-        gen->builder->create_store(value, slot);
-        return;
-    }
-
-
-    if (auto *vectorType = dynamic_cast<ScalarizedVectorType *>(type)) {
-        auto *value = buildScalarizedVectorInitializer(gen, init, vectorType);
-        storeScalarizedVector(gen, slot, value, vectorType);
-        return;
-    }
-
-    auto *arrayType = dynamic_cast<ArrayType *>(type);
-    if (!arrayType) {
-        std::cerr << "unexpected type while initializing a vector array\n";
-        std::exit(1);
-    }
-
-    unsigned length = arrayType->num_elements_;
-    Type *elementType = arrayType->contained_;
-    if (init && init->isExpression()) {
-        std::cerr << "a nested vector array initializer must use braces\n";
-        std::exit(1);
-    }
-    if (init && init->elements().size() > length) {
-        std::cerr << "too many vectors in array initializer\n";
-        std::exit(1);
-    }
-
-    for (unsigned i = 0; i < length; ++i) {
-        Value *element = gen->builder->create_gep(
-            slot, {new ConstantInt(gen->module->int32_ty_, 0),
-                   new ConstantInt(gen->module->int32_ty_, (int)i)});
-        InitValAST *child = nullptr;
-        if (init && !init->isExpression() && i < init->elements().size())
-            child = init->elements()[i].get();
-        storeLocalVectorAggregate(gen, element, child, elementType);
-    }
-}
-
-// splatScalar：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static Value *splatScalar(IRStmtBuilder *builder, Module *module, Value *value,
-                           VectorType *type) {
-    value = coerceScalar(builder, module, value, type->contained_);
-    if (auto *constant = dynamic_cast<Constant *>(value)) {
-        std::vector<Constant *> lanes(type->num_elements_, constant);
-        return new ConstantVector(type, lanes);
-    }
-    Value *result = new ConstantZero(type);
-    for (unsigned lane = 0; lane < type->num_elements_; ++lane)
-        result = new InsertElementInst(
-            result, value, new ConstantInt(module->int32_ty_, lane),
-            builder->BB_);
-    return result;
-}
-
-// scalarizeIntegerVectorBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static Value *scalarizeIntegerVectorBinary(IRStmtBuilder *builder, Module *module,
-                                           Value *lhs, Value *rhs,
-                                           Instruction::OpID op,
-                                           VectorType *type) {
-    Value *result = new ConstantZero(type);
-    for (unsigned lane = 0; lane < type->num_elements_; ++lane) {
-        auto *index = new ConstantInt(module->int32_ty_, lane);
-        Value *left = new ExtractElementInst(lhs, index, builder->BB_);
-        Value *right = new ExtractElementInst(rhs, index, builder->BB_);
-        Value *value = new BinaryInst(type->contained_, op, left, right,
-                                      builder->BB_);
-        result = new InsertElementInst(result, value, index, builder->BB_);
-    }
-    return result;
-}
-
-// foldConstantVector：按目标 IR 语义计算已知输入；除零、溢出或未知输入时拒绝折叠。
-static ConstantVector *foldConstantVector(Module *module,
-                                          Instruction::OpID op,
-                                          ConstantVector *lhs,
-                                          ConstantVector *rhs) {
-    auto *type = static_cast<VectorType *>(lhs->type_);
-    if (rhs->type_ != type || lhs->elements_.size() != rhs->elements_.size())
-        return nullptr;
-    std::vector<Constant *> result;
-    for (unsigned i = 0; i < lhs->elements_.size(); ++i) {
-        if (type->contained_ == module->int32_ty_) {
-            auto *a = dynamic_cast<ConstantInt *>(lhs->elements_[i]);
-            auto *b = dynamic_cast<ConstantInt *>(rhs->elements_[i]);
-            if (!a || !b)
-                return nullptr;
-            int value = 0;
-            switch (op) {
-            case Instruction::Add: value = a->value_ + b->value_; break;
-            case Instruction::Sub: value = a->value_ - b->value_; break;
-            case Instruction::Mul: value = a->value_ * b->value_; break;
-            case Instruction::SDiv:
-                if (b->value_ == 0) return nullptr;
-                value = a->value_ / b->value_;
-                break;
-            case Instruction::SRem:
-                if (b->value_ == 0) return nullptr;
-                value = a->value_ % b->value_;
-                break;
-            default: return nullptr;
-            }
-            result.push_back(new ConstantInt(type->contained_, value));
-        } else {
-            auto *a = dynamic_cast<ConstantFloat *>(lhs->elements_[i]);
-            auto *b = dynamic_cast<ConstantFloat *>(rhs->elements_[i]);
-            if (!a || !b)
-                return nullptr;
-            float value = 0.0f;
-            switch (op) {
-            case Instruction::FAdd: value = a->value_ + b->value_; break;
-            case Instruction::FSub: value = a->value_ - b->value_; break;
-            case Instruction::FMul: value = a->value_ * b->value_; break;
-            case Instruction::FDiv: value = a->value_ / b->value_; break;
-            default: return nullptr;
-            }
-            result.push_back(new ConstantFloat(type->contained_, value));
-        }
-    }
-    return new ConstantVector(type, result);
-}
-
-// scalarizedLaneBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static Value *scalarizedLaneBinary(GenIR *gen, Value *lhs, Value *rhs,
-                                   Instruction::OpID op, Type *elementType) {
-    lhs = coerceScalar(gen->builder, gen->module.get(), lhs, elementType);
-    rhs = coerceScalar(gen->builder, gen->module.get(), rhs, elementType);
-    if (elementType == gen->module->int32_ty_) {
-        auto *left = dynamic_cast<ConstantInt *>(lhs);
-        auto *right = dynamic_cast<ConstantInt *>(rhs);
-        if (left && right) {
-            std::int64_t result = 0;
-            switch (op) {
-            case Instruction::Add: result = left->value_ + right->value_; break;
-            case Instruction::Sub: result = left->value_ - right->value_; break;
-            case Instruction::Mul: result = left->value_ * right->value_; break;
-            case Instruction::SDiv:
-                if (right->value_ == 0) {
-                    std::cerr << "division by zero in constant vector expression\n";
-                    std::exit(1);
-                }
-                result = left->value_ / right->value_;
-                break;
-            case Instruction::SRem:
-                if (right->value_ == 0) {
-                    std::cerr << "remainder by zero in constant vector expression\n";
-                    std::exit(1);
-                }
-                result = left->value_ % right->value_;
-                break;
-            default:
-                std::cerr << "unsupported integer vector operator\n";
-                std::exit(1);
-            }
-            return new ConstantInt(elementType, result);
-        }
-    } else {
-        auto *left = dynamic_cast<ConstantFloat *>(lhs);
-        auto *right = dynamic_cast<ConstantFloat *>(rhs);
-        if (left && right) {
-            float result = 0.0f;
-            switch (op) {
-            case Instruction::FAdd: result = left->value_ + right->value_; break;
-            case Instruction::FSub: result = left->value_ - right->value_; break;
-            case Instruction::FMul: result = left->value_ * right->value_; break;
-            case Instruction::FDiv: result = left->value_ / right->value_; break;
-            default:
-                std::cerr << "unsupported floating vector operator\n";
-                std::exit(1);
-            }
-            return new ConstantFloat(elementType, result);
-        }
-    }
-    return new BinaryInst(elementType, op, lhs, rhs, gen->builder->BB_);
-}
-
-// scalarizedVectorBinary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *scalarizedVectorBinary(
-    GenIR *gen, Value *lhs, Value *rhs, Instruction::OpID integerOp,
-    Instruction::OpID floatingOp) {
-    auto *left = asScalarizedVector(lhs);
-    auto *right = asScalarizedVector(rhs);
-    ScalarizedVectorType *type = left
-        ? static_cast<ScalarizedVectorType *>(left->type_)
-        : right ? static_cast<ScalarizedVectorType *>(right->type_) : nullptr;
-    if (!type)
-        return nullptr;
-    if (!left)
-        left = splatScalarizedVector(gen, lhs, type);
-    if (!right)
-        right = splatScalarizedVector(gen, rhs, type);
-    if (left->type_ != type || right->type_ != type) {
-        std::cerr << "vector operands must have the same element type and width\n";
-        std::exit(1);
-    }
-    Instruction::OpID op = type->contained_ == gen->module->int32_ty_
-                                ? integerOp : floatingOp;
-    std::vector<Value *> lanes;
-    lanes.reserve(type->num_elements_);
-    for (unsigned lane = 0; lane < type->num_elements_; ++lane)
-        lanes.push_back(scalarizedLaneBinary(
-            gen, left->lanes_[lane], right->lanes_[lane], op,
-            type->contained_));
-    return new ScalarizedVectorValue(type, std::move(lanes));
-}
-
-// scalarizedVectorUnary：封装该局部计算，为上层分析或 IR 构造返回所需结果。
-static ScalarizedVectorValue *scalarizedVectorUnary(GenIR *gen,
-                                                     ScalarizedVectorValue *value,
-                                                     UnaryOp op) {
-    auto *type = static_cast<ScalarizedVectorType *>(value->type_);
-    if (op == UnaryOp::Plus)
-        return value;
-    std::vector<Value *> lanes;
-    lanes.reserve(type->num_elements_);
-    if (op == UnaryOp::Minus) {
-        Instruction::OpID binaryOp = type->contained_ == gen->module->int32_ty_
-                                          ? Instruction::Sub
-                                          : Instruction::FSub;
-        for (Value *lane : value->lanes_)
-            lanes.push_back(scalarizedLaneBinary(
-                gen, zeroScalar(gen->module.get(), type->contained_), lane,
-                binaryOp, type->contained_));
-        return new ScalarizedVectorValue(type, std::move(lanes));
-    }
-
-    auto *resultType = gen->module->get_scalarized_vector_type(
-        gen->module->int32_ty_, type->num_elements_);
-    for (Value *lane : value->lanes_) {
-        if (auto *integer = dynamic_cast<ConstantInt *>(lane)) {
-            lanes.push_back(new ConstantInt(gen->module->int32_ty_,
-                                            integer->value_ == 0));
-        } else if (auto *floating = dynamic_cast<ConstantFloat *>(lane)) {
-            lanes.push_back(new ConstantInt(gen->module->int32_ty_,
-                                            floating->value_ == 0.0f));
-        } else if (type->contained_ == gen->module->int32_ty_) {
-            lanes.push_back(gen->builder->create_zext(
-                gen->builder->create_icmp_eq(
-                    lane, new ConstantInt(gen->module->int32_ty_, 0)),
-                gen->module->int32_ty_));
-        } else {
-            lanes.push_back(gen->builder->create_zext(
-                gen->builder->create_fcmp_eq(
-                    lane, new ConstantFloat(gen->module->float32_ty_, 0.0f)),
-                gen->module->int32_ty_));
-        }
-    }
-    return new ScalarizedVectorValue(resultType, std::move(lanes));
 }
 
 // 在函数内创建带语义名的基本块；同名冲突时加数字后缀（if.then → if.then1）。
@@ -1239,127 +644,25 @@ void GenIR::checkInitType() const {
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(CompUnitAST &ast) {
     for (auto &item : ast.items)
         std::visit([this](auto &node) { node->accept(*this); }, item);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(DeclAST &ast) {
     isConst = ast.isConst;
-    curSourceType = ast.type;
-    curType = ast.type.isDynamicVector()
-                  ? scalarType(module.get(), ast.type.element)
-                  : lowerFixedType(this, ast.type);
+    curSourceTensor = ast.tensor;
+    curType = scalarType(module.get(), ast.type);
     for (auto &object : ast.objects) {
-        if (curSourceType.isDynamicVector() &&
-            object->dimensions.empty()) {
-            std::cerr << "a dynamic vector object requires an explicit storage length, "
-                         "for example vector<int> a[n]\n";
-            std::exit(1);
-        }
         object->accept(*this);
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ObjectDefAST &ast) {
     string varName = ast.name;
-    if ((dynamic_cast<VectorType *>(curType) ||
-         dynamic_cast<ScalarizedVectorType *>(curType)) &&
-        !ast.dimensions.empty()) {
-        bool wasUseConst = useConst;
-        useConst = true;
-        std::vector<unsigned> dimensions;
-        dimensions.reserve(ast.dimensions.size());
-        for (auto &exp : ast.dimensions) {
-            exp->accept(*this);
-            auto *lengthValue = dynamic_cast<ConstantInt *>(recentVal);
-            if (!lengthValue || lengthValue->value_ <= 0) {
-                std::cerr << "fixed vector array length must be a positive constant\n";
-                std::exit(1);
-            }
-            dimensions.push_back((unsigned)lengthValue->value_);
-        }
-        useConst = wasUseConst;
-
-        // Innermost element remains the fixed vector; outer dims nest ArrayType.
-        Type *aggregateType = curType;
-        for (int i = (int)dimensions.size() - 1; i >= 0; --i)
-            aggregateType =
-                module->get_array_type(aggregateType, dimensions[i]);
-
-        if (scope.in_global()) {
-            Constant *initializer = nullptr;
-            if (!ast.initializer ||
-                (!ast.initializer->isExpression() &&
-                 ast.initializer->elements().empty())) {
-                initializer = new ConstantZero(aggregateType);
-            } else {
-                bool oldConst = useConst;
-                useConst = true;
-                initializer = buildConstantVectorAggregate(
-                    this, ast.initializer.get(), aggregateType);
-                useConst = oldConst;
-            }
-            auto *global = new GlobalVariable(varName, module.get(), aggregateType,
-                                              isConst, initializer);
-            if (isConst)
-                global->setSemFlag(SemFlag::ImmutableObject);
-            scope.push(varName, global);
-            return;
-        }
-
-        auto *slot = builder->create_alloca(aggregateType);
-        slot->name_ = varName;
-        if (isConst)
-            slot->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
-        scope.push(varName, slot);
-        storeLocalVectorAggregate(this, slot, ast.initializer.get(),
-                                  aggregateType);
-        return;
-    }
     //全局变量或常量
     if (scope.in_global()) {
         if (ast.dimensions.empty()) {   //不是数组，即全局量
-            if (auto *vectorType = dynamic_cast<VectorType *>(curType)) {
-                bool oldConst = useConst;
-                useConst = true;
-                Value *initializer = buildVectorInitializer(
-                    this, ast.initializer.get(), vectorType);
-                useConst = oldConst;
-                auto *constant = dynamic_cast<Constant *>(initializer);
-                if (!constant) {
-                    std::cerr << "global vector initializer is not constant\n";
-                    std::exit(1);
-                }
-                if (isConst)
-                    scope.push(varName, constant);
-                else
-                    scope.push(varName, new GlobalVariable(varName, module.get(),
-                                                           curType, false, constant));
-                return;
-            }
-            if (auto *vectorType =
-                    dynamic_cast<ScalarizedVectorType *>(curType)) {
-                bool oldConst = useConst;
-                useConst = true;
-                auto *initializer = buildScalarizedVectorInitializer(
-                    this, ast.initializer.get(), vectorType);
-                useConst = oldConst;
-                auto *constant = constantFromScalarizedVector(initializer);
-                if (!constant) {
-                    std::cerr << "global vector initializer is not constant\n";
-                    std::exit(1);
-                }
-                if (isConst)
-                    scope.push(varName, constant);
-                else
-                    scope.push(varName, new GlobalVariable(
-                        varName, module.get(), curType, false, constant));
-                return;
-            }
             if (ast.initializer == nullptr) { //无初始化
                 if (isConst) cout << "no initVal when define const!" << endl; //无初始化全局常量报错
                 //无初始化全局量一定是变量
@@ -1405,7 +708,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
                 // tensor 与普通数组共享 IR 类型，用语义位保留源级身份供表达式 lowering 识别。
-                if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
+                if (curSourceTensor) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             } else {
                 useConst = true; //全局数组量的初始值必为常量
@@ -1415,7 +718,7 @@ void GenIR::visit(ObjectDefAST &ast) {
                 auto var = new GlobalVariable(varName, module.get(), arrayTys[0], isConst, init);
                 if (isConst) var->setSemFlag(SemFlag::ImmutableObject);
                 // 带初始化的全局 tensor 同样沿用嵌套 ArrayType 表示。
-                if (curSourceType.isTensor()) var -> setSemFlag(SemFlag::SrcTensor);
+                if (curSourceTensor) var -> setSemFlag(SemFlag::SrcTensor);
                 scope.push(varName, var);
             }
         }
@@ -1425,32 +728,6 @@ void GenIR::visit(ObjectDefAST &ast) {
 
     //局部变量或常量
     if (ast.dimensions.empty()) {   //不是数组，即普通局部量
-        if (auto *vectorType = dynamic_cast<VectorType *>(curType)) {
-            Value *initializer = buildVectorInitializer(
-                this, ast.initializer.get(), vectorType);
-            if (isConst) {
-                scope.push(varName, initializer);
-            } else {
-                auto *slot = builder->create_alloca(curType);
-                slot->name_ = varName;
-                scope.push(varName, slot);
-                builder->create_store(initializer, slot);
-            }
-            return;
-        }
-        if (auto *vectorType = dynamic_cast<ScalarizedVectorType *>(curType)) {
-            auto *initializer = buildScalarizedVectorInitializer(
-                this, ast.initializer.get(), vectorType);
-            if (isConst) {
-                scope.push(varName, initializer);
-            } else {
-                auto *slot = builder->create_alloca(curType);
-                slot->name_ = varName;
-                scope.push(varName, slot);
-                storeScalarizedVector(this, slot, initializer, vectorType);
-            }
-            return;
-        }
         if (ast.initializer == nullptr) {   //无初始化
             if (isConst) cout << "no initVal when define const!" << endl;   //无初始化局部常量报错
             else { //无初始化变量
@@ -1497,10 +774,10 @@ void GenIR::visit(ObjectDefAST &ast) {
         if (isConst)
             arrayAlloc->setSemFlag(SemFlag::SrcConstArray | SemFlag::ImmutableObject);
         // 标记局部存储，使后续赋值、下标和调用走 tensor 专用路径。
-        if (curSourceType.isTensor()) arrayAlloc->setSemFlag(SemFlag::SrcTensor);
+        if (curSourceTensor) arrayAlloc->setSemFlag(SemFlag::SrcTensor);
         scope.push(varName, arrayAlloc);
         // tensor 表达式初始化优先直接写入声明的数组；未直写时再复制并回收临时量。
-        if (curSourceType.isTensor() && ast.initializer != nullptr && ast.initializer->isExpression()){
+        if (curSourceTensor && ast.initializer != nullptr && ast.initializer->isExpression()){
             ArrayType* savedExpected = expectedTensorType;
             Value *savedTarget = expectedTensorTarget;
             expectedTensorType = arrayTy;
@@ -1682,51 +959,31 @@ void GenIR::localInit(Value* ptr, vector<unique_ptr<InitValAST>> &list, vector<i
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(InitValAST &ast) {
     //不是数组则求exp的值，若是数组不会进入此函数
     if (ast.isExpression())
         ast.expression()->accept(*this);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(FuncDefAST &ast) {
     isNewFunc = true;
     params.clear();
     paramNames.clear();
-    pendingScalarizedParameters.clear();
     pendingTensorParameters.clear();
     // 功能：记录当前函数的 tensor ABI 状态，函数结束时统一清空，避免污染下一函数。
-    currentTensorReturn = ast.returnType.isTensor();
+    currentTensorReturn = ast.tensorReturn;
     tensorReturnPointer = nullptr;
-    currentScalarizedReturnType = nullptr;
-    scalarizedReturnPointer = nullptr;
     Type *retType;
-    if (ast.returnType.isDynamicVector()) {
-        std::cerr << "dynamic vectors are non-owning views and cannot be returned by value\n";
-        std::exit(1);
-    }else if(currentTensorReturn){
+    if(currentTensorReturn){
         // tensor 按值返回降低为 void，并把调用者提供的元素缓冲区放在第一个隐藏形参。
         retType = VOID_T;
-        params.push_back(module->get_pointer_type(scalarType(module.get(), ast.returnType.element)));
+        params.push_back(module->get_pointer_type(scalarType(module.get(), ast.returnType)));
         paramNames.push_back("$tensor.return");
-        pendingScalarizedParameters.push_back(nullptr);
     } else if (ast.returnType == TYPE_VOID) {
         retType = VOID_T;
     } else {
-        Type *lowered = lowerFixedType(this, ast.returnType);
-        if (auto *scalarized =
-                dynamic_cast<ScalarizedVectorType *>(lowered)) {
-            currentScalarizedReturnType = scalarized;
-            retType = VOID_T;
-            params.push_back(module->get_pointer_type(scalarized));
-            paramNames.push_back("$vector.return");
-            pendingScalarizedParameters.push_back(nullptr);
-        } else {
-            retType = lowered;
-        }
+        retType = scalarType(module.get(), ast.returnType);
     }
-
     for (auto &parameter : ast.parameters)
         parameter->accept(*this);
 
@@ -1735,14 +992,9 @@ void GenIR::visit(FuncDefAST &ast) {
     currentFunction = func;
     // 保存源级签名中 IR FunctionType 无法表达的 tensor 返回值和 tensor 形参信息。
     FunctionLoweringInfo info;
-    info.returnType = currentScalarizedReturnType;
     info.tensorReturn = currentTensorReturn;
     for(auto &p: ast.parameters)
-        info.tensorParameters.push_back(p->type.isTensor());
-    unsigned hiddenParameters = currentScalarizedReturnType || currentTensorReturn ? 1U : 0U;
-    // info.valueParameters.assign(
-    //     pendingScalarizedParameters.begin() + hiddenParameters,
-    //     pendingScalarizedParameters.end());
+        info.tensorParameters.push_back(p->tensor);
     functionLoweringInfo[func] = std::move(info);
     scope.push(ast.name, func);
     scope.enter();
@@ -1754,34 +1006,11 @@ void GenIR::visit(FuncDefAST &ast) {
     auto *entry = createNamedBB(module.get(), func, "entry");
     builder->BB_ = entry;
 
-    // 标量和原生向量形参保存在局部槽中；展开向量先复制各 lane，保持按值语义。
+    // 普通形参保存在局部槽中；tensor 形参保留其地址和动态维度信息。
     for (int i = 0; i < (int)paramNames.size(); i++) {
         if(currentTensorReturn && i == 0){
             // 隐藏返回指针由 return lowering 直接使用，不为它创建普通局部槽。
             tensorReturnPointer = args[i];
-            continue;
-        }
-        if (currentScalarizedReturnType && i == 0) {
-            scalarizedReturnPointer = args[i];
-            Value *zero = zeroScalar(module.get(),
-                                     currentScalarizedReturnType->contained_);
-            storeScalarizedVector(
-                this, scalarizedReturnPointer,
-                new ScalarizedVectorValue(
-                    currentScalarizedReturnType,
-                    std::vector<Value *>(
-                        currentScalarizedReturnType->num_elements_, zero)),
-                currentScalarizedReturnType);
-            continue;
-        }
-        if (pendingScalarizedParameters[i]) {
-            auto *type = pendingScalarizedParameters[i];
-            auto *alloc = builder->create_alloca(type);
-            alloc->name_ = paramNames[i];
-            scope.push(paramNames[i], alloc);
-            storeScalarizedVector(this, alloc,
-                                  loadScalarizedVector(this, args[i], type),
-                                  type);
             continue;
         }
         auto *alloc = builder->create_alloca(params[i]);
@@ -1805,11 +1034,8 @@ void GenIR::visit(FuncDefAST &ast) {
         retAlloca = builder->create_alloca(retType);
         retAlloca->name_ = "retval";
         Value *zero;
-        if (retType->tid_ == Type::VectorTyID)
-            zero = new ConstantZero(retType);
-        else
-            zero = (retType == FLOAT_T) ? (Value *)CONST_FLOAT(0.0f)
-                                        : (Value *)CONST_INT(0);
+        zero = (retType == FLOAT_T) ? (Value *)CONST_FLOAT(0.0f)
+                                    : (Value *)CONST_INT(0);
         builder->create_store(zero, retAlloca);
         builder->BB_ = retBB;
         builder->create_ret(builder->create_load(retAlloca));
@@ -1825,31 +1051,14 @@ void GenIR::visit(FuncDefAST &ast) {
     tryMergeTrivialRetBlock(func, retBB, retAlloca);
     retBB = nullptr;
     retAlloca = nullptr;
-    currentScalarizedReturnType = nullptr;
-    scalarizedReturnPointer = nullptr;
     currentTensorReturn = false;
     tensorReturnPointer = nullptr;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(FuncParamAST &ast) {
     //获取参数类型
     Type *paramType;
-    if (ast.type.isDynamicVector()) {
-        if (!ast.isArray) {
-            std::cerr << "a dynamic vector parameter must use view syntax name[]\n";
-            std::exit(1);
-        }
-        paramType = scalarType(module.get(), ast.type.element);
-    } else {
-        paramType = lowerFixedType(this, ast.type);
-    }
-    ScalarizedVectorType *scalarizedValueParameter = nullptr;
-    if (auto *scalarized = dynamic_cast<ScalarizedVectorType *>(paramType);
-        scalarized && !ast.isArray) {
-        scalarizedValueParameter = scalarized;
-        paramType = module->get_pointer_type(scalarized);
-    }
+    paramType = scalarType(module.get(), ast.type);
     //是否为数组
     if (ast.isArray) {
         useConst = true; //数组维度是整型常量
@@ -1863,17 +1072,14 @@ void GenIR::visit(FuncParamAST &ast) {
     }
     params.push_back(paramType);
     paramNames.push_back(ast.name);
-    pendingScalarizedParameters.push_back(scalarizedValueParameter);
-    if(ast.type.isTensor()){
+    if(ast.tensor){
         // 每个 tensor 形参后紧跟一个 i32 隐藏形参，传递其运行时第一维长度。
         pendingTensorParameters.insert(ast.name);
         params.push_back(INT32_T);
         paramNames.push_back("$" + ast.name + ".dim0");
-        pendingScalarizedParameters.push_back(nullptr);
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BlockAST &ast) {
     //如果是一个新的函数，则不用再进入一个新的作用域
     if (isNewFunc)
@@ -1891,14 +1097,9 @@ void GenIR::visit(BlockAST &ast) {
     scope.exit();
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(EmptyStmtAST &) {}
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(AssignStmtAST &ast) {
-    is_single_exp = true;
-    vectorLaneBase = nullptr;
-    vectorLaneIndex = nullptr;
     requireLVal = true;  
     ast.target->accept(*this);
     auto var = recentVal;
@@ -1923,43 +1124,9 @@ void GenIR::visit(AssignStmtAST &ast) {
         }
         return;
     }
-    ScalarizedVectorType *scalarizedType = nullptr;
-    if (var && var->type_->tid_ == Type::PointerTyID)
-        scalarizedType = dynamic_cast<ScalarizedVectorType *>(
-            static_cast<PointerType *>(var->type_)->contained_);
-    if (scalarizedType) {
-        ScalarizedVectorValue *initializer = nullptr;
-        ScalarizedVectorType *saved = expectedScalarizedVectorType;
-        expectedScalarizedVectorType = scalarizedType;
-        ast.value->accept(*this);
-        expectedScalarizedVectorType = saved;
-        initializer = asScalarizedVector(recentVal);
-        storeScalarizedVector(this, var, initializer, scalarizedType);
-        return;
-    }
-    {
-        VectorType *savedExpected = expectedVectorType;
-        if (var && var->type_->tid_ == Type::PointerTyID)
-            expectedVectorType = dynamic_cast<VectorType *>(
-                static_cast<PointerType *>(var->type_)->contained_);
-        ast.value->accept(*this);
-        expectedVectorType = savedExpected;
-    }
+
+    ast.value->accept(*this);
     auto expval = recentVal;
-    if (vectorLaneBase) {
-        auto *vectorType = static_cast<VectorType *>(
-            static_cast<PointerType *>(vectorLaneBase->type_)->contained_);
-        expval = coerceScalar(builder, module.get(), expval,
-                                vectorType->contained_);
-        auto *oldVector = builder->create_load(vectorLaneBase);
-        auto *newVector = new InsertElementInst(oldVector, expval,
-                                                vectorLaneIndex,
-                                                builder->BB_);
-        builder->create_store(newVector, vectorLaneBase);
-        vectorLaneBase = nullptr;
-        vectorLaneIndex = nullptr;
-        return;
-    }
     Type* varElemType = static_cast<PointerType*>(var->type_)->contained_;
     if (varElemType == FLOAT_T && expval->type_ == INT32_T) {
         expval = builder->create_sitofp(expval, FLOAT_T);
@@ -1969,31 +1136,24 @@ void GenIR::visit(AssignStmtAST &ast) {
     builder->create_store(expval, var);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ExprStmtAST &ast) {
-    is_single_exp = true;
     ast.expression->accept(*this);
     // 独立表达式无人接收其结果，及时释放动态 tensor 临时量。
     releaseTensor(this, recentVal);
-    is_single_exp = false;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ContinueStmtAST &) {
     builder->create_br(whileCondBB);
     has_br = true;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BreakStmtAST &) {
     builder->create_br(whileFalseBB);
     has_br = true;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BlockStmtAST &ast) { ast.block->accept(*this); }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(ReturnStmtAST &ast) {
     if(currentTensorReturn){
         // tensor 返回值写入调用者的隐藏缓冲区；顶层调用可直接复用该缓冲区。
@@ -2029,26 +1189,8 @@ void GenIR::visit(ReturnStmtAST &ast) {
         has_br = true;
         return;
     }
-    if (currentScalarizedReturnType) {
-        if (ast.value) {
-            ScalarizedVectorType *saved = expectedScalarizedVectorType;
-            expectedScalarizedVectorType = currentScalarizedReturnType;
-            ast.value->accept(*this);
-            expectedScalarizedVectorType = saved;
-            storeScalarizedVector(this, scalarizedReturnPointer,
-                                  asScalarizedVector(recentVal),
-                                  currentScalarizedReturnType);
-        }
-        recentVal = builder->create_br(retBB);
-        has_br = true;
-        return;
-    }
     if (ast.value != nullptr) {
-        VectorType *savedExpected = expectedVectorType;
-        expectedVectorType =
-            dynamic_cast<VectorType *>(currentFunction->get_return_type());
         ast.value->accept(*this);
-        expectedVectorType = savedExpected;
         Value *retVal = coerceToReturnType(builder, recentVal,
                                            currentFunction->get_return_type(),
                                            INT32_T, FLOAT_T);
@@ -2058,7 +1200,6 @@ void GenIR::visit(ReturnStmtAST &ast) {
     has_br = true;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(IfStmtAST &ast) {
     //先保存trueBB和falseBB，防止嵌套导致返回上一层后丢失块的地址
     auto tempTrue = trueBB;
@@ -2125,7 +1266,6 @@ void GenIR::visit(IfStmtAST &ast) {
     falseBB = tempFalse;
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(WhileStmtAST &ast) {
     //先保存trueBB和falseBB，防止嵌套导致返回上一层后丢失块的地址
     auto tempTrue = trueBB;
@@ -2197,22 +1337,8 @@ void GenIR::checkCalType(Value* val[]) {
     if (val[1]->type_ == INT32_T && val[0]->type_ == FLOAT_T) {
         val[1] = builder->create_sitofp(val[1], FLOAT_T);
     }
-    auto *leftVector = dynamic_cast<VectorType *>(val[0]->type_);
-    auto *rightVector = dynamic_cast<VectorType *>(val[1]->type_);
-    if (leftVector && !rightVector) {
-        val[1] = splatScalar(builder, module.get(), val[1], leftVector);
-        rightVector = leftVector;
-    } else if (!leftVector && rightVector) {
-        val[0] = splatScalar(builder, module.get(), val[0], rightVector);
-        leftVector = rightVector;
-    }
-    if (leftVector && rightVector && leftVector != rightVector) {
-        std::cerr << "vector operands must have the same element type and width\n";
-        std::exit(1);
-    }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(BinaryExprAST &ast) {
     // 无调用的逐元素 tensor 表达式整体融合，避免每个二元节点各生成一次遍历和临时量。
     if(isTensorElementwise(ast.op) && containsTensorValue(this, &ast) && !containsCall(&ast)){
@@ -2258,17 +1384,7 @@ void GenIR::visit(BinaryExprAST &ast) {
     Value* val[2]; //lVal, rVal
     ast.left->accept(*this);
     val[0] = recentVal;
-    VectorType *savedExpected = expectedVectorType;
-    ScalarizedVectorType *savedScalarizedExpected =
-        expectedScalarizedVectorType;
-    if (auto *lhsVector = dynamic_cast<VectorType *>(val[0]->type_))
-        expectedVectorType = lhsVector;
-    if (auto *lhsVector = asScalarizedVector(val[0]))
-        expectedScalarizedVectorType =
-            static_cast<ScalarizedVectorType *>(lhsVector->type_);
     ast.right->accept(*this);
-    expectedVectorType = savedExpected;
-    expectedScalarizedVectorType = savedScalarizedExpected;
     val[1] = recentVal;
 
     if (ast.op == BinaryOp::Less || ast.op == BinaryOp::LessEqual ||
@@ -2312,17 +1428,8 @@ void GenIR::visit(BinaryExprAST &ast) {
         return;
     }
 
-    if (asScalarizedVector(val[0]) || asScalarizedVector(val[1])) {
-        recentVal = scalarizedVectorBinary(
-            this, val[0], val[1],
-            ast.op == BinaryOp::Add ? Instruction::Add : Instruction::Sub,
-            ast.op == BinaryOp::Add ? Instruction::FAdd : Instruction::FSub);
-        return;
-    }
-
     //若都是常量
-    if (useConst && val[0]->type_->tid_ != Type::VectorTyID &&
-        val[1]->type_->tid_ != Type::VectorTyID) {
+    if (useConst) {
         int intVal[3]; //lInt, rInt, relInt;
         float floatVal[3]; // lFloat, rFloat, relFloat;
         bool resultIsInt = checkCalType(val, intVal, floatVal);
@@ -2343,22 +1450,7 @@ void GenIR::visit(BinaryExprAST &ast) {
 
     //若不是常量，进行计算，输出指令
     checkCalType(val);
-    if (useConst) {
-        auto *lhs = dynamic_cast<ConstantVector *>(val[0]);
-        auto *rhs = dynamic_cast<ConstantVector *>(val[1]);
-        Instruction::OpID op = ast.op == BinaryOp::Add ? Instruction::Add
-                                                        : Instruction::Sub;
-        if (lhs && (lhs->type_->tid_ == Type::VectorTyID) &&
-            static_cast<VectorType *>(lhs->type_)->contained_ == FLOAT_T)
-            op = ast.op == BinaryOp::Add ? Instruction::FAdd
-                                          : Instruction::FSub;
-        if (lhs && rhs) {
-            recentVal = foldConstantVector(module.get(), op, lhs, rhs);
-            if (recentVal)
-                return;
-        }
-    }
-    if (isIntegerValueType(val[0]->type_)) {
+    if (val[0]->type_->tid_ == Type::IntegerTyID) {
         switch (ast.op) {
             case BinaryOp::Add:
                 recentVal = builder->create_iadd(val[0], val[1]);
@@ -2379,7 +1471,6 @@ void GenIR::visit(BinaryExprAST &ast) {
     }
 }
 
-// lowerMultiplicative：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     Value* val[2]; //lVal, rVal
     ArrayType* savedTensorExpected = expectedTensorType;
@@ -2391,17 +1482,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     }
     ast.left->accept(*this);
     val[0] = recentVal;
-    VectorType *savedExpected = expectedVectorType;
-    ScalarizedVectorType *savedScalarizedExpected =
-        expectedScalarizedVectorType;
-    if (auto *lhsVector = dynamic_cast<VectorType *>(val[0]->type_))
-        expectedVectorType = lhsVector;
-    if (auto *lhsVector = asScalarizedVector(val[0]))
-        expectedScalarizedVectorType =
-            static_cast<ScalarizedVectorType *>(lhsVector->type_);
     ast.right->accept(*this);
-    expectedVectorType = savedExpected;
-    expectedScalarizedVectorType = savedScalarizedExpected;
     if(ast.op == BinaryOp::Matmul){
         expectedTensorType = savedTensorExpected;
         expectedTensorTarget = savedTensorTarget;
@@ -2416,32 +1497,9 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
         recentVal = lowerTensorBinary(this,val[0],val[1],ast.op);
         return;
     }
-    if (asScalarizedVector(val[0]) || asScalarizedVector(val[1])) {
-        Instruction::OpID integerOp = Instruction::Mul;
-        Instruction::OpID floatingOp = Instruction::FMul;
-        if (ast.op == BinaryOp::Divide) {
-            integerOp = Instruction::SDiv;
-            floatingOp = Instruction::FDiv;
-        } else if (ast.op == BinaryOp::Remainder) {
-            integerOp = Instruction::SRem;
-            if (auto *vector = asScalarizedVector(val[0]);
-                (vector && static_cast<ScalarizedVectorType *>(vector->type_)
-                               ->contained_ != INT32_T) ||
-                (!vector && static_cast<ScalarizedVectorType *>(
-                                asScalarizedVector(val[1])->type_)
-                                ->contained_ != INT32_T)) {
-                std::cerr << "remainder is only valid for integer vectors\n";
-                std::exit(1);
-            }
-        }
-        recentVal = scalarizedVectorBinary(this, val[0], val[1], integerOp,
-                                           floatingOp);
-        return;
-    }
 
     //若都是常量
-    if (useConst && val[0]->type_->tid_ != Type::VectorTyID &&
-        val[1]->type_->tid_ != Type::VectorTyID) {
+    if (useConst) {
         int intVal[3]; //lInt, rInt, relInt;
         float floatVal[3]; // lFloat, rFloat, relFloat;
         bool resultIsInt = checkCalType(val, intVal, floatVal);
@@ -2465,35 +1523,7 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
 
     //若不是常量，进行计算，输出指令
     checkCalType(val);
-    if (useConst) {
-        auto *lhs = dynamic_cast<ConstantVector *>(val[0]);
-        auto *rhs = dynamic_cast<ConstantVector *>(val[1]);
-        Instruction::OpID op = Instruction::Mul;
-        if (lhs && static_cast<VectorType *>(lhs->type_)->contained_ == FLOAT_T) {
-            op = ast.op == BinaryOp::Multiply ? Instruction::FMul
-                                               : Instruction::FDiv;
-        } else if (ast.op == BinaryOp::Divide) {
-            op = Instruction::SDiv;
-        } else if (ast.op == BinaryOp::Remainder) {
-            op = Instruction::SRem;
-        }
-        if (lhs && rhs) {
-            recentVal = foldConstantVector(module.get(), op, lhs, rhs);
-            if (recentVal)
-                return;
-        }
-    }
-    if (isIntegerValueType(val[0]->type_)) {
-        auto *vectorType = dynamic_cast<VectorType *>(val[0]->type_);
-        if (vectorType && (ast.op == BinaryOp::Divide ||
-                           ast.op == BinaryOp::Remainder)) {
-            recentVal = scalarizeIntegerVectorBinary(
-                builder, module.get(), val[0], val[1],
-                ast.op == BinaryOp::Divide ? Instruction::SDiv
-                                            : Instruction::SRem,
-                vectorType);
-            return;
-        }
+    if (val[0]->type_->tid_ == Type::IntegerTyID) {
         switch (ast.op) {
             case BinaryOp::Multiply:
                 recentVal = builder->create_imul(val[0], val[1]);
@@ -2520,7 +1550,6 @@ void GenIR::lowerMultiplicative(BinaryExprAST &ast) {
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(UnaryExprAST &ast) {
     // tensor 正负号可并入逐元素融合循环；含调用时退回顺序求值以保留副作用次序。
     if((ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus) && !containsCall(&ast) && containsTensorValue(this, &ast)){
@@ -2531,32 +1560,15 @@ void GenIR::visit(UnaryExprAST &ast) {
     if(recentVal->hasSemFlag(SemFlag::SrcTensor)&&(ast.op == UnaryOp::Plus || ast.op == UnaryOp::Minus)){
         // 非融合路径把 -tensor 视为 0 - tensor；一元加直接保留原值。
         if(ast.op == UnaryOp::Minus){
-            ArrayType* type =expectedVectorType ? expectedTensorType : tensorType(recentVal);
+            ArrayType* type = tensorType(recentVal);
             Value* zero = zeroScalar(module.get(),tensorElementType(type));
             recentVal = lowerTensorBinary(this, zero, recentVal, BinaryOp::Subtract);
         }
         return;
     }
-    if (auto *vector = asScalarizedVector(recentVal)) {
-        recentVal = scalarizedVectorUnary(this, vector, ast.op);
-        return;
-    }
     if (useConst) {
         if (ast.op == UnaryOp::Minus) {
-            if (auto *vector = dynamic_cast<ConstantVector *>(recentVal)) {
-                auto *type = static_cast<VectorType *>(vector->type_);
-                std::vector<Constant *> lanes;
-                for (auto *lane : vector->elements_) {
-                    if (auto *integer = dynamic_cast<ConstantInt *>(lane))
-                        lanes.push_back(new ConstantInt(type->contained_,
-                                                        -integer->value_));
-                    else
-                        lanes.push_back(new ConstantFloat(
-                            type->contained_,
-                            -static_cast<ConstantFloat *>(lane)->value_));
-                }
-                recentVal = new ConstantVector(type, lanes);
-            } else if (auto *integer = dynamic_cast<ConstantInt *>(recentVal)) {
+            if (auto *integer = dynamic_cast<ConstantInt *>(recentVal)) {
                 integer->value_ = -integer->value_;
             } else {
                 auto *floating = static_cast<ConstantFloat *>(recentVal);
@@ -2574,12 +1586,10 @@ void GenIR::visit(UnaryExprAST &ast) {
     if (recentVal->type_ == VOID_T) return;
     if (recentVal->type_ == INT1_T)
         recentVal = builder->create_zext(recentVal, INT32_T);
-    if (isIntegerValueType(recentVal->type_)) {
+    if (recentVal->type_->tid_ == Type::IntegerTyID) {
         if (ast.op == UnaryOp::Minus)
             recentVal = builder->create_isub(
-                recentVal->type_->tid_ == Type::VectorTyID
-                    ? (Value *)new ConstantZero(recentVal->type_)
-                    : (Value *)CONST_INT(0),
+                CONST_INT(0),
                 recentVal);
         else if (ast.op == UnaryOp::LogicalNot)
             recentVal = builder->create_zext(
@@ -2587,9 +1597,7 @@ void GenIR::visit(UnaryExprAST &ast) {
     } else {
         if (ast.op == UnaryOp::Minus)
             recentVal = builder->create_fsub(
-                recentVal->type_->tid_ == Type::VectorTyID
-                    ? (Value *)new ConstantZero(recentVal->type_)
-                    : (Value *)CONST_FLOAT(0),
+                CONST_FLOAT(0),
                 recentVal);
         else if (ast.op == UnaryOp::LogicalNot)
             recentVal = builder->create_zext(
@@ -2597,7 +1605,6 @@ void GenIR::visit(UnaryExprAST &ast) {
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(SubscriptExprAST &ast) {
     ast.base->accept(*this);
     Value *base = recentVal;
@@ -2635,153 +1642,27 @@ void GenIR::visit(SubscriptExprAST &ast) {
         }
         return;
     }
-    if (auto *vector = asScalarizedVector(base)) {
-        auto *type = static_cast<ScalarizedVectorType *>(vector->type_);
-        ast.index->accept(*this);
-        Value *index = recentVal;
-        if (auto *constant = dynamic_cast<ConstantInt *>(index)) {
-            if (constant->value_ < 0 ||
-                static_cast<unsigned>(constant->value_) >=
-                    type->num_elements_) {
-                std::cerr << "constant vector lane index is out of range\n";
-                std::exit(1);
-            }
-            recentVal = vector->lanes_[constant->value_];
-            return;
-        }
-        auto *slot = builder->create_alloca(type);
-        storeScalarizedVector(this, slot, vector, type);
-        recentVal = builder->create_load(
-            builder->create_gep(slot, {CONST_INT(0), index}));
-        return;
-    }
-    if (auto *pointer = dynamic_cast<PointerType *>(base->type_))
-        if (pointer->contained_->tid_ == Type::VectorTyID)
-            base = builder->create_load(base);
-    auto *type = dynamic_cast<VectorType *>(base->type_);
-    if (!type) {
-        std::cerr << "lane extract requires a fixed vector value\n";
-        std::exit(1);
-    }
     ast.index->accept(*this);
-    Value *index = recentVal;
-    if (auto *constant = dynamic_cast<ConstantInt *>(index)) {
-        if (constant->value_ < 0 ||
-            static_cast<unsigned>(constant->value_) >= type->num_elements_) {
-            std::cerr << "constant vector lane index is out of range\n";
-            std::exit(1);
-        }
-        if (auto *constantVector = dynamic_cast<ConstantVector *>(base)) {
-            recentVal = constantVector->elements_[constant->value_];
-            return;
-        }
-    }
-    recentVal = new ExtractElementInst(base, index, builder->BB_);
+    recentVal = builder->create_gep(base, {CONST_INT(0), recentVal});
+    if (!requireLVal)
+        recentVal = builder->create_load(recentVal);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(AggregateExprAST &ast) {
-    if (expectedScalarizedVectorType) {
-        recentVal = buildScalarizedVectorInitializer(
-            this, ast.initializer.get(), expectedScalarizedVectorType);
-        return;
-    }
-    VectorType *type =
-        inferVectorLiteralType(module.get(), ast.initializer.get());
-    recentVal = buildVectorInitializer(this, ast.initializer.get(), type);
+    ast.initializer->accept(*this);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(LValueAST &ast) {
     bool isTrueLVal = requireLVal; //是否真是作为左值
     requireLVal = false;
     auto var = scope.find(ast.name);
-    if (auto *vector = asScalarizedVector(var)) {
-        if (ast.indices.empty()) {
-            recentVal = vector;
-            return;
-        }
-        if (ast.indices.size() != 1) {
-            std::cerr << "a fixed vector requires exactly one lane index\n";
-            std::exit(1);
-        }
-        ast.indices[0]->accept(*this);
-        auto *index = dynamic_cast<ConstantInt *>(recentVal);
-        if (index && (index->value_ < 0 ||
-            static_cast<unsigned>(index->value_) >= vector->lanes_.size())) {
-            std::cerr << "constant vector lane index is out of range\n";
-            std::exit(1);
-        }
-        if (index) {
-            recentVal = vector->lanes_[index->value_];
-            return;
-        }
-        if (isTrueLVal) {
-            std::cerr << "cannot assign to a compiler-constant vector\n";
-            std::exit(1);
-        }
-        Value *dynamicIndex = recentVal;
-        auto *type = static_cast<ScalarizedVectorType *>(vector->type_);
-        auto *slot = builder->create_alloca(type);
-        storeScalarizedVector(this, slot, vector, type);
-        recentVal = builder->create_load(
-            builder->create_gep(slot, {CONST_INT(0), dynamicIndex}));
-        return;
-    }
     if (auto *constant = dynamic_cast<ConstantArray *>(var)) {
-        if (auto *type = dynamic_cast<ScalarizedVectorType *>(constant->type_)) {
-            auto *vector = constantScalarizedVector(module.get(), type, constant);
-            if (ast.indices.empty()) {
-                recentVal = vector;
-                return;
-            }
-            if (ast.indices.size() != 1) {
-                std::cerr << "a fixed vector requires exactly one lane index\n";
-                std::exit(1);
-            }
-            ast.indices[0]->accept(*this);
-            auto *index = dynamic_cast<ConstantInt *>(recentVal);
-            if (index && (index->value_ < 0 ||
-                static_cast<unsigned>(index->value_) >= vector->lanes_.size())) {
-                std::cerr << "constant vector lane index is out of range\n";
-                std::exit(1);
-            }
-            if (index) {
-                recentVal = vector->lanes_[index->value_];
-                return;
-            }
-            if (scope.in_global() || isTrueLVal) {
-                std::cerr << "a global constant expression requires a constant lane index\n";
-                std::exit(1);
-            }
-            Value *dynamicIndex = recentVal;
-            auto *slot = builder->create_alloca(type);
-            storeScalarizedVector(this, slot, vector, type);
-            recentVal = builder->create_load(
-                builder->create_gep(slot, {CONST_INT(0), dynamicIndex}));
-            return;
-        }
     }
     //全局作用域内，一定使用常量，全局作用域下访问左值时useConst已置为true
     if (scope.in_global()) {
         //不是数组，直接返回该常量
         if (ast.indices.empty()) {
             recentVal = var;
-            return;
-        }
-        if (auto *vector = dynamic_cast<ConstantVector *>(var)) {
-            if (ast.indices.size() != 1) {
-                std::cerr << "a fixed vector requires exactly one lane index\n";
-                std::exit(1);
-            }
-            ast.indices[0]->accept(*this);
-            auto *index = dynamic_cast<ConstantInt *>(recentVal);
-            if (!index || index->value_ < 0 ||
-                (unsigned)index->value_ >= vector->elements_.size()) {
-                std::cerr << "constant vector lane index is out of range\n";
-                std::exit(1);
-            }
-            recentVal = vector->elements_[index->value_];
             return;
         }
         //若是数组，则var一定是全局常量数组
@@ -2805,12 +1686,6 @@ void GenIR::visit(LValueAST &ast) {
             }
             if (dynamic_cast<ConstantArray*>(recentVal)) {
                 recentVal = ((ConstantArray*)recentVal)->const_array[i];
-            } else if (auto *vector = dynamic_cast<ConstantVector *>(recentVal)) {
-                if (i < 0 || (unsigned)i >= vector->elements_.size()) {
-                    std::cerr << "constant vector lane index is out of range\n";
-                    std::exit(1);
-                }
-                recentVal = vector->elements_[i];
             }
         }
         return;
@@ -2819,30 +1694,6 @@ void GenIR::visit(LValueAST &ast) {
     //局部作用域
     if (var->type_->tid_ == Type::IntegerTyID || var->type_->tid_ == Type::FloatTyID) { //说明为局部常量
         recentVal = var;
-        return;
-    }
-    if (auto *constantVector = dynamic_cast<ConstantVector *>(var)) {
-        if (ast.indices.empty()) {
-            recentVal = constantVector;
-            return;
-        }
-        if (ast.indices.size() != 1) {
-            std::cerr << "a fixed vector requires exactly one lane index\n";
-            std::exit(1);
-        }
-        ast.indices[0]->accept(*this);
-        auto *constantIndex = dynamic_cast<ConstantInt *>(recentVal);
-        if (constantIndex) {
-            if (constantIndex->value_ < 0 ||
-                (unsigned)constantIndex->value_ >= constantVector->elements_.size()) {
-                std::cerr << "constant vector lane index is out of range\n";
-                std::exit(1);
-            }
-            recentVal = constantVector->elements_[constantIndex->value_];
-        } else {
-            recentVal = new ExtractElementInst(constantVector, recentVal,
-                                               builder->BB_);
-        }
         return;
     }
     // 不是常量那么var一定是指针类型
@@ -2857,60 +1708,6 @@ void GenIR::visit(LValueAST &ast) {
         }
         return;
     }
-    if (auto *type = dynamic_cast<ScalarizedVectorType *>(varType)) {
-        if (ast.indices.empty()) {
-            recentVal = isTrueLVal ? var
-                                   : (Value *)loadScalarizedVector(this, var, type);
-            return;
-        }
-        if (ast.indices.size() != 1) {
-            std::cerr << "a fixed vector requires exactly one lane index\n";
-            std::exit(1);
-        }
-        ast.indices[0]->accept(*this);
-        Value *index = recentVal;
-        if (auto *constantIndex = dynamic_cast<ConstantInt *>(index);
-            constantIndex &&
-            (constantIndex->value_ < 0 ||
-             static_cast<unsigned>(constantIndex->value_) >=
-                 type->num_elements_)) {
-            std::cerr << "constant vector lane index is out of range\n";
-            std::exit(1);
-        }
-        recentVal = builder->create_gep(var, {CONST_INT(0), index});
-        if (!isTrueLVal)
-            recentVal = builder->create_load(recentVal);
-        return;
-    }
-    if (varType->tid_ == Type::VectorTyID) {
-        if (ast.indices.empty()) {
-            recentVal = isTrueLVal ? var : (Value *)builder->create_load(var);
-            return;
-        }
-        if (ast.indices.size() != 1) {
-            std::cerr << "a fixed vector requires exactly one lane index\n";
-            std::exit(1);
-        }
-        ast.indices[0]->accept(*this);
-        Value *index = recentVal;
-        auto *constantIndex = dynamic_cast<ConstantInt *>(index);
-        auto *type = static_cast<VectorType *>(varType);
-        if (constantIndex &&
-            (constantIndex->value_ < 0 ||
-             (unsigned)constantIndex->value_ >= type->num_elements_)) {
-            std::cerr << "constant vector lane index is out of range\n";
-            std::exit(1);
-        }
-        if (isTrueLVal) {
-            vectorLaneBase = var;
-            vectorLaneIndex = index;
-            recentVal = var;
-        } else {
-            recentVal = new ExtractElementInst(builder->create_load(var), index,
-                                               builder->BB_);
-        }
-        return;
-    }
     if (!ast.indices.empty()) {
         bool parameterArray = varType->tid_ == Type::PointerTyID;
         Value *base = var;
@@ -2921,79 +1718,9 @@ void GenIR::visit(LValueAST &ast) {
         }
         unsigned arrayDepth = 0;
         Type *tail = aggregateType;
-        while (tail->tid_ == Type::ArrayTyID &&
-               !dynamic_cast<ScalarizedVectorType *>(tail)) {
+        while (tail->tid_ == Type::ArrayTyID) {
             ++arrayDepth;
             tail = static_cast<ArrayType *>(tail)->contained_;
-        }
-        if (tail->tid_ == Type::VectorTyID ||
-            dynamic_cast<ScalarizedVectorType *>(tail)) {
-            std::vector<Value *> sourceIndices;
-            for (auto &exp : ast.indices) {
-                exp->accept(*this);
-                sourceIndices.push_back(recentVal);
-            }
-            unsigned objectIndices = arrayDepth + (parameterArray ? 1 : 0);
-            if (sourceIndices.size() != objectIndices &&
-                sourceIndices.size() != objectIndices + 1) {
-                std::cerr << "fixed vector array access has the wrong number of indices\n";
-                std::exit(1);
-            }
-            std::vector<Value *> gepIndices(sourceIndices.begin(),
-                                            sourceIndices.begin() + objectIndices);
-            if (!parameterArray)
-                gepIndices.insert(gepIndices.begin(), CONST_INT(0));
-            Value *vectorPointer = builder->create_gep(base, gepIndices);
-            if (sourceIndices.size() == objectIndices) {
-                if (auto *scalarized =
-                        dynamic_cast<ScalarizedVectorType *>(tail)) {
-                    recentVal = isTrueLVal
-                        ? vectorPointer
-                        : (Value *)loadScalarizedVector(
-                              this, vectorPointer, scalarized);
-                } else {
-                    recentVal = isTrueLVal
-                        ? vectorPointer
-                        : (Value *)builder->create_load(vectorPointer);
-                }
-                return;
-            }
-            Value *laneIndex = sourceIndices.back();
-            if (auto *scalarized =
-                    dynamic_cast<ScalarizedVectorType *>(tail)) {
-                auto *constantIndex =
-                    dynamic_cast<ConstantInt *>(laneIndex);
-                if (constantIndex &&
-                    (constantIndex->value_ < 0 ||
-                     static_cast<unsigned>(constantIndex->value_) >=
-                         scalarized->num_elements_)) {
-                    std::cerr << "constant vector lane index is out of range\n";
-                    std::exit(1);
-                }
-                recentVal = builder->create_gep(
-                    vectorPointer, {CONST_INT(0), laneIndex});
-                if (!isTrueLVal)
-                    recentVal = builder->create_load(recentVal);
-                return;
-            }
-            auto *vectorType = static_cast<VectorType *>(tail);
-            auto *constantIndex = dynamic_cast<ConstantInt *>(laneIndex);
-            if (constantIndex &&
-                (constantIndex->value_ < 0 ||
-                 (unsigned)constantIndex->value_ >=
-                     vectorType->num_elements_)) {
-                std::cerr << "constant vector lane index is out of range\n";
-                std::exit(1);
-            }
-            if (isTrueLVal) {
-                vectorLaneBase = vectorPointer;
-                vectorLaneIndex = laneIndex;
-                recentVal = vectorPointer;
-            } else {
-                recentVal = new ExtractElementInst(
-                    builder->create_load(vectorPointer), laneIndex, builder->BB_);
-            }
-            return;
         }
     }
     if (!ast.indices.empty()) { //说明是数组
@@ -3022,7 +1749,6 @@ void GenIR::visit(LValueAST &ast) {
     }
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(LiteralExprAST &ast) {
     if (const auto *integer = std::get_if<int>(&ast.value))
         recentVal = CONST_INT(*integer);
@@ -3030,7 +1756,6 @@ void GenIR::visit(LiteralExprAST &ast) {
         recentVal = CONST_FLOAT(std::get<float>(ast.value));
 }
 
-// lowerRuntimeString：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static Value *lowerRuntimeString(GenIR *gen, const string &text) {
     auto *byteType = gen->module->int8_ty_;
     auto *arrayType = gen->module->get_array_type(byteType, text.size() + 1);
@@ -3053,7 +1778,6 @@ static Value *lowerRuntimeString(GenIR *gen, const string &text) {
         global, indices);
 }
 
-// visit：将对应 AST 节点降为 IR，并更新当前值、作用域或控制流插入点。
 void GenIR::visit(CallExprAST &ast) {
     // 将 C 宏名映射到 SysY 运行时函数
     if (ast.callee == "starttime") ast.callee = "_sysy_starttime";
@@ -3064,7 +1788,6 @@ void GenIR::visit(CallExprAST &ast) {
         std::cerr << "Error: undefined function '" << ast.callee << "'\n";
         exit(1);
     }
-    is_single_exp = false;
     vector<Value *> args;
     // 动态 tensor 实参必须活到 call 之后，再统一释放其临时存储。
     vector<Value *> tensorArgumentsToRelease;
@@ -3072,13 +1795,8 @@ void GenIR::visit(CallExprAST &ast) {
     auto infoIt = functionLoweringInfo.find(fun);
     FunctionLoweringInfo *info = infoIt == functionLoweringInfo.end() ? nullptr : &infoIt -> second;
     Value *tensorResultSlot = nullptr;
-    Value *scalarizedResultSlot = nullptr;
     unsigned argumentOffset = 0;
-    if (info && info->returnType) {
-        scalarizedResultSlot = builder->create_alloca(info->returnType);
-        args.push_back(scalarizedResultSlot);
-        argumentOffset = 1;
-    }else if(info && info->tensorReturn){
+    if(info && info->tensorReturn){
         // tensor 返回调用采用 sret 风格：选择上下文目标或新结果槽，并作为第一个实参传入。
         ArrayType *type = info ->tensorReturnType ? info -> tensorReturnType : expectedTensorType;
         tensorResultSlot = expectedTensorTarget ? expectedTensorTarget : (Value *)builder->create_alloca(type);
@@ -3108,30 +1826,14 @@ void GenIR::visit(CallExprAST &ast) {
             ++fixedIndex;
             continue;
         }
-        VectorType *savedExpected = expectedVectorType;
-        ScalarizedVectorType *savedScalarizedExpected =
-            expectedScalarizedVectorType;
-        // ScalarizedVectorType *scalarizedParameter = info && static_cast<unsigned>(i) < info->valueParameters.size() ? info->valueParameters[i] : nullptr;
         bool tensorParameter = info && static_cast<unsigned>(i) < info -> tensorParameters.size() && info -> tensorParameters[i];
-        // expectedScalarizedVectorType = scalarizedParameter;
         Type *fixedParameterType =
             fixedIndex < fixedArgumentCount
                 ? functionType->args_[fixedIndex]
                 : nullptr;
-        expectedVectorType = dynamic_cast<VectorType *>(fixedParameterType);
         std::get<std::unique_ptr<ExprAST>>(argument)->accept(*this);
-        expectedVectorType = savedExpected;
-        expectedScalarizedVectorType = savedScalarizedExpected;
         if (heapTensorStorage.find(recentVal) != heapTensorStorage.end()) 
             tensorArgumentsToRelease.push_back(recentVal);
-        // if (scalarizedParameter) {
-        //     auto *value = asScalarizedVector(recentVal);
-        //     auto *slot = builder->create_alloca(scalarizedParameter);
-        //     storeScalarizedVector(this, slot, value, scalarizedParameter);
-        //     args.push_back(slot);
-        //     ++fixedIndex;
-        //     continue;
-        // }
         // tensor 形参在数据指针之后追加运行时首维；必要时先统一指针类型。
         Value *firstDim = tensorParameter ? tensorFirstDimension(this, recentVal) : nullptr;
         if(fixedParameterType && fixedParameterType->tid_ == Type::PointerTyID && recentVal ->type_->tid_==Type::PointerTyID && recentVal -> type_ != fixedParameterType && recentVal ->hasSemFlag(SemFlag::SrcTensor)){
@@ -3164,7 +1866,4 @@ void GenIR::visit(CallExprAST &ast) {
     // call 已消费所有实参，释放临时 tensor，并把隐藏返回槽作为调用表达式的值。
     for(auto *arg : tensorArgumentsToRelease) releaseTensor(this, arg);
     if(tensorResultSlot) recentVal = tensorResultSlot;
-    else if(info && info -> returnType)
-        recentVal = loadScalarizedVector(this, scalarizedResultSlot,
-                                         info->returnType);
 }

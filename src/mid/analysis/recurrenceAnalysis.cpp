@@ -37,7 +37,6 @@ bool RecurrenceAnalysis::checkedSub(long long a, long long b, long long &out) {
     return checkedAdd(a, -b, out);
 }
 
-// scevConstant：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RecurrenceAnalysis::scevConstant(const SCEV *s, long long &value) {
     auto *constant = dynamic_cast<const SCEVConstant *>(s);
     if (!constant) return false;
@@ -134,7 +133,6 @@ AffineRecurrenceStep RecurrenceAnalysis::extractAffineStep(
     return invalid;
 }
 
-// invalidAccumulatorStep：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 AccumulatorRecurrenceStep RecurrenceAnalysis::invalidAccumulatorStep() {
     return {false, 0, {}};
 }

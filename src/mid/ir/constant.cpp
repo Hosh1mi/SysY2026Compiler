@@ -1,13 +1,9 @@
-// Constant 各子类的 print() —— 将常量值转为 IR 文本格式
-
 #include "../../include/mid/ir/constant.hpp"
 
 #include <cstdint>
 #include <cstring>
 #include <sstream>
 #include <string>
-
-// ── Recursively check whether a Constant represents zero ──────────────
 
 static bool isZeroConstant(Constant *c) {
     if (dynamic_cast<ConstantZero*>(c)) return true;
@@ -26,7 +22,6 @@ static bool isZeroConstant(Constant *c) {
     return false;
 }
 
-// ── Individual constant printing ──────────────────────────────────────
 std::string ConstantInt::print() {
     std::string const_ir;
     if (this->type_->tid_ == Type::IntegerTyID && static_cast<IntegerType*>(this->type_)->num_bits_ == 1) {
@@ -36,7 +31,6 @@ std::string ConstantInt::print() {
     return const_ir;
 }
 
-// float 常量，以十六进制双精度表示
 std::string ConstantFloat::print() {
     double val = this->value_;
     std::uint64_t bits;
@@ -92,12 +86,10 @@ std::string ConstantVector::print() {
     return const_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ConstantZero::print() {
     return "zeroinitializer";
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string UndefValue::print() {
     return "undef";
 }

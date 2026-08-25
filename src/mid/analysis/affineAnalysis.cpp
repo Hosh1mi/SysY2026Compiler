@@ -32,7 +32,6 @@ bool AffineAnalysis::provablyIndependentOfIV(Value *v, PhiInst *iv) {
 }
 
 // ── AffineExpr 算术 ───────────────────────────────────────────────────────
-
 AffineExpr AffineExpr::operator+(const AffineExpr &o) const {
     if (!valid || !o.valid) return makeInvalid();
     AffineExpr r;

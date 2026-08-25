@@ -42,7 +42,6 @@ bool checkedMul(long long lhs, long long rhs, long long &result) {
     return true;
 }
 
-// dependsOnImpl：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool dependsOnImpl(Value *value, Value *target,
                    std::set<Value *> &visiting, unsigned depth) {
     if (value == target)
@@ -242,7 +241,6 @@ bool inferBoundsImpl(Value *value, long long &lower, long long &upper,
 
 } // namespace
 
-// dependsOn：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool dependsOn(Value *value, Value *target) {
     std::set<Value *> visiting;
     return dependsOnImpl(value, target, visiting, 0);
@@ -301,7 +299,6 @@ bool analyze(PhiInst *state, BinaryInst *remainder,
     return true;
 }
 
-// hasPrivateUpdateChain：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool hasPrivateUpdateChain(const Recurrence &recurrence,
                            const std::set<BasicBlock *> &updateBlocks,
                            bool allowExternalUses) {
@@ -352,7 +349,6 @@ bool inferContributionBounds(Recurrence &recurrence,
     return true;
 }
 
-// advanceBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool advanceBounds(Bounds &bounds, const Recurrence &recurrence,
                    unsigned repetitions) {
     for (unsigned iteration = 0; iteration < repetitions; ++iteration) {
@@ -378,7 +374,6 @@ bool advanceBounds(Bounds &bounds, const Recurrence &recurrence,
     return true;
 }
 
-// proveNoI32UpdateWrap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool proveNoI32UpdateWrap(Recurrence &recurrence,
                           const std::vector<PhiInst *> &loopStates,
                           PhiInst *inductionState, Value *initial) {
@@ -400,7 +395,6 @@ bool fitsSignedI32(long long lower, long long upper) {
            upper <= std::numeric_limits<int>::max();
 }
 
-// needsAtMostOneCorrection：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool needsAtMostOneCorrection(long long lower, long long upper,
                               long long modulus) {
     if (modulus <= 0)

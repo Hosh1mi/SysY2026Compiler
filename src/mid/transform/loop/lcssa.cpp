@@ -23,7 +23,6 @@
 #include <vector>
 
 /**
- * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
  * @param module 待处理的 IR 模块，函数可能原地修改其内容。
  * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
  */
@@ -33,7 +32,6 @@ void LCSSA::execute(Module *module) {
 }
 
 /**
- * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
  * @param module 待处理的 IR 模块，函数可能原地修改其内容。
  * @param AM 分析管理器，用于获取并维护本次变换依赖的分析结果。
  * @return 返回本次运行后仍然有效的分析集合。

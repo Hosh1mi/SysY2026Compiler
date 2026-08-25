@@ -9,7 +9,6 @@
 
 namespace {
 
-// arithmeticCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int arithmeticCost(const Instruction *inst, bool vector) {
     auto *binary = dynamic_cast<const BinaryInst *>(inst);
     if (!binary) {
@@ -43,7 +42,6 @@ int arithmeticCost(const Instruction *inst, bool vector) {
 
 } // namespace
 
-// shuffleCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int VectorizationCostModel::shuffleCost(const std::vector<int> &mask) const {
     if (mask.size() != VectorWidth)
         return 24;
@@ -94,7 +92,6 @@ int VectorizationCostModel::shuffleCost(const std::vector<int> &mask) const {
     return 7;
 }
 
-// scalarInstructionCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int VectorizationCostModel::scalarInstructionCost(
     const Instruction *inst) const {
     if (inst->op_id_ == Instruction::Load) return 3;
@@ -102,7 +99,6 @@ int VectorizationCostModel::scalarInstructionCost(
     return arithmeticCost(inst, false);
 }
 
-// vectorInstructionCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int VectorizationCostModel::vectorInstructionCost(
     const Instruction *inst) const {
     if (inst->op_id_ == Instruction::Load) return 4;
@@ -110,7 +106,6 @@ int VectorizationCostModel::vectorInstructionCost(
     return arithmeticCost(inst, true);
 }
 
-// setupCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int VectorizationCostModel::setupCost(std::size_t splats,
                                       std::size_t runtimeChecks,
                                       std::size_t addressGroups) const {
@@ -122,7 +117,6 @@ int VectorizationCostModel::setupCost(std::size_t splats,
            static_cast<int>(addressGroups);
 }
 
-// minimumProfitableTripCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int VectorizationCostModel::minimumProfitableTripCount(
     int scalarLaneCost, int vectorPartCost, int setup,
     int unrollFactor) const {

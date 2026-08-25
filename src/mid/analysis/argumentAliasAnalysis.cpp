@@ -1,6 +1,4 @@
 // ArgumentAliasAnalysis 从模块内所有调用点反推形参可能来自哪些 global/alloca 根对象。
-// 当两个形参的来源集合都完整且互不相交时，才能补充 BasicAA 无法从函数体本身得到的
-// no-alias 结论，供循环变换和内存提升减少不必要的保守限制。
 #include "../../include/mid/analysis/argumentAliasAnalysis.hpp"
 #include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/function.hpp"
@@ -8,7 +6,6 @@
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/module.hpp"
 
-// underlyingObject：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Value *ArgumentAliasAnalysis::underlyingObject(Value *ptr) {
     while (ptr) {
         if (auto *gep = dynamic_cast<GetElementPtrInst *>(ptr)) {
@@ -22,7 +19,6 @@ Value *ArgumentAliasAnalysis::underlyingObject(Value *ptr) {
     return ptr;
 }
 
-// isIdentifiedObject：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isIdentifiedObject(Value *v) {
     return dynamic_cast<GlobalVariable *>(v) || dynamic_cast<AllocaInst *>(v);
 }
@@ -98,13 +94,11 @@ void ArgumentAliasAnalysis::resolveArg(Argument *a) {
     else           roots_[a] = std::move(rootSet);
 }
 
-// argRoots：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const std::set<Value *> *ArgumentAliasAnalysis::argRoots(Argument *a) const {
     auto it = roots_.find(a);
     return it == roots_.end() ? nullptr : &it->second;
 }
 
-// noAlias：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool ArgumentAliasAnalysis::noAlias(Value *baseA, Value *baseB) const {
     if (!baseA || !baseB) return false;
     if (baseA == baseB)   return false;   // 同一对象

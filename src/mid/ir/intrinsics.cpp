@@ -1,22 +1,19 @@
 // 本文件集中声明和识别中端 intrinsic。目前包括有符号 min/max 与宽位 mul-mod；名称后缀
-// 编码标量或向量类型，intrinsic_id 防止把同名用户函数误认成具有特殊语义的内建函数。
+// 记录 intrinsic 身份，防止把同名用户函数误认成具有特殊语义的内建函数。
 #include "../../include/mid/ir/intrinsics.hpp"
 
 namespace {
 
-// baseName：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const char *baseName(SignedMinMaxIntrinsic kind) {
     return kind == SignedMinMaxIntrinsic::SMin ? "llvm.smin" : "llvm.smax";
 }
 
-// intrinsicID：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Function::IntrinsicID intrinsicID(SignedMinMaxIntrinsic kind) {
     return kind == SignedMinMaxIntrinsic::SMin
                ? Function::IntrinsicID::SignedMin
                : Function::IntrinsicID::SignedMax;
 }
 
-// typeSuffix：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string typeSuffix(Type *type) {
     if (auto *integer = dynamic_cast<IntegerType *>(type)) {
         if (integer->num_bits_ == 32)
@@ -30,7 +27,6 @@ std::string typeSuffix(Type *type) {
     return "";
 }
 
-// selectChoosesCompareOperands：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool selectChoosesCompareOperands(SelectInst *select, ICmpInst *compare,
                                   bool swapped) {
     Value *lhs = compare->get_operand(0);
@@ -41,12 +37,10 @@ bool selectChoosesCompareOperands(SelectInst *select, ICmpInst *compare,
 
 } // namespace
 
-// isSupportedSignedMinMaxType：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isSupportedSignedMinMaxType(Type *type) {
     return !typeSuffix(type).empty();
 }
 
-// getOrInsertSignedMinMaxIntrinsic：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Function *getOrInsertSignedMinMaxIntrinsic(Module *module,
                                            SignedMinMaxIntrinsic kind,
                                            Type *type) {
@@ -74,7 +68,6 @@ Function *getOrInsertSignedMinMaxIntrinsic(Module *module,
     return function;
 }
 
-// isSignedMinMaxIntrinsic：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isSignedMinMaxIntrinsic(Function *function,
                              SignedMinMaxIntrinsic *kind) {
     if (!function)
@@ -96,7 +89,6 @@ bool isSignedMinMaxIntrinsic(Function *function,
     return true;
 }
 
-// getOrInsertMulModIntrinsic：从 IR 和已有分析结果取得目标信息；缺少可靠结论时返回空值或保守结果。
 Function *getOrInsertMulModIntrinsic(Module *module) {
     if (!module)
         return nullptr;
@@ -125,13 +117,11 @@ Function *getOrInsertMulModIntrinsic(Module *module) {
     return function;
 }
 
-// isMulModIntrinsic：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isMulModIntrinsic(Function *function) {
     return function &&
            function->intrinsicID() == Function::IntrinsicID::MulMod;
 }
 
-// matchSignedMinMaxSelect：逐层匹配允许的 IR 形状并提取组成部分，结构或类型不符时返回失败。
 bool matchSignedMinMaxSelect(SelectInst *select,
                              SignedMinMaxIntrinsic &kind,
                              Value *&lhs,

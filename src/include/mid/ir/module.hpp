@@ -62,20 +62,10 @@ public:
         return type;
     }
 
-    // 获取可作为单个 SSA 值的 <num_elements x contained>；按形状驻留。
     VectorType* get_vector_type(Type* contained, unsigned num_elements) {
         auto &type = vector_map_[{contained, num_elements}];
         if (!type)
             type = new VectorType(contained, num_elements);
-        return type;
-    }
-
-    // 获取非原生宽度向量的聚合存储类型；它按形状单独驻留。
-    ScalarizedVectorType* get_scalarized_vector_type(Type* contained,
-                                                     unsigned num_elements) {
-        auto &type = scalarized_vector_map_[{contained, num_elements}];
-        if (!type)
-            type = new ScalarizedVectorType(contained, num_elements);
         return type;
     }
 
@@ -99,6 +89,4 @@ private:
     std::map<Type*, PointerType*> pointer_map_;
     std::map<std::pair<Type*, unsigned>, ArrayType*> array_map_;
     std::map<std::pair<Type*, unsigned>, VectorType*> vector_map_;
-    std::map<std::pair<Type*, unsigned>, ScalarizedVectorType*>
-        scalarized_vector_map_;
 };

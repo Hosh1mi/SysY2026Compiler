@@ -14,7 +14,6 @@
 
 namespace {
 
-// isDedicatedPreheader：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
     if (!bb || !header) return false;
     if (bb->succ_bbs_.size() != 1 || bb->succ_bbs_[0] != header)
@@ -25,7 +24,6 @@ bool isDedicatedPreheader(BasicBlock *bb, BasicBlock *header) {
            term->get_operand(0) == header;
 }
 
-// isLoopInvariant：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isLoopInvariant(Value *value, const Loop *loop) {
     if (!value || !loop) return false;
     if (dynamic_cast<Constant *>(value) ||
@@ -68,7 +66,6 @@ ICmpInst::ICmpOp invertPredicate(ICmpInst::ICmpOp pred) {
     return pred;
 }
 
-// isOrderedPredicate：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isOrderedPredicate(ICmpInst::ICmpOp pred) {
     switch (pred) {
     case ICmpInst::ICMP_UGT:
@@ -123,7 +120,6 @@ bool matchInductionUpdate(Value *value, PhiInst *phi, const Loop *loop,
     return true;
 }
 
-// normalizeCompare：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool normalizeCompare(ICmpInst *compare, Value *inductionValue,
                       Value *&bound, ICmpInst::ICmpOp &predicate) {
     if (!compare || !inductionValue) return false;
@@ -178,7 +174,6 @@ bool matchEqualityGuard(BasicBlock *guardBlock, Value *inductionValue,
     return predicate == ICmpInst::ICMP_NE;
 }
 
-// continuationSense：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool continuationSense(BranchInst *branch, const Loop *loop,
                        bool &continuesWhenTrue) {
     if (!branch || branch->num_ops() != 3 || !loop) return false;
@@ -214,7 +209,6 @@ bool matchGuard(BasicBlock *guardBlock, Value *inductionValue,
     return true;
 }
 
-// describeControlInduction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool describeControlInduction(Loop *loop, PhiInst *phi, Value *start,
                               Value *latchValue,
                               InductionDescriptor &descriptor) {
@@ -254,7 +248,6 @@ bool describeControlInduction(Loop *loop, PhiInst *phi, Value *start,
     return true;
 }
 
-// isAddOneOf：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isAddOneOf(Value *value, PhiInst *phi) {
     auto *add = dynamic_cast<BinaryInst *>(value);
     if (!add || !add->is_add()) return false;
@@ -266,7 +259,6 @@ bool isAddOneOf(Value *value, PhiInst *phi) {
            (op1 == phi && c0 && c0->value_ == 1);
 }
 
-// isStepFromLatch：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
     if (isAddOneOf(value, phi)) return true;
 
@@ -280,7 +272,6 @@ bool isStepFromLatch(Value *value, PhiInst *phi, BasicBlock *latch) {
     return true;
 }
 
-// headerGuardTripCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
     auto *term = loop->header->get_terminator();
     if (!term || !term->is_br() || term->num_ops() != 3) return false;
@@ -291,7 +282,6 @@ bool headerGuardTripCount(Loop *loop, PhiInst *iv, Value *&bound) {
     return true;
 }
 
-// latchGuardTripCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
     BasicBlock *latch = loop->singleLatch();
     if (!latch || !stepValue) return false;
@@ -306,7 +296,6 @@ bool latchGuardTripCount(Loop *loop, Value *stepValue, Value *&bound) {
 
 } // namespace
 
-// describeEqualityControlInduction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool describeEqualityControlInduction(const Loop &loop,
                                       InductionDescriptor &descriptor) {
     BasicBlock *latch = loop.singleLatch();

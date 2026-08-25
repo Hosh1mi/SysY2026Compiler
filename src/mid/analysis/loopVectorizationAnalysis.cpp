@@ -64,7 +64,6 @@ bool matchIVPlusConstant(Value *value, PhiInst *iv, int &offset) {
     return false;
 }
 
-// varyingIndexHasUnitElementStride：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
                                       unsigned varyingIndex,
                                       Type *scalarType) {
@@ -86,7 +85,6 @@ bool varyingIndexHasUnitElementStride(GetElementPtrInst *gep,
     return false;
 }
 
-// pointerOffsetFromPhi：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     offset = 0;
     Value *cursor = pointer;
@@ -101,12 +99,10 @@ bool pointerOffsetFromPhi(Value *pointer, PhiInst *phi, int &offset) {
     return true;
 }
 
-// memoryPointer：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Value *memoryPointer(Instruction *inst) {
     return inst->is_load() ? inst->get_operand(0) : inst->get_operand(1);
 }
 
-// sameAddressShape：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
                       const LoopVectorizationAnalysis::MemoryAccess &b) {
     if (a.addressKind != b.addressKind) return false;
@@ -126,7 +122,6 @@ bool sameAddressShape(const LoopVectorizationAnalysis::MemoryAccess &a,
     return true;
 }
 
-// constantByteOffset：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<long long> constantByteOffset(
     const LoopVectorizationAnalysis::MemoryAccess &access,
     const LoopVectorizationAnalysis::Plan &plan,
@@ -202,7 +197,6 @@ std::optional<long long> constantByteOffset(
     return offset;
 }
 
-// constantInitialByteOffset：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<long long> constantInitialByteOffset(
     const LoopVectorizationAnalysis::MemoryAccess &access,
     const LoopVectorizationAnalysis::Plan &plan,
@@ -213,7 +207,6 @@ std::optional<long long> constantInitialByteOffset(
     return constantByteOffset(access, plan, BAA, initial->value_);
 }
 
-// minimumVectorRangesOverlap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool minimumVectorRangesOverlap(
     const LoopVectorizationAnalysis::MemoryAccess &a,
     const LoopVectorizationAnalysis::MemoryAccess &b,
@@ -259,7 +252,6 @@ bool minimumVectorRangesOverlap(
     return !(aEnd <= *bStart || bEnd <= *aStart);
 }
 
-// constantIterationRangesOverlap：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::optional<bool> constantIterationRangesOverlap(
     const LoopVectorizationAnalysis::MemoryAccess &a,
     const LoopVectorizationAnalysis::MemoryAccess &b,
@@ -296,14 +288,12 @@ std::optional<bool> constantIterationRangesOverlap(
 
 } // namespace
 
-// reject：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::reject(std::string *reason,
                                        const char *message) const {
     if (reason) *reason = message;
     return false;
 }
 
-// isLoopInvariant：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopVectorizationAnalysis::isLoopInvariant(Value *value,
                                                 const Loop &loop) const {
     if (dynamic_cast<Constant *>(value) || dynamic_cast<Argument *>(value) ||
@@ -382,7 +372,6 @@ bool LoopVectorizationAnalysis::findPointerRecurrences(
     return true;
 }
 
-// classifyMemory：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
                                                std::string *reason) const {
     auto recordAccess = [&](MemoryAccess access) {
@@ -493,7 +482,6 @@ bool LoopVectorizationAnalysis::classifyMemory(Plan &plan,
     return true;
 }
 
-// checkInstructions：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
                                                   std::string *reason) const {
     std::set<Instruction *> addressHelpers;
@@ -581,7 +569,6 @@ bool LoopVectorizationAnalysis::checkInstructions(Plan &plan,
     return true;
 }
 
-// checkMemoryDependences：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkMemoryDependences(
     Plan &plan, std::string *reason) const {
     std::set<std::pair<size_t, size_t>> checkedGroups;
@@ -649,7 +636,6 @@ bool LoopVectorizationAnalysis::checkMemoryDependences(
     return true;
 }
 
-// checkProfitability：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool LoopVectorizationAnalysis::checkProfitability(Plan &plan,
                                                    std::string *reason) const {
     VectorizationCostModel costs;

@@ -17,9 +17,6 @@ static long gcdAbs(long a, long b) {
     return a;
 }
 
-
-// ── helpers ─────────────────────────────────────────────────────────────
-
 GetElementPtrInst *DependenceAnalysis::accessGEP(Instruction *acc) const {
     if (auto *st = dynamic_cast<StoreInst *>(acc))
         return dynamic_cast<GetElementPtrInst *>(st->get_operand(1));
@@ -28,7 +25,6 @@ GetElementPtrInst *DependenceAnalysis::accessGEP(Instruction *acc) const {
     return nullptr;
 }
 
-// gepBase：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Value *DependenceAnalysis::gepBase(GetElementPtrInst *gep) const {
     if (!gep) return nullptr;
     Value *base = gep->get_operand(0);
@@ -39,7 +35,6 @@ Value *DependenceAnalysis::gepBase(GetElementPtrInst *gep) const {
 }
 
 DependenceAnalysis::BaseRelation
-// baseRelation：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 DependenceAnalysis::baseRelation(Value *a, Value *b) const {
     if (a == b) return BaseRelation::MustAlias;
     // 不同全局变量绝对不别名
@@ -91,7 +86,6 @@ static void addLinearRange(__int128 coeff, long long lo, long long hi,
     range.hi += std::max(a, b);
 }
 
-// hasOnlyNestIVs：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool hasOnlyNestIVs(const AffineExpr &expr,
                            const std::vector<Loop *> &loops) {
     for (const auto &term : expr.coeffs) {
@@ -168,7 +162,6 @@ static BanerjeeRange computeBanerjee(const AffineExpr &e1,
     return result;
 }
 
-// mayContainZero：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool mayContainZero(const BanerjeeRange &range) {
     return range.valid && range.lo <= 0 && range.hi >= 0;
 }

@@ -74,7 +74,7 @@ bool checkDeclaration(const DeclAST *declaration, std::string &error) {
         }
         for (const auto &dimension : object->dimensions)
             if (!checkExpr(dimension.get(), error)) return false;
-        if (declaration->type.isScalar() && object->dimensions.empty() &&
+        if (!declaration->tensor && object->dimensions.empty() &&
             object->initializer &&
             (!object->initializer->isExpression() ||
              containsAggregate(object->initializer->expression()))) {
@@ -86,10 +86,10 @@ bool checkDeclaration(const DeclAST *declaration, std::string &error) {
     return true;
 }
 
-bool checkBlock(const BlockAST *block, const TypeSpec &returnType,
+bool checkBlock(const BlockAST *block, TYPE returnType,
                 unsigned loopDepth, std::string &error);
 
-bool checkStatement(const StmtAST *statement, const TypeSpec &returnType,
+bool checkStatement(const StmtAST *statement, TYPE returnType,
                     unsigned loopDepth, std::string &error) {
     if (dynamic_cast<const EmptyStmtAST *>(statement)) return true;
     if (const auto *assignment =
@@ -118,7 +118,7 @@ bool checkStatement(const StmtAST *statement, const TypeSpec &returnType,
             error = "a value-returning function requires a return expression";
             return false;
         }
-        if (ret->value && returnType.isScalar() &&
+        if (ret->value && returnType != TYPE_VOID &&
             containsAggregate(ret->value.get())) {
             error = "a scalar function cannot return a brace literal";
             return false;
@@ -137,7 +137,7 @@ bool checkStatement(const StmtAST *statement, const TypeSpec &returnType,
            checkStatement(loop->body.get(), returnType, loopDepth + 1, error);
 }
 
-bool checkBlock(const BlockAST *block, const TypeSpec &returnType,
+bool checkBlock(const BlockAST *block, TYPE returnType,
                 unsigned loopDepth, std::string &error) {
     for (const auto &item : block->items) {
         if (const auto *declaration =

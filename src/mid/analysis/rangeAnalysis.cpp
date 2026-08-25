@@ -50,7 +50,6 @@ private:
 
 } // namespace
 
-// RangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::RangeAnalysis(Function *func, AnalysisManager *AM, const LoopInfo &LI,
                              ScalarEvolution &SE)
     : func_(func), AM_(AM), LI_(&LI), SE_(&SE) {
@@ -80,7 +79,6 @@ void RangeAnalysis::clearCache() {
     returnSummary_ = ReturnSummary{};
 }
 
-// typeBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::pair<long long, long long> RangeAnalysis::typeBounds(Type *ty) {
     if (!ty || ty->tid_ != Type::IntegerTyID) {
         return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
@@ -95,7 +93,6 @@ std::pair<long long, long long> RangeAnalysis::typeBounds(Type *ty) {
     return {lo, hi};
 }
 
-// multiplyBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::multiplyBounds(long long a, long long b, long long &out) {
     if (a == 0 || b == 0) {
         out = 0;
@@ -118,7 +115,6 @@ bool RangeAnalysis::addBounds(long long a, long long b, long long &out) {
     return true;
 }
 
-// subtractBounds：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::subtractBounds(long long a, long long b, long long &out) {
     return addBounds(a, -b, out);
 }
@@ -132,7 +128,6 @@ bool RangeAnalysis::getConstInt(Value *v, long long &out) {
     return false;
 }
 
-// isIntegerValue：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isIntegerValue(Value *v) {
     return v && v->type_ && v->type_->tid_ == Type::IntegerTyID;
 }
@@ -225,7 +220,6 @@ void RangeAnalysis::buildControlDependence(Function *func) {
     }
 }
 
-// factsForBlock：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const std::vector<RangeAnalysis::PredicateFact> &RangeAnalysis::factsForBlock(BasicBlock *bb) {
     static const std::vector<PredicateFact> empty;
     auto it = blockFacts_.find(bb);
@@ -678,7 +672,6 @@ RangeAnalysis::IntRange RangeAnalysis::getGEPOffsetRange(GetElementPtrInst *gep,
     return result;
 }
 
-// compareRanges：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::TruthValue RangeAnalysis::compareRanges(ICmpInst::ICmpOp pred,
                                                        const IntRange &lhs,
                                                        const IntRange &rhs) const {
@@ -764,7 +757,6 @@ RangeAnalysis::TruthValue RangeAnalysis::getPredicateResult(ICmpInst::ICmpOp pre
     return compareRanges(pred, l, r);
 }
 
-// isKnownNonNegative：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegative(Value *v, BasicBlock *ctx) {
     auto r = getRange(v, ctx);
     return r.knownNonNegative();
@@ -891,7 +883,6 @@ bool RangeAnalysis::addMemoryKeyOffset(MemoryKey &key, Value *idx, long long sca
     return addBounds(key.symbolicScale, scale, key.symbolicScale);
 }
 
-// typeElementCount：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::typeElementCount(Type *ty, Type *elemType, long long &count) const {
     if (!ty || !elemType) return false;
     if (ty == elemType) {
@@ -1196,7 +1187,6 @@ void RangeAnalysis::computeMemoryFacts() {
     cache_.clear();
 }
 
-// entryMemoryFacts：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 const RangeAnalysis::MemoryFactSet &RangeAnalysis::entryMemoryFacts(BasicBlock *bb) {
     static const MemoryFactSet empty;
     if (!bb) return empty;
@@ -1205,7 +1195,6 @@ const RangeAnalysis::MemoryFactSet &RangeAnalysis::entryMemoryFacts(BasicBlock *
     return it == memoryInFacts_.end() ? empty : it->second;
 }
 
-// memoryFactsBefore：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 RangeAnalysis::MemoryFactSet RangeAnalysis::memoryFactsBefore(Instruction *target) {
     MemoryFactSet facts;
     if (!target || !target->parent_) return facts;
@@ -1343,19 +1332,16 @@ bool RangeAnalysis::addPendingNonNegativeArg(unsigned argNo) {
     return true;
 }
 
-// hasPendingNonNegativeArg：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::hasPendingNonNegativeArg(unsigned argNo) const {
     const auto &args = returnSummary_.pendingNonNegativeArgs;
     return std::find(args.begin(), args.end(), argNo) != args.end();
 }
 
-// isKnownNonNegativeForSummary：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx) {
     std::set<Value *> visiting;
     return isKnownNonNegativeForSummary(v, ctx, visiting);
 }
 
-// isKnownNonNegativeForSummary：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx,
                                                  std::set<Value *> &visiting) {
     if (!v) return false;
@@ -1426,7 +1412,6 @@ bool RangeAnalysis::isKnownNonNegativeForSummary(Value *v, BasicBlock *ctx,
     }
 }
 
-// proveOrRequireNonNegative：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::proveOrRequireNonNegative(Value *v, BasicBlock *ctx) {
     if (isKnownNonNegativeForSummary(v, ctx)) return true;
 
@@ -1436,7 +1421,6 @@ bool RangeAnalysis::proveOrRequireNonNegative(Value *v, BasicBlock *ctx) {
     return true;
 }
 
-// callSatisfiesReturnRequirements：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *ctx) {
     if (!call) return false;
     auto *callee = dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
@@ -1486,7 +1470,6 @@ bool RangeAnalysis::callSatisfiesReturnRequirements(CallInst *call, BasicBlock *
     return true;
 }
 
-// allCallSitesSatisfyReturnRequirements：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
     if (!func_ || !func_->parent_) return false;
     if (returnSummary_.pendingNonNegativeArgs.empty()) return true;
@@ -1508,13 +1491,11 @@ bool RangeAnalysis::allCallSitesSatisfyReturnRequirements() {
     return true;
 }
 
-// valueMatchesNormalizedMod：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx, long long mod) {
     std::set<Value *> visiting;
     return valueMatchesNormalizedMod(v, ctx, mod, visiting);
 }
 
-// valueMatchesNormalizedMod：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool RangeAnalysis::valueMatchesNormalizedMod(Value *v, BasicBlock *ctx,
                                                long long mod,
                                                std::set<Value *> &visiting) {

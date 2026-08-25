@@ -8,7 +8,6 @@
 
 namespace {
 
-// availableOutsideLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool availableOutsideLoop(Value *value, Loop *loop) {
     if (dynamic_cast<Constant *>(value)) return true;
     if (dynamic_cast<GlobalVariable *>(value)) return true;
@@ -18,7 +17,6 @@ bool availableOutsideLoop(Value *value, Loop *loop) {
     return !loop->blocks.count(inst->parent_);
 }
 
-// provablyNonNegative：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool provablyNonNegative(Value *value, Loop *scope) {
     if (auto *constant = dynamic_cast<ConstantInt *>(value))
         return constant->value_ >= 0;
@@ -77,7 +75,6 @@ bool separatedByNestedBounds(GetElementPtrInst *bodyGEP,
 
 } // namespace
 
-// detectScalarExpandableNest：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool ReductionAnalysis::detectScalarExpandableNest(
     Loop *inner, ScalarReductionNestInfo &out) {
     if (!inner) return false;
@@ -235,7 +232,6 @@ bool ReductionAnalysis::detectScalarExpandableNest(
     return true;
 }
 
-// isScalarExpansionMemoryLegal：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool ReductionAnalysis::isScalarExpansionMemoryLegal(
     const ScalarReductionNestInfo &info) const {
     if (!info.parent_loop || !info.parent_loop->getInductionIV()) return false;

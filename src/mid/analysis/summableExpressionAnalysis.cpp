@@ -14,7 +14,6 @@
 namespace SummableExpressionAnalysis {
 namespace {
 
-// constantI32：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool constantI32(Value *value, int &result) {
     auto *constant = dynamic_cast<ConstantInt *>(value);
     if (!constant || constant->value_ < std::numeric_limits<int>::min() ||
@@ -264,7 +263,6 @@ void collectValues(Value *value, std::set<Value *> &seen,
     }
 }
 
-// flattenSignedAdd：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool flattenSignedAdd(Value *value, int sign,
                       std::vector<std::pair<Value *, int>> &terms,
                       int &constant) {

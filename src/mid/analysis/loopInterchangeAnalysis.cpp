@@ -6,7 +6,6 @@
 
 namespace {
 
-// hasHeaderIVGuard：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool hasHeaderIVGuard(Loop *loop) {
     if (!loop || !loop->header || !loop->canonicalIV) return false;
     auto *term = loop->header->get_terminator();
@@ -16,7 +15,6 @@ bool hasHeaderIVGuard(Loop *loop) {
     return cmp->get_operand(0) == loop->canonicalIV;
 }
 
-// containsWavefrontCoincidentLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool containsWavefrontCoincidentLoop(Loop *loop) {
     if (!loop) return false;
     if (loop->header &&
@@ -29,14 +27,12 @@ bool containsWavefrontCoincidentLoop(Loop *loop) {
 
 } // namespace
 
-// isInterchangeLegal：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopInterchangeAnalysis::isInterchangeLegal(
     Loop *outer, Loop *inner,
     const std::vector<Instruction *> &accesses) const {
     return DA_->isInterchangeLegal(outer, inner, accesses);
 }
 
-// estimateCost：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 LoopInterchangeCost LoopInterchangeAnalysis::estimateCost(
     const std::vector<GetElementPtrInst *> &geps,
     PhiInst *beforeInnerIV,
@@ -47,7 +43,6 @@ LoopInterchangeCost LoopInterchangeAnalysis::estimateCost(
     return cost;
 }
 
-// deepestCanonicalDescendant：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Loop *LoopInterchangeAnalysis::deepestCanonicalDescendant(Loop *loop) const {
     Loop *best = nullptr;
     int bestDepth = -1;
@@ -64,7 +59,6 @@ Loop *LoopInterchangeAnalysis::deepestCanonicalDescendant(Loop *loop) const {
     return best;
 }
 
-// hasNonIVHeaderPhi：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopInterchangeAnalysis::hasNonIVHeaderPhi(Loop *loop) const {
     if (!loop || !loop->header) return true;
     for (auto *inst : loop->header->instr_list_) {

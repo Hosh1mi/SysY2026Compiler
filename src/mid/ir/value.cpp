@@ -1,5 +1,3 @@
-// Value::replace_all_use_with —— 维护 use-def 链的核心方法
-
 #include "../../include/mid/ir/value.hpp"
 #include "../../include/mid/ir/instruction.hpp"
 

@@ -1,6 +1,3 @@
-// 本文件实现各类指令的文本输出和操作码名称映射。打印逻辑遵守项目 IR 的操作数布局，
-// 尤其是 PHI 的 value/block 对、条件分支的真假目标和 GEP 的逐级索引类型。
-
 #include "../../include/mid/ir/instruction.hpp"
 #include "../../include/mid/ir/globalVariable.hpp"
 #include "../../include/mid/ir/constant.hpp"
@@ -138,8 +135,6 @@ std::string print_fcmp_type(FCmpInst::FCmpOp op) {
     }
     return "wrong fcmpop";
 }
-
-//============================ 各指令 print() ============================
 
 static std::string print_binary_semantics(const BinaryInst *inst) {
     std::string sem;
@@ -404,7 +399,6 @@ std::string AllocaInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ZextInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -420,7 +414,6 @@ std::string ZextInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string FpToSiInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -436,7 +429,6 @@ std::string FpToSiInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string SiToFpInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -452,7 +444,6 @@ std::string SiToFpInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string Bitcast::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -468,7 +459,6 @@ std::string Bitcast::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string InsertElementInst::print() {
     std::string instr_ir;
     instr_ir += "%";
@@ -489,7 +479,6 @@ std::string InsertElementInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ExtractElementInst::print() {
     std::string instr_ir;
     instr_ir += "%" + name_ + " = ";
@@ -500,7 +489,6 @@ std::string ExtractElementInst::print() {
     return instr_ir;
 }
 
-// print：按项目 IR 文本格式输出节点类型、操作数和必要属性。
 std::string ShuffleVectorInst::print() {
     std::string instr_ir;
     instr_ir += "%" + name_ + " = ";

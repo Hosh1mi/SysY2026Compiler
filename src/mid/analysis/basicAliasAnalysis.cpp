@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <iostream>
 
-// isBasicAADebugEnabled：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isBasicAADebugEnabled() {
     static bool enabled = std::getenv("DEBUG_BASIC_AA") != nullptr;
     return enabled;
@@ -21,8 +20,7 @@ void BasicAliasAnalysis::analyze(Module *module) {
     summaries_.clear();
     if (!module_) return;
 
-    // 先为函数定义放入空效果摘要，声明函数保持保守默认值；后续迭代再把被调函数效果
-    // 逐层传播到调用者。
+    // 先为函数定义放入空效果摘要，声明函数保持保守默认值
     for (auto *func : module_->function_list_) {
         FunctionSummary summary;
         if (!func->is_declaration()) {
@@ -109,7 +107,6 @@ BasicAliasAnalysis::PointerInfo BasicAliasAnalysis::getPointerInfo(Value *ptr) c
     return info;
 }
 
-// isTrackedMemoryObject：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isTrackedMemoryObject(Value *value) const {
     return dynamic_cast<GlobalVariable *>(value) ||
            dynamic_cast<AllocaInst *>(value) ||
@@ -127,7 +124,6 @@ MemoryLocation BasicAliasAnalysis::getMemoryLocation(Value *ptr) const {
     return loc;
 }
 
-// aliasResultName：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string BasicAliasAnalysis::aliasResultName(AliasResult result) const {
     switch (result) {
     case AliasResult::NoAlias:
@@ -425,7 +421,6 @@ ModRefInfo BasicAliasAnalysis::getCallModRef(CallInst *call, Value *ptr) const {
     return result;
 }
 
-// isPure：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isPure(Function *func) const {
     if (func && func->hasSemFlag(SemFlag::FnPure))
         return true;
@@ -433,7 +428,6 @@ bool BasicAliasAnalysis::isPure(Function *func) const {
     return it != summaries_.end() && it->second.pure;
 }
 
-// mayHaveSideEffect：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::mayHaveSideEffect(Function *func) const {
     if (func &&
         (func->hasSemFlag(SemFlag::FnPure) ||
@@ -444,7 +438,6 @@ bool BasicAliasAnalysis::mayHaveSideEffect(Function *func) const {
     return it == summaries_.end() || it->second.sideEffect;
 }
 
-// isNoCapture：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
     if (!func || !arg || arg->parent_ != func)
         return false;
@@ -459,14 +452,12 @@ bool BasicAliasAnalysis::isNoCapture(Function *func, Argument *arg) const {
     return it->second.argNoCapture[arg->arg_no_];
 }
 
-// isLocalArrayPointer：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isLocalArrayPointer(Value *ptr) const {
     PointerInfo info = getPointerInfo(ptr);
     auto *alloca = dynamic_cast<AllocaInst *>(info.base);
     return alloca && alloca->allocated_type()->tid_ == Type::ArrayTyID;
 }
 
-// isImmutableLoad：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
                                          const LoopInfo &LI) const {
     if (!load || !load->is_load()) return false;
@@ -486,7 +477,6 @@ bool BasicAliasAnalysis::isImmutableLoad(Instruction *load,
 
 namespace {
 
-// isPointerDerivedFrom：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isPointerDerivedFrom(Value *value, Value *target,
                           std::unordered_set<Value *> &visited) {
     if (value == target) return true;
@@ -539,7 +529,6 @@ Value *BasicAliasAnalysis::getUnderlyingObject(Value *ptr) const {
     return resolveUnderlyingObject(ptr, visiting);
 }
 
-// valueDoesNotCapture：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool BasicAliasAnalysis::valueDoesNotCapture(
     Value *value, std::unordered_set<Value *> &visited) const {
     if (!value)
@@ -598,7 +587,6 @@ bool BasicAliasAnalysis::valueDoesNotCapture(
     return true;
 }
 
-// immutableObjectHasSafeUses：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool BasicAliasAnalysis::immutableObjectHasSafeUses(
     Value *value, std::unordered_set<Value *> &visited) const {
     if (!value || !visited.insert(value).second)

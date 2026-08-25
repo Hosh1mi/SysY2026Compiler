@@ -16,7 +16,6 @@
 
 namespace {
 
-// verifyDominanceEnabled：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool verifyDominanceEnabled() {
     static bool enabled = std::getenv("DEBUG_VERIFY_DOMINANCE") != nullptr;
     return enabled;
@@ -150,25 +149,21 @@ DominatorTreeAnalysis::getChildren(BasicBlock *bb) const {
     return node ? node->children_ : empty;
 }
 
-// isReachableFromEntry：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool DominatorTreeAnalysis::isReachableFromEntry(BasicBlock *bb) const {
     return getNode(bb) != nullptr;
 }
 
-// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(BasicBlock *a, BasicBlock *b) const {
     auto *an = getNode(a);
     auto *bn = getNode(b);
     return an && bn && an->dfsIn_ <= bn->dfsIn_ && an->dfsOut_ >= bn->dfsOut_;
 }
 
-// properlyDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::properlyDominates(BasicBlock *a,
                                                BasicBlock *b) const {
     return a != b && dominates(a, b);
 }
 
-// instructionComesBefore：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::instructionComesBefore(const Instruction *a,
                                                     const Instruction *b) const {
     if (!a || !b || !a->parent_ || a->parent_ != b->parent_) return false;
@@ -179,7 +174,6 @@ bool DominatorTreeAnalysis::instructionComesBefore(const Instruction *a,
     return false;
 }
 
-// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(Instruction *def,
                                        Instruction *use) const {
     if (!def || !use || !def->parent_ || !use->parent_) return false;
@@ -189,7 +183,6 @@ bool DominatorTreeAnalysis::dominates(Instruction *def,
     return dominates(def->parent_, use->parent_);
 }
 
-// dominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::dominates(Value *def, const Use &use) const {
     auto *user = use.user_;
     if (!def || !user || !user->parent_) return false;
@@ -232,7 +225,6 @@ void DominatorTreeAnalysis::getDescendants(
         getDescendants(child->block_, result);
 }
 
-// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominatorTreeAnalysis::verify() const {
     if (!function_) return nodes_.empty() && !root_;
     auto rpo = computeRPO(function_);
@@ -415,25 +407,21 @@ BasicBlock *PostDominatorTreeAnalysis::getIPostDominator(BasicBlock *bb) const {
     return it == ipdom_.end() ? nullptr : it->second;
 }
 
-// canReachExit：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool PostDominatorTreeAnalysis::canReachExit(BasicBlock *bb) const {
     return reachesExit_.count(bb) != 0;
 }
 
-// postDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::postDominates(BasicBlock *a,
                                                BasicBlock *b) const {
     auto it = postDominators_.find(b);
     return a && it != postDominators_.end() && it->second.count(a) != 0;
 }
 
-// properlyPostDominates：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::properlyPostDominates(BasicBlock *a,
                                                        BasicBlock *b) const {
     return a != b && postDominates(a, b);
 }
 
-// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool PostDominatorTreeAnalysis::verify() const {
     if (!function_) return reachesExit_.empty();
 
@@ -562,7 +550,6 @@ DominanceFrontierAnalysis::getFrontier(BasicBlock *bb) const {
     return it == frontiers_.end() ? empty : it->second;
 }
 
-// verify：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool DominanceFrontierAnalysis::verify(const DominatorTreeAnalysis &DT) const {
     if (function_ != DT.function()) return false;
     for (const auto &entry : frontiers_) {

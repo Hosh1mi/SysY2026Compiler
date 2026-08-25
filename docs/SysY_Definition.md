@@ -129,9 +129,3 @@ check capacity.
 are allowed; completion prints each timer and a cumulative total in the form
 `Timer#number@start-line-stop-line: hour-minute-second-microsecond` followed by
 `TOTAL`.
-
-## 4. Source Documents
-
-- SysY Language Definition, Version 1 (English)
-- SysY Definition
-- SysY Runtime Library, Version 1 (English)

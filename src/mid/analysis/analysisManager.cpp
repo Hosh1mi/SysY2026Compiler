@@ -1,13 +1,10 @@
-// AnalysisManager 统一创建、缓存和失效中端分析。各 get 接口按需建立依赖，例如 LoopInfo
-// 依赖支配树，RangeAnalysis 又依赖 LoopInfo 和 SCEV；优化 pass 修改 IR 后通过
-// PreservedAnalyses 声明仍然有效的结果，管理器据此清理其余缓存。
+// AnalysisManager 统一创建、缓存和失效中端分析。
 #include "../../include/mid/analysis/analysisManager.hpp"
 
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
-// isAnalysisManagerDebugEnabled：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isAnalysisManagerDebugEnabled() {
     static bool enabled = std::getenv("DEBUG_ANALYSIS_MANAGER") != nullptr;
     return enabled;
@@ -130,22 +127,18 @@ ScalarEvolution &AnalysisManager::getScalarEvolution(Function *func) {
     return *cache.scalarEvolution;
 }
 
-// isRangeAnalysisActive：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool AnalysisManager::isRangeAnalysisActive(Function *func) const {
     return activeRangeAnalyses_.count(func) != 0;
 }
 
-// enterRangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::enterRangeAnalysis(Function *func) {
     if (func) activeRangeAnalyses_.insert(func);
 }
 
-// leaveRangeAnalysis：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::leaveRangeAnalysis(Function *func) {
     if (func) activeRangeAnalyses_.erase(func);
 }
 
-// invalidateFunctionCache：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
                                               const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;
@@ -184,7 +177,6 @@ void AnalysisManager::invalidateFunctionCache(FunctionCache &cache,
     }
 }
 
-// invalidate：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidate(Module *module, const PreservedAnalyses &pa) {
     if (pa.preservesAll()) {
         debug("preserve", "all", "module");
@@ -203,7 +195,6 @@ void AnalysisManager::invalidate(Module *module, const PreservedAnalyses &pa) {
     }
 }
 
-// invalidateFunction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 void AnalysisManager::invalidateFunction(Function *func,
                                          const PreservedAnalyses &pa) {
     if (pa.preservesAll()) return;

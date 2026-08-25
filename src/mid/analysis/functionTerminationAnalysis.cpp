@@ -1,37 +1,30 @@
 // FunctionTerminationAnalysis 证明函数在定义行为下是否必然返回。它检查所有可达路径，并
-// 只在循环具有可证明的单调控制变量和有限边界时接受循环。自动记忆化等会改变调用次数的
-// 优化借此避免删除原程序中可能永不返回的调用。
+// 只在循环具有可证明的单调控制变量和有限边界时接受循环。
 
 #include "../../include/mid/analysis/functionTerminationAnalysis.hpp"
-
 #include "../../include/mid/ir/instruction.hpp"
-
 #include <cstdlib>
 
 namespace {
 
-// calledFunction：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 Function *calledFunction(CallInst *call) {
     if (!call || call->num_ops() == 0)
         return nullptr;
     return dynamic_cast<Function *>(call->get_operand(call->num_ops() - 1));
 }
 
-// isUnitStep：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool isUnitStep(const InductionDescriptor &control, long long expected) {
     return control.constantStep && *control.constantStep == expected;
 }
 
 } // namespace
 
-// mustReturn：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool FunctionTerminationAnalysis::mustReturn(Function *function) {
     if (!module_ || !function || function->parent_ != module_)
         return false;
     return analyzeFunction(function);
 }
 
-// loopIsFinite：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 bool FunctionTerminationAnalysis::loopIsFinite(const Loop &loop) const {
     if (!loop.preheader || !loop.singleLatch() || !loop.singleExit() ||
         loop.exiting.size() != 1)

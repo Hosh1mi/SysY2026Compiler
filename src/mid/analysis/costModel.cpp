@@ -5,7 +5,6 @@
 
 #include <cstdlib>
 
-// strideAlong：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 long CostModel::strideAlong(GetElementPtrInst *gep, PhiInst *iv) {
     if (!gep || !iv) return -1;
 

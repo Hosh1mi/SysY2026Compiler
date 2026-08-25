@@ -460,11 +460,11 @@ public:
     }
     Purpose purpose_ = Purpose::Generic;
 
-    // 判断该槽是否为标量展开的临时存储。
+    // 判断该槽是否为循环展开的临时存储。
     bool isLoopExpansionScratch() const {
         return purpose_ == Purpose::LoopExpansionScratch;
     }
-    // 把槽标为标量展开临时存储，供后续分析区分普通源级对象。
+    // 把槽标为循环展开临时存储，供后续分析区分普通源级对象。
     void markLoopExpansionScratch() {
         purpose_ = Purpose::LoopExpansionScratch;
     }

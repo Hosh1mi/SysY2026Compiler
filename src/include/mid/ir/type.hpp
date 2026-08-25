@@ -18,7 +18,6 @@ public:
         ArrayTyID,     // 数组类型
         VectorTyID,    // 向量（<4 x i32> / <4 x float>）
         PointerTyID,   // 指针类型
-        TensorTyID
     };
     // 构造一个给定类别的类型；派生类负责补充位宽、元素类型等参数。
     explicit Type(TypeID tid) : tid_(tid) {}
@@ -46,22 +45,12 @@ public:
     unsigned num_elements_;   // 元素个数
 };
 
-// 非原生宽度向量的后端可见存储形式。它故意保留 ArrayTyID，使布局、全局数据、GEP
-// 和 load/store 可以把它当作定长聚合处理；它不是可直接参与向量指令的 VectorType。
-class ScalarizedVectorType : public ArrayType {
-public:
-    // contained 是 lane 类型，num_elements 是源级 lane 数。
-    ScalarizedVectorType(Type* contained, unsigned num_elements)
-        : ArrayType(contained, num_elements) {}
-};
-
 // <4 x i32> : num_elements_ = 4, contained_ = i32
 class VectorType : public Type {
 public:
-    // 构造可作为单个 SSA 值参与向量指令的定宽向量类型。
     VectorType(Type* contained, unsigned num_elements) : Type(Type::VectorTyID), num_elements_(num_elements), contained_(contained) {}
-    Type* contained_;         // 通道元素类型
-    unsigned num_elements_;   // 通道数
+    Type* contained_;
+    unsigned num_elements_;
 };
 
 // [2 x [3 x i32]]*
@@ -83,16 +72,6 @@ public:
     std::vector<Type*> args_;  // 形参类型列表
     bool is_variadic_ = false;
 };
-
-// Tensor 当前复用嵌套 ArrayType 表示，源级身份由 SemFlag::SrcTensor 保留。
-// 下列草案记录独立 TensorType 的预期形状，待类型系统完整支持 tensor 后启用。
-// {3 x {2 x i32}}
-// class TensorType : public Type {
-// public:
-//     TensorType(Type* contained, unsigned num_elements) : Type(Type::TensorTyID), num_elements_(num_elements), contained_(contained) {}
-//     Type* contained_;
-//     unsigned num_elements_;
-// };
 
 // 返回该 IR 类型采用紧凑布局时的存储字节数。无存储表示或大小溢出时返回 -1。
 long long typeStorageBytes(Type *type);

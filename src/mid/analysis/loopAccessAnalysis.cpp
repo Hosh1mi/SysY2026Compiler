@@ -35,7 +35,6 @@ LoopAccessInfo LoopAccessAnalysis::collect(Loop *loop) const {
     return info;
 }
 
-// isAffineOverAncestorIVs：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopAccessAnalysis::isAffineOverAncestorIVs(
     GetElementPtrInst *gep, Loop *inner) const {
     if (!gep || !inner || gep->num_ops() < 2) return false;
@@ -59,13 +58,11 @@ bool LoopAccessAnalysis::isAffineOverAncestorIVs(
     return true;
 }
 
-// isGlobalOrArgument：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 bool LoopAccessAnalysis::isGlobalOrArgument(Value *value) {
     return dynamic_cast<GlobalVariable *>(value) ||
            dynamic_cast<Argument *>(value);
 }
 
-// innermostArrayDim：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 int LoopAccessAnalysis::innermostArrayDim(Value *base) {
     auto *ptr = dynamic_cast<PointerType *>(base->type_);
     if (!ptr) return -1;

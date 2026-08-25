@@ -1,11 +1,8 @@
-// Type::print() —— 将 IR 类型转为可读字符串（如 i32, float, [2 x i32]* 等）
-
 #include "../../include/mid/ir/type.hpp"
 
 #include <limits>
 #include <string>
 
-// typeStorageBytes：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 long long typeStorageBytes(Type *type) {
     if (!type) return -1;
 
@@ -25,10 +22,6 @@ long long typeStorageBytes(Type *type) {
     } else if (auto *vector = dynamic_cast<VectorType *>(type)) {
         elementType = vector->contained_;
         elementCount = vector->num_elements_;
-    // 独立 TensorType 尚未启用；当前 tensor 复用 ArrayType，已由上面的分支计算布局。
-    // } else if (auto *tensor = dynamic_cast<TensorType *>(type)){
-    //     elementType = tensor->contained_;
-    //     elementCount = tensor->num_elements_;
     }
     else {
         return -1;

@@ -4,7 +4,6 @@
 #include "../../include/mid/ir/function.hpp"
 #include "../../include/mid/ir/basicBlock.hpp"
 #include "../../include/mid/ir/instruction.hpp"
-
 #include <algorithm>
 #include <set>
 #include <string>
@@ -15,7 +14,6 @@ void Function::add_basic_block(BasicBlock *bb) {
     basic_block_names_.insert(bb->name_);
 }
 
-// uniqueBasicBlockName：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 std::string Function::uniqueBasicBlockName(const std::string &base) {
     unsigned &suffix = basic_block_suffixes_[base];
     for (;;) {

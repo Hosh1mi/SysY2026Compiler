@@ -283,7 +283,6 @@ bool runOnFunction(Function *function, Module *module,
 } // namespace
 
 /**
- * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
  * @param module 待处理的 IR 模块，函数可能原地修改其内容。
  * @return 无返回值；所需结果通过 IR 原地修改或输出参数给出。
  */
@@ -293,7 +292,6 @@ void LoopModuloDelay::execute(Module *module) {
 }
 
 /**
- * @brief 执行当前优化 Pass，并按需更新或失效分析结果。
  * @param module 待处理的 IR 模块，函数可能原地修改其内容。
  * @param manager 参数 `manager`，用于本函数的分析、匹配或 IR 构造。
  * @return 返回本次运行后仍然有效的分析集合。

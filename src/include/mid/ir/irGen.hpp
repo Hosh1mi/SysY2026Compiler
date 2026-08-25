@@ -6,8 +6,7 @@
 
 using std::unique_ptr;
 using std::vector;
-// IRGen 的词法符号表。每一层 map 只保存该层声明，查找从内向外进行；Value 的实际
-// 形态可能是常量、地址、函数或编译期标量化向量，由访问者根据类型解释。
+// IRGen 的词法符号表。每一层 map 只保存该层声明，查找从内向外进行。
 class Scope {
 public:
     // 压入一个空的词法作用域；构造 GenIR 时首先建立全局层。
@@ -55,7 +54,7 @@ class GenIR: public Visitor {
 public:
     // 按源码顺序访问顶层声明和函数定义。
     void visit(CompUnitAST &ast) override;
-    // 设置当前声明的源级/IR 类型与 const 属性，再逐个生成声明对象。
+    // 设置当前声明的 IR 类型与 const 属性，再逐个生成声明对象。
     void visit(DeclAST &ast) override;
     // 生成单个全局量、局部栈槽、常量或数组及其初始化。
     void visit(ObjectDefAST &ast) override;
@@ -69,7 +68,7 @@ public:
     void visit(BlockAST &ast) override;
     // 空语句不生成 IR。
     void visit(EmptyStmtAST &ast) override;
-    // 先按左值协议取得目标，再计算右值并生成 store 或向量 lane 更新。
+    // 先按左值协议取得目标，再计算右值并生成 store。
     void visit(AssignStmtAST &ast) override;
     // 计算表达式并丢弃结果，调用等副作用仍被保留。
     void visit(ExprStmtAST &ast) override;
@@ -87,7 +86,7 @@ public:
     void visit(WhileStmtAST &ast) override;
     // 把整数或浮点字面量转成对应 Constant，并写入 recentVal。
     void visit(LiteralExprAST &ast) override;
-    // 名称解析后按上下文返回地址或值，并降低数组/向量下标。
+    // 名称解析后按上下文返回地址或值，并降低数组下标。
     void visit(LValueAST &ast) override;
     // 检查并转换实参、生成 CallInst；特殊运行库调用会补充约定参数。
     void visit(CallExprAST &ast) override;
@@ -95,9 +94,9 @@ public:
     void visit(UnaryExprAST &ast) override;
     // 生成算术、比较或短路逻辑；乘除模转交 lowerMultiplicative。
     void visit(BinaryExprAST &ast) override;
-    // 对任意向量表达式结果生成 lane 提取。
+    // 对数组下标生成地址计算和 load。
     void visit(SubscriptExprAST &ast) override;
-    // 根据上下文期望类型构造花括号向量值。
+    // 构造花括号初始化值。
     void visit(AggregateExprAST &ast) override;
 
     IRStmtBuilder *builder;       // 当前插入点的指令工厂
@@ -169,7 +168,6 @@ public:
         auto put_format = new Function(format_type, "putf", module.get());
 
         std::vector<Type *>().swap(output_params);
-        // output_params.clear();
         output_params.push_back(TyInt32);
         output_type = new FunctionType(TyVoid, output_params);
         auto sysy_start_time = new Function(output_type, "_sysy_starttime", module.get());
@@ -204,10 +202,6 @@ public:
         }
 #endif
 
-        // output_params.clear();
-        // output_params.push_back(TyInt32);
-        // output_type = new FunctionType(TyInt32, output_params);
-        // auto my_malloc = new Function(output_type, "malloc", module.get());
 
         scope.enter();
         scope.push("getint", get_int);
@@ -267,6 +261,6 @@ public:
     // 动态计算用类型统一：必要时修改 val[0]/val[1] 并插入 int/float 转换。
     void checkCalType(Value **val);
 
-    // 生成乘、除、模及其向量/常量形式；拆出此函数只为缩短 BinaryExpr lowering。
+    // 生成乘、除、模；拆出此函数只为缩短 BinaryExpr lowering。
     void lowerMultiplicative(BinaryExprAST &ast);
 };

@@ -117,7 +117,6 @@ static void collectEdgeFacts(BasicBlock *fromBB, BasicBlock *toBB,
     recordAssumedBool(br->get_operand(0), trueDest == toBB, boolFacts, cmpFacts);
 }
 
-// isSameOrNestedLoop：逐项检查该性质所需条件；任何未知结构都按不能证明处理。
 static bool isSameOrNestedLoop(const Loop *inner, const Loop *outer) {
     if (!outer) return true;
     for (const Loop *loop = inner; loop; loop = loop->parent)
@@ -177,7 +176,6 @@ static void collectDominatingEdgeFacts(const QueryState &state,
     }
 }
 
-// gatherFacts：封装该局部计算，为上层分析或 IR 构造返回所需结果。
 static void gatherFacts(const QueryState &state, BoolFactMap &boolFacts,
                         ICmpFactMap &cmpFacts) {
     collectDominatingEdgeFacts(state, boolFacts, cmpFacts);
