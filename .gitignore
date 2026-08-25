@@ -2,6 +2,7 @@
 
 !.clang-format
 !.gitignore
+!schedA53_ref.td
 !CMakeLists.txt
 !Dockerfile
 !README.md
@@ -10,10 +11,7 @@
 !lib/
 !.proto/
 !docs/*
-.agents/
 !test
-test/*
-.proto/
 
 __pycache__
 .DS_STORE
