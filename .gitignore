@@ -10,7 +10,7 @@
 !src/
 !lib/
 !.proto/
-!docs/*
+!docs/
 !test
 
 __pycache__
