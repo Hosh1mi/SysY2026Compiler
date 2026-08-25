@@ -9,7 +9,7 @@
 // 命中即 RAUW 到 leader——leader 在支配树祖先链上，必然支配当前指令。
 //
 // 与管线最前端的 EarlyCSE 互补：
-//   * 跑在循环管线之后，收割 LoopUnroll/IVSR/LoopRotate 暴露的重复 GEP 与标量算术；
+//   * 跑在循环管线之后，收割 IVSR/LoopRotate 暴露的重复 GEP 与标量算术；
 //   * phi 处理：平凡 phi 折叠 + 同块同入边 phi 合并；
 //   * InlineExpand 之后的纯函数调用 CSE（EarlyCSE 跑在内联之前，管不到）。
 //

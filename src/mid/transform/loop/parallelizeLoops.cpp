@@ -1058,9 +1058,6 @@ bool ParallelizeLoops::isLegalDoall(Loop &loop, const LoopShape &shape,
             return fail("store address does not vary with loop IV");
     }
 
-    // TriangleInterchange 已证明同根读取只来自当前单元或更早波次。若在这里重做
-    // 方向向量检查，会丢失该证明依赖的嵌套循环不等式，因此仅对带精确标记的循环
-    // 复用 coincidence 证书；未标记循环仍执行下面的普通 DOALL 检查。
     // 依赖：每个 (store, access) 对需证明独立或仅同迭代依赖
 
     auto basePriv = [&](Instruction *acc) {

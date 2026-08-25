@@ -7,7 +7,7 @@
 //   规范 2-BB 循环剥首轮：先执行 iteration 0，再进入主循环
 //   latch 上存在 side-exit 时仍保留该退出边
 //
-// 与 LoopUnroll 不同，本 Pass 保留 side exit，不做多倍展开。
+// 本 Pass 保留 side exit，不做多倍展开。
 
 #include "pass.hpp"
 

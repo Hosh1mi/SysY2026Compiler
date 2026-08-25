@@ -4,7 +4,7 @@
 #include "include/frontend/validation.hpp"
 
 #include "include/mid/ir/irGen.hpp"
-#include "include/mid/runtime/summableModSumRuntime.hpp"
+// #include "include/mid/runtime/summableModSumRuntime.hpp"
 #include "include/mid/opt/passManager.hpp"
 #include "include/mid/opt/optPasses.hpp"
 
@@ -151,7 +151,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
 
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<Mem2Reg>());
-    pm.addPass(std::make_unique<RadixRecurrenceEliminate>());
+    // pm.addPass(std::make_unique<RadixRecurrenceEliminate>());
     pm.addPass(std::make_unique<EarlyCSE>());
     addMemoryCleanup(pm, /*runOnClean=*/true);
     pm.addPass(std::make_unique<TailRecursionEliminate>());
@@ -161,7 +161,7 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CodeSink>());
 
-    pm.addPass(std::make_unique<BitFuncRecognize>());
+    // pm.addPass(std::make_unique<BitFuncRecognize>());
     pm.addPass(std::make_unique<LastIterationElimination>());
     pm.addPass(std::make_unique<InlineExpand>());
     pm.addPass(std::make_unique<EarlyCSE>());
@@ -188,18 +188,18 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<LICM>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LoopDeletion>());
-    pm.addPass(std::make_unique<LoopRepFold>(LoopRepFoldMode::Lite));
-    pm.addPass(std::make_unique<LoopFixedPointEliminate>());
+    // pm.addPass(std::make_unique<LoopRepFold>(LoopRepFoldMode::Lite));
+    // pm.addPass(std::make_unique<LoopFixedPointEliminate>());
     addScalarSimplifyClosure(pm);
-    pm.addPass(std::make_unique<TriangularRemapSourceCompose>());
-    pm.addPass(std::make_unique<TriangularPanelize>());
-    pm.addPass(std::make_unique<LinearRecurrenceFold>());
+    // pm.addPass(std::make_unique<TriangularRemapSourceCompose>());
+    // pm.addPass(std::make_unique<TriangularPanelize>());
+    // pm.addPass(std::make_unique<LinearRecurrenceFold>());
     pm.addPass(std::make_unique<LoopFusion>());
     pm.addPass(std::make_unique<LoopInvariantReduction>());
     pm.addPass(std::make_unique<LoopSkewing>());
-    pm.addPass(std::make_unique<TriangleInterchange>());
+    // pm.addPass(std::make_unique<TriangleInterchange>());
     pm.addPass(std::make_unique<LoopInterchange>());
-    pm.addPass(std::make_unique<LoopResetPointElimination>());
+    // pm.addPass(std::make_unique<LoopResetPointElimination>());
     pm.addPass(std::make_unique<ParallelizeLoops>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<IndVarSimplify>());
@@ -212,14 +212,14 @@ static void buildArm64Pipeline(PassManager &pm, int optLevel, Module *m) {
     pm.addPass(std::make_unique<IdiomRecognize>());
     pm.addPass(std::make_unique<IfConversion>());
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LoopRepFold>());
-    pm.addPass(std::make_unique<LoopModuloDelay>());
+    // pm.addPass(std::make_unique<LoopRepFold>());
+    // pm.addPass(std::make_unique<LoopModuloDelay>());
     pm.addPass(std::make_unique<LoopSimplify>());
     pm.addPass(std::make_unique<LoopPeel>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<CFGSimplify>());
     pm.addPass(std::make_unique<LoopSimplify>());
-    pm.addPass(std::make_unique<LoopUnroll>());
+    // pm.addPass(std::make_unique<LoopUnroll>());
     addScalarSimplifyClosure(pm);
     pm.addPass(std::make_unique<LateMemoryForwarding>());
     addScalarSimplifyClosure(pm);
@@ -300,7 +300,7 @@ int main(int argc, char **argv) {
     buildArm64Pipeline(pm, options.optLevel, m.get());
     pm.run(m.get());
 
-    materializeSummableModSumRuntime(m.get());
+    // materializeSummableModSumRuntime(m.get());
     if (options.verifyIR)
         m->verify("summable-runtime-materialization");
 

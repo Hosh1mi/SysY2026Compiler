@@ -135,22 +135,6 @@ exit:  %next.lcssa = phi i32 [ %next, %loop ]
        %result = add i32 %next.lcssa, 10
 ```
 
-#### `linearRecurrenceFold.cpp`
-
-> **线性递推折叠**：把最多若干维的耦合线性状态递推写成矩阵系统 `x_next = A * x`，再通过闭式或二进制矩阵快速幂计算最终逃逸值。
-
-```cpp
-// 二维线性递推示意
-for (int i = 0; i < n; ++i) {
-    int nextX = x + y;
-    int nextY = x;
-    x = nextX;
-    y = nextY;
-}
-
-// 等价为 [x_n, y_n]^T = [[1,1],[1,0]]^n * [x_0, y_0]^T。
-```
-
 #### `loopCloneUtils.cpp`
 
 > **循环克隆工具**：提供循环区域克隆的共享工具，本身不是独立 Pass。它复制基本块和指令、建立旧值到新值的映射，并用映射后的值修复克隆区域的操作数和出口 PHI。
@@ -174,20 +158,6 @@ for (int i = 0; i < n; ++i)
     x = x * 3 + 1;
 
 // 整个循环可以删除。
-```
-
-#### `loopFixedPointEliminate.cpp`
-
-> **循环不动点消除**：识别状态已经达到不动点的循环。当继续迭代不会改变状态或可观察内存时，在回边插入状态变化检查，达到固定点后提前退出，删除剩余空转迭代。
-
-```cpp
-// 若分析能够证明 update(x) == x，后续迭代不再改变结果。
-while (condition) {
-    int next = update(x);
-    x = next;
-}
-
-// 达到固定点后可直接退出循环。
 ```
 
 #### `loopFusion.cpp`
@@ -268,21 +238,6 @@ for (int i = 0; i < n; ++i)
 *sum = local;
 ```
 
-#### `loopModuloDelay.cpp`
-
-> **循环取模延迟**：把循环携带状态上的逐轮有符号余数运算延迟到循环出口。只有宽整数累加不会溢出，并且延迟取模与逐轮取模等价时才应用。
-
-```cpp
-// 变换前
-for (int i = 0; i < n; ++i)
-    state = (state + delta[i]) % modulus;
-
-// 变换后示意：wideState 使用已证明安全的更宽类型。
-for (int i = 0; i < n; ++i)
-    wideState += delta[i];
-state = wideState % modulus;
-```
-
 #### `loopPeel.cpp`
 
 > **循环剥离**：把第一次迭代克隆到循环外单独执行，再让剩余迭代进入原循环。这样可以消除只在首轮成立的判断，或为后续展开、向量化建立稳定状态。
@@ -297,34 +252,6 @@ if (n > 0)
     body(0);
 for (int i = 1; i < n; ++i)
     body(i);
-```
-
-#### `loopRepFold.cpp`
-
-> **循环重复折叠**：识别可求和的仿射贡献、等差累加和受支持的模递推，根据迭代次数生成闭式或辅助计算路径，用一次等价计算替代逐轮更新。
-
-```cpp
-// 变换前
-int sum = initial;
-for (int i = 0; i < n; ++i)
-    sum += a * i + b;
-
-// 闭式示意
-sum = initial + a * n * (n - 1) / 2 + b * n;
-```
-
-#### `loopResetPointElimination.cpp`
-
-> **循环重置点消除**：对乘性状态递推查找最后一次确定产生零值的重置点。该点之前的状态不可能影响最终结果，因此循环可以从最后重置位置继续执行。
-
-```cpp
-for (int i = 0; i < n; ++i)
-    state = state * factor[i] + fresh[i];
-
-// 若已证明 factor[k] == 0，则 k 之前的 state 不再影响后续状态：
-state = fresh[k];
-for (int i = k + 1; i < n; ++i)
-    state = state * factor[i] + fresh[i];
 ```
 
 #### `loopRotate.cpp`
@@ -373,22 +300,6 @@ for (int i = 1; i < n; ++i)
 for (int wave = 2; wave < n + m; ++wave)
     for (int i = lower(wave); i < upper(wave); ++i)
         compute(i, wave - i);
-```
-
-#### `loopUnroll.cpp`
-
-> **循环展开**：实现完整展开和定因子展开，覆盖简单循环、结构化 CFG、do-while、带状态 while 等形态。Pass 根据循环体规模、状态数量和内存操作选择展开因子，并生成余数路径。
-
-```cpp
-// 四路展开示意
-for (; i + 3 < n; i += 4) {
-    body(i);
-    body(i + 1);
-    body(i + 2);
-    body(i + 3);
-}
-for (; i < n; ++i)
-    body(i);  // 余数迭代
 ```
 
 #### `loopVectorize.cpp`
@@ -455,53 +366,6 @@ else
     for (int i = 0; i < n; ++i) a[i] = y(i);
 ```
 
-#### `triangleInterchange.cpp`
-
-> **三角波前交换**：处理可证明的三角波前结构，把原三角迭代次序改写为 distance 外层、独立 lane 内层，同时保证读取只依赖当前或更早波次。
-
-```cpp
-// 原三角域
-for (int i = 0; i < n; ++i)
-    for (int j = 0; j <= i; ++j)
-        compute(i, j);
-
-// 波前次序示意
-for (int distance = 0; distance < n; ++distance)
-    for (int lane = 0; lane < n - distance; ++lane)
-        compute(lane + distance, lane);
-```
-
-#### `triangularPanelize.cpp`
-
-> **三角分块（Panel 化）**：把三角标量递推的相邻列组合成 panel。没有面板内依赖的公共前缀使用向量计算，剩余三角依赖仍按标量顺序补齐。
-
-```cpp
-// 标量列递推
-for (int j = 0; j < width; ++j)
-    for (int i = j; i < height; ++i)
-        columnStep(i, j);
-
-// 四列 panel 示意
-for (int j = 0; j < width; j += 4) {
-    vectorPrefix(j, j + 1, j + 2, j + 3);
-    finishPanelDependencies(j, 4);
-}
-```
-
-#### `triangularRemapSourceCompose.cpp`
-
-> **三角重映射源组合**：识别“行长序列生成、三角矩阵重映射、后继消费”的完整链条，在消费者读取处追溯真正源元素，从而绕过中间矩阵副本；边界无法静态证明时会生成运行时守卫和回退路径。
-
-```cpp
-// 变换前：先搬运到 temporary，再由消费者读取。
-temporary[remap(i)] = source[i];
-result[i] = consume(temporary[i]);
-
-// 变换后示意：在消费点组合逆映射，直接读取真正来源。
-int sourceIndex = traceSource(i);
-result[i] = consume(source[sourceIndex]);
-```
-
 ## Pass 之间的典型关系
 
 循环 Pass 并不是各自孤立运行，常见协作关系为：
@@ -513,7 +377,7 @@ LoopSimplify
     -> 删除、闭式折叠、融合、交换、倾斜等高层变换
     -> 再次 LoopSimplify + LCSSA
     -> LoopVectorize / IndVarStrengthReduce
-    -> LoopPeel / LoopUnroll
+    -> LoopPeel
     -> InstCombine / DCE / CFGSimplify 清理新暴露的冗余 IR
 ```
 
@@ -524,6 +388,5 @@ LoopSimplify
 - `LoopSimplify` 必须先于 `LCSSA`，因为 LCSSA 依赖 dedicated exit。
 - 需要改写循环活跃输出的 Pass 通常要求 LCSSA，避免在任意循环外位置逐个修复 use。
 - `IndVarSimplify` 和 LICM 能把循环变成更规范的分析形式，通常位于向量化和展开之前。
-- `LoopModuloDelay` 需要在展开破坏单步模递推形态前运行。
 - `LoopVectorize` 后运行 `IndVarStrengthReduce`，可继续把向量循环的仿射地址计算变成指针递推。
-- `LoopPeel`、`LoopUnroll` 或循环版本化后通常需要 InstCombine、DCE 和 CFGSimplify 清理克隆产生的常量分支、退化 PHI 和死块。
+- `LoopPeel` 或循环版本化后通常需要 InstCombine、DCE 和 CFGSimplify 清理克隆产生的常量分支、退化 PHI 和死块。

@@ -6,7 +6,6 @@
 
 #include "../../../include/mid/opt/loopUnroll.hpp"
 #include "../../../include/mid/opt/lcssa.hpp"
-#include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -34,155 +33,6 @@ struct UnrollCost {
     int floatingStates = 0;            ///< 浮点类型的循环携带状态数量。
     int vectorStates = 0;              ///< 向量类型的循环携带状态数量。
 };
-
-/**
- * @brief 保存展开时可合并处理的模递推及其范围证明信息。
- */
-struct UnrolledModuloRecurrence {
-    PhiInst *state = nullptr;        ///< 承载模递推状态的循环头 PHI。
-    BinaryInst *remainder = nullptr; ///< 对下一状态取模的余数指令。
-    ConstantInt *modulus = nullptr;  ///< 余数指令使用的常量模数。
-    std::vector<ModuloRecurrenceAnalysis::SignedTerm> contributionTerms; ///< 单轮状态增量的带符号项。
-    std::set<Instruction *> updateChain; ///< 从状态 PHI 到余数指令的更新链。
-    long long contributionLower = 0; ///< 单轮增量的已证明下界。
-    long long contributionUpper = 0; ///< 单轮增量的已证明上界。
-    long long prefixLower = 0;       ///< 展开组内中间前缀状态的最小偏移。
-    long long prefixUpper = 0;       ///< 展开组内中间前缀状态的最大偏移。
-    long long finalLower = 0;        ///< 合并整组更新后被除数的下界。
-    long long finalUpper = 0;        ///< 合并整组更新后被除数的上界。
-};
-
-/**
- * @brief 构造 prepareModuloRecurrence 所描述的新 IR，并返回或记录构造结果。
- * @param state 参数 `state`，用于本函数的分析、匹配或 IR 构造。
- * @param remainder 参数 `remainder`，用于本函数的分析、匹配或 IR 构造。
- * @param initialValue 参数 `initialValue`，用于本函数的分析、匹配或 IR 构造。
- * @param updateBlocks 参数 `updateBlocks`，用于本函数的分析、匹配或 IR 构造。
- * @param loopStates 参数 `loopStates`，用于本函数的分析、匹配或 IR 构造。
- * @param inductionState 参数 `inductionState`，用于本函数的分析、匹配或 IR 构造。
- * @param unrollFactor 参数 `unrollFactor`，用于本函数的分析、匹配或 IR 构造。
- * @param allowExternalUses 参数 `allowExternalUses`，用于本函数的分析、匹配或 IR 构造。
- * @param result 用于写回匹配或计算结果的输出参数。
- * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
- */
-static bool prepareModuloRecurrence(
-    PhiInst *state, BinaryInst *remainder, Value *initialValue,
-    const std::set<BasicBlock *> &updateBlocks,
-    const std::vector<PhiInst *> &loopStates, PhiInst *inductionState,
-    int unrollFactor, bool allowExternalUses,
-    UnrolledModuloRecurrence &result) {
-    if (unrollFactor <= 2)
-        return false;
-
-    ModuloRecurrenceAnalysis::Recurrence analyzed;
-    if (!ModuloRecurrenceAnalysis::analyze(
-            state, remainder, updateBlocks, analyzed) ||
-        !ModuloRecurrenceAnalysis::hasPrivateUpdateChain(
-            analyzed, updateBlocks, allowExternalUses))
-        return false;
-
-    if (!ModuloRecurrenceAnalysis::inferContributionBounds(
-            analyzed, loopStates, inductionState))
-        return false;
-
-    ModuloRecurrenceAnalysis::Bounds initial;
-    if (!ModuloRecurrenceAnalysis::inferBounds(initialValue, initial))
-        return false;
-
-    const long long modulus = analyzed.modulus->value_;
-    ModuloRecurrenceAnalysis::Bounds prefix{
-        std::min(initial.lower, -modulus + 1),
-        std::max(initial.upper, modulus - 1)};
-    if (!ModuloRecurrenceAnalysis::advanceBounds(
-            prefix, analyzed, static_cast<unsigned>(unrollFactor - 1)))
-        return false;
-
-    ModuloRecurrenceAnalysis::Bounds final{-modulus + 1, modulus - 1};
-    if (!ModuloRecurrenceAnalysis::advanceBounds(final, analyzed))
-        return false;
-    if (!ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-            prefix.lower, prefix.upper, modulus) ||
-        !ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-            final.lower, final.upper, modulus))
-        return false;
-
-    UnrolledModuloRecurrence candidate;
-    candidate.state = analyzed.state;
-    candidate.remainder = analyzed.remainder;
-    candidate.modulus = analyzed.modulus;
-    candidate.contributionTerms = analyzed.contributionTerms;
-    candidate.updateChain = analyzed.updateChain;
-    candidate.contributionLower = analyzed.contributionRange.lower;
-    candidate.contributionUpper = analyzed.contributionRange.upper;
-    candidate.prefixLower = prefix.lower;
-    candidate.prefixUpper = prefix.upper;
-    candidate.finalLower = final.lower;
-    candidate.finalUpper = final.upper;
-    result = std::move(candidate);
-    return true;
-}
-
-/**
- * @brief 判断 isMustExecuteModuloRecurrence 所描述的结构、合法性或安全条件是否成立。
- * @param recurrence 参数 `recurrence`，用于本函数的分析、匹配或 IR 构造。
- * @param loop 待检查或变换的循环。
- * @param func 待分析或改写的函数。
- * @param latch 循环回边基本块。
- * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
- */
-static bool isMustExecuteModuloRecurrence(
-    const UnrolledModuloRecurrence &recurrence, const Loop &loop,
-    Function *func, BasicBlock *latch) {
-    if (!func || !latch || !gLoopUnrollDomTree)
-        return false;
-    for (Instruction *instruction : recurrence.updateChain) {
-        if (!instruction->parent_ ||
-            !loop.blocks.count(instruction->parent_) ||
-            !gLoopUnrollDomTree->dominates(instruction->parent_, latch))
-            return false;
-    }
-    for (const auto &term : recurrence.contributionTerms) {
-        auto *instruction = dynamic_cast<Instruction *>(term.value);
-        if (instruction && loop.blocks.count(instruction->parent_) &&
-            !gLoopUnrollDomTree->dominates(instruction->parent_, latch))
-            return false;
-    }
-    return true;
-}
-
-/**
- * @brief 用至多一次正向和一次负向修正代替已知范围内的取模。
- * @param dividend 待归约的值。
- * @param lower dividend 的已证明下界。
- * @param upper dividend 的已证明上界。
- * @param modulus 正模数。
- * @param module 所属模块。
- * @param block 指令插入基本块。
- * @return 与 dividend%modulus 等价的有界修正结果。
- */
-static Value *buildBoundedModulo(Value *dividend, long long lower,
-                                 long long upper, int modulus,
-                                 Module *module, BasicBlock *block) {
-    Value *adjusted = dividend;
-    if (upper >= modulus) {
-        auto *positiveMod = new ConstantInt(module->int32_ty_, modulus);
-        auto *highCmp = new ICmpInst(ICmpInst::ICMP_SGE, adjusted,
-                                     positiveMod, block);
-        auto *highSub = new BinaryInst(module->int32_ty_, Instruction::Sub,
-                                       adjusted, positiveMod, block);
-        adjusted = new SelectInst(highCmp, highSub, adjusted, block);
-    }
-    if (lower <= -modulus) {
-        auto *negativeMod = new ConstantInt(module->int32_ty_, -modulus);
-        auto *positiveMod = new ConstantInt(module->int32_ty_, modulus);
-        auto *lowCmp = new ICmpInst(ICmpInst::ICMP_SLE, adjusted,
-                                    negativeMod, block);
-        auto *lowAdd = new BinaryInst(module->int32_ty_, Instruction::Add,
-                                      adjusted, positiveMod, block);
-        adjusted = new SelectInst(lowCmp, lowAdd, adjusted, block);
-    }
-    return adjusted;
-}
 
 /**
  * @brief 计算 computeBoundAdjustment 所描述的派生信息，供合法性或收益判断使用。
@@ -955,32 +805,6 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
             return false;
     }
 
-    std::vector<UnrolledModuloRecurrence> modularRecurrences;
-    std::unordered_map<PhiInst *, std::size_t> modularRecurrenceIndex;
-    std::set<Instruction *> modularUpdateInstructions;
-    if (N > 2) {
-        std::set<BasicBlock *> updateBlocks{latch};
-        for (PhiInst *phi : headerPhis) {
-            if (phi == ivPhi || phi->type_->tid_ != Type::IntegerTyID)
-                continue;
-            auto *remainder = dynamic_cast<BinaryInst *>(getLatchVal(phi));
-            UnrolledModuloRecurrence candidate;
-            if (!remainder ||
-                !prepareModuloRecurrence(
-                    phi, remainder, getInitVal(phi), updateBlocks,
-                    headerPhis, ivPhi, N, false, candidate))
-                continue;
-            modularRecurrenceIndex[phi] = modularRecurrences.size();
-            modularUpdateInstructions.insert(
-                candidate.updateChain.begin(), candidate.updateChain.end());
-            modularRecurrences.push_back(std::move(candidate));
-            if (std::getenv("DEBUG_LOOP_UNROLL"))
-                std::cerr << "[LoopUnroll] func=" << func->name_
-                          << " header=" << header->name_
-                          << " modular-prefix=" << N - 1 << "\n";
-        }
-    }
-
     // 1. Compute adjusted bound (for the main unrolled loop check)
     Value *boundMain;
     if (auto *cb = dynamic_cast<ConstantInt *>(bound)) {
@@ -1033,46 +857,14 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
     for (auto phi : headerPhis)
         curPhiVals[phi] = phiToMain[phi];
 
-    std::unordered_map<PhiInst *, Value *> modularAccumulators;
-    for (const auto &recurrence : modularRecurrences)
-        modularAccumulators[recurrence.state] =
-            phiToMain[recurrence.state];
-
     for (int iter = 0; iter < N; iter++) {
         std::unordered_map<Value *, Value *> localMap = iterMap;
 
         for (auto inst : latch->instr_list_) {
             if (inst->isTerminator()) continue;
-            if (iter < N - 1 &&
-                modularUpdateInstructions.count(inst))
-                continue;
             auto *newInst = cloneInst(inst, unrolledBody, localMap);
             if (!newInst) return false; // should not happen after pre-check
             localMap[inst] = newInst;
-        }
-
-        if (iter < N - 1) {
-            for (const auto &recurrence : modularRecurrences) {
-                Value *accumulator =
-                    modularAccumulators[recurrence.state];
-                for (const auto &term : recurrence.contributionTerms) {
-                    auto mapped = localMap.find(term.value);
-                    Value *contribution =
-                        mapped != localMap.end() ? mapped->second : term.value;
-                    accumulator = new BinaryInst(
-                        module->int32_ty_,
-                        term.sign > 0 ? Instruction::Add : Instruction::Sub,
-                        accumulator, contribution, unrolledBody);
-                }
-                modularAccumulators[recurrence.state] = accumulator;
-                if (iter == N - 2) {
-                    Value *combined = buildBoundedModulo(
-                        accumulator, recurrence.prefixLower,
-                        recurrence.prefixUpper,
-                        recurrence.modulus->value_, module, unrolledBody);
-                    curPhiVals[recurrence.state] = combined;
-                }
-            }
         }
 
         // 用本轮 latch 更新结果推进各 PHI 的当前值。localMap 未命中有两种含义：
@@ -1080,8 +872,6 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
         // 若混为“保留 curPhiVals”，会生成自引用的 PHI 回边。
         bool remapFailure = false;
         for (auto phi : headerPhis) {
-            if (iter < N - 1 && modularRecurrenceIndex.count(phi))
-                continue;
             Value *lv = getLatchVal(phi);
             if (!lv) {
                 remapFailure = true;
@@ -1104,22 +894,6 @@ bool LoopUnroll::tryUnroll(Loop &loop, Function *func, Module *module,
                 nextValue = lv;
             }
 
-            auto recurrenceIt = modularRecurrenceIndex.find(phi);
-            if (iter == N - 1 &&
-                recurrenceIt != modularRecurrenceIndex.end()) {
-                const auto &recurrence =
-                    modularRecurrences[recurrenceIt->second];
-                auto *finalRemainder =
-                    dynamic_cast<BinaryInst *>(nextValue);
-                if (!finalRemainder ||
-                    finalRemainder->op_id_ != Instruction::SRem)
-                    return false;
-                nextValue = buildBoundedModulo(
-                    finalRemainder->get_operand(0),
-                    recurrence.finalLower, recurrence.finalUpper,
-                    recurrence.modulus->value_, module, unrolledBody);
-                localMap[lv] = nextValue;
-            }
             curPhiVals[phi] = nextValue;
         }
         if (remapFailure)

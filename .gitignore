@@ -12,6 +12,7 @@
 !.proto/
 !docs/
 !test
+!archive/
 
 __pycache__
 .DS_STORE

@@ -5,7 +5,6 @@
  */
 
 #include "instCombineInternal.hpp"
-#include "../../../include/mid/analysis/moduloRecurrenceAnalysis.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -131,79 +130,6 @@ bool inferSignedBounds(Value *value, long long &lower, long long &upper,
 bool inferSignedBounds(Value *value, long long &lower, long long &upper) {
     std::set<Value *> visiting;
     return inferSignedBounds(value, lower, upper, visiting);
-}
-
-// 循环变换可能先把多次展开后的递推余数合并起来，因此暂时保留循环携带的 rem。
-// 循环优化结束后再次运行 InstCombine，仍可把剩余 rem 降低为有界修正。
-/**
- * @brief 判断 isLoopCarriedRemainder 所描述的结构、合法性或安全条件是否成立。
- * @param remainder 参数 `remainder`，用于本函数的分析、匹配或 IR 构造。
- * @return 条件成立、匹配成功或变换完成时返回 true，否则返回 false。
- */
-bool isLoopCarriedRemainder(BinaryInst *remainder) {
-    for (const auto &use : remainder->use_list_) {
-        auto *phi = dynamic_cast<PhiInst *>(use.user_);
-        if (!phi || use.operand_index_ % 2 != 0 ||
-            use.operand_index_ + 1 >= phi->num_ops() || phi->num_ops() != 4)
-            continue;
-        auto *backedge = dynamic_cast<BasicBlock *>(
-            phi->get_operand(use.operand_index_ + 1));
-        BasicBlock *header = phi->parent_;
-        Function *function = header ? header->parent_ : nullptr;
-        if (!function || !backedge || !remainder->parent_ ||
-            !gInstCombineDominatorTree ||
-            !gInstCombineDominatorTree->dominates(header, remainder->parent_) ||
-            !gInstCombineDominatorTree->dominates(remainder->parent_, backedge))
-            continue;
-        // rem 不一定直接位于 latch。只要它支配 PHI 回边、即所有从 header 到回边
-        // 的路径都经过它，就保留这种跨基本块形式供 CFG 区域展开识别。
-        std::set<BasicBlock *> updateBlocks;
-        for (BasicBlock *block : function->basic_blocks_) {
-            if (gInstCombineDominatorTree->dominates(header, block) &&
-                gInstCombineDominatorTree->dominates(block, backedge))
-                updateBlocks.insert(block);
-        }
-        if (!updateBlocks.count(remainder->parent_))
-            continue;
-        ModuloRecurrenceAnalysis::Recurrence recurrence;
-        if (!ModuloRecurrenceAnalysis::analyze(
-                phi, remainder, updateBlocks, recurrence) ||
-            !ModuloRecurrenceAnalysis::hasPrivateUpdateChain(
-                recurrence, updateBlocks, true))
-            continue;
-
-        Value *init = nullptr;
-        for (unsigned i = 0; i + 1 < phi->num_ops(); i += 2) {
-            if (phi->get_operand(i + 1) != backedge) {
-                init = phi->get_operand(i);
-                break;
-            }
-        }
-        std::vector<PhiInst *> noLoopStates;
-        if (!ModuloRecurrenceAnalysis::inferContributionBounds(
-                recurrence, noLoopStates, nullptr))
-            continue;
-        ModuloRecurrenceAnalysis::Bounds initial;
-        if (!init || !ModuloRecurrenceAnalysis::inferBounds(init, initial))
-            continue;
-
-        const long long mod = recurrence.modulus->value_;
-        ModuloRecurrenceAnalysis::Bounds prefix{
-            std::min(initial.lower, -mod + 1),
-            std::max(initial.upper, mod - 1)};
-        // Cover every factor currently selected by LoopUnroll (4 or 8).
-        bool safe = ModuloRecurrenceAnalysis::advanceBounds(
-            prefix, recurrence, 7);
-        ModuloRecurrenceAnalysis::Bounds final{-mod + 1, mod - 1};
-        if (safe)
-            safe = ModuloRecurrenceAnalysis::advanceBounds(final, recurrence);
-        if (safe && ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-                        prefix.lower, prefix.upper, mod) &&
-            ModuloRecurrenceAnalysis::needsAtMostOneCorrection(
-                final.lower, final.upper, mod))
-            return true;
-    }
-    return false;
 }
 
 } // namespace
@@ -504,9 +430,6 @@ Value* visitSRem(BinaryInst *inst) {
         if (knownAbsBound(x, b) && static_cast<int64_t>(b) < cmag)
             return x;
     }
-
-    if (cy && cy->value_ > 0 && isLoopCarriedRemainder(inst))
-        return nullptr;
 
     // 若已知 x 位于 (-2M, 2M)，有符号余数至多需要向正或负方向修正一次。
     // 这能把 AArch64 上昂贵的除法序列变成比较、加减和 select，同时保留
